@@ -22,7 +22,7 @@ def test_channel_transport_processes_jsonrpc_request() -> None:
 
     response = transport.receive_outbound(timeout=1)
     assert response["id"] == 1
-    assert response["result"]["protocolVersion"] == "v1"
+    assert response["result"]["protocolVersion"] == "v2"
 
 
 def test_channel_transport_outbound_overflow_is_reported() -> None:
@@ -62,7 +62,7 @@ def test_stdio_malformed_json_returns_parse_error_and_keeps_processing() -> None
         "error": {"code": AppServerErrorCode.INVALID_REQUEST, "message": "Invalid Request"},
     }
     assert messages[3]["id"] == 1
-    assert messages[3]["result"]["protocolVersion"] == "v1"
+    assert messages[3]["result"]["protocolVersion"] == "v2"
 
 
 def test_channel_transport_runs_generic_loop_and_disconnects_on_close() -> None:

@@ -30,6 +30,13 @@ from .store import (
     WorkItem,
 )
 
+_DRIVE_RUNNABLE_SQL = """
+    (s.lease_until_ms IS NULL OR s.lease_until_ms<=t.ms)
+    AND (s.next_drive_ms<=t.ms OR EXISTS (
+        SELECT 1 FROM sk_inbox i WHERE i.session_id=s.session_id
+        AND i.consumed_seq IS NULL AND i.available_ms<=t.ms))
+"""
+
 
 def _positive(value: int, name: str) -> None:
     if type(value) is not int or value <= 0:
@@ -293,6 +300,44 @@ class SQLStore:
             self._rows("UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL WHERE session_id=%s", (lease.session_id,))
             return True
 
+    def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
+        """Defer a stale idle schedule without changing execution facts or future due work."""
+        _positive(poll_ms, "poll_ms")
+        with self._transaction():
+            sid = lease.session_id
+            row = self._lock(sid)
+            now = self._now()
+            self._check_lease(sid, lease, row, now)
+            scheduled = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (sid,))[0]
+            if scheduled is None or scheduled > now:
+                return False
+            state = self._prefix(sid, row).reducer.state
+            due = [now + poll_ms, *(t for t in state.due_ms if t > now)]
+            available = self._one(
+                "SELECT min(available_ms) FROM sk_inbox WHERE session_id=%s AND consumed_seq IS NULL AND available_ms>%s",
+                (sid, now),
+            )[0]
+            if available is not None:
+                due.append(available)
+            return bool(
+                self._rows(
+                    "UPDATE sk_session SET next_drive_ms=%s WHERE session_id=%s AND next_drive_ms<=%s RETURNING session_id",
+                    (min(due), sid, now),
+                )
+            )
+
+    def is_runnable(self, session_id: str) -> bool:
+        # Check after release in a fresh transaction so a pusher racing the holder is visible.
+        with self._transaction():
+            return bool(
+                self._rows(
+                    f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
+                    "SELECT 1 FROM sk_session s CROSS JOIN clock t "
+                    f"WHERE s.session_id=%s AND {_DRIVE_RUNNABLE_SQL}",
+                    (session_id,),
+                )
+            )
+
     def list_runnable(self, *, limit: int = 100, after: WorkCursor | None = None) -> tuple[WorkItem, ...]:
         _positive(limit, "limit")
         cursor = (after.session_id, after.kind, after.consumer) if after else ("", "", "")
@@ -302,10 +347,7 @@ class SQLStore:
                 SELECT s.session_id,'drive' AS work_kind,'' AS consumer
                 FROM sk_session s CROSS JOIN clock t
                 WHERE s.session_id >= %s AND (s.session_id,'drive','')>(%s,%s,%s)
-                  AND (s.lease_until_ms IS NULL OR s.lease_until_ms<=t.ms)
-                  AND (s.next_drive_ms<=t.ms OR EXISTS (
-                      SELECT 1 FROM sk_inbox i WHERE i.session_id=s.session_id
-                      AND i.consumed_seq IS NULL AND i.available_ms<=t.ms))
+                  AND {_DRIVE_RUNNABLE_SQL}
                 ORDER BY s.session_id LIMIT %s
             ), projecting AS (
                 SELECT c.session_id,'project' AS work_kind,c.consumer FROM sk_consumer c

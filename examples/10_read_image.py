@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
@@ -22,22 +23,23 @@ def image_info(path: str) -> dict[str, object]:
 
 
 def main() -> None:
-    agent = Agent(
-        name="image-reporter",
-        instructions="Use image_info, then produce a Markdown report.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-        tools=[image_info],
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Inspect ./example.png and report what metadata is available.")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        agent = Agent(
+            name="image-reporter",
+            instructions="Use image_info, then produce a Markdown report.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+            tools=[image_info],
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Inspect ./example.png and report what metadata is available.")
+        result = Runner.run_sync(agent, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

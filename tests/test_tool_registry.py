@@ -10,8 +10,7 @@ from typing import Any
 import pytest
 
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.backends.distributed import toolset_schema_digest
-from vv_agent.runtime.tool_planner import plan_tool_schemas
+from vv_agent.runtime.tool_planner import plan_tool_schemas, toolset_schema_digest
 from vv_agent.tools import ToolContext
 from vv_agent.tools.executor import RegistryToolExecutor
 from vv_agent.tools.registry import ToolRegistry
@@ -22,7 +21,7 @@ _SUBPROCESS_SCRIPT = """
 import json
 
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.backends.distributed import toolset_schema_digest
+from vv_agent.runtime.tool_planner import toolset_schema_digest
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools.executor import RegistryToolExecutor
 from vv_agent.tools.registry import ToolRegistry

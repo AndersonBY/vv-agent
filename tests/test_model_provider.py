@@ -16,6 +16,7 @@ from vv_agent import (
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelError
+from vv_agent.model_settings import RetrySettings
 from vv_agent.types import LLMResponse, Message
 
 
@@ -47,7 +48,9 @@ def test_scripted_model_provider_runs_through_the_shared_request_contract(tmp_pa
     assert result.final_output == "done"
     assert len(requests) == 1
     assert requests[0].model == "demo-model"
-    assert requests[0].model_settings == ModelSettings(temperature=0.2, max_tokens=300)
+    assert requests[0].model_settings == ModelSettings(
+        temperature=0.2, max_tokens=300, retry=RetrySettings(max_attempts=1, backoff_seconds=0)
+    )
     assert requests[0].metadata["trace_id"] == result.trace_id
     assert requests[0].prompt_bundle is not None
     assert requests[0].prompt_bundle.sections

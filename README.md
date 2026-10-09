@@ -2,7 +2,7 @@
 
 [中文文档](README_ZH.md)
 
-A lightweight agent framework extracted from VectorVein's production runtime. Cycle-based execution with pluggable LLM backends, tool dispatch, memory compression, and distributed scheduling.
+A lightweight agent framework extracted from VectorVein's production runtime. Cycle-based execution with pluggable LLM backends, tool dispatch, memory compression, and durable session scheduling.
 
 ## Install
 
@@ -14,156 +14,34 @@ update. See [the contract workflow](docs/parity-contract.md). This repository
 keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.16.1"
+python -m pip install -e .
 ```
 
-Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
-integrations are needed. Repository `HEAD` is forward-only: current readers
+Install the `postgres` extra for PostgreSQL SessionStore or the `s3` extra
+for S3 workspace storage. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
 
-### 0.16.1 Highlights
-
-- Memory, SQLite, and Redis stores share snapshot transitions while retaining
-  their native atomic commit boundaries.
-- Redis host-response recovery preserves concurrent record updates.
-- Cross-runtime recovery tests exchange persisted SQLite checkpoints and Redis
-  controller records between Python and Rust.
-
-### 0.16.0 Highlights
-
-- Distributed workers with an injected LLM client run without a settings file.
-- Host prompts and responses preserve original application content across
-  checkpoints, notifications, and model recovery.
-- Distributed terminal decisions, unknown tool receipts, and unsupported
-  idempotency requests follow the same Python/Rust contract.
-- Frozen finalization uses persisted definitions; Redis checkpoint reads use
-  one atomic snapshot.
-
-### 0.14.3 Highlights
-
-- Terminal replay first idempotently delivers pending lifecycle events and
-  acknowledges the terminal checkpoint without repeating runtime or terminal effects.
-
-### 0.14.2 Highlights
-
-- Redis host-interaction response recovery derives the retained checkpoint
-  lease from Redis authoritative time within the recovery transaction, while
-  replay and CAS behavior remain unchanged.
-
-### 0.14.1 Highlights
-
-- Redis controller admission uses Redis authoritative time for claim expiry and
-  recovery lease calculation.
-
-### 0.14.0 Highlights
-
-- Checkpoint v10 records complete canonical definitive tool receipts atomically;
-  failed receipts retain the result and digest while synthetic cancellation
-  closures remain resultless.
-- Recovery replays failed results directly from the verified journal result,
-  preserving metadata, directives, artifacts, and cursors without tool or model
-  side effects.
-- Public results carry sorted `resume_observations`; worker responses use v4.
-- The public API inventory is `vv-agent-public-api-v7`; the AgentResult wire remains v6.
-- RunEvent uses wire version v5. Live-claim cancellation is a top-level typed
-  transition, and deferred admission rejects completed outcomes without writes.
-- Definitive ordinary and deferred tool receipts use the stable
-  `evt_receipt_<identity_key>` event identity; controller wake reaping is
-  checkpoint-scoped and excludes ambiguous rows.
-
-### 0.12.3 Highlights
-
-- Heartbeat handling retries transient failures and fences local lease
-  ownership.
-- Heartbeats continue through cycle commit.
-- Ambiguous tool outcomes fail closed instead of becoming definitive failures.
-- `max_cycles` finalization completes the session's terminal state.
-- Terminal acknowledgements use the same active-claim fence across checkpoint
-  stores.
-
-### 0.12.2 Highlights
-
-- Durable model-call replay preserves the original operation identity after a
-  crash instead of allocating a duplicate slot.
-
-### 0.12.1 Highlights
-
-- Distributed Celery workers restore planner extra tools from the immutable run
-  definition before validating task schemas.
-
-### 0.12.0 Highlights
-
-- `Runner.start_distributed_compiled()` accepts an already compiled `AgentTask`,
-  preserves its prepared runtime fields, and returns the passive distributed
-  handle without compiling the task again.
-
-### 0.11.0 Highlights
-
-- `Runner.start_distributed()` prepares a durable checkpoint, enqueues Cycle 1,
-  and immediately returns a passive `DistributedRunHandle`.
-- `CeleryBackend.advance()` reloads the shared checkpoint once and makes one
-  bounded dispatch, retry, wait, finalization, or terminal-replay decision.
-- Cycle tasks acknowledge late and reject worker loss; terminal processing runs
-  in a separate idempotent `Runner.finalize_distributed()` task.
-
-### 0.10.0 Highlights
-
-- Every admitted model dispatch is recorded in
-  `result.token_usage.model_calls`, including agent cycles, Session Memory,
-  full memory compaction, failures, retries, and ambiguous outcomes. Missing
-  provider token or cache fields remain unavailable instead of being reported
-  as zero.
-- Tool arguments are validated as a complete JSON Schema Draft 2020-12 value
-  before approval or side effects. Invalid calls return structured
-  `invalid_tool_arguments` details without invoking the handler.
-- Optional host output validation is disabled by default and can make at most
-  one tools-free repair callback before a terminal result is committed.
-- A resolved `PromptBundle` freezes the prompt sections and run time once for a
-  run. Checkpoint resume and distributed workers reuse that bundle instead of
-  rerunning instruction or context producers.
-- When Session Memory is enabled, a new run loads persisted entries once before
-  freezing its `PromptBundle`. Entries extracted during that run are persisted
-  for the next new run; they never rewrite the active run's system prompt.
-- The canonical 15-tool surface uses compact schemas. `compress_memory` is no
-  longer model-callable; framework-owned automatic compaction remains internal.
-- Large bash output returns a bounded 12,000-character preview plus a secure
-  workspace artifact. A local workspace stores the artifact outside the shell
-  working directory and streams the complete capture into private storage.
-  Large file reads return bounded text plus a verified cursor, so recovery does
-  not repeat the original operation.
-- `MicrocompactionPolicy` exposes the trigger ratio, target ratio, protected
-  recent cycles, and minimum result size. Old results from built-in and custom
-  tools default to archive retention; the runtime replaces them only after a
-  complete immutable artifact is available and only when `read_file` remains
-  model-visible. The compact marker keeps a short excerpt and recovery path
-  while integrity metadata stays host-only.
-- Durable execution uses `vv-agent.checkpoint.v10`,
-  `vv-agent.run-definition.v5`, `vv-agent.distributed-run.v5`, and
-  `vv-agent.distributed-worker-response.v4` for strict recovery and
-  distributed-controller boundaries. `RunEvent` uses wire version `v5`, and
-  SQLite session stores use `PRAGMA user_version=2`.
-
-See [output validation](docs/output-validation.md) and
-[checkpoint/resume](docs/checkpoint-resume.md) for the detailed contracts.
+Current HEAD uses contract v24, public API v8 and one session kernel execution path.
+Older runtime behavior is retained in Git tags. See [v8 migration](docs/migration-v8.md)
+for API replacements and host seed examples.
+See [cloud host integration](docs/host-integration.md) for PostgreSQL transactions,
+queue dispatch and a host-owned Celery example.
 
 ## Architecture
 
-```
-Agent / RunConfig / ModelSettings
-└── Runner
-    └── AgentRuntime
-        ├── CycleRunner          # single LLM turn: context -> completion -> tool calls
-        ├── ToolCallRunner       # tool dispatch, directive convergence
-        ├── RuntimeHookManager   # before/after hooks
-        ├── MemoryManager        # automatic history compression
-        └── ExecutionBackend     # inline, thread, or Celery scheduling
+```text
+Runner / InteractiveAgentClient / CLI / AppServer
+  -> SessionDriver -> SessionStore (SQLite or PostgreSQL)
+  -> session.kernel.drive
+  -> retained model/tool operations and child delivery
+  -> RunResult / RunEvent / tracing / protocol projections
 ```
 
 The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
-`RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `Session`,
+`RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `SessionStore`,
 `PromptBundle`, `PromptSection`, `ToolExecutionResult`, `ToolArtifactRef`,
 `ToolResultCursor`, typed `RunEvent` objects, `ApprovalProvider`,
-`ContextProvider`, `RunEventStore`, and the interactive session API for
+`ContextProvider`, `SessionRunEventStore`, and the interactive session API for
 desktop/runtime integrations. Extension points that live in package modules include
 `vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
 Lower-level runtime implementation details include `AgentTask`, `AgentResult`,
@@ -245,58 +123,25 @@ tool JSON schema.
 
 ### Streaming And Sessions
 
-`RunConfig.workspace` controls the workspace for a run. `RunConfig.session`
-accepts `MemorySession`, `SQLiteSession`, or `RedisSession` to persist message
-history across runs.
+Ordinary Runner runs use a fresh SQLite `:memory:` store. `Runner.start()` returns
+ a live RunHandle; events(), result(), cancel() and approve() share the same
+kernel path. Durable events derive from the session log; assistant deltas are
+volatile live observations. A JsonlRunEventStore is an optional projection sink.
 
 ```python
-from vv_agent import Agent, MemorySession, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner
 
-agent = Agent(name="assistant", instructions="Remember context.", model="kimi-k3")
-session = MemorySession("thread-001")
-config = RunConfig(
-    default_backend="moonshot",
-    workspace="./workspace/thread-001",
-    session=session,
-)
-
-Runner.run_sync(agent, "Inspect the project", run_config=config)
-for event in Runner.stream_sync(agent, "Continue and report progress", run_config=config):
+agent = Agent("assistant", "Answer briefly.", model="kimi-k3")
+handle = Runner.start(agent, "Inspect the project", run_config=RunConfig(default_backend="moonshot"))
+for event in handle.events():
     if event.type == "assistant_delta":
         print(event.delta, end="")
+print(handle.result().final_output)
 ```
 
-Use `Runner.start()` when the host needs a live handle instead of blocking for
-the final result. `RunHandle.events()` yields the same typed `RunEvent` stream
-as `Runner.stream_sync()`, `RunHandle.result()` waits for the final
-`RunResult`, `RunHandle.cancel()` cancels the run, and `RunHandle.approve()`
-resolves pending approval requests. When the handle is attached to an
-`AgentSession`, `RunHandle.steer()` queues context for the active run and
-`RunHandle.follow_up()` queues the next session turn. Plain one-shot
-`Runner.start()` handles do not own session queues, so those methods require an
-interactive session controller.
-
-`RunConfig.event_store` can persist every typed event. `JsonlRunEventStore`
-stores event dictionaries and replays events by `run_id`, including child runs
-whose `parent_run_id` points at the requested run. Typed `RunEvent` is the only
-public runtime event boundary; task-neutral observations use
-`DiagnosticEvent`.
-
-For a normalized and schema-valid tool call, the execution lifecycle is
-`tool_call_planned`, optional approval events, `tool_call_started` immediately
-before effects may begin, and `tool_call_completed` after a result exists.
-Argument parse failures emit none of these events. Schema validation, policy,
-approval, and unknown-tool short-circuits emit planned plus completed without
-started; completed events report `directive`, nullable `error_code`,
-`execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v10's
-operation journal remains the recovery authority.
-
-The lower-level `AgentRuntime` API remains available for backend integrations
-that need direct cycle-loop control.
-
-Install Redis support with `uv sync --extra redis` or inject a Redis-compatible
-client when constructing `RedisSession`.
+Use InteractiveAgentClient for multiple turns and SessionStore for durable
+retention. Waiting operations retain the same session_id and turn_id. After
+answering a parked approval, explicitly resume the handle or retained turn.
 
 ### App Server
 
@@ -325,59 +170,37 @@ the current host boundary and rollout checks.
 
 ### Interactive Sessions
 
-Use `Runner` for one-shot runs, streamed runs, and conversation history managed
-by `RunConfig.session`. Use `InteractiveAgentClient` when the host application
-needs a stateful, bidirectional runtime session with stable session ids,
-runtime listeners, queued steering prompts, follow-up turns, cancellation, and
-shared tool state. During a running session, `session.active_run_handle` exposes
-the unified `RunHandle` control surface for approval, cancellation, steering,
-and follow-up.
-
-Pass an existing `MemorySession`, `SQLiteSession`, or `RedisSession` through
-`AgentSessionOptions.session` (or `create_session(session=...)`) to hydrate a
-facade from durable history and let `Runner` append each turn to the same
-store. When both are provided, the requested `session_id` must match the
-backing Session id. Do not also pass that history as initial messages.
+InteractiveAgentClient owns conversation turns, steering, follow-up, cancellation
+and approvals. Its default store is SQLite `:memory:`. Supply SQLiteStore or
+PostgresStore through AgentSessionOptions.session_store for durable retention.
+Creation-time `session` is a closed seed with messages and shared_state; messages
+and shared_state become read-only projections after creation.
 
 ```python
 from pathlib import Path
+from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, SQLiteStore, VvLlmModelProvider
 
-from vv_agent import (
-    AgentSessionOptions,
-    InteractiveAgentClient,
-    InteractiveAgentDefinition,
-    SQLiteSession,
-)
-from vv_agent.runtime.backends import ThreadBackend
-
-client = InteractiveAgentClient(
-    options=AgentSessionOptions(
-        settings_file=Path("local_settings.py"),
-        default_backend="moonshot",
-        workspace=Path("./workspace/thread-001"),
-        execution_backend=ThreadBackend(max_workers=4),
-        session=SQLiteSession("thread-001", db_path=Path("./sessions.sqlite3")),
-    )
-)
-
-session = client.create_session(
-    session_id="thread-001",
-    agent=InteractiveAgentDefinition(
-        description="Operate in the user's workspace and report progress.",
-        model="kimi-k3",
-        no_tool_policy="finish",
-    ),
-)
-unsubscribe = session.subscribe(lambda event, payload: print(event, payload))
-try:
-    run = session.prompt("Inspect the workspace")
-    print(run.result.status, run.result.final_answer)
-finally:
-    unsubscribe()
+with SQLiteStore.standalone("sessions.sqlite3") as store:
+    if not store.connection.execute("PRAGMA user_version").fetchone()[0]:
+        store.install_schema()
+    client = InteractiveAgentClient(options=AgentSessionOptions(
+        model_provider=VvLlmModelProvider(Path("local_settings.py"), default_backend="moonshot"),
+        session_store=store,
+    ))
+    try:
+        session = client.create_session(
+            agent=Agent("assistant", "Remember prior turns.", model="kimi-k3"),
+            session_id="thread-001",
+        )
+        print(session.prompt("Remember the project codename River.").final_output)
+        print(session.prompt("What is the codename?").final_output)
+    finally:
+        client.driver.close()
 ```
 
-Interactive sessions are additive to the normal SDK facade; they do not
-reintroduce the old 0.1 `AgentSDKClient` or `AgentSDKOptions` names.
+Runner.resume(session_id, turn_id), AgentSession.continue_run() and App Server
+turn/resume drive an explicitly retained turn. Replies preserve turn budgets;
+fresh turns reset their counters. Closed sessions reject execution.
 
 ### Agent As Tool, Handoff, And Policy
 
@@ -425,7 +248,7 @@ Set `Agent(no_tool_policy="finish")` when a normal assistant response should
 finish the run without `task_finish`, or override it for one call with
 `RunConfig(no_tool_policy="continue" | "wait_user" | "finish")`. Per-run
 configuration wins over a configured Runner default, which wins over the
-Agent value; omitting every layer uses `continue`. Inspect
+Agent value; omitting every layer uses `finish`. Inspect
 `result.completion_reason`, `result.completion_tool_name`,
 and `result.partial_output` to distinguish natural completion, tool-driven
 completion, waits, cancellation, failure, and max-cycle exhaustion.
@@ -486,7 +309,7 @@ argument, approval, budget, or runtime restriction.
 
 Typed metadata is separate from generic `FunctionTool.metadata` and is not
 added to the model-visible function schema. `ToolMetadata.idempotency` is the
-only idempotency declaration used by execution, telemetry, and checkpointing.
+only idempotency declaration used by execution, telemetry, and retained operations.
 
 ### Guardrails And Tracing
 
@@ -531,10 +354,9 @@ result = Runner.run_sync(
 - `Runner.run_sync(...)` and `Runner.stream_sync(...)` both inherit compiled
   shell metadata.
 - The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
-- The runtime shell hint is frozen per task/session-run for local LLM requests to keep those request schemas stable across cycles and preserve prompt-cache efficiency. Distributed run definitions retain the canonical schemas planned for the compiled task, so host-specific hint text does not affect the task-scoped toolset digest.
+- The runtime shell hint is frozen per task/session-run for local LLM requests to keep those request schemas stable across cycles and preserve prompt-cache efficiency. Frozen turn definitions retain the canonical schemas planned for the compiled task, so host-specific hint text does not affect the task-scoped toolset digest.
 - Runner/CLI-generated tasks carry one resolved `PromptBundle` explicitly
-  through `AgentTask`, each `LlmRequest`, the run definition, checkpoints, and
-  distributed execution. Generic metadata is not a prompt-section transport.
+  through `AgentTask`, each `LlmRequest`, the frozen turn definition and logged model operations. Generic metadata is not a prompt-section transport.
   Anthropic projection may use the canonical sections for cache breakpoints;
   other providers receive the deterministic flattened prompt.
 
@@ -560,89 +382,31 @@ result = Runner.run_sync(
 )
 ```
 
-## Execution Backends
+## Session Execution
 
-The cycle loop is delegated to a pluggable `ExecutionBackend`.
-
-| Backend | Use case |
-|---------|----------|
-| `InlineBackend` | Default. Synchronous, single-process. |
-| `ThreadBackend` | Thread pool. Non-blocking `submit()` returns a `Future`. |
-| `CeleryBackend` | Distributed. Each cycle dispatched as an independent Celery task. |
-
-### CeleryBackend
-
-Each cycle is a Celery task. Workers rebuild the `AgentRuntime` from a required
-`RuntimeRecipe` and resolve the declared shared `CheckpointStore` capability.
+All public entrypoints use SessionDriver and the session kernel. SessionStore
+transactions own the log, inbox, leases, child admission and retained receipts.
+Ordinary runs use SQLite `:memory:`; durable SQLite/PostgreSQL are opt-in through
+the session API. Runner.start() provides non-blocking execution and cancellation.
 
 ```python
-from vv_agent import CheckpointConfig, RunConfig
-from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
-from vv_agent.runtime.backends.distributed import (
-    CapabilityRef,
-    DistributedCapabilities,
-    DistributedCapabilityRegistry,
-)
-from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+from vv_agent import Agent, RunConfig, Runner
 
-checkpoint_ref = CapabilityRef("checkpoint.production", "1")
-checkpoint_store = SqliteCheckpointStore(".vv-agent-state/checkpoints.db")
-worker_capabilities = DistributedCapabilityRegistry()
-worker_capabilities.register("checkpoint_store", checkpoint_ref, checkpoint_store)
-register_cycle_task(celery_app, capability_registry=worker_capabilities)
-
-recipe = RuntimeRecipe(
-    settings_file="local_settings.py",
-    backend="moonshot",
-    model="kimi-k3",
-    workspace="./workspace",
-    capabilities=DistributedCapabilities(checkpoint_store_ref=checkpoint_ref),
-)
-backend = CeleryBackend(celery_app=celery_app, runtime_recipe=recipe)
-run_config = RunConfig(
-    execution_backend=backend,
-    checkpoint_config=CheckpointConfig(
-        key="tenant-7/task-42",
-        store=checkpoint_store,
-    ),
-)
+handle = Runner.start(Agent("assistant", "Answer briefly.", model="kimi-k3"), "Explain session history.",
+                      run_config=RunConfig(default_backend="moonshot"))
+# A host can call handle.cancel() from its UI or a timer.
+print(handle.result().final_output)
 ```
 
-`dispatch_outbox_store` is an optional Celery transport adapter. Inject it when
-the host needs durable enqueue receipts and schedule its lease reaper from the
-host. Without the adapter, Celery uses the stable cycle task id with
-at-least-once broker delivery; the worker checkpoint claim/CAS prevents a
-duplicate model or tool state transition.
-
-Install celery extras: `uv sync --extra celery`.
-
-### Cancellation and Streaming
-
-```python
-from vv_agent.events import AssistantDeltaEvent, RunEvent
-from vv_agent.runtime import CancellationToken, ExecutionContext
-
-# Cancel from another thread
-token = CancellationToken()
-ctx = ExecutionContext(cancellation_token=token)
-result = runtime.run(task, ctx=ctx)
-
-def on_event(event: RunEvent) -> None:
-    if isinstance(event, AssistantDeltaEvent):
-        print(event.delta, end="")
-
-
-# Stream LLM output events, including assistant deltas and tool progress
-ctx = ExecutionContext(event_handler=on_event)
-result = runtime.run(task, ctx=ctx)
-```
+See [runtime-control.md](docs/runtime-control.md) for waits, explicit resume,
+LeaseLost backoff, budgets and event projections.
 
 ### Runtime Log Payloads
 
 The `tool_result` diagnostic contains the model-visible `content`, ordinary
 metadata, and a bounded `content_preview`; it does not duplicate artifact or
 cursor fields. Structured recovery belongs to `ToolExecutionResult` and is
-preserved in cycle results, checkpoints, and distributed wire records. A
+preserved in cycle results and retained operation receipts. A
 bounded bash result points to an immutable workspace artifact, while a bounded
 `read_file` result points to a source-verified cursor. Hosts must read artifacts
 through normal workspace policy; cursors reject changed sources, path
@@ -670,21 +434,12 @@ Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All 
 | `S3WorkspaceBackend` | S3-compatible object storage (AWS S3, Aliyun OSS, MinIO, Cloudflare R2). |
 
 ```python
+from pathlib import Path
+from vv_agent import RunConfig
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
-# Explicit local backend
-runtime = AgentRuntime(
-    llm_client=llm,
-    tool_registry=registry,
-    workspace_backend=LocalWorkspaceBackend(Path("./workspace")),
-)
-
-# In-memory backend for testing
-runtime = AgentRuntime(
-    llm_client=llm,
-    tool_registry=registry,
-    workspace_backend=MemoryWorkspaceBackend(),
-)
+local_config = RunConfig(workspace_backend=LocalWorkspaceBackend(Path("./workspace")))
+memory_config = RunConfig(workspace_backend=MemoryWorkspaceBackend())
 ```
 
 ### S3WorkspaceBackend
@@ -722,11 +477,8 @@ class MyBackend(WorkspaceBackend):
 
 | Module | Description |
 |--------|-------------|
-| `vv_agent.runtime.AgentRuntime` | Top-level state machine (completed / wait_user / max_cycles / failed) |
-| `vv_agent.runtime.CycleRunner` | Single LLM turn and cycle record construction |
-| `vv_agent.runtime.ToolCallRunner` | Tool execution with directive convergence |
 | `vv_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
-| `vv_agent.runtime.CheckpointStore` | Checkpoint persistence protocol (`InMemoryCheckpointStore` / `SqliteCheckpointStore` / `RedisCheckpointStore`) |
+| `vv_agent.session.SessionStore` | Durable log, inbox, leases and projections |
 | `vv_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
 | `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `vv_agent.tools` | Built-in tools plus `function_tool`, `FunctionTool`, and structured tool outputs |
@@ -760,7 +512,7 @@ internals:
   timeout, error, and execution behavior. `FunctionTool` and `@function_tool`
   cover normal Python functions; custom executors are routed by
   `ToolOrchestrator`.
-- `RunEventStore` persists typed `RunEvent` history so app views can replay
+- `SessionRunEventStore` projects typed `RunEvent` history so app views can replay
   completed runs and parent/child run graphs.
 
 This boundary keeps `Agent`, `Runner`, `RunConfig`, `RunHandle`, and
@@ -780,7 +532,7 @@ resolved auto-compaction threshold is exceeded.
   - Resolved model limits are recorded as `model_context_window` and
     `model_max_output_tokens`; output capability is not copied into
     `reserved_output_tokens`.
-  - Current durable task/checkpoint records carry the exact configured threshold
+  - Current durable turn definitions carry the exact configured threshold
     and capacity metadata used by resume.
   - Runtime-only compaction knobs remain metadata-backed until promoted into
     stable public fields.
@@ -865,7 +617,7 @@ excerpt:
     message as `<Session Memory>`; every cycle reuses the same `PromptBundle`
   - Entries extracted during the active run are persisted but become visible
     only when the next new run is compiled
-  - Checkpoint resume reuses the frozen memory section without rereading the
+  - Retained-turn resume reuses the frozen memory section without rereading the
     store or rewriting the active prompt
   - Extraction reuses the configured memory summary backend/model
   - Full compaction resets transcript tracking but preserves persisted memory entries
@@ -914,7 +666,7 @@ start; omission means no execution deadline. Querying does not extend it.
 `check_background_command({"session_id":"bg_..."})` reads a current snapshot;
 `stop_background_command({"session_id":"bg_..."})` requests process-tree
 termination. A successful start or running query is a completed `SUCCESS` /
-`continue` management receipt, so a checkpointed Runner can call its model
+`continue` management receipt, so the session kernel can call its model
 again. The actual process state is in content and metadata. Nonzero observed
 exit codes remain errors. Sessions belong to their initiating task and workspace;
 a missing local record does not establish whether an external process exited.
@@ -929,27 +681,15 @@ continue. Use `handoff()` when the child agent should take over and finish the
 run. Use `create_sub_task` and `sub_task_status` when the model needs explicit
 background or parallel task management.
 
-Each delegated sub-task runs in a real `AgentSession` whose session id defaults
-to the sub-task id. Child `RunEvent` values preserve their run, trace, parent,
-task, and session identities so hosts can subscribe, persist, and replay them
-without an untyped event translation.
+Each delegated task is an independently scheduled kernel session. Parent admission
+freezes its identity, prompt, policy, model and budget; the parent adopts only its
+authenticated terminal. Intermediate user waits stay on the child. Batch children
+can drive independently after the parent releases its lease.
 
-Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
-
-Use `sub_task_status` to query runtime sub-task states, inspect
-lightweight progress snapshots (`detail_level=snapshot`), or send follow-up
-messages to running/completed sub-tasks.
-
-When the parent task cannot make useful progress until background sub-tasks
-finish, call `sub_task_status` with `wait_for_completion=true`. The runtime waits
-inside that tool call and returns when queried tasks finish or `max_wait_seconds`
-is reached, avoiding repeated status-polling cycles in the agent context.
-
-Before a completed sub-task is resumed, the runtime now sanitizes the saved session transcript: empty assistant turns, thinking-only turns, orphaned tool results, and unresolved tail tool calls are removed so the next follow-up prompt resumes from a coherent history.
-
-Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
-
-Host apps can interrupt a currently running sub-agent by calling `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)`.
+Use `sub_task_status` to read owner-scoped progress, wait for completion or admit
+a continuation message. Hosts steer a retained child by pushing a targeted
+`steer` inbox item through its store or interactive session. Child lifecycle events
+carry parent and child identities for subscription and replay.
 
 Configured child runs inherit the same explicit `ModelProvider` as the parent
 and resolve their own model. No settings path or backend fallback is rebuilt

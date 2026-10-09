@@ -7,18 +7,27 @@ import json
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from vv_agent import Agent, MemorySession, ModelSettings, RunConfig, Runner, VvLlmModelProvider, function_tool
+from vv_agent import (
+    Agent,
+    AgentSessionOptions,
+    InteractiveAgentClient,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    ToolContext,
+    VvLlmModelProvider,
+    function_tool,
+)
 from vv_agent.events import RunEvent
 
 
 @function_tool
-def save_note(path: str, content: str) -> str:
+def save_note(ctx: ToolContext, path: str, content: str) -> str:
     """Save a short note into the current working directory."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"saved {target}"
+    ctx.workspace_backend.write_text(path, content)
+    return f"saved {path}"
 
 
 def print_event(event: RunEvent) -> None:
@@ -47,38 +56,51 @@ agents = {
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-    agent_name = os.getenv("VV_AGENT_EXAMPLE_AGENT", "default")
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "先拆分任务, 再逐步完成并汇报")
-    max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "10"))
-    session_id = os.getenv("VV_AGENT_EXAMPLE_SESSION_ID", "").strip()
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+        backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+        workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)).resolve()
+        verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
+        agent_name = os.getenv("VV_AGENT_EXAMPLE_AGENT", "default")
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "先拆分任务, 再逐步完成并汇报")
+        max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "10"))
+        session_id = os.getenv("VV_AGENT_EXAMPLE_SESSION_ID", "").strip()
 
-    workspace.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
 
-    agent = agents.get(agent_name, agents["default"])
-    if agent_name == "translator" and os.getenv("VV_AGENT_EXAMPLE_BACKEND") is None:
-        backend = "minimax"
+        agent = agents.get(agent_name, agents["default"])
+        if agent_name == "translator" and os.getenv("VV_AGENT_EXAMPLE_BACKEND") is None:
+            backend = "minimax"
 
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=settings_file,
-            default_backend=backend,
-        ),
-        workspace=workspace,
-        max_cycles=max(max_cycles, 1),
-        stream=print_event if verbose else None,
-        session=MemorySession(session_id) if session_id else None,
-    )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=settings_file,
+                default_backend=backend,
+            ),
+            workspace=workspace,
+            max_cycles=max(max_cycles, 1),
+            stream=print_event if verbose else None,
+        )
 
-    try:
-        result = Runner.run_sync(agent, prompt, run_config=config)
-        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
-    except Exception as exc:
-        print(f"Error running agent: {exc}", file=sys.stderr)
-        sys.exit(1)
+        try:
+            if session_id:
+                client = InteractiveAgentClient(
+                    options=AgentSessionOptions(
+                        model_provider=config.model_provider,
+                        workspace=workspace,
+                        stream=print_event if verbose else None,
+                    )
+                )
+                try:
+                    result = client.create_session(agent=agent, session_id=session_id).prompt(prompt)
+                finally:
+                    client.driver.close()
+            else:
+                result = Runner.run_sync(agent, prompt, run_config=config)
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"Error running agent: {exc}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

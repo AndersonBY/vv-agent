@@ -52,11 +52,11 @@ and `output_validation_max_repairs` accepts only `0` or `1`.
 
 The Runner first applies the existing output guardrail and `output_type`
 coercion to form a terminal candidate. When this extension is enabled, the
-validator and optional one-shot repair run before session persistence,
-checkpoint finalization, and terminal-event emission. The committed terminal
+validator and optional one-shot repair run before the session turn terminal
+and terminal-event emission. The committed terminal
 is therefore either the validated success or a typed validation failure.
 Disabled and accepted validators preserve the existing event and trace shape.
-A checkpoint terminal replay reuses that authoritative terminal and does not
+A retained turn terminal replay reuses that authoritative terminal and does not
 call the primary model, validator, or repair callback again.
 
 If the initial output is invalid and repair is enabled, the callback receives
@@ -87,8 +87,9 @@ of the contract's empty tool collection. `model` and `model_settings` are
 host-selected descriptors passed to the callback; the Runner does not resolve
 them, inject tools, or turn repair into another agent cycle.
 
-Checkpoint v12 requires stable `output_validator` and `output_repair`
-capability refs when those callbacks are enabled.
+Durable hosts must reconstruct the frozen callback bindings. A repair is one
+logged tools-free `output_repair` operation, with model-call v2 accounting; an
+unknown repair outcome is never automatically retried.
 
 ## Verification
 

@@ -147,7 +147,7 @@ def test_deepseek_session_memory_probe_accounts_for_every_model_call(tmp_path: P
                 "merged_entries": merged,
                 "persisted_entries": len(memory.state.entries),
                 "workspace_configured": memory.workspace is not None,
-                "storage_path_available": memory._storage_path() is not None,
+                "storage_path_available": memory.storage_path() is not None,
             }
         )
         return merged

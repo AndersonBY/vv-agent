@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vv_agent.types import TokenUsage
+
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -504,7 +509,7 @@ class BudgetEvaluator:
 
     def model_call_complete(self, token_usage: Any) -> BudgetExhaustion | None:
         boundary = BudgetEnforcementBoundary.MODEL_CALL_COMPLETE
-        self._observe_token_usage(token_usage)
+        self.observe_model_usage(token_usage)
         self._observe_boundary(boundary)
         unavailable = self._strict_unavailable(boundary)
         if unavailable is not None:
@@ -681,7 +686,7 @@ class BudgetEvaluator:
             return
         self._host_cost = reading
 
-    def _observe_token_usage(self, usage: Any) -> None:
+    def observe_model_usage(self, usage: TokenUsage) -> None:
         usage_source = getattr(usage, "usage_source", None)
         source_value = getattr(usage_source, "value", usage_source)
         total = getattr(usage, "total_tokens", None)
@@ -906,3 +911,11 @@ __all__ = [
     "RunBudgetLimits",
     "UnavailableMetricPolicy",
 ]
+
+
+class ModelCallBudgetExhausted(RuntimeError):
+    vv_agent_control_flow = True
+
+    def __init__(self, exhaustion: BudgetExhaustion) -> None:
+        super().__init__("Run budget exhausted by a model call.")
+        self.exhaustion = exhaustion

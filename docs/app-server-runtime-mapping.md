@@ -1,28 +1,18 @@
-# App Server Runtime Mapping
+# App Server runtime mapping
 
-## Runtime contracts
+App Server owns transport connections, subscriptions, protocol formatting and
+approval routing. SessionDriver and the kernel own execution. Product modules
+stay behind AppServerHost agent/configuration providers.
 
-- `Runner.start(agent, input, run_config)` is the execution entrypoint for App Server turns.
-- `RunHandle.events()` is the live runtime stream.
-- `RunHandle.result()` is the terminal turn result.
-- `RunHandle.cancel()`, `steer()`, `follow_up()`, `approve()`, and `state()` are the control surface.
-- `RunEvent` is the runtime event contract.
-- `JsonlRunEventStore` is the baseline append-only event replay store.
-- `InteractiveAgentClient` remains public, but App Server should not depend on v-claw internals.
-
-## App Server mapping
-
-| App Server | Runtime |
+| App Server | Kernel owner |
 | --- | --- |
-| Thread | session metadata plus replay scope |
-| Turn | one `RunHandle` |
-| Item | `RunEvent` mapped to protocol item |
-| Approval request | `ApprovalBroker` pending request routed through server request id |
-| Tool-call delta | streamed `tool_call_progress` `RunEvent` metadata |
-| Warning | failed run or event-stream exception |
+| Thread | Session record metadata and projected ThreadStatus |
+| Turn | Retained kernel turn identity plus process-local RunHandle |
+| Item | Typed record-derived event projected to protocol item |
+| Approval | Original owner and deadline retained in the parked operation; authenticated inbox answer |
+| Live delta | Volatile RunEvent observation routed to subscribed transports |
+| Read/resume | Retained records and stable item cursor; execution resume drives the original turn |
 
-## Constraints
-
-- App Server consumes only typed `RunEvent` values.
-- App Server must not call `AgentRuntime` internals directly.
-- App Server must not import product modules from v-claw or backend.
+SessionRunEventStore supplies durable event history. JsonlRunEventStore is an
+optional sink. thread_store/thread_state hold projected values and local handles;
+they own no queue, transcript or execution ledger. Host controls enter the inbox.

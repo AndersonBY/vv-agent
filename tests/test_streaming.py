@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from support.kernel_runtime import KernelRuntime
+
 from vv_agent.events import AssistantDeltaEvent, RunEvent
 from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, ToolCall
@@ -40,7 +41,7 @@ class TestStreamCallback:
     def test_stream_callback_receives_events(self):
         tokens = ["Hello", " ", "world", "!"]
         llm = StreamCapturingLLM(tokens=tokens)
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )
@@ -58,13 +59,13 @@ class TestStreamCallback:
         assert result.status == AgentStatus.COMPLETED
         deltas = [event for event in received if isinstance(event, AssistantDeltaEvent)]
         assert [event.delta for event in deltas] == ["Hello", " ", "world", "!"]
-        assert all(event.run_id == "stream-test" and event.cycle_index == 1 for event in deltas)
+        assert all(event.run_id == result.turn_id and event.cycle_index == 1 for event in deltas)
         assert result.final_answer == "Hello world!"
 
     def test_no_stream_callback_still_works(self):
         tokens = ["Hi"]
         llm = StreamCapturingLLM(tokens=tokens)
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )
@@ -82,7 +83,7 @@ class TestStreamCallback:
 
     def test_scripted_llm_ignores_stream_callback(self):
         llm = ScriptedLLM(steps=[LLMResponse(content="ok")])
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )

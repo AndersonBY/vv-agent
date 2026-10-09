@@ -1,22 +1,111 @@
 {
-  "contract": "result_public",
-  "version": 6,
-  "agent_result_wire": {
-    "required_fields": [
-      "status",
-      "completion_reason",
-      "completion_tool_name",
-      "partial_output",
-      "messages",
-      "cycles",
-      "final_answer",
-      "wait_reason",
-      "error",
-      "shared_state",
-      "token_usage",
-      "checkpoint_key",
-      "resume_observations"
+  "agent_result": {
+    "completion_reason": "no_tool_finish",
+    "completion_tool_name": null,
+    "cycles": [
+      {
+        "assistant_message": "done",
+        "index": 1,
+        "memory_compacted": false,
+        "tool_calls": [],
+        "tool_results": []
+      }
     ],
+    "error": null,
+    "final_answer": "done",
+    "messages": [
+      {
+        "content": "Be precise.",
+        "metadata": {
+          "_vv_agent_tool_policy_approval": "default",
+          "_vv_agent_tool_use_behavior": "run_llm_again",
+          "session_memory_enabled": false,
+          "trace_id": "seed/turn/initial"
+        },
+        "role": "system"
+      },
+      {
+        "content": "history",
+        "role": "user"
+      },
+      {
+        "content": "go",
+        "role": "user"
+      },
+      {
+        "content": "done",
+        "role": "assistant"
+      }
+    ],
+    "partial_output": null,
+    "session_id": "seed",
+    "shared_state": {
+      "bool": true,
+      "float": 1.5,
+      "integer": 1,
+      "null": null,
+      "\ue000": 0,
+      "\ud83d\ude00": 1e-07
+    },
+    "status": "completed",
+    "token_usage": {
+      "cache_usage": {
+        "read_input_tokens": null,
+        "source": "aggregate",
+        "status": "accounting_missing",
+        "uncached_input_tokens": null,
+        "write_input_tokens": null
+      },
+      "input_tokens": 10,
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "scripted",
+          "call_id": "seed/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "seed/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_usage": {
+              "completion_tokens": 5,
+              "prompt_tokens": 10,
+              "total_tokens": 15
+            },
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": 15,
+            "usage_source": "provider_reported"
+          }
+        }
+      ],
+      "output_tokens": 5,
+      "reasoning_tokens": null,
+      "schema_version": "vv-agent.task-token-usage.v3",
+      "total_tokens": 15
+    },
+    "turn_id": "seed/turn/initial",
+    "wait_reason": null
+  },
+  "agent_result_wire": {
+    "message_wire": {
+      "artifact_ref_omitted_when_absent": true,
+      "artifact_ref_preserved": true,
+      "model_projection_strips_artifact_ref": true,
+      "type": "Message"
+    },
     "optional_fields": [
       "budget_usage",
       "budget_exhaustion",
@@ -24,317 +113,1283 @@
     ],
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
-    "unknown_fields": "reject",
-    "resume_observations": {
-      "item_schema": "vv-agent.resume-observation.v1",
-      "unique_by": [
-        "operation_id",
-        "operation_kind",
-        "cycle_index"
-      ],
-      "sort_by": [
-        "operation_id",
-        "operation_kind",
-        "cycle_index"
-      ],
-      "terminal_projection": "same-CAS closed tool journal entries, one item per operation identity",
-      "empty_when_no_unclosed_tool": true
-    },
-    "message_wire": {
-      "type": "Message",
-      "artifact_ref_preserved": true,
-      "artifact_ref_omitted_when_absent": true,
-      "model_projection_strips_artifact_ref": true
-    },
+    "required_fields": [
+      "completion_reason",
+      "completion_tool_name",
+      "cycles",
+      "error",
+      "final_answer",
+      "messages",
+      "partial_output",
+      "session_id",
+      "shared_state",
+      "status",
+      "token_usage",
+      "turn_id",
+      "wait_reason"
+    ],
     "statuses": [
       "pending",
       "running",
-      "deferred",
-      "reconciliation_required",
+      "suspended",
       "wait_user",
       "completed",
       "failed",
       "max_cycles"
     ],
-    "checkpoint_only_statuses": [
-      "host_interaction",
-      "suspended"
-    ],
-    "checkpoint_only_status_semantics": {
-      "excluded_from_agent_result": true,
-      "excluded_from_terminal_result": true,
-      "projected_by": "App Server observable wait projection and distributed driver decision",
-      "wire_source": "fixtures/checkpoint_codec.json#host_interaction_persistence"
-    },
-    "deferred_status_semantics": {
-      "status": "deferred",
-      "non_terminal": true,
-      "wait_reason": "deferred_pending",
-      "turn_status": "interrupted",
-      "resume_method": "turn/resume",
-      "completion_reason": null,
-      "error": null
-    }
+    "unknown_fields": "reject"
   },
-  "agent_result": {
-    "status": "wait_user",
-    "completion_reason": "wait_user",
-    "completion_tool_name": "dangerous",
-    "partial_output": null,
-    "messages": [
-      {
-        "role": "tool",
-        "content": "<Tool Result Compact>\ntool_name: bash\nartifact_path: .vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst output\n...<snip>...\nlast output\n</Tool Result Compact>",
-        "name": "bash",
-        "tool_call_id": "call-bash",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 100000,
-          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        }
-      }
-    ],
-    "cycles": [
-      {
-        "index": 2,
-        "assistant_message": "",
-        "tool_calls": [],
-        "tool_results": [
+  "contract": "result_public",
+  "producer_cases": [
+    {
+      "agent_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": [
           {
-            "tool_call_id": "call_1",
-            "content": "Approval is required.",
-            "status_code": "ERROR",
-            "directive": "wait_user",
-            "error_code": "approval_required",
-            "metadata": {
-              "approval_interruption_id": "approval_1",
-              "mode": "approval_requested",
-              "approval_required": true,
-              "tool_name": "dangerous",
-              "arguments": {
-                "path": "target.txt"
-              },
-              "message": "Approve dangerous."
-            }
-          },
-          {
-            "tool_call_id": "call_duplicate",
-            "content": "Duplicate event.",
-            "status_code": "ERROR",
-            "directive": "wait_user",
-            "metadata": {
-              "approval_interruption_id": "approval_1",
-              "mode": "approval_requested",
-              "tool_name": "duplicate"
-            }
-          },
-          {
-            "tool_call_id": "call_irrelevant",
-            "content": "Not an approval.",
-            "status_code": "SUCCESS",
-            "directive": "continue",
-            "metadata": {
-              "request_id": "not_approval",
-              "mode": "ordinary"
-            }
-          },
-          {
-            "tool_call_id": "call-bash",
-            "content": "first output\n... output omitted; full text in artifact ...\nlast output",
-            "status_code": "SUCCESS",
-            "directive": "continue",
-            "truncated": true,
-            "truncation_reason": "output_limit",
-            "original_bytes": 100000,
-            "visible_bytes": 70,
-            "artifact": {
-              "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
-              "media_type": "text/plain",
-              "encoding": "utf-8",
-              "size_bytes": 100000,
-              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            }
+            "assistant_message": "done",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [],
+            "tool_results": []
           }
         ],
-        "memory_compacted": false
-      }
-    ],
-    "final_answer": null,
-    "wait_reason": "Approval is required.",
-    "error": null,
-    "shared_state": {},
-    "token_usage": {
-      "schema_version": "vv-agent.task-token-usage.v2",
-      "input_tokens": 1000,
-      "output_tokens": 100,
-      "total_tokens": 1100,
-      "reasoning_tokens": 0,
-      "cache_usage": {
-        "status": "provider_reported",
-        "read_input_tokens": 600,
-        "write_input_tokens": null,
-        "uncached_input_tokens": 400,
-        "source": "aggregate"
-      },
-      "model_calls": [
-        {
-          "call_id": "op_model_cycle_2_main:attempt:1",
-          "operation_id": "op_model_cycle_2_main",
-          "attempt": 1,
-          "operation": "agent_cycle",
-          "cycle_index": 2,
-          "backend": "test",
-          "model": "test-model",
-          "status": "completed",
-          "usage": {
-            "schema_version": "vv-agent.token-usage.v1",
-            "input_tokens": 1000,
-            "output_tokens": 100,
-            "total_tokens": 1100,
-            "reasoning_tokens": 0,
-            "usage_source": "provider_reported",
-            "cache_usage": {
-              "status": "provider_reported",
-              "read_input_tokens": 600,
-              "write_input_tokens": null,
-              "uncached_input_tokens": 400,
-              "source": "provider_usage"
+        "error": null,
+        "final_answer": "done",
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "seed/turn/initial"
             },
-            "provider_usage": {
-              "prompt_tokens": 1000,
-              "completion_tokens": 100,
-              "total_tokens": 1100,
-              "prompt_tokens_details": {
-                "cached_tokens": 600
+            "role": "system"
+          },
+          {
+            "content": "history",
+            "role": "user"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "done",
+            "role": "assistant"
+          }
+        ],
+        "partial_output": null,
+        "session_id": "seed",
+        "shared_state": {
+          "bool": true,
+          "float": 1.5,
+          "integer": 1,
+          "null": null,
+          "\ue000": 0,
+          "\ud83d\ude00": 1e-07
+        },
+        "status": "completed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": 10,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "seed/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "seed/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "provider_usage": {
+                  "completion_tokens": 5,
+                  "prompt_tokens": 10,
+                  "total_tokens": 15
+                },
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": 15,
+                "usage_source": "provider_reported"
               }
             }
-          },
-          "error_code": null
-        }
-      ]
-    },
-    "checkpoint_key": null,
-    "resume_observations": []
-  },
-  "expected_approvals": [
-    {
-      "interruption_id": "approval_1",
-      "tool_name": "dangerous",
-      "tool_call_id": "call_1",
-      "arguments": {
-        "path": "target.txt"
+          ],
+          "output_tokens": 5,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": 15
+        },
+        "turn_id": "seed/turn/initial",
+        "wait_reason": null
       },
-      "message": "Approve dangerous.",
-      "cycle_index": 2,
-      "approved": false
+      "name": "seed",
+      "public_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": 1,
+        "error": null,
+        "error_code": null,
+        "final_answer": "done",
+        "final_output": "done",
+        "model_calls": 1,
+        "partial_output": null,
+        "session_id": "seed",
+        "status": "completed",
+        "tool_execution_count": 0,
+        "turn_id": "seed/turn/initial",
+        "wait_reason": null
+      }
+    },
+    {
+      "agent_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": [
+          {
+            "assistant_message": "bad",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [],
+            "tool_results": []
+          }
+        ],
+        "error": null,
+        "final_answer": "[1, 2]",
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "repair/turn/initial"
+            },
+            "role": "system"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "bad",
+            "role": "assistant"
+          }
+        ],
+        "partial_output": null,
+        "session_id": "repair",
+        "shared_state": {
+          "todo_list": []
+        },
+        "status": "completed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": 20,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "repair/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "repair/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "provider_usage": {
+                  "completion_tokens": 5,
+                  "prompt_tokens": 10,
+                  "total_tokens": 15
+                },
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": 15,
+                "usage_source": "provider_reported"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "repair/turn/initial/model/output_repair/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "output_repair",
+              "operation_id": "repair/turn/initial/model/output_repair/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "provider_usage": {
+                  "completion_tokens": 5,
+                  "prompt_tokens": 10,
+                  "total_tokens": 15
+                },
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": 15,
+                "usage_source": "provider_reported"
+              }
+            }
+          ],
+          "output_tokens": 10,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": 30
+        },
+        "turn_id": "repair/turn/initial",
+        "wait_reason": null
+      },
+      "name": "repair",
+      "public_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": 1,
+        "error": null,
+        "error_code": null,
+        "final_answer": "[1, 2]",
+        "final_output": [
+          1,
+          2
+        ],
+        "model_calls": 2,
+        "partial_output": null,
+        "session_id": "repair",
+        "status": "completed",
+        "tool_execution_count": 0,
+        "turn_id": "repair/turn/initial",
+        "wait_reason": null
+      }
+    },
+    {
+      "agent_result": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "total_tokens",
+          "enforcement_boundary": "model_call_complete",
+          "limit": 1,
+          "observed": 15,
+          "overshoot": 14,
+          "reason": "limit_exceeded",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "tokens"
+        },
+        "budget_usage": {
+          "cycles": 1,
+          "elapsed_ms": 0,
+          "host_cost": null,
+          "tool_calls": 0,
+          "tool_calls_by_name": {},
+          "total_tokens": 15,
+          "unavailable_dimensions": [
+            {
+              "dimension": "uncached_input_tokens",
+              "expected_currency": null,
+              "expected_unit": "tokens",
+              "observed_currency": null,
+              "observed_unit": null,
+              "reason": "usage_missing"
+            }
+          ],
+          "uncached_input_tokens": null
+        },
+        "completion_reason": "budget_exhausted",
+        "completion_tool_name": null,
+        "cycles": [
+          {
+            "assistant_message": "",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [
+              {
+                "arguments": {
+                  "text": "never"
+                },
+                "id": "never",
+                "name": "echo"
+              }
+            ],
+            "tool_results": []
+          }
+        ],
+        "error": {
+          "code": "run_budget_exhausted",
+          "message": "Run budget exhausted.",
+          "retryable": false
+        },
+        "error_code": "run_budget_exhausted",
+        "final_answer": null,
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "budget/turn/initial"
+            },
+            "role": "system"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"text\":\"never\"}",
+                  "name": "echo"
+                },
+                "id": "never",
+                "type": "function"
+              }
+            ]
+          }
+        ],
+        "partial_output": null,
+        "session_id": "budget",
+        "shared_state": {
+          "todo_list": []
+        },
+        "status": "failed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": 10,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "budget/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "budget/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "provider_usage": {
+                  "completion_tokens": 5,
+                  "prompt_tokens": 10,
+                  "total_tokens": 15
+                },
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": 15,
+                "usage_source": "provider_reported"
+              }
+            }
+          ],
+          "output_tokens": 5,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": 15
+        },
+        "turn_id": "budget/turn/initial",
+        "wait_reason": null
+      },
+      "name": "budget",
+      "public_result": {
+        "completion_reason": "budget_exhausted",
+        "completion_tool_name": null,
+        "cycles": 1,
+        "error": "Run budget exhausted.",
+        "error_code": "run_budget_exhausted",
+        "final_answer": null,
+        "final_output": "Run budget exhausted.",
+        "model_calls": 1,
+        "partial_output": null,
+        "session_id": "budget",
+        "status": "failed",
+        "tool_execution_count": 0,
+        "turn_id": "budget/turn/initial",
+        "wait_reason": null
+      }
+    },
+    {
+      "agent_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": [
+          {
+            "assistant_message": "",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [
+              {
+                "arguments": {
+                  "text": "effect"
+                },
+                "id": "effect",
+                "name": "echo"
+              }
+            ],
+            "tool_results": [
+              {
+                "content": "provider done",
+                "directive": "continue",
+                "status_code": "SUCCESS",
+                "tool_call_id": "effect"
+              }
+            ]
+          },
+          {
+            "assistant_message": "done",
+            "index": 2,
+            "memory_compacted": false,
+            "tool_calls": [],
+            "tool_results": []
+          }
+        ],
+        "error": null,
+        "final_answer": "done",
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "accepted/turn/initial"
+            },
+            "role": "system"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"text\":\"effect\"}",
+                  "name": "echo"
+                },
+                "id": "effect",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "provider done",
+            "role": "tool",
+            "tool_call_id": "effect"
+          },
+          {
+            "content": "done",
+            "role": "assistant"
+          }
+        ],
+        "partial_output": null,
+        "session_id": "accepted",
+        "shared_state": {
+          "todo_list": []
+        },
+        "status": "completed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": null,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "accepted/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "accepted/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "accepted/turn/initial/model/primary/2/1",
+              "cycle_index": 2,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "accepted/turn/initial/model/primary/2",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            }
+          ],
+          "output_tokens": null,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": null
+        },
+        "turn_id": "accepted/turn/initial",
+        "wait_reason": null
+      },
+      "name": "accepted",
+      "public_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": 2,
+        "error": null,
+        "error_code": null,
+        "final_answer": "done",
+        "final_output": "done",
+        "model_calls": 2,
+        "partial_output": null,
+        "session_id": "accepted",
+        "status": "completed",
+        "tool_execution_count": 1,
+        "turn_id": "accepted/turn/initial",
+        "wait_reason": null
+      }
+    },
+    {
+      "agent_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": [
+          {
+            "assistant_message": "",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [
+              {
+                "arguments": {
+                  "text": "effect"
+                },
+                "id": "effect",
+                "name": "echo"
+              }
+            ],
+            "tool_results": [
+              {
+                "content": "provider done",
+                "directive": "continue",
+                "status_code": "SUCCESS",
+                "tool_call_id": "effect"
+              }
+            ]
+          },
+          {
+            "assistant_message": "done",
+            "index": 2,
+            "memory_compacted": false,
+            "tool_calls": [],
+            "tool_results": []
+          }
+        ],
+        "error": null,
+        "final_answer": "done",
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "unknown/turn/initial"
+            },
+            "role": "system"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"text\":\"effect\"}",
+                  "name": "echo"
+                },
+                "id": "effect",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "{\"error\": \"tool_outcome_unknown\", \"retryable\": false}",
+            "name": "echo",
+            "role": "tool",
+            "tool_call_id": "effect"
+          },
+          {
+            "content": "done",
+            "role": "assistant"
+          }
+        ],
+        "partial_output": null,
+        "session_id": "unknown",
+        "shared_state": {
+          "todo_list": []
+        },
+        "status": "completed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": null,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "unknown/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "unknown/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "unknown/turn/initial/model/primary/2/1",
+              "cycle_index": 2,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "unknown/turn/initial/model/primary/2",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            }
+          ],
+          "output_tokens": null,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": null
+        },
+        "turn_id": "unknown/turn/initial",
+        "wait_reason": null
+      },
+      "name": "unknown",
+      "public_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": 2,
+        "error": null,
+        "error_code": null,
+        "final_answer": "done",
+        "final_output": "done",
+        "model_calls": 2,
+        "partial_output": null,
+        "session_id": "unknown",
+        "status": "completed",
+        "tool_execution_count": 1,
+        "turn_id": "unknown/turn/initial",
+        "wait_reason": null
+      }
+    },
+    {
+      "agent_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": [
+          {
+            "assistant_message": "",
+            "index": 1,
+            "memory_compacted": false,
+            "tool_calls": [
+              {
+                "arguments": {
+                  "question": "Choose"
+                },
+                "id": "ask",
+                "name": "ask_user"
+              }
+            ],
+            "tool_results": [
+              {
+                "content": "blue",
+                "directive": "continue",
+                "status_code": "SUCCESS",
+                "tool_call_id": "ask"
+              }
+            ]
+          },
+          {
+            "assistant_message": "answered",
+            "index": 2,
+            "memory_compacted": false,
+            "tool_calls": [],
+            "tool_results": []
+          }
+        ],
+        "error": null,
+        "final_answer": "answered",
+        "messages": [
+          {
+            "content": "Be precise.",
+            "metadata": {
+              "_vv_agent_tool_policy_approval": "default",
+              "_vv_agent_tool_use_behavior": "run_llm_again",
+              "session_memory_enabled": false,
+              "trace_id": "user_wait/turn/initial"
+            },
+            "role": "system"
+          },
+          {
+            "content": "go",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"question\":\"Choose\"}",
+                  "name": "ask_user"
+                },
+                "id": "ask",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "blue",
+            "role": "tool",
+            "tool_call_id": "ask"
+          },
+          {
+            "content": "answered",
+            "role": "assistant"
+          }
+        ],
+        "partial_output": null,
+        "session_id": "user_wait",
+        "shared_state": {
+          "todo_list": []
+        },
+        "status": "completed",
+        "token_usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": null,
+          "model_calls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "user_wait/turn/initial/model/primary/1/1",
+              "cycle_index": 1,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "user_wait/turn/initial/model/primary/1",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "call_id": "user_wait/turn/initial/model/primary/2/1",
+              "cycle_index": 2,
+              "error_code": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operation_id": "user_wait/turn/initial/model/primary/2",
+              "schema_version": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cache_usage": {
+                  "read_input_tokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncached_input_tokens": null,
+                  "write_input_tokens": null
+                },
+                "input_tokens": null,
+                "output_tokens": null,
+                "provider_usage": {},
+                "reasoning_tokens": null,
+                "schema_version": "vv-agent.token-usage.v1",
+                "total_tokens": null,
+                "usage_source": "accounting_missing"
+              }
+            }
+          ],
+          "output_tokens": null,
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.task-token-usage.v3",
+          "total_tokens": null
+        },
+        "turn_id": "user_wait/turn/initial",
+        "wait_reason": null
+      },
+      "name": "user_wait",
+      "public_result": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "cycles": 2,
+        "error": null,
+        "error_code": null,
+        "final_answer": "answered",
+        "final_output": "answered",
+        "model_calls": 2,
+        "partial_output": null,
+        "session_id": "user_wait",
+        "status": "completed",
+        "tool_execution_count": 0,
+        "turn_id": "user_wait/turn/initial",
+        "wait_reason": null
+      }
     }
   ],
   "projection_keys": [
-    "agent_name",
-    "budget_exhaustion",
-    "budget_usage",
-    "checkpoint_key",
+    "input",
+    "new_items",
+    "final_output",
+    "status",
     "completion_reason",
     "completion_tool_name",
-    "events",
-    "final_output",
-    "input",
-    "metadata",
-    "new_items",
     "partial_output",
-    "resolved_model",
-    "resume_observations",
-    "run_id",
-    "status",
+    "budget_usage",
+    "budget_exhaustion",
+    "events",
     "token_usage",
-    "trace_id"
+    "trace_id",
+    "run_id",
+    "metadata",
+    "agent_name",
+    "resolved_model",
+    "session_id",
+    "turn_id"
   ],
   "resolved_model_projection": {
-    "backend": "test",
-    "requested_model": "requested",
-    "selected_model": "selected",
-    "model_id": "model-id",
-    "endpoint": "endpoint-public"
+    "backend": "scripted",
+    "endpoint": null,
+    "model_id": "m",
+    "requested_model": "m",
+    "selected_model": "m"
   },
-  "reconciliation_result": {
-    "status": "reconciliation_required",
-    "completion_reason": null,
+  "run_result": {
+    "agent_name": "fixture",
+    "budget_exhaustion": null,
+    "budget_usage": null,
+    "completion_reason": "no_tool_finish",
     "completion_tool_name": null,
-    "partial_output": "last committed assistant output",
-    "final_answer": null,
-    "wait_reason": null,
-    "error": null,
-    "checkpoint_key": "tenant-7/run-42",
-    "resume_observations": [
+    "events": [
       {
-        "operation_id": "op_tool_cycle_2_call_2",
-        "operation_kind": "tool",
-        "cycle_index": 2,
-        "state": "ambiguous",
-        "risk": "unknown_tool_side_effect",
-        "idempotency_support": "unknown"
+        "created_at": 1000.0,
+        "event_id": "sk/71c6a647b211a055332281ddeeeca72ee8b1b7b41be9d3df637ea7450f1012aa/event",
+        "input": "go",
+        "metadata": {
+          "session_seq": 3
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "run_started",
+        "version": "v6"
+      },
+      {
+        "created_at": 1000.0,
+        "event_id": "sk/71c6a647b211a055332281ddeeeca72ee8b1b7b41be9d3df637ea7450f1012aa/agent",
+        "metadata": {
+          "session_seq": 3
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "agent_started",
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "created_at": 1000.0,
+        "cycle_index": 1,
+        "event_id": "sk/1e01411e40b4a6a70b95067ad3deeac23758be0d21095127a8fecd448f98074f/cycle",
+        "metadata": {
+          "session_seq": 5
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "cycle_started",
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "attempt": 1,
+        "backend": "scripted",
+        "call_id": "seed/turn/initial/model/primary/1/1",
+        "created_at": 1000.0,
+        "cycle_index": 1,
+        "event_id": "sk/9adbde86bb4d76b016711cb57a73de1687f123acc5450b2b8748e3182362562f/event",
+        "metadata": {
+          "purpose": "primary",
+          "session_seq": 7
+        },
+        "model": "m",
+        "operation": "agent_cycle",
+        "operation_id": "seed/turn/initial/model/primary/1",
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "model_call_started",
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "code": "cycle_llm_response",
+        "created_at": 1000.0,
+        "cycle_index": 1,
+        "details": {
+          "assistant_message": "done",
+          "tool_calls": []
+        },
+        "event_id": "sk/fcad202fb9b940f15475fd8d1115bc75e60ff2591bf20127f1c63f146c1b8110/response",
+        "level": "info",
+        "metadata": {
+          "session_seq": 9
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "diagnostic",
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "attempt": 1,
+        "backend": "scripted",
+        "call_id": "seed/turn/initial/model/primary/1/1",
+        "created_at": 1000.0,
+        "cycle_index": 1,
+        "event_id": "sk/fcad202fb9b940f15475fd8d1115bc75e60ff2591bf20127f1c63f146c1b8110/event",
+        "metadata": {
+          "purpose": "primary",
+          "session_seq": 9
+        },
+        "model": "m",
+        "operation": "agent_cycle",
+        "operation_id": "seed/turn/initial/model/primary/1",
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "model_call_completed",
+        "usage": {
+          "cache_usage": {
+            "read_input_tokens": null,
+            "source": null,
+            "status": "accounting_missing",
+            "uncached_input_tokens": null,
+            "write_input_tokens": null
+          },
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "provider_usage": {
+            "completion_tokens": 5,
+            "prompt_tokens": 10,
+            "total_tokens": 15
+          },
+          "reasoning_tokens": null,
+          "schema_version": "vv-agent.token-usage.v1",
+          "total_tokens": 15,
+          "usage_source": "provider_reported"
+        },
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "code": "run_completed",
+        "created_at": 1000.0,
+        "details": {
+          "completion_reason": "no_tool_finish",
+          "final_answer": "done"
+        },
+        "event_id": "sk/4cd34d9821a95fe8c26c76c8f19c395fe3ca758be3d5f1eb32783fbffa4e5e49/diagnostic",
+        "level": "info",
+        "metadata": {
+          "session_seq": 11
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "trace_id": "seed/turn/initial",
+        "type": "diagnostic",
+        "version": "v6"
+      },
+      {
+        "agent_name": "fixture",
+        "created_at": 1000.0,
+        "event_id": "sk/4cd34d9821a95fe8c26c76c8f19c395fe3ca758be3d5f1eb32783fbffa4e5e49/event",
+        "final_output": "done",
+        "metadata": {
+          "session_seq": 11
+        },
+        "run_id": "seed/turn/initial",
+        "session_id": "seed",
+        "status": "completed",
+        "trace_id": "seed/turn/initial",
+        "type": "run_completed",
+        "version": "v6"
       }
-    ]
-  },
-  "deferred_pending_result": {
-    "status": "deferred",
-    "completion_reason": null,
-    "completion_tool_name": null,
-    "partial_output": "last committed assistant output",
-    "final_answer": null,
-    "wait_reason": "deferred_pending",
-    "error": null,
-    "checkpoint_key": "tenant-7/run-42",
-    "resume_observations": [],
-    "turn_projection": {
-      "status": "interrupted",
-      "terminal": false,
-      "completion_reason": null,
-      "error": null,
-      "resume_method": "turn/resume"
-    }
-  },
-  "resume_observation_vectors": [
-    {
-      "name": "unsorted_input_is_canonicalized_by_operation_identity",
-      "input": [
+    ],
+    "final_output": "done",
+    "input": "go",
+    "metadata": {
+      "session_model_calls": [
         {
-          "operation_id": "op_tool_cycle_2_call_3",
-          "operation_kind": "tool",
-          "cycle_index": 2,
-          "state": "ambiguous",
-          "risk": "unknown_tool_side_effect",
-          "idempotency_support": "unknown"
-        },
-        {
-          "operation_id": "op_tool_cycle_2_call_2",
-          "operation_kind": "tool",
-          "cycle_index": 2,
-          "state": "ambiguous",
-          "risk": "unknown_tool_side_effect",
-          "idempotency_support": "unknown"
-        }
-      ],
-      "canonical": [
-        {
-          "operation_id": "op_tool_cycle_2_call_2",
-          "operation_kind": "tool",
-          "cycle_index": 2,
-          "state": "ambiguous",
-          "risk": "unknown_tool_side_effect",
-          "idempotency_support": "unknown"
-        },
-        {
-          "operation_id": "op_tool_cycle_2_call_3",
-          "operation_kind": "tool",
-          "cycle_index": 2,
-          "state": "ambiguous",
-          "risk": "unknown_tool_side_effect",
-          "idempotency_support": "unknown"
+          "attempt": 1,
+          "operation_id": "seed/turn/initial/model/primary/1",
+          "purpose": "primary",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_usage": {
+              "completion_tokens": 5,
+              "prompt_tokens": 10,
+              "total_tokens": 15
+            },
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": 15,
+            "usage_source": "provider_reported"
+          }
         }
       ]
-    }
-  ]
+    },
+    "new_items": [
+      {
+        "content": "go",
+        "role": "user"
+      },
+      {
+        "content": "done",
+        "role": "assistant"
+      }
+    ],
+    "partial_output": null,
+    "resolved_model": {
+      "backend": "scripted",
+      "endpoint": null,
+      "model_id": "m",
+      "requested_model": "m",
+      "selected_model": "m"
+    },
+    "run_id": "seed/turn/initial",
+    "session_id": "seed",
+    "status": "completed",
+    "token_usage": {
+      "cache_usage": {
+        "read_input_tokens": null,
+        "source": "aggregate",
+        "status": "accounting_missing",
+        "uncached_input_tokens": null,
+        "write_input_tokens": null
+      },
+      "input_tokens": 10,
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "scripted",
+          "call_id": "seed/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "seed/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_usage": {
+              "completion_tokens": 5,
+              "prompt_tokens": 10,
+              "total_tokens": 15
+            },
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": 15,
+            "usage_source": "provider_reported"
+          }
+        }
+      ],
+      "output_tokens": 5,
+      "reasoning_tokens": null,
+      "schema_version": "vv-agent.task-token-usage.v3",
+      "total_tokens": 15
+    },
+    "trace_id": "seed/turn/initial",
+    "turn_id": "seed/turn/initial"
+  },
+  "version": 7
 }

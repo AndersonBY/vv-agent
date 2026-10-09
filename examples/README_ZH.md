@@ -9,7 +9,7 @@ handoff、强类型事件和工具策略。低层 runtime 示例单独保留，�
 宿主产品迁移时，优先使用 provider 和 executor 扩展点，不要 patch runtime 内部：
 `ApprovalProvider` 负责 UI/规则审批，`ContextProvider` 负责产品 prompt 片段，
 `vv_agent.memory.MemoryProvider` 负责产品持久化，`vv_agent.tools.ToolExecutor`
-或 `FunctionTool` 组合负责产品工具，`RunEventStore` 负责应用历史。宿主需要实时
+或 `FunctionTool` 组合负责产品工具，`SessionRunEventStore` 负责应用历史。宿主需要实时
 强类型事件、取消或审批控制时，使用 `Runner.start()` 和 `RunHandle`。
 
 ## 通用环境变量
@@ -17,7 +17,7 @@ handoff、强类型事件和工具策略。低层 runtime 示例单独保留，�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM 后端配置文件 |
-| `VV_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | 工作区目录 |
+| `VV_AGENT_EXAMPLE_WORKSPACE` | temporary directory | 工作区目录 |
 | `VV_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM 后端 |
 | `VV_AGENT_EXAMPLE_MODEL` | `kimi-k3` | 模型名称 |
 | `VV_AGENT_EXAMPLE_PROMPT` | 示例内置值 | 覆盖示例 prompt |
@@ -31,7 +31,7 @@ handoff、强类型事件和工具策略。低层 runtime 示例单独保留，�
 | 01 | `01_quick_start.py` | 最小 `Agent` + `Runner.run_sync` |
 | 02 | `02_agent_profiles.py` | 可复用 Agent profile 与 `ModelSettings` |
 | 03 | `03_sdk_client.py` | Runner 配置、Session、自定义工具、强类型事件 |
-| 04 | `04_session_api.py` | 使用 `MemorySession` 跨多次 run 保留上下文 |
+| 04 | `04_session_api.py` | 使用 kernel session 跨多轮保留上下文 |
 | 05 | `05_ask_user_resume.py` | 工具审批与 `WAIT_USER` 事件 |
 | 06 | `06_runtime_hooks.py` | 通过 `RunConfig.hooks` 接入低层 hook |
 | 07 | `07_token_budget_guard.py` | 使用公共 API 限制整次运行的 token 和工具调用预算 |
@@ -61,25 +61,23 @@ uv run python examples/17_error_recovery.py
 
 ## Runtime 集成
 
-这些示例使用更低层的 runtime API，展示取消、流式输出、线程后端、checkpoint、
-Celery 分发和工作区后端。
+这些示例使用当前 kernel 的 RunHandle、持久会话、流式输出和工作区后端。
 
 | # | 文件 | 展示内容 |
 | --- | --- | --- |
-| 18 | `18_cancellation.py` | 通过 `CancellationToken` 取消运行中的任务 |
+| 18 | `18_cancellation.py` | 通过 RunHandle 取消运行中的任务 |
 | 19 | `19_streaming.py` | 原始 runtime stream callback 事件 |
-| 20 | `20_thread_backend.py` | `ThreadBackend` submit/future 执行 |
-| 21 | `21_state_checkpoint.py` | 使用 checkpoint v10 与 SQLite 恢复/重放 Runner 任务 |
-| 22 | `22_sdk_advanced.py` | 公开 SDK + streaming + `ThreadBackend` |
-| 23 | `23_celery_backend.py` | `CeleryBackend` 分布式 cycle |
+| 20 | `20_background_run.py` | RunHandle 非阻塞执行 |
+| 21 | `21_durable_session.py` | SQLite 持久会话与 retained-turn 恢复 |
+| 22 | `22_sdk_advanced.py` | 公开 SDK + kernel streaming |
 | 24 | `24_workspace_backends.py` | Local、memory、S3 与自定义工作区后端 |
 | 25 | `25_temporary_tool_injection.py` | run 级别临时启用工具 |
 
 ```bash
 VV_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
 uv run python examples/19_streaming.py
-uv run python examples/20_thread_backend.py
-VV_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
+uv run python examples/20_background_run.py
+VV_AGENT_EXAMPLE_DB=/tmp/vv-agent-example.db uv run python examples/21_durable_session.py
 uv run python examples/22_sdk_advanced.py
 uv run python examples/24_workspace_backends.py
 ```

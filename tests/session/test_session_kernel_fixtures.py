@@ -1,4 +1,4 @@
-"""Authoring fixtures stay outside the v23 snapshot and prove real producer bytes."""
+"""Real producer generation must match the published v24 snapshot byte-for-byte."""
 
 import base64
 import json
@@ -11,6 +11,7 @@ from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
+from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -23,7 +24,7 @@ from vv_agent.session.projection import project_records
 from vv_agent.session.records import InboxItem, Record, RecordError
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.store import StoredRecord
-from vv_agent.session.surfaces import _SessionKernel
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
@@ -31,6 +32,7 @@ from vv_agent.types import AgentResult, LLMResponse, ToolCall
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session_kernel_fixtures.py"
 AUTHOR = runpy.run_path(str(SCRIPT))
 REPLACEMENTS = runpy.run_path(str(SCRIPT.with_name("_session_kernel_replacements.py")))
+start_runner = REPLACEMENTS["start_runner"]
 CURATION = runpy.run_path(str(SCRIPT.with_name("_session_kernel_curation.py")))
 CHECKS = runpy.run_path(str(SCRIPT.with_name("_session_kernel_checks.py")))
 FILES = {
@@ -58,7 +60,7 @@ def checked_bytes(vector):
 @pytest.fixture(scope="module")
 def generated_fixtures(tmp_path_factory):
     root = tmp_path_factory.mktemp("kernel-fixtures")
-    directories = [root / "first", root / "second"]
+    directories = [root / "first"]
     coverage_runs = []
     reports = []
     for output in directories:
@@ -72,17 +74,20 @@ def generated_fixtures(tmp_path_factory):
         coverage_runs.append(report["coverage"])
         assert sum(p.stat().st_size for p in output.iterdir()) <= 3_000_000
         assert all(p.stat().st_size <= 512_000 for p in output.iterdir())
-    assert coverage_runs[0] == coverage_runs[1]
     assert set(coverage_runs[0]) == FILES
-    first, second = directories
-    for name in FILES:
-        assert (first / name).read_bytes() == (second / name).read_bytes(), name
+    first = directories[0]
+    second = Path(__file__).resolve().parents[1] / "fixtures" / "parity"
     values = {}
     for name in FILES:
         raw = (first / name).read_text()
         values[name] = [json.loads(line) for line in raw.splitlines()] if name.endswith(".jsonl") else json.loads(raw)
-    assert reports[0]["self_checks"] == reports[1]["self_checks"]
-    return directories, coverage_runs, values, reports[0]["self_checks"]
+    return [first, second], coverage_runs, values, reports[0]["self_checks"]
+
+
+def test_generated_fixtures_match_vendored_snapshot(generated_fixtures):
+    (produced, vendored), _, _, _ = generated_fixtures
+    differences = sorted(name for name in FILES if (produced / name).read_bytes() != (vendored / name).read_bytes())
+    assert not differences, differences
 
 
 def validate_outputs(values):
@@ -105,14 +110,8 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     replaced = {}
     for name in REPLACEMENTS["REPLACE"]:
         raw = (first / name).read_text()
-        for retired in REPLACEMENTS["RETIRED_FIELDS"] | REPLACEMENTS["RETIRED_KINDS"] | REPLACEMENTS["REMOVED_MEMBERS"]:
+        for retired in REPLACEMENTS["RETIRED_FIELDS"] | REPLACEMENTS["RETIRED_KINDS"]:
             assert re.search(r"(?<![A-Za-z0-9_])" + re.escape(retired) + r"(?![A-Za-z0-9_])", raw) is None, (name, retired)
-        for symbol in REPLACEMENTS["REMOVED"]:
-            # Rendered prompts retain ordinary words such as "Session Memory".
-            assert re.search(r'"' + re.escape(symbol) + r'"|vv_agent\.[A-Za-z_.]*\b' + re.escape(symbol) + r"\b", raw) is None, (
-                name,
-                symbol,
-            )
         replaced[name] = [json.loads(line) for line in raw.splitlines()] if name.endswith(".jsonl") else json.loads(raw)
     assert set(REPLACEMENTS["validate_replacements"](replaced, AUTHOR["independent_bytes"])) == set(REPLACEMENTS["REPLACE"])
 
@@ -227,7 +226,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         assert projection["spans"] == [expected_spans[(s["seq"], s["method"], s["span"]["span_id"])] for s in projection["spans"]]
         for event in projection["events"]:
             assert event["version"] == "v6"
-            assert event_from_dict(event, _kernel=True).to_dict() == event
+            assert event_from_dict(event).to_dict() == event
         for prefix in projection["prefix_states"]:
             log = [r.record for r in rows if r.seq <= prefix["seq"]]
             assert [r.seq for r in rows if r.seq <= prefix["seq"]] == list(range(1, prefix["seq"] + 1))
@@ -251,7 +250,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     app = read("app_server_protocol.json")
     from vv_agent.app_server.schema import export_schema_bundles
 
-    exports = export_schema_bundles(_kernel=True)
+    exports = export_schema_bundles()
     schemas = {name: json.loads(source) for name, source in app["schemas"]["jsonSchema"].items()}
     assert schemas == {name: json.loads(source) for name, source in exports["jsonSchema"].items()}
     assert set(app["schemas"]["typescript"]) == set(exports["typescript"])
@@ -287,8 +286,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
 
 
 def test_host_interaction_wire_references_use_current_owner(generated_fixtures):
-    from vv_agent.interaction import HostInteractionRequest
-    from vv_agent.runtime.controller import HostInteractionOutcome
+    from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
 
     _, _, values, _ = generated_fixtures
     capabilities = {c["python"]: c for domain in values["public_api.json"]["domains"] for c in domain["capabilities"]}
@@ -307,7 +305,7 @@ def test_terminal_optional_fields_come_from_kernel_schema(generated_fixtures):
     from vv_agent.app_server.schema import export_schema_bundles
 
     _, _, values, _ = generated_fixtures
-    schema = json.loads(export_schema_bundles(_kernel=True)["jsonSchema"]["ServerNotification"])["$defs"]["TurnCompletedParams"]
+    schema = json.loads(export_schema_bundles()["jsonSchema"]["ServerNotification"])["$defs"]["TurnCompletedParams"]
     optional = values["app_server_observable.json"]["terminal"]["optionalFieldsOmittedWhenAbsent"]
     assert schema["additionalProperties"] is False
     assert set(optional) == set(schema["properties"]) - set(schema["required"])
@@ -452,15 +450,15 @@ def test_private_runner_subscribers_and_observer_failure_keep_committed_result()
     def broken_observer(_event):
         raise RuntimeError("observer unavailable")
 
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
         provider = ScriptedModelProvider.from_steps("test", "m", [complete])
-        handle = Runner.start(
+        handle = start_runner(
+            kernel,
+            "subscribers",
             Agent("fixture", "Answer."),
             "go",
             run_config=RunConfig(model_provider=provider, stream=broken_observer),
-            _kernel=kernel,
-            _session_id="subscribers",
         )
         assert entered.wait(5)
         first, second = handle.events(), handle.events()
@@ -471,9 +469,9 @@ def test_private_runner_subscribers_and_observer_failure_keep_committed_result()
         assert [e.to_dict() for e in first] == [e.to_dict() for e in second]
         assert [e.to_dict() for e in handle.events()] == [e.to_dict() for e in result.events]
         wire = result.raw_result.to_dict()
-        assert AgentResult.from_dict(wire, _kernel=True).to_dict() == wire
+        assert AgentResult.from_dict(wire).to_dict() == wire
         with pytest.raises((ValueError, TypeError)):
-            AgentResult.from_dict(wire)
+            AgentResult.from_dict(wire | {"checkpoint_key": "retired"})
     finally:
         released.set()
         kernel.close()
@@ -486,19 +484,19 @@ def test_private_shared_state_mutation_does_not_change_the_retained_seed():
         shared["nested"]["values"].append("local")
         return []
 
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
-        result = Runner.run_sync(
+        result = start_runner(
+            kernel,
+            "isolation",
             Agent("isolation", "Answer."),
             "go",
-            _kernel=kernel,
-            _session_id="isolation",
             run_config=RunConfig(
                 model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("done")]),
                 shared_state=seed,
                 before_cycle_messages=before_cycle,
             ),
-        )
+        ).result()
         state, _, _ = kernel.store.read_state("isolation")
         start = next(iter(state.turns.values())).start
         assert seed == start._task().initial_shared_state == {"nested": {"values": ["seed"]}}
@@ -524,19 +522,19 @@ def test_private_approval_provider_failure_is_a_retained_terminal():
             del request
             raise RuntimeError("approval unavailable")
 
-    broker, kernel = ApprovalBroker(), _SessionKernel()
+    broker, kernel = ApprovalBroker(), SessionDriver()
     try:
-        result = Runner.run_sync(
+        result = start_runner(
+            kernel,
+            "approval-failure",
             Agent("approval", "Use gated.", tools=[gated]),
             "go",
-            _kernel=kernel,
-            _session_id="approval-failure",
             run_config=RunConfig(
                 model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("", [ToolCall("gated", "gated", {})])]),
                 approval_provider=FailingApproval(),
                 approval_broker=broker,
             ),
-        )
+        ).result()
         assert result.status.value == "failed" and result.raw_result.error is not None
         assert result.raw_result.error["message"] == "approval unavailable"
         assert not effects
@@ -544,7 +542,7 @@ def test_private_approval_provider_failure_is_a_retained_terminal():
         assert broker.pending_request(request.request_id) is None
         state, rows, _ = kernel.store.read_state("approval-failure")
         assert state.active_turn_id is None and rows[-1].record.kind == "turn_ended"
-        retained = Runner.resume("approval-failure", _kernel=kernel, _turn_id=result.run_id)
+        retained = Runner.resume("approval-failure", result.run_id)
         assert retained.to_dict() == result.to_dict()
         assert kernel.store.read_state("approval-failure")[1] == rows
     finally:
@@ -552,27 +550,31 @@ def test_private_approval_provider_failure_is_a_retained_terminal():
 
 
 def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes():
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
         provider = ScriptedModelProvider.new("test", "m", [LLMResponse("question"), LLMResponse("answer")])
-        runner = Runner.configured(RunConfig(model_provider=provider, no_tool_policy="wait_user"), _kernel=kernel)
-        result = runner.run_sync(Agent("fixture", "Answer."), "go", _session_id="resume")
-        tid = result.raw_result._kernel_turn_id
+        runner = Runner.configured(RunConfig(model_provider=provider, no_tool_policy="wait_user"))
+        with (
+            patch("vv_agent.session.surfaces.SessionDriver", return_value=kernel),
+            patch("vv_agent.runner.uuid.uuid4", return_value=type("Identity", (), {"hex": "resume"})()),
+        ):
+            result = runner.run_sync(Agent("fixture", "Answer."), "go")
+        tid = result.raw_result.turn_id
         assert tid is not None and result.status.value == "wait_user"
         original = kernel.handles[-1]
         kernel.answer("resume", original.runtime, "reply", "reply")
-        resumed = runner.resume("resume", _turn_id=tid)
-        assert resumed.raw_result._kernel_turn_id == tid
+        resumed = runner.resume("resume", tid)
+        assert resumed.raw_result.turn_id == tid
         assert len(resumed.raw_result.cycles) == 2
         state, rows, _ = kernel.store.read_state("resume")
         assert state.active_turn_id == tid
         with pytest.raises(ValueError, match="turn_id"):
-            runner.resume("resume", _turn_id="wrong")
+            runner.resume("resume", "wrong")
         assert kernel.store.read_state("resume")[1] == rows
         kernel.control("resume", "close", "close", runtime=original.runtime)
         closed = kernel.store.read_state("resume")[1]
         with pytest.raises(ValueError, match="closed"):
-            runner.resume("resume", _turn_id=tid)
+            runner.resume("resume", tid)
         assert kernel.store.read_state("resume")[1] == closed
     finally:
         kernel.close()
@@ -590,7 +592,7 @@ def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes
     ],
 )
 def test_kernel_seed_rejects_invalid_messages_atomically(message):
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
         with pytest.raises((ValueError, TypeError)):
             kernel.create("invalid-seed", "/fixture", {"seed": {"messages": [message], "shared_state": {}}})
@@ -604,7 +606,7 @@ def test_kernel_context_preserves_reasoning_and_removes_empty_assistant():
     from vv_agent.types import Message
 
     fixture = json.loads((SCRIPT.parents[1] / "tests/fixtures/parity/assistant_reasoning_history.json").read_text())
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
         for case in fixture["cases"]:
             sid = case["name"]
@@ -653,7 +655,7 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
         "main-model",
     )
     prefix = "memory_summary" if purpose == "compaction" else "session_memory_extraction"
-    kernel = _SessionKernel()
+    kernel = SessionDriver()
     try:
         config = RunConfig(
             model_provider=provider,

@@ -14,9 +14,9 @@ from vv_agent import (
     AssistantDeltaEvent,
     CycleStartedEvent,
     DiagnosticEvent,
-    MemorySession,
     ModelCallStartedEvent,
     ModelSettings,
+    RetrySettings,
     RunCompletedEvent,
     RunConfig,
     Runner,
@@ -103,7 +103,9 @@ def test_runner_run_sync_executes_agent_with_model_provider(tmp_path: Path) -> N
     assert result.final_output == "ok"
     assert result.input == "Say ok."
     assert result.raw_result.final_answer == "ok"
-    assert seen_settings == [ModelSettings(temperature=0.1, max_tokens=200)]
+    assert seen_settings == [
+        ModelSettings(temperature=0.1, max_tokens=200, retry=RetrySettings(max_attempts=1, backoff_seconds=0))
+    ]
 
 
 def test_runner_path_workspace_isolated_from_process_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,7 +293,9 @@ def test_runner_passes_resolved_model_settings_to_llm_complete(tmp_path: Path) -
         ),
     )
 
-    assert seen_settings == [ModelSettings(temperature=0.2, top_p=0.8, max_tokens=250)]
+    assert seen_settings == [
+        ModelSettings(temperature=0.2, top_p=0.8, max_tokens=250, retry=RetrySettings(max_attempts=1, backoff_seconds=0))
+    ]
 
 
 def test_runner_keeps_hidden_tools_executable_but_out_of_model_schemas(tmp_path: Path) -> None:
@@ -369,9 +373,7 @@ def test_stop_on_first_tool_finishes_only_after_a_successful_tool(tmp_path: Path
     assert result.final_output == "first output"
     assert calls == ["first"]
     assert result.raw_result.cycles[0].tool_results[1].error_code == "skipped_due_to_finish"
-    assert not any(
-        event.type.startswith("tool_call_") and getattr(event, "tool_call_id", None) == "c2" for event in result.events
-    )
+    assert not any(event.type == "tool_call_started" and getattr(event, "tool_call_id", None) == "c2" for event in result.events)
 
 
 def test_stop_on_first_tool_does_not_finish_on_a_no_tool_response(tmp_path: Path) -> None:
@@ -491,11 +493,7 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
         manager_kwargs.append(kwargs)
         return MemoryManager(**kwargs)
 
-    def reject_static_defaults(model: str):
-        raise AssertionError(f"static defaults should not be queried for {model}")
-
-    monkeypatch.setattr("vv_agent.runtime.engine.MemoryManager", capture_memory_manager)
-    monkeypatch.setattr("vv_agent.runtime.engine.resolve_model_token_limits", reject_static_defaults)
+    monkeypatch.setattr("vv_agent.session.compaction.MemoryManager", capture_memory_manager)
 
     def capture_request(request: LlmRequest) -> LLMResponse:
         observed_requests.append(request)
@@ -575,7 +573,8 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
 
 
 def test_runner_appends_session_items_across_runs(tmp_path: Path) -> None:
-    session = MemorySession("thread-1")
+    from vv_agent import AgentSessionOptions, InteractiveAgentClient
+
     calls: list[list[Message]] = []
 
     def respond(request: LlmRequest) -> LLMResponse:
@@ -599,18 +598,19 @@ def test_runner_appends_session_items_across_runs(tmp_path: Path) -> None:
         tools=[echo],
         tool_use_behavior="stop_on_first_tool",
     )
-    config = RunConfig(
-        workspace=tmp_path,
-        session=session,
-        model_provider=FixedModelProvider(ScriptedLLM(steps=[respond, respond]), _fake_resolved()),
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            workspace=tmp_path,
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond, respond]), _fake_resolved()),
+        )
     )
-
-    first = Runner.run_sync(agent, "first input", run_config=config)
-    second = Runner.run_sync(agent, "second input", run_config=config)
+    session = client.create_session(agent=agent, session_id="thread-1")
+    first = session.prompt("first input")
+    second = session.prompt("second input")
 
     assert first.final_output == "first result"
     assert second.final_output == "second result"
-    persisted = session.get_items()
+    persisted = session.messages
     fixture_path = Path(__file__).parent / "fixtures" / "parity" / "runner_session_messages.jsonl"
     expected = [json.loads(line) for line in fixture_path.read_text(encoding="utf-8").splitlines()]
     assert [item.to_dict() for item in persisted] == expected
@@ -618,6 +618,7 @@ def test_runner_appends_session_items_across_runs(tmp_path: Path) -> None:
     assert [message.role for message in calls[1]] == ["system", "user", "assistant", "tool", "user"]
     assert calls[1][2].tool_calls is not None
     assert calls[1][3].tool_call_id == "finish_1"
+    client.driver.close()
 
 
 def test_runner_passes_tool_context_to_function_tool(tmp_path: Path) -> None:

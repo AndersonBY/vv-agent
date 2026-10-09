@@ -1,8 +1,10 @@
-"""Bindings to existing runtime components; no checkpoint controller or second executor."""
+"""Current model, tool, budget and memory bindings for the session kernel."""
 
 from __future__ import annotations
 
 import json
+import random
+import time
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -27,15 +29,16 @@ from vv_agent.budget import (
 )
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.guardrails import apply_input_guardrails
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory import MemoryManager
-from vv_agent.model import ModelRef
+from vv_agent.model import ModelRef, resolve_run_model
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import PromptBundle, PromptSection
-from vv_agent.run_config import RunConfig, ToolPolicy, merge_tool_policies
+from vv_agent.run_config import RunConfig, ToolPolicy, effective_run_config, merge_tool_policies
 from vv_agent.runtime.cancellation import CancellationToken
-from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata
+from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata, tool_is_enabled
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.token_usage import normalize_token_usage
@@ -74,6 +77,11 @@ class Runtime:
     heartbeat_seconds: float = 0.25
     poll_ms: int = 1000
     cancellation_grace: float = 0.25
+    lease_retry_attempts: int = 5
+    lease_retry_base_seconds: float = 0.01
+    lease_retry_cap_seconds: float = 0.5
+    lease_retry_jitter: Callable[[float, float], float] = random.uniform
+    lease_retry_sleep: Callable[[float], None] = time.sleep
     model_timeout: float = 300
     tool_timeout: float = 300
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None
@@ -81,11 +89,21 @@ class Runtime:
     memory_manager: MemoryManager = field(default_factory=MemoryManager)
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.lease_retry_attempts, bool)
+            or not isinstance(self.lease_retry_attempts, int)
+            or self.lease_retry_attempts < 1
+        ):
+            raise ValueError("lease_retry_attempts must be a positive integer")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in (self.lease_retry_base_seconds, self.lease_retry_cap_seconds)
+        ) or not 0 < self.lease_retry_base_seconds <= self.lease_retry_cap_seconds < float("inf"):
+            raise ValueError("lease retry delays must be finite, positive, and base <= cap")
         if not 0 < self.heartbeat_seconds <= 1 or self.ttl_ms <= self.heartbeat_seconds * 2000:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
-        from vv_agent.runner import Runner
 
-        self.config = Runner._effective_run_config(self.agent, self.config)
+        self.config = effective_run_config(self.agent, self.config)
         self._dynamic_tools: dict[str, FunctionTool] = {}
         self._enabled_dynamic_tools: set[str] = set()
         self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
@@ -116,7 +134,6 @@ class Runtime:
     @cached_property
     def registry(self) -> ToolRegistry:
         # A read-only child result projection does not dispatch or plan tools.
-        from vv_agent.runner import Runner
 
         registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
         for candidate in self.agent.tools:
@@ -126,7 +143,7 @@ class Runtime:
                 tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
                 if callable(tool.is_enabled):
                     self._dynamic_tools[tool.name] = tool
-                if not Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
+                if not tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
                     continue
                 executor = tool.to_executor()
                 if tool.name in self._dynamic_tools:
@@ -141,9 +158,9 @@ class Runtime:
     @cached_property
     def delegated_tools(self) -> set[str]:
         names = {
-            t.name
-            for t in self.agent.tools
-            if isinstance(t, FunctionTool) and t.metadata.get("mode") in {"agent_as_tool", "background_task"}
+            name
+            for name in self.registry.list_tool_names()
+            if self.registry.get_executor(name).metadata.get("mode") in {"agent_as_tool", "background_task"}
         }
         names.update(t.tool_name for t in self.agent.handoffs if t.tool_name)
         if self.agent.sub_agents:
@@ -162,10 +179,9 @@ class Runtime:
         return bind_shared_state(state, self.host_bindings, required) if required or self.host_bindings else state
 
     def for_agent(self, agent: Agent, config: RunConfig) -> Runtime:
-        from vv_agent.runner import Runner
 
         client, resolved = (
-            Runner._resolve_model(agent=agent, run_config=config) if config.model_provider else (self.llm, self.resolved)
+            resolve_run_model(agent=agent, run_config=config) if config.model_provider else (self.llm, self.resolved)
         )
         return Runtime(
             agent,
@@ -181,6 +197,11 @@ class Runtime:
             heartbeat_seconds=self.heartbeat_seconds,
             poll_ms=self.poll_ms,
             cancellation_grace=self.cancellation_grace,
+            lease_retry_attempts=self.lease_retry_attempts,
+            lease_retry_base_seconds=self.lease_retry_base_seconds,
+            lease_retry_cap_seconds=self.lease_retry_cap_seconds,
+            lease_retry_jitter=self.lease_retry_jitter,
+            lease_retry_sleep=self.lease_retry_sleep,
             model_timeout=self.model_timeout,
             tool_timeout=self.tool_timeout,
             memory_manager=replace(self.memory_manager),
@@ -264,7 +285,6 @@ class Runtime:
         return client.complete(request)
 
     def compile(self, content: str, tid: str, *, seed: dict[str, Any] | None = None) -> AgentTask:
-        from vv_agent.runner import Runner
 
         if "vv_session" in self.agent.metadata or "vv_session" in self.config.metadata:
             raise ValueError("vv_session is reserved for kernel metadata")
@@ -276,7 +296,7 @@ class Runtime:
             return task
         _ = self.registry
         for name, tool in self._dynamic_tools.items():
-            enabled = Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
+            enabled = tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
             if enabled and name not in self._enabled_dynamic_tools:
                 visible = tool.exposure == ToolExposure.DIRECT
                 self.registry.register_executor(tool.to_executor(), expose_to_model=visible, planner_extra=visible)
@@ -284,7 +304,7 @@ class Runtime:
             elif not enabled and name in self._enabled_dynamic_tools:
                 self.registry.unregister(name)
                 self._enabled_dynamic_tools.remove(name)
-        guardrail = Runner._apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
+        guardrail = apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
         if guardrail.outcome == "rewrite":
             content = str(guardrail.value)
         if guardrail.outcome in {"block", "require_approval"}:
@@ -305,7 +325,7 @@ class Runtime:
                 tool_policy=policy,
                 **(
                     {
-                        "initial_messages": [Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]],
+                        "initial_messages": [Message.from_dict(copy_json(m)) for m in seed["messages"]],
                         "shared_state": copy_json(seed["shared_state"]),
                     }
                     if seed is not None
@@ -403,7 +423,7 @@ class Runtime:
             task_id=plan.turn_id or task.task_id,
             ctx=ctx,
             task_metadata=metadata,
-            sub_task_manager=self.child_tasks(store, session_id).tool_manager()
+            sub_task_manager=self.child_tasks(store, session_id)
             if store and session_id and plan._payload["request"].get("name") == "sub_task_status"
             else None,
             idempotency_key=plan._payload["idempotency_key"],
@@ -528,7 +548,7 @@ class Runtime:
 def request_from_dict(value: dict[str, Any]) -> LlmRequest:
     return LlmRequest(
         model=value["model"],
-        messages=[Message.from_dict(m, _kernel=True) for m in value["messages"]],
+        messages=[Message.from_dict(m) for m in value["messages"]],
         tools=value["tools"],
         metadata=value["metadata"],
         prompt_bundle=PromptBundle.from_dict(value["prompt_bundle"]) if value["prompt_bundle"] else None,
@@ -577,5 +597,5 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     )
     for kind, attempt in started:
         if kind == "model" and (attempt.result is not None or attempt.unknown is not None):
-            evaluator._observe_token_usage(model_usage(attempt.result._payload["usage"] if attempt.result else {}))
+            evaluator.observe_model_usage(model_usage(attempt.result._payload["usage"] if attempt.result else {}))
     return evaluator

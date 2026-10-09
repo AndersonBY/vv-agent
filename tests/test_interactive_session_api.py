@@ -10,7 +10,6 @@ import vv_agent
 from vv_agent import (
     Agent,
     AgentSessionOptions,
-    AgentSessionRun,
     AgentStatus,
     InteractiveAgentClient,
     InteractiveAgentDefinition,
@@ -27,8 +26,8 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import LlmRequest
-from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
-from vv_agent.types import AgentResult, LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeLLMEvent
+from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -54,30 +53,6 @@ def _empty_model_provider() -> ScriptedModelProvider:
     return ScriptedModelProvider.new("moonshot", "kimi-k2.6", [])
 
 
-def _completed_run(
-    *,
-    agent_name: str = "inline",
-    prompt: str = "hello",
-    shared_state: dict[str, Any] | None = None,
-) -> AgentSessionRun:
-    state = dict(shared_state or {})
-    state.setdefault("todo_list", [])
-    return AgentSessionRun(
-        agent_name=agent_name,
-        result=AgentResult(
-            status=AgentStatus.COMPLETED,
-            messages=[
-                Message(role="user", content=prompt),
-                Message(role="assistant", content=f"answer: {prompt}"),
-            ],
-            cycles=[],
-            final_answer=f"answer: {prompt}",
-            shared_state=state,
-        ),
-        resolved=_resolved(),
-    )
-
-
 def test_top_level_public_api_exports_interactive_session_names() -> None:
     expected = {
         "AgentSession",
@@ -94,100 +69,32 @@ def test_top_level_public_api_exports_interactive_session_names() -> None:
         assert hasattr(vv_agent, name)
 
 
-def test_agent_session_preserves_session_id_messages_shared_state_and_events(tmp_path: Path) -> None:
-    calls: list[dict[str, Any]] = []
+def test_agent_session_preserves_session_id_messages_shared_state_and_events(tmp_path):
+    @function_tool
+    def remember(context: vv_agent.ToolContext, value: str) -> str:
+        context.shared_state["last_prompt"] = value
+        return "answer: " + value
 
-    def execute_run(**kwargs: Any) -> AgentSessionRun:
-        calls.append(kwargs)
-        return _completed_run(
-            agent_name=kwargs["task_name"],
-            prompt=kwargs["prompt"],
-            shared_state={**kwargs["shared_state"], "last_prompt": kwargs["prompt"]},
-        )
-
-    definition = InteractiveAgentDefinition(description="desktop agent", model="kimi-k2.6")
+    provider = ScriptedModelProvider.new("test", "m", [LLMResponse("", [ToolCall("remember", "remember", {"value": "hello"})])])
     session = create_agent_session(
-        execute_run=execute_run,
+        agent=Agent("desktop", "Remember.", tools=[remember], tool_use_behavior="stop_on_first_tool"),
+        options=AgentSessionOptions(model_provider=provider, workspace=tmp_path),
         session_id="desktop-session-1",
-        agent_name="desktop",
-        definition=definition,
-        workspace=tmp_path,
         shared_state={"todo_list": [{"title": "existing", "status": "pending"}]},
     )
-    events: list[tuple[str, dict[str, Any]]] = []
+    events = []
     unsubscribe = session.subscribe(lambda event, payload: events.append((event, payload)))
-
-    run = session.prompt("hello")
-    unsubscribe()
-
-    assert session.session_id == "desktop-session-1"
-    assert run.result.final_answer == "answer: hello"
-    assert session.messages[-1].content == "answer: hello"
-    assert session.shared_state["last_prompt"] == "hello"
-    assert calls[0]["session_id"] == "desktop-session-1"
-    assert calls[0]["initial_messages"] is None
-    assert calls[0]["cancellation_token"] is not None
-    assert events[0][0] == "session_run_start"
-    assert events[-1][0] == "session_run_end"
-
-
-def test_agent_session_requires_execute_run_to_accept_cancellation_token(tmp_path: Path) -> None:
-    def execute_run(
-        *,
-        prompt: str,
-        session_id: str,
-        agent: InteractiveAgentDefinition,
-        task_name: str,
-        workspace: Path,
-        shared_state: dict[str, Any],
-        initial_messages: list[Message],
-        before_cycle_messages: Any,
-        interruption_messages: Any,
-        event_handler: Any,
-    ) -> AgentSessionRun:
-        del session_id, agent, task_name, workspace, initial_messages, before_cycle_messages, interruption_messages, event_handler
-        return _completed_run(prompt=prompt, shared_state=shared_state)
-
-    session = create_agent_session(
-        execute_run=execute_run,
-        session_id="desktop-session-requires-cancel",
-        agent_name="desktop",
-        definition=InteractiveAgentDefinition(description="desktop agent", model="kimi-k2.6"),
-        workspace=tmp_path,
-    )
-
-    with pytest.raises(TypeError, match="cancellation_token"):
-        session.prompt("hello")
-
-
-def test_agent_session_queues_steering_and_follow_up_prompts(tmp_path: Path) -> None:
-    prompts: list[str] = []
-
-    def execute_run(**kwargs: Any) -> AgentSessionRun:
-        prompts.append(kwargs["prompt"])
-        before_cycle_messages = kwargs["before_cycle_messages"](1, [], {})
-        prompts.extend(message.content for message in before_cycle_messages)
-        return _completed_run(prompt=kwargs["prompt"], shared_state=kwargs["shared_state"])
-
-    session = create_agent_session(
-        execute_run=execute_run,
-        session_id="desktop-session-2",
-        agent_name="desktop",
-        definition=InteractiveAgentDefinition(description="desktop agent", model="kimi-k2.6"),
-        workspace=tmp_path,
-    )
-
-    session.steer("interrupt with context")
-    session.steer("second steering message")
-    session.follow_up("continue with next turn")
-    session.prompt("start")
-
-    assert prompts == [
-        "start",
-        "interrupt with context",
-        "second steering message",
-        "continue with next turn",
-    ]
+    try:
+        run = session.prompt("hello")
+        unsubscribe()
+        assert session.session_id == run.raw_result.session_id == "desktop-session-1"
+        assert run.final_output == "answer: hello"
+        assert session.messages[-1].content == "answer: hello"
+        assert session.shared_state["last_prompt"] == "hello"
+        assert events[0][0] == "session_run_start"
+        assert events[-1][0] == "session_run_end"
+    finally:
+        session.driver.close()
 
 
 def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_path: Path) -> None:
@@ -331,26 +238,18 @@ def test_interactive_client_create_session_preserves_caller_session_id(surface, 
 
 
 def test_kernel_session_creation_seed_is_durable_and_read_only(surface, tmp_path):
-    if surface is None:
-        pytest.skip("kernel creation seed")
-    from vv_agent.sessions import MemorySession
-
-    history = MemorySession("history")
-    history.add_items([Message("user", "retained history")])
+    history = [Message("user", "retained history")]
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])
     client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
     session = client.create_session(
         agent=Agent("assistant", "Work.", model="m"),
         session_id="seeded",
-        session=history,
-        shared_state={"nested": {"value": 2}},
+        session={"messages": [m.to_dict() for m in history], "shared_state": {"nested": {"value": 2}}},
     )
-    assert session.messages == history.get_items()
+    assert session.messages == history
     assert session.shared_state == {"nested": {"value": 2}}
     session.shared_state["nested"]["value"] = 99
     assert session.shared_state == {"nested": {"value": 2}}
-    for name in ("replace_messages", "replace_shared_state", "clear_queues", "session"):
-        assert name not in dir(session) and not hasattr(session, name)
     run = session.prompt("go")
     assert run.result.shared_state == {"nested": {"value": 2}}
     assert [m.content for m in session.messages if m.role == "user"] == ["retained history", "go"]
@@ -446,7 +345,7 @@ def test_interactive_client_preserves_complete_public_agent(surface, tmp_path: P
     from vv_agent.model_settings import RetrySettings
 
     assert requests[0].model_settings == ModelSettings(
-        temperature=0.25, max_tokens=321, retry=RetrySettings(max_attempts=1, backoff_seconds=0) if surface else None
+        temperature=0.25, max_tokens=321, retry=RetrySettings(max_attempts=1, backoff_seconds=0)
     )
     assert requests[0].metadata["session_id"] == "public-agent-session"
     assert requests[0].prompt_bundle is not None
@@ -521,23 +420,6 @@ def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path) -> N
         )
 
 
-def test_public_sub_agent_session_registry_wrappers() -> None:
-    from vv_agent.runtime.engine import (
-        get_sub_agent_session,
-        register_sub_agent_session,
-        unregister_sub_agent_session,
-    )
-
-    session = object()
-    register_sub_agent_session("sub-session", session)
-    try:
-        assert get_sub_agent_session(session_id="sub-session") is session
-    finally:
-        unregister_sub_agent_session("sub-session", session)
-
-    assert get_sub_agent_session(session_id="sub-session") is None
-
-
 def test_interactive_real_same_turn_user_reply(surface, tmp_path):
     provider = ScriptedModelProvider.new(
         "test",
@@ -553,11 +435,10 @@ def test_interactive_real_same_turn_user_reply(surface, tmp_path):
     assert first.status == AgentStatus.WAIT_USER
     second = session.continue_run("value")
     assert second.final_output == "resumed"
-    assert (second.run_id == first.run_id) is (surface is not None)
-    if surface:
-        state, records, _ = surface.store.read_state(session.session_id)
-        assert len(state.turns) == 1
-        assert sum(r.record.kind == "turn_ended" for r in records) == 1
+    assert second.run_id == first.run_id
+    state, records, _ = surface.store.read_state(session.session_id)
+    assert len(state.turns) == 1
+    assert sum(r.record.kind == "turn_ended" for r in records) == 1
 
 
 def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
@@ -599,11 +480,10 @@ def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
     assert result[0].final_output == "done"
     assert requests[0] == ["first", "steering"]
     assert requests[1] == ["first", "steering", "next"]
-    if surface:
-        state, records, _ = surface.store.read_state(session.session_id)
-        assert len(state.turns) == 2
-        assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "steer" for r in records)
-        assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "follow_up" for r in records)
+    state, records, _ = surface.store.read_state(session.session_id)
+    assert len(state.turns) == 2
+    assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "steer" for r in records)
+    assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "follow_up" for r in records)
 
 
 def test_interactive_child_wait_reply_keeps_child_identity(surface, tmp_path):
@@ -629,9 +509,6 @@ def test_interactive_child_wait_reply_keeps_child_identity(surface, tmp_path):
     client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
     session = client.create_session(agent=Agent("assistant", "Delegate.", model="m", tools=[child.as_tool()]))
     first = session.prompt("go", auto_follow_up=False)
-    if surface is None:
-        assert first.status == AgentStatus.COMPLETED and first.final_output == "child done"
-        return
     assert first.status == AgentStatus.WAIT_USER
     wait = first.metadata["session_waits"][0]
     assert wait["question"] == "Need child input" and wait["session_id"] != session.session_id
@@ -657,10 +534,9 @@ def test_interactive_sequential_children_complete_in_one_prompt(surface, tmp_pat
     client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
     session = client.create_session(agent=Agent("parent", "Delegate.", model="m", tools=[child.as_tool()]))
     assert session.prompt("go").final_output == "parent done"
-    if surface:
-        ids = surface.store.list_sessions()
-        assert len(ids) == 3
-        assert all(surface.store.read_state(sid)[0].active_turn_id is None for sid in ids)
+    ids = surface.store.list_sessions()
+    assert len(ids) == 3
+    assert all(surface.store.read_state(sid)[0].active_turn_id is None for sid in ids)
 
 
 def test_interactive_background_child_runs_independently(surface, tmp_path):
@@ -689,14 +565,13 @@ def test_interactive_background_child_runs_independently(surface, tmp_path):
     finally:
         release.set()
     assert finished.wait(3)
-    if surface:
-        for handle in surface.handles:
-            handle.join(3)
-        children = [sid for sid in surface.store.list_sessions() if sid != session.session_id]
-        assert len(children) == 1
-        state, records, _ = surface.store.read_state(children[0])
-        assert state.active_turn_id is None
-        assert any(r.record.kind == "turn_ended" and r.record._payload["result"] == "child done" for r in records)
+    for handle in client.driver.handles:
+        handle.join(3)
+    children = [sid for sid in surface.store.list_sessions() if sid != session.session_id]
+    assert len(children) == 1
+    state, records, _ = surface.store.read_state(children[0])
+    assert state.active_turn_id is None
+    assert any(r.record.kind == "turn_ended" and r.record._payload["result"] == "child done" for r in records)
 
 
 def test_interactive_close_during_model_call_is_idempotent(surface, tmp_path):
@@ -721,8 +596,7 @@ def test_interactive_close_during_model_call_is_idempotent(surface, tmp_path):
     release.set()
     worker.join(5)
     assert not worker.is_alive() and session.closed
-    if surface:
-        state, records, _ = surface.store.read_state(session.session_id)
-        assert state.closed and len(state.turns) == 1
-        assert sum(r.record.kind == "turn_ended" for r in records) == 1
-        assert next(r.record for r in records if r.record.kind == "turn_ended")._payload["status"] == "cancelled"
+    state, records, _ = surface.store.read_state(session.session_id)
+    assert state.closed and len(state.turns) == 1
+    assert sum(r.record.kind == "turn_ended" for r in records) == 1
+    assert next(r.record for r in records if r.record.kind == "turn_ended")._payload["status"] == "cancelled"

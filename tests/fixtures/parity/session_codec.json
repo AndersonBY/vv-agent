@@ -1,10 +1,653 @@
 {
-  "version": 2,
+  "canonical_cases": [
+    {
+      "canonical": {
+        "content": "Inspect the current session contract.",
+        "role": "user"
+      },
+      "input": {
+        "content": "Inspect the current session contract.",
+        "role": "user"
+      },
+      "name": "plain_message_uses_current_wire"
+    },
+    {
+      "canonical": {
+        "content": "working",
+        "image_url": "data:image/png;base64,AA==",
+        "metadata": {
+          "sequence": 2
+        },
+        "name": "planner",
+        "reasoning_content": "Check the canonical wire.",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "extra_content": {
+              "provider": "fixture"
+            },
+            "function": {
+              "arguments": "{\"a\":{\"x\":1,\"y\":2},\"z\":1}",
+              "name": "lookup"
+            },
+            "id": "call_lookup",
+            "type": "function"
+          }
+        ]
+      },
+      "input": {
+        "content": "working",
+        "image_url": "data:image/png;base64,AA==",
+        "metadata": {
+          "sequence": 2
+        },
+        "name": "planner",
+        "reasoning_content": "Check the canonical wire.",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "extra_content": {
+              "provider": "fixture"
+            },
+            "function": {
+              "arguments": " { \"z\": 1, \"a\": {\"y\": 2, \"x\": 1} } ",
+              "name": "lookup"
+            },
+            "id": "call_lookup",
+            "type": "function"
+          }
+        ]
+      },
+      "name": "openai_function_tool_call_is_canonicalized"
+    },
+    {
+      "canonical": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+          "size_bytes": 26
+        },
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "role": "tool",
+        "tool_call_id": "call_search"
+      },
+      "input": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+          "size_bytes": 26
+        },
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "role": "tool",
+        "tool_call_id": "call_search"
+      },
+      "model_projection": {
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "role": "tool",
+        "tool_call_id": "call_search"
+      },
+      "name": "microcompacted_tool_message_round_trips"
+    },
+    {
+      "canonical": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                  "size_bytes": 26
+                },
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": [
+              {
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "offset_chars": 20,
+                  "path": "logs/output.txt",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                },
+                "tool_call_id": "c2",
+                "tool_name": "read_file"
+              }
+            ]
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                  "size_bytes": 26
+                },
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": [
+              {
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "offset_chars": 20,
+                  "path": "logs/output.txt",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                },
+                "tool_call_id": "c2",
+                "tool_name": "read_file"
+              }
+            ]
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "model_projection": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_round_trips"
+    }
+  ],
+  "invalid_cases": [
+    {
+      "input": [],
+      "name": "message_must_be_object"
+    },
+    {
+      "input": {
+        "content": "missing role"
+      },
+      "name": "role_is_required"
+    },
+    {
+      "input": {
+        "role": "user"
+      },
+      "name": "content_is_required"
+    },
+    {
+      "input": {
+        "content": "unknown role",
+        "role": "developer"
+      },
+      "name": "role_must_be_known"
+    },
+    {
+      "input": {
+        "content": null,
+        "role": "user"
+      },
+      "name": "content_must_be_string"
+    },
+    {
+      "input": {
+        "content": "closed message",
+        "role": "user",
+        "vendor_extension": true
+      },
+      "name": "unknown_message_field_is_rejected"
+    },
+    {
+      "input": {
+        "content": "bad optional string",
+        "name": null,
+        "role": "user"
+      },
+      "name": "optional_string_must_be_string_when_present"
+    },
+    {
+      "input": {
+        "content": "bad metadata",
+        "metadata": [],
+        "role": "user"
+      },
+      "name": "metadata_must_be_object"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": null
+      },
+      "name": "tool_calls_must_be_array"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "lookup"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "name": "tool_call_id_is_required"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "lookup"
+            },
+            "id": "call_custom",
+            "type": "custom"
+          }
+        ]
+      },
+      "name": "tool_call_type_must_be_function"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "lookup"
+            },
+            "id": "call_unknown",
+            "type": "function",
+            "vendor_extension": true
+          }
+        ]
+      },
+      "name": "tool_call_unknown_field_is_rejected"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "lookup",
+              "strict": true
+            },
+            "id": "call_unknown",
+            "type": "function"
+          }
+        ]
+      },
+      "name": "tool_function_unknown_field_is_rejected"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "extra_content": [],
+            "function": {
+              "arguments": "{}",
+              "name": "lookup"
+            },
+            "id": "call_extra",
+            "type": "function"
+          }
+        ]
+      },
+      "name": "tool_extra_content_must_be_object"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "[]",
+              "name": "lookup"
+            },
+            "id": "call_array",
+            "type": "function"
+          }
+        ]
+      },
+      "name": "tool_arguments_must_contain_json_object"
+    },
+    {
+      "input": {
+        "role": "user"
+      },
+      "name": "message_missing_content_is_rejected"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": {
+                "query": "session parity"
+              },
+              "name": "search"
+            },
+            "id": "call_object",
+            "type": "function"
+          }
+        ]
+      },
+      "name": "tool_arguments_must_be_a_json_string"
+    },
+    {
+      "input": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "arguments": {
+              "path": "README.md"
+            },
+            "id": "call_flat",
+            "name": "read_file"
+          }
+        ]
+      },
+      "name": "tool_call_requires_function_envelope"
+    },
+    {
+      "input": {
+        "content": "missing role",
+        "type": "user"
+      },
+      "name": "message_requires_role_field"
+    },
+    {
+      "input": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/../escape.txt",
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+          "size_bytes": 26
+        },
+        "content": "compact marker",
+        "role": "tool"
+      },
+      "name": "artifact_ref_bad_path_is_rejected"
+    },
+    {
+      "input": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "sha256": "ABC",
+          "size_bytes": 26
+        },
+        "content": "compact marker",
+        "role": "tool"
+      },
+      "name": "artifact_ref_bad_hash_is_rejected"
+    },
+    {
+      "input": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "size_bytes": 26
+        },
+        "content": "compact marker",
+        "role": "tool"
+      },
+      "name": "artifact_ref_missing_field_is_rejected"
+    },
+    {
+      "input": {
+        "artifact_ref": {
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "original_bytes": 26,
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+          "size_bytes": 26
+        },
+        "content": "compact marker",
+        "role": "tool"
+      },
+      "name": "artifact_ref_unknown_field_is_rejected"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_missing_artifacts"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_missing_cursors"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [],
+            "cursors": [],
+            "extra": true
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_unknown_field"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": null,
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_artifacts_not_array"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                  "size_bytes": 26
+                },
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_record_missing_arguments"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                  "size_bytes": 26
+                },
+                "extra": true,
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_record_unknown_field"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "arguments": "[]",
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                  "size_bytes": 26
+                },
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_arguments_not_object_json"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "encoding": "utf-8",
+                  "media_type": "text/plain",
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "sha256": "BAD",
+                  "size_bytes": 26
+                },
+                "tool_call_id": "c1",
+                "tool_name": "read_file"
+              }
+            ],
+            "cursors": []
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_artifact_bad_hash"
+    },
+    {
+      "input": {
+        "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [],
+            "cursors": [
+              {
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "offset_chars": -1,
+                  "path": "logs/output.txt",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                },
+                "tool_call_id": "c2",
+                "tool_name": "read_file"
+              }
+            ]
+          }
+        },
+        "name": "memory_summary",
+        "role": "user"
+      },
+      "name": "summary_evidence_cursor_bad_offset"
+    }
+  ],
   "message_contract": {
-    "required_fields": [
-      "role",
-      "content"
+    "artifact_ref_closed": true,
+    "artifact_ref_fields": [
+      "path",
+      "media_type",
+      "encoding",
+      "size_bytes",
+      "sha256"
     ],
+    "artifact_ref_omitted_when_absent": true,
+    "artifact_ref_type": "ToolArtifactRef",
     "optional_fields": [
       "name",
       "tool_call_id",
@@ -14,666 +657,52 @@
       "metadata",
       "artifact_ref"
     ],
-    "artifact_ref_type": "ToolArtifactRef",
-    "artifact_ref_omitted_when_absent": true,
-    "artifact_ref_fields": [
-      "path",
-      "media_type",
-      "encoding",
-      "size_bytes",
-      "sha256"
+    "required_fields": [
+      "role",
+      "content"
     ],
-    "artifact_ref_closed": true,
-    "unknown_message_fields": "reject",
     "reserved_metadata": {
-      "_vv_agent_compaction": "memory_local.json#evidence_manifest"
-    }
+      "_vv_agent_compaction": "memory_local.json#/evidence_manifest"
+    },
+    "unknown_message_fields": "reject"
   },
   "model_projection": {
+    "content_is_unchanged": true,
     "strip_host_only_fields": [
       "artifact_ref"
     ],
-    "content_is_unchanged": true,
     "strip_host_only_metadata_keys": [
       "_vv_agent_compaction"
     ]
   },
-  "canonical_cases": [
-    {
-      "name": "plain_message_uses_current_wire",
-      "input": {
-        "role": "user",
-        "content": "Inspect the current session contract."
-      },
-      "canonical": {
-        "role": "user",
-        "content": "Inspect the current session contract."
-      }
-    },
-    {
-      "name": "openai_function_tool_call_is_canonicalized",
-      "input": {
-        "role": "assistant",
-        "content": "working",
-        "name": "planner",
-        "tool_calls": [
-          {
-            "id": "call_lookup",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": " { \"z\": 1, \"a\": {\"y\": 2, \"x\": 1} } "
-            },
-            "extra_content": {
-              "provider": "fixture"
-            }
-          }
-        ],
-        "reasoning_content": "Check the canonical wire.",
-        "image_url": "data:image/png;base64,AA==",
-        "metadata": {
-          "sequence": 2
-        }
-      },
-      "canonical": {
-        "role": "assistant",
-        "content": "working",
-        "name": "planner",
-        "tool_calls": [
-          {
-            "id": "call_lookup",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{\"a\":{\"x\":1,\"y\":2},\"z\":1}"
-            },
-            "extra_content": {
-              "provider": "fixture"
-            }
-          }
-        ],
-        "reasoning_content": "Check the canonical wire.",
-        "image_url": "data:image/png;base64,AA==",
-        "metadata": {
-          "sequence": 2
-        }
-      }
-    },
-    {
-      "name": "microcompacted_tool_message_round_trips",
-      "input": {
-        "role": "tool",
-        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
-        "name": "web_search",
-        "tool_call_id": "call_search",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/run-7/call-search.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26,
-          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-        }
-      },
-      "canonical": {
-        "role": "tool",
-        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
-        "name": "web_search",
-        "tool_call_id": "call_search",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/run-7/call-search.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26,
-          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-        }
-      },
-      "model_projection": {
-        "role": "tool",
-        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
-        "name": "web_search",
-        "tool_call_id": "call_search"
-      }
-    },
-    {
-      "name": "summary_evidence_round_trips",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"auth.py\"}",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                }
-              }
-            ],
-            "cursors": [
-              {
-                "tool_call_id": "c2",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"logs/output.txt\"}",
-                "cursor": {
-                  "kind": "read_file",
-                  "path": "logs/output.txt",
-                  "offset_chars": 20,
-                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                }
-              }
-            ]
-          }
-        }
-      },
-      "canonical": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"auth.py\"}",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                }
-              }
-            ],
-            "cursors": [
-              {
-                "tool_call_id": "c2",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"logs/output.txt\"}",
-                "cursor": {
-                  "kind": "read_file",
-                  "path": "logs/output.txt",
-                  "offset_chars": 20,
-                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                }
-              }
-            ]
-          }
-        }
-      },
-      "model_projection": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary"
-      }
-    }
-  ],
-  "invalid_cases": [
-    {
-      "name": "message_must_be_object",
-      "input": []
-    },
-    {
-      "name": "role_is_required",
-      "input": {
-        "content": "missing role"
-      }
-    },
-    {
-      "name": "content_is_required",
-      "input": {
-        "role": "user"
-      }
-    },
-    {
-      "name": "role_must_be_known",
-      "input": {
-        "role": "developer",
-        "content": "unknown role"
-      }
-    },
-    {
-      "name": "content_must_be_string",
-      "input": {
-        "role": "user",
-        "content": null
-      }
-    },
-    {
-      "name": "unknown_message_field_is_rejected",
-      "input": {
-        "role": "user",
-        "content": "closed message",
-        "vendor_extension": true
-      }
-    },
-    {
-      "name": "optional_string_must_be_string_when_present",
-      "input": {
-        "role": "user",
-        "content": "bad optional string",
-        "name": null
-      }
-    },
-    {
-      "name": "metadata_must_be_object",
-      "input": {
-        "role": "user",
-        "content": "bad metadata",
-        "metadata": []
-      }
-    },
-    {
-      "name": "tool_calls_must_be_array",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": null
-      }
-    },
-    {
-      "name": "tool_call_id_is_required",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{}"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_call_type_must_be_function",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_custom",
-            "type": "custom",
-            "function": {
-              "name": "lookup",
-              "arguments": "{}"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_call_unknown_field_is_rejected",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_unknown",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{}"
-            },
-            "vendor_extension": true
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_function_unknown_field_is_rejected",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_unknown",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{}",
-              "strict": true
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_extra_content_must_be_object",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_extra",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{}"
-            },
-            "extra_content": []
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_arguments_must_contain_json_object",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_array",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "[]"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "message_missing_content_is_rejected",
-      "input": {
-        "role": "user"
-      }
-    },
-    {
-      "name": "tool_arguments_must_be_a_json_string",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_object",
-            "type": "function",
-            "function": {
-              "name": "search",
-              "arguments": {
-                "query": "session parity"
-              }
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "tool_call_requires_function_envelope",
-      "input": {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-          {
-            "id": "call_flat",
-            "name": "read_file",
-            "arguments": {
-              "path": "README.md"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "message_requires_role_field",
-      "input": {
-        "type": "user",
-        "content": "missing role"
-      }
-    },
-    {
-      "name": "artifact_ref_bad_path_is_rejected",
-      "input": {
-        "role": "tool",
-        "content": "compact marker",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/../escape.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26,
-          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-        }
-      }
-    },
-    {
-      "name": "artifact_ref_bad_hash_is_rejected",
-      "input": {
-        "role": "tool",
-        "content": "compact marker",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/run-7/call-search.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26,
-          "sha256": "ABC"
-        }
-      }
-    },
-    {
-      "name": "artifact_ref_missing_field_is_rejected",
-      "input": {
-        "role": "tool",
-        "content": "compact marker",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/run-7/call-search.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26
-        }
-      }
-    },
-    {
-      "name": "artifact_ref_unknown_field_is_rejected",
-      "input": {
-        "role": "tool",
-        "content": "compact marker",
-        "artifact_ref": {
-          "path": ".vv-agent/artifacts/run-7/call-search.txt",
-          "media_type": "text/plain",
-          "encoding": "utf-8",
-          "size_bytes": 26,
-          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
-          "original_bytes": 26
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_missing_artifacts",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_missing_cursors",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_unknown_field",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [],
-            "cursors": [],
-            "extra": true
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_artifacts_not_array",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": null,
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_record_missing_arguments",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                }
-              }
-            ],
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_record_unknown_field",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"auth.py\"}",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                },
-                "extra": true
-              }
-            ],
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_arguments_not_object_json",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "arguments": "[]",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                }
-              }
-            ],
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_artifact_bad_hash",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [
-              {
-                "tool_call_id": "c1",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"auth.py\"}",
-                "artifact_ref": {
-                  "path": ".vv-agent/artifacts/run/c1-H.txt",
-                  "media_type": "text/plain",
-                  "encoding": "utf-8",
-                  "size_bytes": 26,
-                  "sha256": "BAD"
-                }
-              }
-            ],
-            "cursors": []
-          }
-        }
-      }
-    },
-    {
-      "name": "summary_evidence_cursor_bad_offset",
-      "input": {
-        "role": "user",
-        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-        "name": "memory_summary",
-        "metadata": {
-          "_vv_agent_compaction": {
-            "artifacts": [],
-            "cursors": [
-              {
-                "tool_call_id": "c2",
-                "tool_name": "read_file",
-                "arguments": "{\"path\":\"logs/output.txt\"}",
-                "cursor": {
-                  "kind": "read_file",
-                  "path": "logs/output.txt",
-                  "offset_chars": -1,
-                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                }
-              }
-            ]
-          }
-        }
-      }
-    }
-  ]
+  "same_turn_wait_producer": {
+    "records": [
+      "session/user_wait/created",
+      "input/initial/applied",
+      "turn/user_wait/turn/initial/started",
+      "usage/active/user_wait/turn/initial/1/1",
+      "op/user_wait/turn/initial/model/primary/1/1/planned",
+      "usage/active/user_wait/turn/initial/1/2",
+      "op/user_wait/turn/initial/model/primary/1/1/started",
+      "usage/active/user_wait/turn/initial/1/3",
+      "op/user_wait/turn/initial/model/primary/1/1/result",
+      "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+      "usage/active/user_wait/turn/initial/1/4",
+      "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+      "usage/active/user_wait/turn/initial/2/1",
+      "input/reply/applied",
+      "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+      "usage/active/user_wait/turn/initial/2/2",
+      "op/user_wait/turn/initial/model/primary/2/1/planned",
+      "usage/active/user_wait/turn/initial/2/3",
+      "op/user_wait/turn/initial/model/primary/2/1/started",
+      "usage/active/user_wait/turn/initial/2/4",
+      "op/user_wait/turn/initial/model/primary/2/1/result",
+      "usage/active/user_wait/turn/initial/2/5",
+      "turn/user_wait/turn/initial/ended"
+    ],
+    "session_id": "user_wait"
+  },
+  "transcript_authority": "read_only_record_projection",
+  "version": 2
 }

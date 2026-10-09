@@ -159,14 +159,16 @@ class SessionMemory:
             start_index = self.state.last_extracted_message_index + 1
 
         new_messages = [
-            message for index, message in enumerate(messages) if index >= start_index and not self._should_skip_message(message)
+            message
+            for index, message in enumerate(messages)
+            if index >= start_index and not self.skip_extraction_message(message)
         ]
 
         if not new_messages:
             self._record_extraction(len(messages) - 1, current_tokens)
             return 0
 
-        prompt = self._build_extraction_prompt(new_messages)
+        prompt = self.extraction_prompt(new_messages)
         try:
             raw_result = self.config.extraction_callback(
                 prompt,
@@ -174,13 +176,9 @@ class SessionMemory:
                 self.config.extraction_model,
             )
         except Exception as exc:
-            from vv_agent.checkpoint import CheckpointError
             from vv_agent.runtime.cancellation import CancelledError
-            from vv_agent.runtime.checkpoint_resume import CheckpointReconciliationRequired
 
-            if isinstance(exc, (CancelledError, CheckpointError, CheckpointReconciliationRequired)) or getattr(
-                exc, "vv_agent_control_flow", False
-            ):
+            if isinstance(exc, CancelledError) or getattr(exc, "vv_agent_control_flow", False):
                 raise
             logger.debug("Session memory extraction callback failed", exc_info=True)
             return 0
@@ -225,7 +223,7 @@ class SessionMemory:
     def load(self) -> None:
         """Load persisted session memory from disk if available."""
 
-        path = self._storage_path()
+        path = self.storage_path()
         if path is None or not path.exists():
             return
         try:
@@ -236,7 +234,7 @@ class SessionMemory:
         if isinstance(data, dict):
             self.state = SessionMemoryState.from_dict(data)
 
-    def _storage_path(self) -> Path | None:
+    def storage_path(self) -> Path | None:
         if self.workspace is None:
             return None
         workspace_root = self.workspace.resolve()
@@ -258,7 +256,7 @@ class SessionMemory:
         return resolved
 
     def _save(self) -> None:
-        path = self._storage_path()
+        path = self.storage_path()
         if path is None:
             return
         try:
@@ -281,12 +279,12 @@ class SessionMemory:
         return normalized or None
 
     @staticmethod
-    def _should_skip_message(message: Message) -> bool:
+    def skip_extraction_message(message: Message) -> bool:
         if message.role == "system":
             return True
         return message.role == "user" and "<Compressed Agent Memory>" in message.content
 
-    def _build_extraction_prompt(self, messages: list[Message]) -> str:
+    def extraction_prompt(self, messages: list[Message]) -> str:
         serialized_messages = [self._message_to_text(message) for message in messages]
         return (
             "Analyze the following conversation messages and extract durable facts that should survive context "

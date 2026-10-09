@@ -126,7 +126,7 @@ def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -
     assert len(result.raw_result.cycles) == expected["cycles"]
 
     continuation_hint_emitted = any(
-        message.role == "user" and message.content.startswith("No tool call was produced.")
+        message.role == "user" and message.content.startswith("Continue working on the task.")
         for request in requests[1:]
         for message in request.messages
     )
@@ -135,10 +135,7 @@ def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -
         "task_finish" not in {cast(dict[str, Any], tool["function"])["name"] for tool in request.tools} for request in requests
     )
 
-    terminal = result.events[-1]
-    assert terminal.to_dict()["completion_reason"] == expected["completion_reason"]
-    if expected["completion_tool_name"] is not None:
-        assert terminal.to_dict()["completion_tool_name"] == expected["completion_tool_name"]
+    assert result.completion_reason.value == expected["completion_reason"]
 
 
 def test_completion_controls_reject_unknown_policy() -> None:
@@ -181,52 +178,43 @@ def test_input_guardrail_failure_emits_the_canonical_reason() -> None:
     assert result.status.value == expected["expected_status"]
     assert result.completion_reason == CompletionReason(expected["expected_reason"])
     assert result.partial_output == expected["expected_partial_output"]
-    assert result.events[-1].to_dict()["completion_reason"] == expected["expected_reason"]
+    assert result.completion_reason.value == expected["expected_reason"]
 
 
-def test_output_guardrail_rewrites_wait_output_but_preserves_completion_observation(tmp_path: Path) -> None:
-    contract = _contract()["output_guardrail_allow"]
-    case = contract["case"]
+def test_output_guardrail_runs_only_after_same_turn_wait_is_resolved(tmp_path: Path) -> None:
+    case = _contract()["output_guardrail_allow"]["case"]
+    calls = []
 
     @output_guardrail
-    def rewrite_wait_output(_context: Any, _output: Any) -> GuardrailResult:
+    def rewrite_output(_context: Any, value: Any) -> GuardrailResult:
+        calls.append(value)
         return GuardrailResult.rewrite(case["guardrail_rewrite_output"])
 
-    candidate = case["candidate_observation"]
-    result = Runner.run_sync(
-        Agent(
-            name="guardrail-wait-contract",
-            instructions="Ask the scripted question.",
-            model="test-model",
-            output_guardrails=[rewrite_wait_output],
-        ),
+    handle = Runner.start(
+        Agent("guardrail-wait-contract", "Ask.", model="test-model", output_guardrails=[rewrite_output]),
         "ask",
         run_config=RunConfig(
             workspace=tmp_path,
             model_provider=_provider(
                 [
                     LLMResponse(
-                        content=candidate["partial_output"],
-                        tool_calls=[
-                            ToolCall(
-                                id="ask-contract",
-                                name="ask_user",
-                                arguments={"question": case["candidate_output"]},
-                            )
-                        ],
-                    )
+                        case["candidate_observation"]["partial_output"],
+                        [ToolCall("ask-contract", "ask_user", {"question": case["candidate_output"]})],
+                    ),
+                    LLMResponse("done"),
                 ]
             ),
         ),
     )
-
-    expected = case["expected_observation"]
-    assert contract["output_rewrite_is_applied"] is True
-    assert result.final_output == case["expected_output"]
-    assert result.status.value == expected["status"]
-    assert result.completion_reason == CompletionReason(expected["completion_reason"])
-    assert result.completion_tool_name == expected["completion_tool_name"]
-    assert result.partial_output == expected["partial_output"]
+    waiting = handle.result()
+    assert waiting.status.value == "wait_user" and calls == []
+    assert waiting.final_output == case["candidate_output"]
+    assert not any(e.type in {"run_completed", "run_failed"} for e in waiting.events)
+    handle.kernel.answer(handle.session_id, handle.runtime, "answer", "answer")
+    resumed = handle.resume()
+    assert resumed.status.value == "completed"
+    assert resumed.final_output == case["guardrail_rewrite_output"]
+    assert calls == ["done"]
 
 
 def test_ordinary_llm_failure_returns_typed_terminal() -> None:

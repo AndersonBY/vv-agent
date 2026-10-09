@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from vv_agent.memory.session_memory import SessionMemoryConfig
+from vv_agent.memory.token_utils import resolve_model_token_limits
+from vv_agent.model_settings import ModelSettings
+from vv_agent.types import AgentTask
+from vv_agent.workspace.local import LocalWorkspaceBackend
+
+if TYPE_CHECKING:
+    from vv_agent.runtime.context import ExecutionContext
+    from vv_agent.tools.registry import ToolRegistry
+
 import json
 import logging
 import re
@@ -8,7 +21,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from vv_agent.canonical_json import canonical_json_bytes
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
     EXCERPT_METADATA_KEY,
@@ -301,7 +313,7 @@ class MemoryManager:
         if self._summary_parts(working_messages, self.keep_recent_messages) is None:
             return MemoryCompactionResult(messages=working_messages, mode="none", changed=False)
 
-        message_length = self._calculate_effective_length(
+        message_length = self.effective_tokens(
             working_messages,
             total_tokens=total_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
@@ -694,7 +706,7 @@ class MemoryManager:
             return 0
         return count_messages_tokens(tool_messages, model=self.model)
 
-    def _calculate_effective_length(
+    def effective_tokens(
         self,
         messages: list[Message],
         *,
@@ -715,7 +727,7 @@ class MemoryManager:
         threshold = self.autocompact_threshold
         if threshold <= 0:
             return 0
-        used_tokens = self._calculate_effective_length(
+        used_tokens = self.effective_tokens(
             messages,
             total_tokens=total_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
@@ -732,7 +744,7 @@ class MemoryManager:
         threshold = self.microcompact_trigger_threshold
         if threshold <= 0:
             return False
-        effective_length = self._calculate_effective_length(
+        effective_length = self.effective_tokens(
             messages,
             total_tokens=total_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
@@ -930,7 +942,7 @@ class MemoryManager:
         except Exception as exc:
             from vv_agent.runtime.cancellation import CancelledError
 
-            if isinstance(exc, (CancelledError, CheckpointError)) or getattr(exc, "vv_agent_control_flow", False):
+            if isinstance(exc, CancelledError) or getattr(exc, "vv_agent_control_flow", False):
                 raise
             return None
 
@@ -947,9 +959,7 @@ class MemoryManager:
             from vv_agent.workspace.streaming import scan_text
 
             scanned = scan_text(backend, artifact.path, lambda _text: None)
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, CheckpointError):
-                raise
+        except (OSError, ValueError):
             return False
         return scanned.valid_utf8 and scanned.size_bytes == artifact.size_bytes and scanned.sha256 == artifact.sha256
 
@@ -982,11 +992,8 @@ class MemoryManager:
                     return summarized
             except Exception as exc:
                 from vv_agent.runtime.cancellation import CancelledError
-                from vv_agent.runtime.checkpoint_resume import CheckpointReconciliationRequired
 
-                if isinstance(exc, (CancelledError, CheckpointError, CheckpointReconciliationRequired)) or getattr(
-                    exc, "vv_agent_control_flow", False
-                ):
+                if isinstance(exc, CancelledError) or getattr(exc, "vv_agent_control_flow", False):
                     raise
                 logging.getLogger(__name__).debug("Memory summary callback failed", exc_info=True)
         return ""
@@ -1245,3 +1252,156 @@ class MemoryManager:
         if len(middle) > limit:
             events.append(f"... {len(middle) - limit} more messages omitted ...")
         return events
+
+
+def build_memory_manager(
+    *,
+    task: AgentTask,
+    workspace_path: Path,
+    workspace_backend: WorkspaceBackend | None = None,
+    ctx: ExecutionContext | None = None,
+    tool_registry: ToolRegistry,
+) -> MemoryManager:
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+    def read_optional_int(key: str, *, minimum: int = 0) -> int | None:
+        if key not in metadata:
+            return None
+        raw = metadata.get(key)
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return max(value, minimum)
+
+    def read_int(key: str, default: int, *, minimum: int = 0) -> int:
+        value = read_optional_int(key, minimum=minimum)
+        return max(default, minimum) if value is None else value
+
+    warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
+    summary_backend = read_optional_string(metadata, "memory_summary_backend")
+    summary_model = read_optional_string(metadata, "memory_summary_model") or task.model
+    session_memory_extraction_backend = read_optional_string(metadata, "session_memory_extraction_backend") or summary_backend
+    session_memory_extraction_model = read_optional_string(metadata, "session_memory_extraction_model") or summary_model
+    session_memory_enabled = read_session_memory_enabled(metadata)
+    model_context_window = metadata_token_limit(
+        metadata,
+        "model_context_window",
+        minimum=1,
+    )
+    model_max_output_tokens = metadata_token_limit(
+        metadata,
+        "model_max_output_tokens",
+        minimum=0,
+    )
+    if model_context_window is None or model_max_output_tokens is None:
+        fallback_context_window, fallback_max_output_tokens = resolve_model_token_limits(task.model)
+        if model_context_window is None:
+            model_context_window = fallback_context_window
+        if model_max_output_tokens is None:
+            model_max_output_tokens = fallback_max_output_tokens
+    effective_model_settings = task.model_settings
+    if ctx is not None:
+        runtime_model_settings = ctx.metadata.get("_vv_agent_model_settings")
+        if isinstance(runtime_model_settings, ModelSettings):
+            effective_model_settings = runtime_model_settings
+    request_max_tokens = effective_model_settings.max_tokens if effective_model_settings is not None else None
+    task_reserved_output_tokens = metadata_token_limit(
+        metadata,
+        "reserved_output_tokens",
+        minimum=0,
+    )
+    if request_max_tokens is not None:
+        reserved_output_tokens = request_max_tokens
+        reserved_output_source = "model_settings"
+    elif task_reserved_output_tokens is not None:
+        reserved_output_tokens = task_reserved_output_tokens
+        reserved_output_source = "task_metadata"
+    else:
+        reserved_output_tokens = 16_000
+        reserved_output_source = "framework_fallback"
+        if model_max_output_tokens is not None and model_max_output_tokens < reserved_output_tokens:
+            reserved_output_tokens = model_max_output_tokens
+            reserved_output_source = "framework_fallback_capped_by_model_capability"
+    autocompact_buffer_tokens = read_int("autocompact_buffer_tokens", 13_000, minimum=0)
+    if model_context_window is None:
+        planning_prompt_capacity = task.memory_compact_threshold if task.memory_compact_threshold > 0 else 250_000
+        model_context_window = min(
+            planning_prompt_capacity + reserved_output_tokens + autocompact_buffer_tokens,
+            (1 << 64) - 1,
+        )
+    session_memory: SessionMemory | None = None
+    if session_memory_enabled:
+        session_memory_scope = read_optional_string(metadata, "session_id", "task_id") or str(task.task_id or "").strip()
+        session_memory = SessionMemory(
+            SessionMemoryConfig(
+                min_tokens_before_extraction=read_int("session_memory_min_tokens", 10_000, minimum=1),
+                max_tokens=read_int("session_memory_max_tokens", 40_000, minimum=1),
+                min_text_messages=read_int("session_memory_min_text_messages", 5, minimum=1),
+                storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
+                extraction_callback=None,
+                extraction_backend=session_memory_extraction_backend,
+                extraction_model=session_memory_extraction_model,
+                token_model=task.model or "",
+            ),
+            workspace=workspace_path if task.use_workspace else None,
+            storage_scope=session_memory_scope,
+        )
+        session_memory.load()
+    tool_result_retentions: dict[str, ToolResultRetention] = {}
+    for tool_name in tool_registry.list_tool_names():
+        declared_metadata = tool_registry.tool_metadata(tool_name)
+        tool_result_retentions[tool_name] = (
+            declared_metadata.result_retention if declared_metadata is not None else ToolResultRetention.ARCHIVE
+        )
+    return MemoryManager(
+        compact_threshold=max(task.memory_compact_threshold, 0),
+        keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
+        model=task.model or "",
+        model_context_window=model_context_window,
+        model_max_output_tokens=model_max_output_tokens,
+        reserved_output_tokens=reserved_output_tokens,
+        reserved_output_source=reserved_output_source,
+        autocompact_buffer_tokens=autocompact_buffer_tokens,
+        language=str(metadata.get("language", "zh-CN")),
+        warning_threshold_percentage=warning_threshold,
+        include_memory_warning=bool(metadata.get("include_memory_warning", False)),
+        tool_result_excerpt_head=read_int("tool_result_excerpt_head", 200),
+        tool_result_excerpt_tail=read_int("tool_result_excerpt_tail", 200),
+        microcompaction_policy=task.microcompaction_policy,
+        tool_result_retentions=tool_result_retentions,
+        workspace_backend=workspace_backend or (LocalWorkspaceBackend(workspace_path) if task.use_workspace else None),
+        artifact_scope=task.task_id,
+        summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
+        summary_backend=summary_backend,
+        summary_model=summary_model,
+        summary_callback=None,
+        base_system_prompt=task.prompt_bundle.flatten(),
+        session_memory=session_memory,
+    )
+
+
+def read_optional_string(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        raw = metadata.get(key)
+        if isinstance(raw, str):
+            value = raw.strip()
+            if value:
+                return value
+    return None
+
+
+def read_session_memory_enabled(metadata: dict[str, Any]) -> bool:
+    explicit = metadata.get("session_memory_enabled", False)
+    if not isinstance(explicit, bool):
+        raise ValueError("session_memory_enabled must be a boolean")
+    return explicit
+
+
+def metadata_token_limit(metadata: dict[str, Any], key: str, *, minimum: int) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        return None
+    return value

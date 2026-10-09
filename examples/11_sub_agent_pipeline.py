@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, handoff
 
@@ -30,17 +31,18 @@ triage = Agent(
 
 
 def main() -> None:
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        max_cycles=8,
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Write a short note about vv-agent sessions.")
-    result = Runner.run_sync(triage, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            max_cycles=8,
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Write a short note about vv-agent sessions.")
+        result = Runner.run_sync(triage, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

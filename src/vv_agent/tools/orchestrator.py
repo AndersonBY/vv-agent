@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import Any, cast
 
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -27,7 +26,7 @@ from vv_agent.tools.executor import (
 )
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
 from vv_agent.tools.metadata import metadata_policy_denial_source
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
@@ -77,7 +76,7 @@ class ToolOrchestrator:
         event_sink: ToolEventSink | None = None,
         _precomputed_result: ToolExecutionResult | None = None,
         _result_finalizer: ToolResultFinalizer | None = None,
-    ) -> ToolExecutionResult | ToolCallOutcome:
+    ) -> ToolExecutionResult | HostToolOutcome:
         arguments, parse_error = _parse_arguments(call.id, call.arguments)
         if parse_error is not None:
             return parse_error
@@ -97,13 +96,12 @@ class ToolOrchestrator:
         tool_metadata = get_executor_tool_metadata(executor) if executor is not None else None
         if tool_metadata is not None:
             call_context.metadata[_TOOL_TYPED_METADATA_KEY] = tool_metadata
-        if call_context.metadata.get("_vv_agent_checkpoint_replay") is not True:
-            self._emit_planned(
-                normalized_call,
-                executor=executor,
-                context=call_context,
-                event_sink=event_sink,
-            )
+        self._emit_planned(
+            normalized_call,
+            executor=executor,
+            context=call_context,
+            event_sink=event_sink,
+        )
         if _precomputed_result is not None:
             result = _precomputed_result
         elif executor is None:
@@ -153,8 +151,6 @@ class ToolOrchestrator:
                             result = executor.execute(normalized_call, call_context)
             except ApprovalError:
                 raise
-            except CheckpointError:
-                raise
             except Exception as exc:
                 if _is_cancelled_error(exc):
                     raise
@@ -169,14 +165,8 @@ class ToolOrchestrator:
                     error_code="tool_execution_failed",
                 )
 
-        # Deferred is a framework outcome, not a ToolExecutionResult.  Do not
-        # run ordinary result hooks or emit a completed event: admission owns
-        # the deferred lifecycle event and will persist it atomically with the
-        # batch journal/barrier.
         interaction_request = None
-        if isinstance(result, ToolCallOutcome):
-            if result.kind == "deferred":
-                return result
+        if isinstance(result, HostToolOutcome):
             interaction_request = result.request
             assert result.result is not None
             result = result.result
@@ -193,24 +183,9 @@ class ToolOrchestrator:
             result.status_code = ToolResultStatus.WAIT_RESPONSE
 
         if interaction_request is not None:
-            return ToolCallOutcome.HostInteraction(result, interaction_request)
+            return HostToolOutcome.HostInteraction(result, interaction_request)
 
-        # For a checkpointed external invocation, the admission CAS owns the
-        # durable completed lifecycle event.  Emitting here as well would
-        # produce a second, non-stable completion event before the batch
-        # barrier is committed.  Replay/pre-dispatch results still emit their
-        # ordinary non-effect completion event because they never crossed the
-        # started boundary.
-        durable_started = call_context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True and (
-            call_context.metadata.get("_vv_agent_checkpoint_controller") is not None
-            or getattr(call_context.ctx, "metadata", {}).get("_vv_agent_checkpoint_controller") is not None
-        )
-        admission_owned_completion = durable_started and result.status_code in {
-            ToolResultStatus.SUCCESS,
-            ToolResultStatus.ERROR,
-        }
-        if not admission_owned_completion and call_context.metadata.get("_vv_agent_checkpoint_replay") is not True:
-            self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
+        self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
         return result
 
     @staticmethod

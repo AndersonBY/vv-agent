@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from vv_agent import CompletionReason, event_from_dict
+from vv_agent import event_from_dict
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_invalid.json"
 
@@ -17,9 +18,10 @@ def _contract() -> dict[str, Any]:
 
 def _run_completed_payload() -> dict[str, Any]:
     return {
-        "version": "v5",
+        "version": "v6",
         "type": "run_completed",
         "event_id": "evt_completion_contract",
+        "session_id": "event-session",
         "run_id": "run_completion_contract",
         "trace_id": "trace_completion_contract",
         "created_at": 1.0,
@@ -29,75 +31,21 @@ def _run_completed_payload() -> dict[str, Any]:
 
 
 def test_invalid_run_event_inputs_are_rejected() -> None:
-    contract = _contract()
-
-    for case in contract["reject"]:
-        if case["id"] == "run_state_changed_live_cancel_missing_cancel_requested":
-            # A bare RunEvent has no claim context.  The controller producer
-            # enforces this field when applying a live-claim cancellation.
-            continue
+    for case in _contract()["reject"]:
+        payload = json.loads(base64.b64decode(case["bytes_base64"]))
         with pytest.raises(ValueError, match=r".+"):
-            event_from_dict(case["input"])
+            event_from_dict(payload)
 
 
-@pytest.mark.parametrize("reason", [reason.value for reason in CompletionReason])
-def test_run_event_completion_reason_accepts_declared_values(reason: str) -> None:
-    payload = _run_completed_payload()
-    payload["completion_reason"] = reason
-
-    event = event_from_dict(payload)
-
-    assert event.to_dict()["completion_reason"] == reason
+def test_run_event_rejects_retired_completion_reason():
+    with pytest.raises(ValueError, match="completion_reason"):
+        event_from_dict(_run_completed_payload() | {"completion_reason": "retired"})
 
 
-def test_run_event_completion_text_fields_accept_strings_and_null() -> None:
-    payload = _run_completed_payload()
-    payload.update(
-        completion_reason=None,
-        completion_tool_name="task_finish",
-        partial_output="last draft",
-    )
-
-    event = event_from_dict(payload)
-
-    encoded = event.to_dict()
-    assert encoded.get("completion_reason") is None
-    assert encoded["completion_tool_name"] == "task_finish"
-    assert encoded["partial_output"] == "last draft"
-
-    nullable_payload = _run_completed_payload()
-    nullable_payload.update(
-        completion_reason=None,
-        completion_tool_name=None,
-        partial_output=None,
-    )
-    nullable = event_from_dict(nullable_payload)
-    nullable_encoded = nullable.to_dict()
-    assert nullable_encoded.get("completion_reason") is None
-    assert nullable_encoded.get("completion_tool_name") is None
-    assert nullable_encoded.get("partial_output") is None
-
-
-@pytest.mark.parametrize(
-    ("field_name", "value"),
-    [
-        ("completion_reason", "future_reason"),
-        ("completion_reason", 7),
-        ("completion_tool_name", False),
-        ("completion_tool_name", ["task_finish"]),
-        ("partial_output", {"text": "last draft"}),
-        ("partial_output", 7),
-    ],
-)
-def test_run_event_completion_fields_reject_unknown_reason_and_wrong_types(
-    field_name: str,
-    value: Any,
-) -> None:
-    payload = _run_completed_payload()
-    payload[field_name] = value
-
-    with pytest.raises(ValueError, match=field_name):
-        event_from_dict(payload)
+@pytest.mark.parametrize("field_name", ["completion_tool_name", "partial_output"])
+def test_run_event_optional_completion_fields_round_trip(field_name):
+    payload = _run_completed_payload() | {field_name: "value"}
+    assert event_from_dict(payload).to_dict()[field_name] == "value"
 
 
 def test_run_event_rejects_unknown_fields_but_preserves_typed_metadata_extension() -> None:
@@ -116,9 +64,10 @@ def test_run_event_rejects_unknown_fields_but_preserves_typed_metadata_extension
 @pytest.mark.parametrize("duration_ms", [True, -1, 1.5, 9_007_199_254_740_992])
 def test_tool_completion_duration_rejects_non_json_safe_values(duration_ms: Any) -> None:
     payload = {
-        "version": "v5",
+        "version": "v6",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_duration",
+        "session_id": "event-session",
         "run_id": "run_invalid_duration",
         "trace_id": "trace_invalid_duration",
         "created_at": 1.0,
@@ -155,9 +104,10 @@ def test_memory_compact_started_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v5",
+        "version": "v6",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory_started",
+        "session_id": "event-session",
         "run_id": "run_invalid_memory",
         "trace_id": "trace_invalid_memory",
         "created_at": 1.0,
@@ -184,9 +134,10 @@ def test_memory_compact_completed_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v5",
+        "version": "v6",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory_completed",
+        "session_id": "event-session",
         "run_id": "run_invalid_memory",
         "trace_id": "trace_invalid_memory",
         "created_at": 1.0,

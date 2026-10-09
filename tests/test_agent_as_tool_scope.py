@@ -10,7 +10,7 @@ from test_agent_as_tool import _resolved
 from vv_agent import Agent, ApprovalDecision, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
-from vv_agent.interactive import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
+from vv_agent.interactive import AgentSessionOptions, InteractiveAgentClient
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.tools import ToolContext, build_default_registry
@@ -18,20 +18,13 @@ from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall, ToolExecutionResult
 
-ENTRYPOINTS = [
-    "invoke",
-    "executor",
-    "orchestrator",
-    "registry",
-    "runner_executor",
-    "interactive",
-    "configured_child",
-    "app_server",
-    "background",
-    "runner",
-    "runtime",
-    "runtime_configured_child",
-]
+ENTRYPOINTS = ["registry", "runner_executor", "interactive", "app_server", "background", "runner"]
+
+
+def build_registry(tool):
+    registry = build_default_registry()
+    registry.register_executor(tool.to_executor())
+    return registry
 
 
 def _run_parent(entrypoint, child, config, parent_llm):
@@ -60,7 +53,7 @@ def _run_parent(entrypoint, child, config, parent_llm):
     elif entrypoint in {"runner_executor", "background"}:
         parent.tools = [tool.to_executor()]
     else:
-        config = replace(config, tool_registry_factory=lambda: registry)
+        config = replace(config, tool_registry_factory=lambda: build_registry(tool))
 
     if entrypoint == "interactive":
         client = InteractiveAgentClient(
@@ -73,7 +66,7 @@ def _run_parent(entrypoint, child, config, parent_llm):
                 approval_provider=config.approval_provider,
             )
         )
-        session = client.create_session(agent=InteractiveAgentDefinition(description="Delegate.", model="parent"))
+        session = client.create_session(agent=parent)
         try:
             session.prompt("go")
         finally:
@@ -130,8 +123,10 @@ def _run_parent(entrypoint, child, config, parent_llm):
 
 
 def _run_runtime(parent, config, llm, registry):
+    from support.kernel_runtime import KernelRuntime
+
     from vv_agent.prompt import build_raw_system_prompt_bundle
-    from vv_agent.runtime import AgentRuntime, ExecutionContext
+    from vv_agent.runtime import ExecutionContext
     from vv_agent.types import AgentTask
 
     task = AgentTask(
@@ -142,7 +137,7 @@ def _run_runtime(parent, config, llm, registry):
         extra_tool_names=["child"],
         sub_agents=parent.sub_agents,
     )
-    AgentRuntime(
+    KernelRuntime(
         llm_client=llm,
         model_provider=config.model_provider,
         tool_registry=registry,
@@ -244,7 +239,6 @@ def test_agent_tool_without_scope_fails_closed(tmp_path, monkeypatch):
 
 def test_agent_tool_preserves_runtime_capabilities_and_child_isolation(tmp_path):
     from vv_agent.budget import RunBudgetLimits
-    from vv_agent.runtime.backends import InlineBackend
     from vv_agent.workspace import MemoryWorkspaceBackend
 
     captured = []
@@ -270,7 +264,6 @@ def test_agent_tool_preserves_runtime_capabilities_and_child_isolation(tmp_path)
         default_model="parent",
     )
     workspace = MemoryWorkspaceBackend()
-    backend = InlineBackend()
     token = CancellationToken()
     state = {"parent_value": [1]}
     app_state = object()
@@ -278,7 +271,6 @@ def test_agent_tool_preserves_runtime_capabilities_and_child_isolation(tmp_path)
     config = RunConfig(
         workspace=tmp_path,
         workspace_backend=workspace,
-        execution_backend=backend,
         model_provider=provider,
         cancellation_token=token,
         budget_limits=limits,
@@ -287,16 +279,15 @@ def test_agent_tool_preserves_runtime_capabilities_and_child_isolation(tmp_path)
         context=app_state,
     )
     child = Agent(name="child", instructions="Inspect.", model="child", tools=[inspect_scope])
-    _run_parent("executor", child, config, parent_llm)
+    _run_parent("runner_executor", child, config, parent_llm)
     assert len(captured) == 1
     context = captured[0]
     assert context.workspace == tmp_path
     assert context.workspace_backend is workspace
     assert context.run_context.context is app_state
     assert context.task_metadata["tenant"] == "parent"
-    assert context.ctx.metadata["execution_backend"] is backend
-    assert context.ctx.metadata["_vv_agent_budget_limits"] == limits
-    assert context.ctx.metadata["_vv_agent_model_provider"] is provider
+    assert context.ctx.metadata.get("_vv_agent_budget_limits") is None
+    assert context.ctx.metadata.get("_vv_agent_model_provider") is None
     assert state == {"parent_value": [1]}
     child_token = context.ctx.cancellation_token
     assert child_token is not token

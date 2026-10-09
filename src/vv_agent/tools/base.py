@@ -6,21 +6,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import (
     SubTaskOutcome,
     SubTaskRequest,
-    ToolDirective,
     ToolExecutionResult,
-    ToolResultStatus,
 )
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
-    from vv_agent.runtime.sub_task_manager import SubTaskManager
+    from vv_agent.session.delegation import ChildTasks
     from vv_agent.workspace.base import WorkspaceBackend
 
-ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult | ToolCallOutcome]
+ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult | HostToolOutcome]
 SubTaskRunner = Callable[[SubTaskRequest], SubTaskOutcome]
 
 
@@ -32,7 +30,7 @@ class ToolContext:
     workspace_backend: WorkspaceBackend
     task_id: str = ""
     sub_task_runner: SubTaskRunner | None = None
-    sub_task_manager: SubTaskManager | None = None
+    sub_task_manager: ChildTasks | None = None
     ctx: ExecutionContext | None = None
     task_metadata: dict[str, Any] = field(default_factory=dict)
     run_context: Any | None = None
@@ -52,6 +50,8 @@ class ToolContext:
 
     @property
     def agent_name(self) -> str:
+        if self.run_context is not None:
+            return self.run_context.agent_name
         runtime_metadata = getattr(self.ctx, "metadata", None)
         if isinstance(runtime_metadata, dict):
             return str(runtime_metadata.get("_vv_agent_agent_name") or self.metadata.get("agent_name") or "")
@@ -60,67 +60,6 @@ class ToolContext:
     @property
     def raw_arguments(self) -> dict[str, Any]:
         return dict(self.arguments)
-
-    def defer(self) -> ToolCallOutcome:
-        """Create the opaque deferred handle before a provider side effect.
-
-        Handle identity is allocated from the active checkpoint controller and
-        tool-operation plan.  A non-checkpointed invocation fails closed with a
-        normal ``Completed(ERROR)`` result; it never manufactures an in-memory
-        handle that could later be mistaken for durable state.
-        """
-
-        from vv_agent.tools.outcomes import DeferredToolHandle
-
-        runtime = self.ctx
-        metadata: dict[str, Any] = {}
-        if isinstance(self.metadata, dict):
-            metadata.update(self.metadata)
-        if runtime is not None and isinstance(runtime.metadata, dict):
-            metadata.update(runtime.metadata)
-        controller = metadata.get("_vv_agent_checkpoint_controller")
-        plan = metadata.get("_vv_agent_checkpoint_plan")
-        checkpoint_key = getattr(controller, "checkpoint_key", None)
-        operation_id = getattr(plan, "operation_id", None) or metadata.get("_vv_agent_operation_id")
-        request_digest = getattr(plan, "request_digest", None) or metadata.get("_vv_agent_request_digest")
-        attempt = getattr(plan, "attempt", None) or metadata.get("_vv_agent_operation_attempt") or 1
-        if (
-            not isinstance(checkpoint_key, str)
-            or not checkpoint_key.strip()
-            or not isinstance(operation_id, str)
-            or not operation_id.strip()
-            or not isinstance(request_digest, str)
-        ):
-            return ToolCallOutcome.Completed(
-                ToolExecutionResult(
-                    tool_call_id=self.tool_call_id,
-                    content="Deferred execution requires a durable checkpoint.",
-                    status_code=ToolResultStatus.ERROR,
-                    directive=ToolDirective.CONTINUE,
-                    error_code="deferred_requires_checkpoint",
-                )
-            )
-        try:
-            handle = DeferredToolHandle(
-                checkpoint_key=checkpoint_key,
-                operation_id=operation_id,
-                attempt=attempt,
-                request_digest=request_digest,
-            )
-        except Exception:
-            return ToolCallOutcome.Completed(
-                ToolExecutionResult(
-                    tool_call_id=self.tool_call_id,
-                    content="Deferred execution requires a durable checkpoint.",
-                    status_code=ToolResultStatus.ERROR,
-                    directive=ToolDirective.CONTINUE,
-                    error_code="deferred_requires_checkpoint",
-                )
-            )
-        # Keep the opaque handle available to the provider adapter without
-        # exposing it in the model-visible result metadata.
-        self.metadata["_vv_agent_deferred_handle"] = handle
-        return ToolCallOutcome.Deferred(handle)
 
     @property
     def app_state(self) -> Any | None:

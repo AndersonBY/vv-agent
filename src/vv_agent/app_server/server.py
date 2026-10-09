@@ -5,9 +5,7 @@ from typing import Any
 from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.processor import MessageProcessor
-from vv_agent.app_server.run_adapter import RunAdapter
 from vv_agent.app_server.thread_state import ThreadStateManager
-from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.app_server.transport import AppServerTransport, StdioJsonlTransport
 
 
@@ -17,38 +15,25 @@ class AppServer:
         *,
         transport: AppServerTransport | None = None,
         host: AppServerHost | None = None,
-        store: ThreadStore | None = None,
+        store=None,
         state_manager: ThreadStateManager | None = None,
         router: OutgoingRouter | None = None,
         processor: MessageProcessor | None = None,
-        _kernel: Any = None,
     ) -> None:
+        from vv_agent.session.app_server import _KernelRunAdapter, _KernelThreadStore
+        from vv_agent.session.surfaces import SessionDriver
+
         self.transport = transport or StdioJsonlTransport()
         self.host = host or DefaultAppServerHost()
-        if _kernel is not None:
-            from vv_agent.session.app_server import _KernelThreadStore
-
-            if store is not None:
-                raise ValueError("kernel threads are projections, not a second ThreadStore")
-            self.store = _KernelThreadStore(_kernel)
-        else:
-            self.store = store or ThreadStore()
+        self.kernel = SessionDriver(store=store)
+        self.store = _KernelThreadStore(self.kernel)
         self.state_manager = state_manager or ThreadStateManager()
         self.router = router or OutgoingRouter()
-        if _kernel is not None:
-            from vv_agent.session.app_server import _KernelRunAdapter
-
-            self.run_adapter = _KernelRunAdapter(
-                kernel=_kernel, host=self.host, store=self.store, state_manager=self.state_manager, router=self.router
-            )
-        else:
-            self.run_adapter = RunAdapter(host=self.host, store=self.store, state_manager=self.state_manager, router=self.router)
+        self.run_adapter = _KernelRunAdapter(
+            kernel=self.kernel, host=self.host, store=self.store, state_manager=self.state_manager, router=self.router
+        )
         self.processor = processor or MessageProcessor(
-            router=self.router,
-            host=self.host,
-            store=self.store,
-            state_manager=self.state_manager,
-            run_adapter=self.run_adapter,
+            router=self.router, host=self.host, store=self.store, state_manager=self.state_manager, run_adapter=self.run_adapter
         )
         self.router.register_transport(self.transport)
 

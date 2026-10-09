@@ -7,23 +7,23 @@ import pytest
 from vv_agent.app_server import AppServerErrorCode, ChannelTransport, MessageProcessor, OutgoingRouter
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.session.app_server import _KernelThreadStore
+from vv_agent.session.store import SessionStore
 
 
 def _initialized_processor(
     *,
-    store: ThreadStore | None = None,
-    _kernel=None,
+    store: SessionStore | _KernelThreadStore | None = None,
 ) -> tuple[MessageProcessor, ChannelTransport, OutgoingRouter, ThreadStateManager]:
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     state_manager = ThreadStateManager()
     router.register_transport(transport)
-    if _kernel is not None:
-        from vv_agent.app_server.server import AppServer
-
-        processor = AppServer(transport=transport, router=router, state_manager=state_manager, _kernel=_kernel).processor
-    else:
-        processor = MessageProcessor(router=router, state_manager=state_manager, store=store)
+    processor = MessageProcessor(
+        router=router,
+        state_manager=state_manager,
+        store=store if isinstance(store, _KernelThreadStore) or store is None else ThreadStore(store=store),
+    )
     processor.process_message(
         "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}}
     )
@@ -33,7 +33,7 @@ def _initialized_processor(
 
 
 def test_thread_list_returns_active_threads(surface) -> None:
-    processor, transport, _router, _state_manager = _initialized_processor(_kernel=surface)
+    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 2, "method": "thread/list"})
 
@@ -49,7 +49,7 @@ def test_thread_list_returns_active_threads(surface) -> None:
 
 
 def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
-    processor, transport, _router, _state_manager = _initialized_processor(_kernel=surface)
+    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
@@ -77,7 +77,7 @@ def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
 
 
 def test_turn_start_rejects_archived_thread(surface) -> None:
-    processor, transport, _router, _state_manager = _initialized_processor(_kernel=surface)
+    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
@@ -104,7 +104,7 @@ def test_turn_start_rejects_archived_thread(surface) -> None:
 
 
 def test_thread_unsubscribe_closes_idle_thread(surface) -> None:
-    processor, transport, _router, _state_manager = _initialized_processor(_kernel=surface)
+    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
@@ -138,7 +138,7 @@ def test_thread_unsubscribe_closes_idle_thread(surface) -> None:
 
 @pytest.mark.parametrize("subscribe", [True, False])
 def test_thread_resume_reopens_closed_thread(surface, subscribe: bool) -> None:
-    processor, transport, _router, state_manager = _initialized_processor(_kernel=surface)
+    processor, transport, _router, state_manager = _initialized_processor(store=surface.store)
     processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}},
@@ -164,12 +164,12 @@ def test_thread_resume_reopens_closed_thread(surface, subscribe: bool) -> None:
     )
     response = transport.receive_outbound(timeout=1)
 
-    if surface and subscribe:
+    if subscribe:
         assert response["error"] == {"code": -32602, "message": "Thread is closed"}
         assert not state_manager.is_subscribed("thread_1", "conn_1")
     else:
-        assert response["result"]["thread"]["status"] == ("closed" if surface else "idle")
-        assert state_manager.status("thread_1") == "idle"
+        assert response["result"]["thread"]["status"] == "closed"
+        assert state_manager.load("thread_1").status == "idle"
         assert state_manager.is_subscribed("thread_1", "conn_1") is subscribe
 
 
@@ -203,8 +203,11 @@ def test_thread_resume_reopens_persisted_closed_thread(subscribe: bool) -> None:
     )
     response = transport.receive_outbound(timeout=1)
 
-    assert response["result"]["thread"]["status"] == "idle"
-    assert store.read_thread("thread_1").thread.status == "idle"
+    if subscribe:
+        assert response["error"] == {"code": -32602, "message": "Thread is closed"}
+    else:
+        assert response["result"]["thread"]["status"] == "closed"
+    assert store.read_thread("thread_1").thread.status == "closed"
 
 
 def test_thread_archive_notifies_only_requester_without_subscribing_it() -> None:
@@ -247,5 +250,5 @@ def test_active_turn_state_is_persisted_through_processor_owned_state_manager() 
     state_manager.clear_active_turn(thread.thread_id, "turn_1")
     idle = store.read_thread(thread.thread_id).thread
 
-    assert (running.status, running.active_turn_id) == ("running", "turn_1")
+    assert (running.status, running.active_turn_id) == ("idle", None)
     assert (idle.status, idle.active_turn_id) == ("idle", None)

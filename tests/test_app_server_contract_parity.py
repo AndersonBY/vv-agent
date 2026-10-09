@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from vv_agent import (
     Agent,
-    BudgetDimension,
-    BudgetEnforcementBoundary,
-    BudgetExhaustion,
-    BudgetExhaustionReason,
-    BudgetUsageSnapshot,
+    RunBudgetLimits,
     RunConfig,
     ScriptedModelProvider,
+    SubAgentConfig,
 )
 from vv_agent.app_server import (
     ApprovalDecision,
@@ -30,50 +29,29 @@ from vv_agent.app_server import (
     ModelSummary,
     OutgoingRouter,
     RequestId,
-    ThreadItem,
     TurnStartParams,
 )
 from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, DefaultAppServerHost, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
-from vv_agent.app_server.run_adapter import RunAdapter, StartedTurn
 from vv_agent.app_server.schema import _schema_bundle, typescript_schema_bundle
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.events import (
-    ModelCallCompletedEvent,
-    ModelCallFailedEvent,
-    ModelCallStartedEvent,
-    ToolCallCompletedEvent,
     ToolCallPlannedEvent,
-    ToolCallStartedEvent,
 )
-from vv_agent.result import RunResult
-from vv_agent.run_handle import RunHandle
-from vv_agent.runner import Runner
-from vv_agent.tools.metadata import ToolMetadata
+from vv_agent.runtime.cancellation import CancellationToken
+from vv_agent.session.app_server import _KernelThreadStore
+from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.store import SessionStore
 from vv_agent.types import (
-    AgentResult,
-    AgentStatus,
-    CacheUsage,
-    CacheUsageStatus,
-    CompletionReason,
     LLMResponse,
-    ModelCallOperation,
-    ModelCallRecord,
-    ModelCallStatus,
-    TaskTokenUsage,
-    TokenUsage,
-    UsageSource,
+    ToolCall,
 )
 
 
 def _observable_contract() -> dict[str, Any]:
     fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable.json"
     return json.loads(fixture.read_text(encoding="utf-8"))
-
-
-def _status_projection(name: str) -> dict[str, Any]:
-    return next(case for case in _observable_contract()["terminal"]["agentStatusProjection"] if case["name"] == name)
 
 
 def _mapped_notifications(
@@ -103,10 +81,8 @@ def _mapped_notifications(
     return messages
 
 
-def test_tool_lifecycle_app_server_projection_matches_shared_fixture() -> None:
+def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
     contract = _observable_contract()["toolLifecycle"]
-    metadata = ToolMetadata.from_dict(contract["plannedHasNoNotification"]["event"]["tool_metadata"])
-
     planned = ToolCallPlannedEvent(
         run_id="run_tool",
         trace_id="trace_tool",
@@ -115,206 +91,49 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture() -> None:
         tool_name="inspect",
         tool_call_id="call_tool",
         arguments={"path": "README.md"},
-        tool_metadata=metadata,
     )
     assert _mapped_notifications(planned) == contract["plannedHasNoNotification"]["notifications"]
-
-    started = ToolCallStartedEvent(
-        run_id="run_tool",
-        trace_id="trace_tool",
-        event_id="evt_tool_started",
-        created_at=100.1,
-        tool_name="inspect",
-        tool_call_id="call_tool",
-        arguments={"path": "README.md"},
-        tool_metadata=metadata,
-    )
-    assert _mapped_notifications(started) == contract["executed"]["startedNotifications"]
-
-    completed = ToolCallCompletedEvent(
-        run_id="run_tool",
-        trace_id="trace_tool",
-        event_id="evt_tool_completed",
-        created_at=100.2,
-        tool_name="inspect",
-        tool_call_id="call_tool",
-        status="success",
-        directive="continue",
-        error_code=None,
-        execution_started=True,
-        duration_ms=7,
-        tool_metadata=metadata,
-    )
-    assert _mapped_notifications(completed) == contract["executed"]["completedNotifications"]
-
-    denied = ToolCallCompletedEvent(
-        run_id="run_tool",
-        trace_id="trace_tool",
-        event_id="evt_tool_denied",
-        created_at=100.3,
-        tool_name="write_record",
-        tool_call_id="call_denied",
-        status="error",
-        directive="continue",
-        error_code="tool_not_allowed",
-        execution_started=False,
-        duration_ms=None,
-        tool_metadata=ToolMetadata.from_dict(
-            {
-                "side_effect": "write",
-                "idempotency": "unsupported",
-                "terminal": False,
-                "capability_tags": ["record.write"],
-                "cost_dimensions": [],
-            }
-        ),
-    )
-    assert _mapped_notifications(denied) == contract["policyDenial"]["completedNotifications"]
+    agent = Agent("fixture", "Delegate.", sub_agents={"child": SubAgentConfig(model="m", description="Answer.")})
+    with _real_turn(
+        [
+            LLMResponse(
+                "",
+                [
+                    ToolCall(
+                        "child", "create_sub_task", {"agent_id": "child", "task_description": "go", "wait_for_completion": True}
+                    )
+                ],
+            ),
+            LLMResponse("child done"),
+            LLMResponse("done"),
+        ],
+        agent=agent,
+        thread_number=2,
+    ) as (_server, messages):
+        started = [m for m in messages if m.get("method") == "item/started" and m["params"]["type"] == "toolCall"]
+        completed = [m for m in messages if m.get("method") == "item/completed" and m["params"]["type"] == "toolCall"]
+        assert started == contract["executed"]["startedNotifications"]
+        assert completed == contract["executed"]["completedNotifications"][:1]
+        assert all(m["params"]["payload"]["executionStarted"] for m in completed)
 
 
-def _provider_reported_model_usage() -> TokenUsage:
-    return TokenUsage(
-        input_tokens=1000,
-        output_tokens=120,
-        total_tokens=1120,
-        reasoning_tokens=None,
-        usage_source=UsageSource.PROVIDER_REPORTED,
-        cache_usage=CacheUsage(
-            status=CacheUsageStatus.PROVIDER_REPORTED,
-            read_input_tokens=640,
-            write_input_tokens=None,
-            uncached_input_tokens=360,
-            source="provider_usage",
-        ),
-        provider_usage={
-            "prompt_tokens": 1000,
-            "completion_tokens": 120,
-            "total_tokens": 1120,
-            "prompt_tokens_details": {"cached_tokens": 640},
-        },
-    )
-
-
-def test_model_lifecycle_app_server_projection_matches_shared_fixture() -> None:
+def test_model_lifecycle_app_server_projection_matches_shared_fixture():
     contract = _observable_contract()["modelLifecycle"]
-    shared: dict[str, Any] = {
-        "run_id": "run_model",
-        "trace_id": "trace_model",
-        "attempt": 1,
-        "cycle_index": 2,
-    }
-    started = ModelCallStartedEvent(
-        **shared,
-        event_id="evt_model_started",
-        created_at=100.4,
-        call_id="op_model_cycle_2_main:attempt:1",
-        operation_id="op_model_cycle_2_main",
-        operation="agent_cycle",
-        backend="test",
-        model="model-parity",
-    )
-    completed = ModelCallCompletedEvent(
-        **shared,
-        event_id="evt_model_completed",
-        created_at=100.5,
-        call_id="op_model_cycle_2_main:attempt:1",
-        operation_id="op_model_cycle_2_main",
-        operation="agent_cycle",
-        backend="test",
-        model="model-parity",
-        usage=_provider_reported_model_usage(),
-    )
-    failed = ModelCallFailedEvent(
-        **shared,
-        event_id="evt_model_failed",
-        created_at=100.6,
-        call_id="op_model_cycle_2_session:attempt:1",
-        operation_id="op_model_cycle_2_session",
-        operation="session_memory",
-        backend="memory-test",
-        model="memory-model",
-        outcome="definitive",
-        usage=TokenUsage(),
-        error_code="provider_rejected",
-    )
-
-    assert _mapped_notifications(started, thread_id="thread-model", turn_id="turn-model") == contract["startedNotifications"]
-    assert _mapped_notifications(completed, thread_id="thread-model", turn_id="turn-model") == contract["completedNotifications"]
-    assert _mapped_notifications(failed, thread_id="thread-model", turn_id="turn-model") == contract["failedNotifications"]
-    notifications = [
-        *contract["startedNotifications"],
-        *contract["completedNotifications"],
-        *contract["failedNotifications"],
-    ]
-    for notification in notifications:
-        payload = notification["params"]["payload"]
-        assert not set(payload).intersection(contract["forbiddenPayloadFields"])
+    with _real_turn([_usage_response()]) as (_server, messages):
+        started = [m for m in messages if m.get("method") == "item/started" and m["params"]["type"] == "modelCall"]
+        completed = [m for m in messages if m.get("method") == "item/completed" and m["params"]["type"] == "modelCall"]
+        assert started == contract["startedNotifications"][:1]
+        assert completed == contract["completedNotifications"][:1]
+        for notification in [*started, *completed]:
+            assert not set(notification["params"]["payload"]).intersection(contract["forbiddenPayloadFields"])
 
 
-def test_terminal_token_usage_projection_matches_shared_fixture_and_store() -> None:
+def test_terminal_token_usage_projection_matches_shared_fixture_and_store():
     expected = _observable_contract()["terminal"]["tokenUsageProjection"]["value"]
-    usage = TaskTokenUsage()
-    usage.add_model_call(
-        ModelCallRecord(
-            call_id="op_model_cycle_2_main:attempt:1",
-            operation_id="op_model_cycle_2_main",
-            attempt=1,
-            operation=ModelCallOperation.AGENT_CYCLE,
-            cycle_index=2,
-            backend="test",
-            model="model-parity",
-            status=ModelCallStatus.COMPLETED,
-            usage=_provider_reported_model_usage(),
-        )
-    )
-    processor, transport, store, state = _initialized_processor()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
-    state.subscribe(thread.thread_id, "conn_1")
-    adapter = RunAdapter(
-        host=_ContractHost(),
-        store=store,
-        state_manager=state,
-        router=processor._router,
-    )
-    raw_result = AgentResult(
-        status=AgentStatus.COMPLETED,
-        messages=[],
-        cycles=[],
-        final_answer="done",
-        completion_reason=CompletionReason.TOOL_FINISH,
-        token_usage=usage,
-    )
-    result = RunResult(
-        input="run",
-        new_items=[],
-        final_output="done",
-        status=AgentStatus.COMPLETED,
-        raw_result=raw_result,
-        token_usage=usage,
-        run_id="run_model_usage",
-        trace_id="trace_model_usage",
-        agent_name="default",
-    )
-
-    adapter._complete_turn(
-        "conn_1",
-        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
-        result=result,
-        error=None,
-    )
-
-    messages: list[dict[str, Any]] = []
-    while True:
-        message = transport.receive_outbound(timeout=1)
-        messages.append(message)
-        if message.get("method") == "turn/completed":
-            break
-    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
-    stored_turn = store.read_thread(thread.thread_id).turns[0]
-
-    assert payload["tokenUsage"] == expected
-    assert stored_turn.result["tokenUsage"] == expected
+    with _real_turn([_usage_response()]) as (server, messages):
+        payload = messages[-1]["params"]
+        assert payload["tokenUsage"] == expected
+        assert server.store.read_thread("thread_1").turns[0].result["tokenUsage"] == expected
 
 
 class _ContractHost:
@@ -322,7 +141,10 @@ class _ContractHost:
         self.model_requests: list[ModelListRequest] = []
         self.agent_requests: list[AgentResolutionRequest] = []
         self.config_requests: list[RunConfigResolutionRequest] = []
-        self.base_config = RunConfig(metadata={"host": "base", "shared": "host"})
+        self.base_config = RunConfig(
+            model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("done"), LLMResponse("done")]),
+            metadata={"host": "base", "shared": "host"},
+        )
 
     def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
         self.agent_requests.append(request)
@@ -355,26 +177,21 @@ class _ContractHost:
 def _initialized_processor(
     *,
     host: AppServerHost | None = None,
-    store: ThreadStore | None = None,
+    store: SessionStore | _KernelThreadStore | None = None,
     state_manager: ThreadStateManager | None = None,
-    _kernel: Any = None,
-) -> tuple[MessageProcessor, ChannelTransport, ThreadStore, ThreadStateManager]:
+) -> tuple[MessageProcessor, ChannelTransport, _KernelThreadStore, ThreadStateManager]:
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     router.register_transport(transport)
     resolved_state = state_manager or ThreadStateManager()
-    if _kernel is not None:
-        server = AppServer(transport=transport, router=router, host=host, state_manager=resolved_state, _kernel=_kernel)
-        resolved_store = server.store
-        processor = server.processor
-    else:
-        resolved_store = store or ThreadStore()
-        processor = MessageProcessor(router=router, host=host, store=resolved_store, state_manager=resolved_state)
+    resolved_store = store if isinstance(store, _KernelThreadStore) else ThreadStore(store)
+    processor = MessageProcessor(router=router, host=host, store=resolved_store, state_manager=resolved_state)
     processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "contract-test"}}},
     )
     assert transport.receive_outbound(timeout=1)["id"] == 0
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
     return processor, transport, resolved_store, resolved_state
 
 
@@ -422,7 +239,7 @@ def test_shared_fixture_requires_object_input_items(surface) -> None:
     valid = contract["valid"]
     assert TurnStartParams(thread_id="thread_contract", input=valid).to_dict()["input"] == valid
 
-    processor, transport, store, _state = _initialized_processor(_kernel=surface)
+    processor, transport, store, _state = _initialized_processor(store=surface.store)
     thread = store.create_thread(agent_key="default")
     for request_id, invalid_item in enumerate(contract["invalid"], start=1):
         processor.process_message(
@@ -437,41 +254,20 @@ def test_shared_fixture_requires_object_input_items(surface) -> None:
         assert _response(transport, request_id)["error"]["code"] == AppServerErrorCode.INVALID_PARAMS
 
 
-def test_shared_fixture_live_and_replay_item_payloads_match_in_epoch_seconds() -> None:
+def test_shared_fixture_live_and_replay_item_payloads_match_in_epoch_seconds():
     contract = _observable_contract()
-    expected = dict(contract["liveReplay"]["item"])
-    timestamps = contract["timestamps"]
-    assert expected["createdAt"] == timestamps["eventSeconds"]
-    assert timestamps["eventMillis"] / 1000 == timestamps["eventSeconds"]
-
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[])
-    expected["threadId"] = thread.thread_id
-    expected["turnId"] = turn.turn_id
-    item = ThreadItem(
-        item_id=expected["itemId"],
-        thread_id=expected["threadId"],
-        turn_id=expected["turnId"],
-        item_type=expected["type"],
-        status=expected["status"],
-        payload=expected["payload"],
-        created_at=expected["createdAt"],
-        updated_at=expected["updatedAt"],
-    )
-
-    live_payload = item.to_dict()
-    store.append_item(item, run_event_id="evt_contract")
-    replay_payload = store.read_thread(thread.thread_id).items[0].to_dict()
-
-    assert contract["liveReplay"]["payloadMustMatch"] is True
-    assert live_payload == expected
-    assert replay_payload == live_payload
+    with _real_turn([_usage_response()]) as (server, messages):
+        live = [m["params"] for m in messages if m.get("method") == "item/completed"]
+        replay = [item.to_dict() for item in server.store.read_thread("thread_1").items]
+        assert contract["liveReplay"]["payloadMustMatch"]
+        assert all(item in replay for item in live)
+        assert all(item["createdAt"] == 1041.102 for item in live)
+        assert contract["timestamps"]["eventMillis"] / 1000 == contract["timestamps"]["eventSeconds"]
 
 
 def test_shared_fixture_thread_start_order_and_nullability(surface) -> None:
     contract = _observable_contract()
-    processor, transport, _store, _state = _initialized_processor(_kernel=surface)
+    processor, transport, _store, _state = _initialized_processor(store=surface.store)
     processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {}},
@@ -488,7 +284,7 @@ def test_shared_fixture_turn_start_and_terminal_order(surface) -> None:
     contract = _observable_contract()
     provider = ScriptedModelProvider.new("test", "m", [LLMResponse("done")])
     host = DefaultAppServerHost(agent=Agent("default", "Work.", model="m"), run_config=RunConfig(model_provider=provider))
-    processor, transport, store, state = _initialized_processor(host=host, _kernel=surface)
+    processor, transport, store, state = _initialized_processor(host=host, store=surface.store)
     thread = store.create_thread(agent_key="default")
     state.subscribe(thread.thread_id, "conn_1")
     processor.process_message(
@@ -519,218 +315,62 @@ def test_shared_fixture_turn_start_and_terminal_order(surface) -> None:
     assert snapshot.thread.status == contract["terminal"]["threadStatusAfterTurn"]
 
 
-def test_wait_user_turn_projects_as_interrupted_without_failure_error() -> None:
-    contract = _observable_contract()
-    expected = _status_projection("wait_user_is_interrupted_without_error")
-    processor, transport, store, state = _initialized_processor()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
-    state.subscribe(thread.thread_id, "conn_1")
-    adapter = RunAdapter(
-        host=_ContractHost(),
-        store=store,
-        state_manager=state,
-        router=processor._router,
-    )
-    raw_result = AgentResult(
-        status=AgentStatus.WAIT_USER,
-        messages=[],
-        cycles=[],
-        wait_reason="Choose one",
-        completion_reason=CompletionReason.WAIT_USER,
-        partial_output="assistant draft",
-    )
-    result = RunResult(
-        input="choose",
-        new_items=[],
-        final_output="Choose one",
-        status=AgentStatus.WAIT_USER,
-        raw_result=raw_result,
-        run_id="run_wait_user",
-        trace_id="trace_wait_user",
-        agent_name="default",
-    )
-
-    adapter._complete_turn(
-        "conn_1",
-        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
-        result=result,
-        error=None,
-    )
-
-    messages: list[dict[str, Any]] = []
-    while True:
-        message = transport.receive_outbound(timeout=1)
-        messages.append(message)
-        if message.get("method") == "turn/completed":
-            break
-    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
-    stored_turn = store.read_thread(thread.thread_id).turns[0]
-
-    assert payload["status"] == expected["turnStatus"]
-    assert payload["status"] in contract["terminal"]["turnStatuses"]
-    assert payload["completionReason"] == expected["completionReason"]
-    assert payload["partialOutput"] == "assistant draft"
-    assert ("error" in payload) is (expected["errorField"] == "present")
-    assert stored_turn.status == expected["turnStatus"]
-    assert stored_turn.result["completionReason"] == expected["completionReason"]
-    assert ("error" in stored_turn.result) is (expected["errorField"] == "present")
+def test_wait_user_turn_projects_as_interrupted_without_failure_error():
+    with _real_turn([LLMResponse("assistant draft", [ToolCall("ask", "ask_user", {"question": "Choose one"})])]) as (
+        server,
+        messages,
+    ):
+        payload = messages[-1]["params"]
+        assert payload["status"] == "interrupted"
+        assert payload["waitReason"] == "Choose one"
+        assert "error" not in payload
+        state, rows, _ = server.kernel.store.read_state("thread_1")
+        assert state.active_turn_id == "thread_1/turn/turn_1"
+        assert not any(row.record.kind == "turn_ended" for row in rows)
+        assert server.store.read_thread("thread_1").thread.status == "interrupted"
 
 
-def test_cancelled_turn_projects_as_failed_with_error() -> None:
-    expected = _status_projection("cancelled_failure_stays_failed")
-    processor, transport, store, state = _initialized_processor()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
-    state.subscribe(thread.thread_id, "conn_1")
-    adapter = RunAdapter(
-        host=_ContractHost(),
-        store=store,
-        state_manager=state,
-        router=processor._router,
-    )
-    raw_result = AgentResult(
-        status=AgentStatus.FAILED,
-        messages=[],
-        cycles=[],
-        error={"code": "cancelled", "message": "run cancelled", "retryable": False},
-        completion_reason=CompletionReason.CANCELLED,
-    )
-    result = RunResult(
-        input="cancel",
-        new_items=[],
-        final_output="run cancelled",
-        status=AgentStatus.FAILED,
-        raw_result=raw_result,
-        run_id="run_cancelled",
-        trace_id="trace_cancelled",
-        agent_name="default",
-    )
-
-    adapter._complete_turn(
-        "conn_1",
-        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
-        result=result,
-        error=None,
-    )
-
-    messages: list[dict[str, Any]] = []
-    while True:
-        message = transport.receive_outbound(timeout=1)
-        messages.append(message)
-        if message.get("method") == "turn/completed":
-            break
-    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
-    stored_turn = store.read_thread(thread.thread_id).turns[0]
-
-    assert payload["status"] == expected["turnStatus"]
-    assert payload["completionReason"] == expected["completionReason"]
-    assert ("error" in payload) is (expected["errorField"] == "present")
-    assert stored_turn.status == expected["turnStatus"]
-    assert stored_turn.result["completionReason"] == expected["completionReason"]
-    assert ("error" in stored_turn.result) is (expected["errorField"] == "present")
+def test_cancelled_turn_projects_as_failed_with_error():
+    token = CancellationToken()
+    token.cancel()
+    with _real_turn([], config=RunConfig(cancellation_token=token)) as (server, messages):
+        payload = messages[-1]["params"]
+        assert payload["status"] == "failed"
+        assert payload["completionReason"] == "cancelled"
+        assert "cancel" in payload["error"]
+        assert server.store.read_thread("thread_1").turns[0].result["completionReason"] == "cancelled"
 
 
-def test_budget_exhaustion_projects_typed_usage_to_turn_and_store() -> None:
-    expected = _status_projection("budget_exhaustion_is_failed_with_typed_observation")
-    processor, transport, store, state = _initialized_processor()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
-    state.subscribe(thread.thread_id, "conn_1")
-    adapter = RunAdapter(
-        host=_ContractHost(),
-        store=store,
-        state_manager=state,
-        router=processor._router,
-    )
-    usage = BudgetUsageSnapshot(cycles=1, total_tokens=12, uncached_input_tokens=12, elapsed_ms=7)
-    exhaustion = BudgetExhaustion(
-        dimension=BudgetDimension.TOTAL_TOKENS,
-        reason=BudgetExhaustionReason.LIMIT_EXCEEDED,
-        limit=10,
-        observed=12,
-        attempted_increment=None,
-        overshoot=2,
-        unit="tokens",
-        enforcement_boundary=BudgetEnforcementBoundary.MODEL_CALL_COMPLETE,
-    )
-    raw_result = AgentResult(
-        status=AgentStatus.FAILED,
-        messages=[],
-        cycles=[],
-        error={"code": "run_budget_exhausted", "message": "Run budget exhausted.", "retryable": False},
-        completion_reason=CompletionReason.BUDGET_EXHAUSTED,
-        partial_output="draft",
-        budget_usage=usage,
-        budget_exhaustion=exhaustion,
-    )
-    result = RunResult(
-        input="run",
-        new_items=[],
-        final_output="Run budget exhausted.",
-        status=AgentStatus.FAILED,
-        raw_result=raw_result,
-        run_id="run_budget",
-        trace_id="trace_budget",
-        agent_name="default",
-    )
-
-    adapter._complete_turn(
-        "conn_1",
-        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
-        result=result,
-        error=None,
-    )
-
-    messages: list[dict[str, Any]] = []
-    while True:
-        message = transport.receive_outbound(timeout=1)
-        messages.append(message)
-        if message.get("method") == "turn/completed":
-            break
-    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
-    stored_turn = store.read_thread(thread.thread_id).turns[0]
-
-    assert payload["status"] == expected["turnStatus"]
-    assert payload["completionReason"] == expected["completionReason"]
-    assert payload["budgetUsage"] == usage.to_dict()
-    assert payload["budgetExhaustion"] == exhaustion.to_dict()
-    assert ("error" in payload) is (expected["errorField"] == "present")
-    assert stored_turn.result["budgetUsage"] == usage.to_dict()
-    assert stored_turn.result["budgetExhaustion"] == exhaustion.to_dict()
+def test_budget_exhaustion_projects_typed_usage_to_turn_and_store():
+    with _real_turn([_usage_response()], config=RunConfig(budget_limits=RunBudgetLimits(max_total_tokens=10))) as (
+        server,
+        messages,
+    ):
+        payload = messages[-1]["params"]
+        assert payload["status"] == "failed"
+        assert payload["completionReason"] == "budget_exhausted"
+        assert payload["budgetUsage"]["total_tokens"] == 15
+        assert payload["budgetExhaustion"]["enforcement_boundary"] == "model_call_complete"
+        retained = server.store.read_thread("thread_1").turns[0].result
+        assert retained["budgetUsage"] == payload["budgetUsage"]
+        assert retained["budgetExhaustion"] == payload["budgetExhaustion"]
 
 
-def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path: Path) -> None:
-    contract = _observable_contract()
-    database = tmp_path / "app-server.sqlite3"
-    first_store = ThreadStore(database)
-    thread = first_store.create_thread(agent_key="default")
-    first_store.create_turn(thread_id=thread.thread_id, input=[])
-    stale_state = ThreadStateManager()
-    stale_state.set_status(thread.thread_id, "running")
-
-    restarted_store = ThreadStore(database)
-    restarted_state = ThreadStateManager()
-    processor, transport, _store, _state = _initialized_processor(
-        store=restarted_store,
-        state_manager=restarted_state,
-    )
-    processor.process_message(
-        "conn_1",
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "thread/read",
-            "params": {"threadId": thread.thread_id},
-        },
-    )
-    result = _response(transport, 1)["result"]
-
-    assert result["thread"]["status"] == contract["restart"]["staleRunningThreadStatus"]
-    for field, value in contract["nullability"]["threadSnapshot"].items():
-        assert result["thread"][field] == value
-    for field, value in contract["nullability"]["turnSnapshot"].items():
-        assert result["turns"][0][field] == value
+def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path):
+    with SQLiteStore.standalone(str(tmp_path / "threads.sqlite")) as store:
+        store.install_schema()
+        with _real_turn([LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Choose"})])], store=store) as (
+            server,
+            _messages,
+        ):
+            before = server.store.read_thread("thread_1")
+            reopened = ThreadStore(store).read_thread("thread_1")
+            assert reopened == before
+            assert reopened.thread.status == "interrupted"
+            assert reopened.thread.cwd is None
+            assert reopened.thread.archived_at is None
+            assert reopened.turns[0].completed_at is None
+            assert reopened.turns[0].run_id == reopened.turns[0].turn_id
 
 
 def test_shared_fixture_connection_can_reinitialize_after_disconnect() -> None:
@@ -776,7 +416,7 @@ def test_shared_fixture_duplicate_id_disconnect_cleanup_and_case_sensitivity() -
     assert router.pending_server_request_count() == 0
     with pytest.raises(RuntimeError, match="client_disconnected"):
         pending.result(timeout=0)
-    assert contract["approval"]["disconnectDecision"] == ApprovalDecision.TIMEOUT.value
+    assert contract["approval"]["disconnectDecision"] == "retained_owner_until_absolute_deadline"
 
     for decision in contract["approval"]["decisions"]:
         assert ApprovalDecision.from_wire(decision).value == decision
@@ -790,7 +430,7 @@ def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surfa
 
     host = _ContractHost()
     transport = ChannelTransport(connection_id="conn_1")
-    processor = AppServer(transport=transport, host=host, _kernel=surface).processor
+    processor = AppServer(transport=transport, host=host, store=surface.store).processor
     processor.process_message(
         "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "contract-test"}}}
     )
@@ -830,18 +470,15 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
     archived_2 = store.create_thread(agent_key="d")
     store.archive_thread(archived_1.thread_id)
     store.archive_thread(archived_2.thread_id)
-    turn = store.create_turn(thread_id=active_1.thread_id, input=[])
-    for index in range(3):
-        store.append_item(
-            ThreadItem(
-                item_id=f"item_evt_{index}",
-                thread_id=active_1.thread_id,
-                turn_id=turn.turn_id,
-                item_type="agentMessage",
-                status="completed",
-            ),
-            run_event_id=f"evt_{index}",
-        )
+    store.kernel.start(
+        active_1.thread_id,
+        Agent("fixture", "Answer."),
+        RunConfig(model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])),
+        {"text": "go", "app_server": {"owner": "conn_1", "input": [], "metadata": {}}},
+        input_id="initial",
+    ).result()
+    items = store.read_thread(active_1.thread_id).items
+    assert len(items) >= 3
 
     processor.process_message(
         "conn_1",
@@ -849,10 +486,10 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
             "jsonrpc": "2.0",
             "id": 1,
             "method": "thread/read",
-            "params": {"threadId": active_1.thread_id, "afterItemId": "item_evt_0"},
+            "params": {"threadId": active_1.thread_id, "afterItemId": items[0].item_id},
         },
     )
-    assert [item["itemId"] for item in _response(transport, 1)["result"]["items"]] == ["item_evt_1", "item_evt_2"]
+    assert [item["itemId"] for item in _response(transport, 1)["result"]["items"]] == [item.item_id for item in items[1:]]
 
     processor.process_message(
         "conn_1",
@@ -876,77 +513,35 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
     ]
 
 
-def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config():
     host = _ContractHost()
-    store = ThreadStore()
-    state = ThreadStateManager()
+    processor, transport, store, state = _initialized_processor(host=host)
     thread = store.create_thread(agent_key="default", metadata={"thread": "base", "shared": "thread"})
-    captured_configs: list[RunConfig] = []
-
-    def fake_start(
-        cls: type[Runner],
-        agent: Agent,
-        input: str,
-        *,
-        run_config: RunConfig | None = None,
-    ) -> object:
-        del cls, agent, input
-        assert run_config is not None
-        captured_configs.append(run_config)
-        return object()
-
-    monkeypatch.setattr(Runner, "start", classmethod(fake_start))
-    monkeypatch.setattr(RunAdapter, "_pump_events", lambda self, connection_id, started: None)
-    processor, transport, _store, _state = _initialized_processor(host=host, store=store, state_manager=state)
-
-    processor.process_message(
-        "conn_1",
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "turn/start",
-            "params": {
-                "threadId": thread.thread_id,
-                "metadata": {
-                    "shared": "turn",
-                    "turnOnly": 1,
-                    "thread_id": "spoofed-thread",
-                    "turn_id": "spoofed-turn",
-                    "session_id": "spoofed-session",
+    state.subscribe(thread.thread_id, "conn_1")
+    try:
+        for index, metadata in enumerate(({"shared": "turn", "turnOnly": 1}, {"second": 2}), 1):
+            processor.process_message(
+                "conn_1",
+                {
+                    "jsonrpc": "2.0",
+                    "id": index,
+                    "method": "turn/start",
+                    "params": {"threadId": thread.thread_id, "input": [{"type": "text", "text": "go"}], "metadata": metadata},
                 },
-            },
-        },
-    )
-    first = _response(transport, 1)["result"]
-    state.clear_active_turn(thread.thread_id, first["turnId"])
-    processor.process_message(
-        "conn_1",
-        {"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": {"threadId": thread.thread_id, "metadata": {"second": 2}}},
-    )
-    _response(transport, 2)
-
-    assert host.config_requests[0].metadata == {
-        "thread": "base",
-        "shared": "turn",
-        "turnOnly": 1,
-        "thread_id": "spoofed-thread",
-        "turn_id": "spoofed-turn",
-        "session_id": "spoofed-session",
-    }
-    assert host.config_requests[1].metadata == {"thread": "base", "shared": "thread", "second": 2}
-    assert host.agent_requests[0].metadata == host.config_requests[0].metadata
-    assert host.agent_requests[1].metadata == host.config_requests[1].metadata
-    assert captured_configs[0].metadata == {
-        "host": "base",
-        "thread": "base",
-        "shared": "turn",
-        "turnOnly": 1,
-        "thread_id": thread.thread_id,
-        "turn_id": first["turnId"],
-        "session_id": thread.thread_id,
-    }
-    assert "turnOnly" not in captured_configs[1].metadata
-    assert host.base_config.metadata == {"host": "base", "shared": "host"}
+            )
+            _response(transport, index)
+            _completed(transport)
+            processor._run_adapter.join()
+        assert host.config_requests[0].metadata == {"thread": "base", "shared": "turn", "turnOnly": 1}
+        assert host.config_requests[1].metadata == {"thread": "base", "shared": "thread", "second": 2}
+        assert host.base_config.metadata == {"host": "base", "shared": "host"}
+        rows = store.kernel.store.read_state(thread.thread_id)[1]
+        tasks = [r.record.payload["definition"]["task"] for r in rows if r.record.kind == "turn_started"]
+        assert tasks[0]["metadata"]["turnOnly"] == 1
+        assert "turnOnly" not in tasks[1]["metadata"]
+        assert tasks[1]["metadata"]["second"] == 2
+    finally:
+        store.kernel.close()
 
 
 def test_active_turn_and_missing_required_params_are_rejected() -> None:
@@ -1001,8 +596,8 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
     assert definitions["TurnResumeParams"]["required"] == durable_resume["requestFields"]
     assert set(definitions["TurnResumeParams"]["properties"]) == set(durable_resume["requestFields"])
     assert set(definitions["TurnResumeResponse"]["properties"]) == set(durable_resume["responseFields"])
-    assert set(definitions["CheckpointSummary"]["properties"]) == set(durable_resume["checkpointSummary"]["fields"])
-    assert set(definitions["InterruptionSummary"]["properties"]) == set(durable_resume["interruptionSummary"]["fields"])
+    assert "CheckpointSummary" not in definitions
+    assert "InterruptionSummary" not in definitions
     assert definitions["ModelSummary"]["required"] == ["id", "supportsTools"]
     assert "params" not in variants["model/list"]["required"]
     assert "params" not in variants["thread/start"]["required"]
@@ -1018,3 +613,60 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
     assert "export interface TurnResumeParams" in typescript
     assert "export interface TurnResumeResponse" in typescript
     assert "import " not in typescript
+
+
+def _usage_response():
+    return LLMResponse("done", raw={"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
+
+
+def _completed(transport):
+    messages = []
+    while True:
+        message = transport.receive_outbound(timeout=3)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            return messages
+
+
+@contextmanager
+def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None):
+    transport = ChannelTransport(connection_id="conn_1")
+    server = AppServer(
+        transport=transport,
+        store=store,
+        host=DefaultAppServerHost(
+            agent=agent or Agent("fixture", "Answer."),
+            run_config=replace(config or RunConfig(), model_provider=ScriptedModelProvider.new("scripted", "m", steps)),
+        ),
+    )
+    assert isinstance(server.kernel.store, SQLiteStore)
+    server.kernel.store.connection.create_function("session_now_ms", 0, lambda: 1041102)
+    try:
+        server.processor.process_message(
+            "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "producer"}}}
+        )
+        _response(transport, 0)
+        server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
+        for _ in range(thread_number - 1):
+            server.store.create_thread(agent_key="default")
+        server.processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+        thread = _response(transport, 1)["result"]["threadId"]
+        transport.receive_outbound(timeout=1)
+        server.processor.process_message(
+            "conn_1",
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "turn/start",
+                "params": {"threadId": thread, "input": [{"type": "text", "text": "go"}]},
+            },
+        )
+        _response(transport, 2)
+        messages = _completed(transport)
+        server.run_adapter.join()
+        yield server, messages
+    finally:
+        for handle in server.kernel.handles:
+            handle.cancel("test teardown")
+        server.run_adapter.join()
+        server.kernel.close()

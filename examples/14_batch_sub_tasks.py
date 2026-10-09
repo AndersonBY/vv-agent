@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
@@ -23,25 +24,26 @@ summarizer = Agent(
 
 
 def main() -> None:
-    coordinator = Agent(
-        name="batch-coordinator",
-        instructions="Use list_documents, call summarize_doc for each item, then combine the results.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-        tools=[
-            list_documents,
-            summarizer.as_tool(name="summarize_doc", description="Summarize one document id."),
-        ],
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        max_cycles=10,
-    )
-    result = Runner.run_sync(coordinator, "Summarize all available documents.", run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        coordinator = Agent(
+            name="batch-coordinator",
+            instructions="Use list_documents, call summarize_doc for each item, then combine the results.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+            tools=[
+                list_documents,
+                summarizer.as_tool(name="summarize_doc", description="Summarize one document id."),
+            ],
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            max_cycles=10,
+        )
+        result = Runner.run_sync(coordinator, "Summarize all available documents.", run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

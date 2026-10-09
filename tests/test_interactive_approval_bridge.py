@@ -75,7 +75,7 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
         )
     )
     session = client.create_session(
-        agent=InteractiveAgentDefinition(description="Use the tool.", model="test-model"),
+        agent=InteractiveAgentDefinition(description="Use the tool.", model="test-model", extra_tool_names=["dangerous"]),
         session_id="session-a",
     )
 
@@ -102,9 +102,13 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
 
     assert request_seen.wait(timeout=_TEST_APPROVAL_TIMEOUT_SECONDS)
     assert calls == []
-    session.approve(request_id, "allow")
     thread.join(timeout=_TEST_APPROVAL_TIMEOUT_SECONDS)
+    session.approve(request_id, "allow")
+    from vv_agent import Runner
 
+    turn_id = client.driver.store.read_state(session.session_id)[0].active_turn_id
+    assert turn_id is not None
+    assert Runner.resume(session.session_id, turn_id).final_output == "finished"
     assert not thread.is_alive()
     assert run_error == []
     assert calls == ["ran"]
@@ -142,27 +146,20 @@ def test_allow_session_persists_across_automatic_follow_up(tmp_path) -> None:
         )
     )
     session = client.create_session(
-        agent=InteractiveAgentDefinition(description="Use the tool twice.", model="test-model"),
+        agent=InteractiveAgentDefinition(description="Use the tool twice.", model="test-model", extra_tool_names=["dangerous"]),
         session_id="session-allow",
     )
-    approvals = 0
+    waiting = session.prompt("run it", auto_follow_up=False)
+    assert waiting.status.value == "wait_user"
+    request_id = waiting.metadata["session_waits"][0]["request_id"]
+    session.approve(request_id, "allow_session")
+    from vv_agent import Runner
 
-    def approve_first_request(event: str, payload: dict[str, object]) -> None:
-        nonlocal approvals
-        if event != "approval_requested" or approvals:
-            return
-        approvals += 1
-        session.approve(str(payload["request_id"]), "allow_session")
-
-    session.subscribe(approve_first_request)
-    session.follow_up("run it again")
-
-    result = session.prompt("run it")
-
+    assert Runner.resume(session.session_id, waiting.run_id).final_output == "first"
+    result = session.prompt("run it again")
     assert result.final_output == "second"
     assert calls == ["ran", "ran"]
     assert [request.tool_name for request in provider.requests].count("dangerous") == 1
-    assert approvals == 1
 
 
 def test_interactive_session_exposes_active_run_handle_lifecycle(tmp_path) -> None:

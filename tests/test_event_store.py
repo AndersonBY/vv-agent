@@ -28,6 +28,7 @@ def test_jsonl_event_store_appends_and_replays_events(tmp_path) -> None:
         metadata={"source": "test"},
     )
     approval = ApprovalResolvedEvent(
+        session_id="s1",
         run_id="run_1",
         trace_id="trace_1",
         tool_name="search",
@@ -60,6 +61,7 @@ def test_jsonl_event_store_parent_replay_includes_child_run_edges(tmp_path) -> N
     path = tmp_path / "events.jsonl"
     store = JsonlRunEventStore(path)
     parent = RunStartedEvent(
+        session_id="parent",
         run_id="run_parent",
         trace_id="trace_1",
         input="parent input",
@@ -88,6 +90,7 @@ def test_jsonl_event_store_parent_replay_includes_child_run_edges(tmp_path) -> N
         created_at=3.0,
     )
     unrelated = SubRunStartedEvent(
+        session_id="other",
         run_id="run_other_child",
         trace_id="trace_1",
         parent_run_id="run_other_parent",

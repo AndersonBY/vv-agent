@@ -1,4 +1,4 @@
-"""Experimental synchronous transaction contract; no framework or connection ownership."""
+"""Synchronous session transactions with caller-owned connections."""
 
 from __future__ import annotations
 
@@ -146,4 +146,16 @@ class SessionStore(Protocol):
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None: ...
     def renew(self, lease: Lease, *, ttl_ms: int) -> LeasePoll: ...
     def release(self, lease: Lease) -> bool: ...
+    def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool: ...
+    def is_runnable(self, session_id: str) -> bool: ...
     def list_runnable(self, *, limit: int = 100, after: WorkCursor | None = None) -> tuple[WorkItem, ...]: ...
+
+
+class LeaseRetryExhausted(LeaseLost):
+    """The host could not restore its execution lease within the retry limit."""
+
+    code = "lease_retry_exhausted"
+
+    def __init__(self, session_id: str, turn_id: str, attempts: int) -> None:
+        self.session_id, self.turn_id, self.attempts = session_id, turn_id, attempts
+        super().__init__(f"Execution lease recovery exhausted after {attempts} attempts for {session_id}/{turn_id}")

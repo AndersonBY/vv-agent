@@ -5,31 +5,33 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 
 
 def main() -> None:
-    available_skills = [
-        {"name": "code-review", "description": "Review code and list concrete findings."},
-        {"name": "release-notes", "description": "Summarize user-facing changes."},
-    ]
-    agent = Agent(
-        name="skill-router",
-        instructions="Choose an available skill when it helps, then provide the final answer.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-        metadata={"available_skills": available_skills},
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Pick the best skill for reviewing a patch.")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        available_skills = [
+            {"name": "code-review", "description": "Review code and list concrete findings."},
+            {"name": "release-notes", "description": "Summarize user-facing changes."},
+        ]
+        agent = Agent(
+            name="skill-router",
+            instructions="Choose an available skill when it helps, then provide the final answer.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+            metadata={"available_skills": available_skills},
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Pick the best skill for reviewing a patch.")
+        result = Runner.run_sync(agent, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

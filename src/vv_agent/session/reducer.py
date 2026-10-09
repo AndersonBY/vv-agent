@@ -101,6 +101,7 @@ class ExecutionState:
     cancel_requested: bool = False
     suspend_requested: bool = False
     phase: str = "idle"
+    due_ms: tuple[int, ...] = ()
     next_drive_ms: int | None = None
     terminal_seq: int = 0
     applied_inputs: dict[str, Record] = field(default_factory=dict)
@@ -132,7 +133,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
     state.applied_inputs[item.input_id] = record
     if p["disposition"] != "applied":
         return
-    tid = item.target_turn_id
+    tid = item.target_turn_id if item.target_turn_id is not None else record.turn_id
     if tid is not None:
         require(tid == record.turn_id, "input targets another turn")
     session_control = item.kind == "control" and item.payload["action"] in {"close", "archive"}
@@ -436,6 +437,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
 
 def _schedule(state: ExecutionState) -> None:
     state.cancel_requested = state.suspend_requested = False
+    state.due_ms = ()
     state.next_drive_ms = None
     if state.active_turn_id is None:
         state.phase = "closed" if state.closed else "idle"
@@ -445,11 +447,13 @@ def _schedule(state: ExecutionState) -> None:
             and applied._payload["input"]["kind"] in {"user", "follow_up"}
             for input_id, applied in state.applied_inputs.items()
         ):
+            state.due_ms = (0,)
             state.next_drive_ms = 0
         return
     turn = state.turns[state.active_turn_id]
     state.cancel_requested, state.suspend_requested = turn.cancelled, turn.suspended
     if turn.cancelled:
+        state.due_ms = (0,)
         state.phase, state.next_drive_ms = "active", 0
         return
     if turn.suspended:
@@ -492,7 +496,8 @@ def _schedule(state: ExecutionState) -> None:
     if not unresolved:
         due.append(0)  # Next model step or unfinished turn finalization.
     state.phase = "parked" if waiting and not due else "active"
-    state.next_drive_ms = min(due) if due else None
+    state.due_ms = tuple(due)
+    state.next_drive_ms = min(state.due_ms) if state.due_ms else None
 
 
 def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord]) -> None:
@@ -502,7 +507,7 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
     source = project_context(tuple(history), state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
-    replacement = [Message.from_dict(m, _kernel=True) for m in p["replacement"]]
+    replacement = [Message.from_dict(m) for m in p["replacement"]]
     ids = message_ids(source)
     definition = state.turns[tid].start._payload["definition"]
     manager = MemoryManager(**definition["memory_settings"])
@@ -803,7 +808,7 @@ class Fold:
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
                     for message in p["data"]["messages"]:
-                        Message.from_dict(message, _kernel=True)
+                        Message.from_dict(message)
                 elif p["stage"] == "session_memory_saved" and oid is not None:
                     require(
                         state.operations[oid].kind == "model"
@@ -852,7 +857,7 @@ class Fold:
                 elif p["stage"] in {"memory_started", "memory_completed"}:
                     from vv_agent.events import event_from_dict
 
-                    event = event_from_dict(p["data"]["event"], _kernel=True)
+                    event = event_from_dict(p["data"]["event"])
                     require(
                         event.type
                         == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),

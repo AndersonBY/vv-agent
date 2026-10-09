@@ -1,21 +1,43 @@
 {
-  "schema_version": "vv-agent.output-validation.v1",
   "capability": "optional_host_output_validation",
   "defaults": {
     "enabled": false,
     "max_repairs": 1,
-    "repair_tools": [],
     "repair_model": null,
-    "repair_model_settings": null
+    "repair_model_settings": null,
+    "repair_tools": []
   },
-  "validator": {
-    "registration": "host_selected_typed_callback",
-    "input": ["final_output", "validation_context"],
-    "outcomes": ["valid", "invalid"],
-    "invalid_fields": ["code", "message"],
-    "invalid_code_is_non_empty": true
+  "durable_output_checked": {
+    "records": [
+      "session/repair/created",
+      "input/initial/applied",
+      "turn/repair/turn/initial/started",
+      "usage/active/repair/turn/initial/1/1",
+      "op/repair/turn/initial/model/primary/1/1/planned",
+      "usage/active/repair/turn/initial/1/2",
+      "op/repair/turn/initial/model/primary/1/1/started",
+      "usage/active/repair/turn/initial/1/3",
+      "op/repair/turn/initial/model/primary/1/1/result",
+      "usage/active/repair/turn/initial/1/4",
+      "turn/repair/turn/initial/boundary/output_checked/initial",
+      "op/repair/turn/initial/model/output_repair/1/1/planned",
+      "usage/active/repair/turn/initial/1/5",
+      "op/repair/turn/initial/model/output_repair/1/1/started",
+      "usage/active/repair/turn/initial/1/6",
+      "op/repair/turn/initial/model/output_repair/1/1/result",
+      "usage/active/repair/turn/initial/1/7",
+      "turn/repair/turn/initial/boundary/output_checked/final",
+      "usage/active/repair/turn/initial/1/8",
+      "turn/repair/turn/initial/ended"
+    ],
+    "session_id": "repair"
   },
   "repair": {
+    "framework_does_not_classify_task_or_rewrite_business_answer": true,
+    "maximum_attempts": 1,
+    "model_and_settings_are_independent_from_primary_run": true,
+    "operation": "output_repair",
+    "provider_failure": "typed_validation_failure",
     "registration": "optional_host_selected_callback",
     "request_fields": [
       "invalid_output",
@@ -25,94 +47,494 @@
       "model_settings",
       "tools"
     ],
-    "tools_are_always_empty": true,
-    "model_and_settings_are_independent_from_primary_run": true,
-    "framework_does_not_classify_task_or_rewrite_business_answer": true,
-    "maximum_attempts": 1,
-    "provider_failure": "typed_validation_failure"
-  },
-  "terminal_rules": {
-    "disabled_preserves_trace_and_terminal_observation": true,
-    "valid_output_preserves_trace_and_terminal_observation": true,
-    "invalid_without_repair_is_typed_failure": true,
-    "invalid_after_one_failed_repair_is_typed_failure": true,
-    "repair_success_revalidates_before_success": true,
-    "second_repair_is_blocked": true,
-    "validator_never_expands_tool_permissions": true
+    "tools_are_always_empty": true
   },
   "runner_cases": [
     {
+      "config": {
+        "enabled": false
+      },
+      "expected": {
+        "repair_calls": 0,
+        "status": "completed",
+        "trace_unchanged": true,
+        "validator_calls": 0
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/disabled/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/disabled/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
       "name": "disabled",
-      "config": {"enabled": false},
-      "validator": "would_fail",
-      "expected": {
-        "validator_calls": 0,
-        "repair_calls": 0,
-        "status": "completed",
-        "trace_unchanged": true
-      }
+      "producer": {
+        "records": [
+          "session/c1c/disabled/created",
+          "input/initial/applied",
+          "turn/c1c/disabled/turn/initial/started",
+          "usage/active/c1c/disabled/turn/initial/1/1",
+          "op/c1c/disabled/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/disabled/turn/initial/1/2",
+          "op/c1c/disabled/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/disabled/turn/initial/1/3",
+          "op/c1c/disabled/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/disabled/turn/initial/1/4",
+          "turn/c1c/disabled/turn/initial/ended"
+        ],
+        "session_id": "c1c/disabled"
+      },
+      "validator": "would_fail"
     },
     {
+      "config": {
+        "enabled": true,
+        "max_repairs": 1
+      },
+      "expected": {
+        "final_output": "valid",
+        "repair_calls": 0,
+        "status": "completed",
+        "validator_calls": 1
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/valid_without_repair/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/valid_without_repair/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
       "name": "valid_without_repair",
-      "config": {"enabled": true, "max_repairs": 1},
-      "validator": "pass",
-      "expected": {
-        "validator_calls": 1,
-        "repair_calls": 0,
-        "status": "completed",
-        "final_output": "valid"
-      }
+      "producer": {
+        "records": [
+          "session/c1c/valid_without_repair/created",
+          "input/initial/applied",
+          "turn/c1c/valid_without_repair/turn/initial/started",
+          "usage/active/c1c/valid_without_repair/turn/initial/1/1",
+          "op/c1c/valid_without_repair/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/valid_without_repair/turn/initial/1/2",
+          "op/c1c/valid_without_repair/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/valid_without_repair/turn/initial/1/3",
+          "op/c1c/valid_without_repair/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/valid_without_repair/turn/initial/1/4",
+          "turn/c1c/valid_without_repair/turn/initial/boundary/output_checked/final",
+          "usage/active/c1c/valid_without_repair/turn/initial/1/5",
+          "turn/c1c/valid_without_repair/turn/initial/ended"
+        ],
+        "session_id": "c1c/valid_without_repair"
+      },
+      "validator": "pass"
     },
     {
+      "config": {
+        "enabled": true,
+        "max_repairs": 1,
+        "repair": null
+      },
+      "expected": {
+        "error_code": "output_validation_failed",
+        "repair_calls": 0,
+        "status": "failed",
+        "validator_calls": 1
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/invalid_without_repair_handler/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/invalid_without_repair_handler/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
       "name": "invalid_without_repair_handler",
-      "config": {"enabled": true, "max_repairs": 1, "repair": null},
-      "validator": "fail",
-      "expected": {
-        "validator_calls": 1,
-        "repair_calls": 0,
-        "status": "failed",
-        "error_code": "output_validation_failed"
-      }
+      "producer": {
+        "records": [
+          "session/c1c/invalid_without_repair_handler/created",
+          "input/initial/applied",
+          "turn/c1c/invalid_without_repair_handler/turn/initial/started",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/1",
+          "op/c1c/invalid_without_repair_handler/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/2",
+          "op/c1c/invalid_without_repair_handler/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/3",
+          "op/c1c/invalid_without_repair_handler/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/4",
+          "turn/c1c/invalid_without_repair_handler/turn/initial/boundary/output_checked/final",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/5",
+          "usage/active/c1c/invalid_without_repair_handler/turn/initial/1/6",
+          "turn/c1c/invalid_without_repair_handler/turn/initial/ended"
+        ],
+        "session_id": "c1c/invalid_without_repair_handler"
+      },
+      "validator": "fail"
     },
     {
-      "name": "one_repair_then_valid",
-      "config": {"enabled": true, "max_repairs": 1},
-      "validator": "fail_then_pass",
-      "repair": "returns_valid",
+      "config": {
+        "enabled": true,
+        "max_repairs": 1
+      },
       "expected": {
-        "validator_calls": 2,
+        "final_output": "repaired",
         "repair_calls": 1,
         "status": "completed",
-        "final_output": "repaired"
-      }
+        "validator_calls": 2
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/one_repair_then_valid/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/one_repair_then_valid/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        },
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/one_repair_then_valid/turn/initial/model/output_repair/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "output_repair",
+          "operation_id": "c1c/one_repair_then_valid/turn/initial/model/output_repair/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
+      "name": "one_repair_then_valid",
+      "producer": {
+        "records": [
+          "session/c1c/one_repair_then_valid/created",
+          "input/initial/applied",
+          "turn/c1c/one_repair_then_valid/turn/initial/started",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/1",
+          "op/c1c/one_repair_then_valid/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/2",
+          "op/c1c/one_repair_then_valid/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/3",
+          "op/c1c/one_repair_then_valid/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/4",
+          "turn/c1c/one_repair_then_valid/turn/initial/boundary/output_checked/initial",
+          "op/c1c/one_repair_then_valid/turn/initial/model/output_repair/1/1/planned",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/5",
+          "op/c1c/one_repair_then_valid/turn/initial/model/output_repair/1/1/started",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/6",
+          "op/c1c/one_repair_then_valid/turn/initial/model/output_repair/1/1/result",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/7",
+          "turn/c1c/one_repair_then_valid/turn/initial/boundary/output_checked/final",
+          "usage/active/c1c/one_repair_then_valid/turn/initial/1/8",
+          "turn/c1c/one_repair_then_valid/turn/initial/ended"
+        ],
+        "session_id": "c1c/one_repair_then_valid"
+      },
+      "repair": "returns_valid",
+      "validator": "fail_then_pass"
     },
     {
+      "config": {
+        "enabled": true,
+        "max_repairs": 1
+      },
+      "expected": {
+        "error_code": "output_validation_failed",
+        "repair_calls": 1,
+        "second_repair_attempted": false,
+        "status": "failed",
+        "validator_calls": 2
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/repair_result_still_invalid/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/repair_result_still_invalid/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        },
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/repair_result_still_invalid/turn/initial/model/output_repair/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "output_repair",
+          "operation_id": "c1c/repair_result_still_invalid/turn/initial/model/output_repair/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
       "name": "repair_result_still_invalid",
-      "config": {"enabled": true, "max_repairs": 1},
-      "validator": "always_fail",
+      "producer": {
+        "records": [
+          "session/c1c/repair_result_still_invalid/created",
+          "input/initial/applied",
+          "turn/c1c/repair_result_still_invalid/turn/initial/started",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/1",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/2",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/3",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/4",
+          "turn/c1c/repair_result_still_invalid/turn/initial/boundary/output_checked/initial",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/output_repair/1/1/planned",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/5",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/output_repair/1/1/started",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/6",
+          "op/c1c/repair_result_still_invalid/turn/initial/model/output_repair/1/1/result",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/7",
+          "turn/c1c/repair_result_still_invalid/turn/initial/boundary/output_checked/final",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/8",
+          "usage/active/c1c/repair_result_still_invalid/turn/initial/1/9",
+          "turn/c1c/repair_result_still_invalid/turn/initial/ended"
+        ],
+        "session_id": "c1c/repair_result_still_invalid"
+      },
       "repair": "returns_invalid",
-      "expected": {
-        "validator_calls": 2,
-        "repair_calls": 1,
-        "status": "failed",
-        "error_code": "output_validation_failed",
-        "second_repair_attempted": false
-      }
+      "validator": "always_fail"
     },
     {
-      "name": "repair_provider_failure",
-      "config": {"enabled": true, "max_repairs": 1},
-      "validator": "fail",
-      "repair": "raises_provider_error",
+      "config": {
+        "enabled": true,
+        "max_repairs": 1
+      },
       "expected": {
-        "validator_calls": 1,
+        "error_code": "output_validation_failed",
+        "provider_error_is_observed": true,
         "repair_calls": 1,
         "status": "failed",
-        "error_code": "output_validation_failed",
-        "provider_error_is_observed": true
-      }
+        "validator_calls": 1
+      },
+      "model_calls": [
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/repair_provider_failure/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "c1c/repair_provider_failure/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        },
+        {
+          "attempt": 1,
+          "backend": "test",
+          "call_id": "c1c/repair_provider_failure/turn/initial/model/output_repair/1/1",
+          "cycle_index": 1,
+          "error_code": "repair_provider_error",
+          "model": "m",
+          "operation": "output_repair",
+          "operation_id": "c1c/repair_provider_failure/turn/initial/model/output_repair/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "failed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        }
+      ],
+      "name": "repair_provider_failure",
+      "producer": {
+        "records": [
+          "session/c1c/repair_provider_failure/created",
+          "input/initial/applied",
+          "turn/c1c/repair_provider_failure/turn/initial/started",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/1",
+          "op/c1c/repair_provider_failure/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/2",
+          "op/c1c/repair_provider_failure/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/3",
+          "op/c1c/repair_provider_failure/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/4",
+          "turn/c1c/repair_provider_failure/turn/initial/boundary/output_checked/initial",
+          "op/c1c/repair_provider_failure/turn/initial/model/output_repair/1/1/planned",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/5",
+          "op/c1c/repair_provider_failure/turn/initial/model/output_repair/1/1/started",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/6",
+          "op/c1c/repair_provider_failure/turn/initial/model/output_repair/1/1/result",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/7",
+          "turn/c1c/repair_provider_failure/turn/initial/boundary/output_checked/final",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/8",
+          "usage/active/c1c/repair_provider_failure/turn/initial/1/9",
+          "turn/c1c/repair_provider_failure/turn/initial/ended"
+        ],
+        "session_id": "c1c/repair_provider_failure"
+      },
+      "repair": "raises_provider_error",
+      "validator": "fail"
     }
   ],
+  "schema_version": "vv-agent.output-validation.v1",
   "task_independence": {
     "forbidden_framework_fields": [
       "task_category",
@@ -121,5 +543,30 @@
       "stop_when_semantically_complete"
     ],
     "prompt_and_tool_schema_unchanged": true
+  },
+  "terminal_rules": {
+    "disabled_preserves_trace_and_terminal_observation": true,
+    "invalid_after_one_failed_repair_is_typed_failure": true,
+    "invalid_without_repair_is_typed_failure": true,
+    "repair_success_revalidates_before_success": true,
+    "second_repair_is_blocked": true,
+    "valid_output_preserves_trace_and_terminal_observation": true,
+    "validator_never_expands_tool_permissions": true
+  },
+  "validator": {
+    "input": [
+      "final_output",
+      "validation_context"
+    ],
+    "invalid_code_is_non_empty": true,
+    "invalid_fields": [
+      "code",
+      "message"
+    ],
+    "outcomes": [
+      "valid",
+      "invalid"
+    ],
+    "registration": "host_selected_typed_callback"
   }
 }

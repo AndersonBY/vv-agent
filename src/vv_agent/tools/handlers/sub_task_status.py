@@ -321,75 +321,9 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
     interaction: dict[str, Any] | None = None
     if message:
-        from vv_agent.runtime.engine import steer_sub_agent_session
+        from vv_agent.session.delegation import status_with_store
 
-        target_id = task_ids[0]
-        record = manager.get(target_id)
-        if record is None:
-            return _error(
-                f"Sub-task {target_id} not found.",
-                error_code="sub_task_not_found",
-                details={"task_id": target_id},
-            )
-
-        previous_status = (
-            record.outcome.status.value
-            if record.outcome is not None
-            else AgentStatus.RUNNING.value
-            if record.is_running()
-            else AgentStatus.PENDING.value
-        )
-        if record.is_running():
-            if record.session is None:
-                return _error(
-                    f"Sub-task {target_id} session is not ready yet.",
-                    error_code="sub_task_session_not_ready",
-                    details={"task_id": target_id},
-                )
-            if not steer_sub_agent_session(session_id=record.session_id, prompt=message):
-                return _error(
-                    f"Failed to queue message for running sub-task {target_id}.",
-                    error_code="sub_task_message_queue_failed",
-                    details={"task_id": target_id},
-                )
-            interaction = {
-                "task_id": target_id,
-                "action": "message_queued",
-                "previous_status": previous_status,
-            }
-        else:
-            if record.outcome is not None and record.outcome.status == AgentStatus.MAX_CYCLES:
-                return _error(
-                    f"Sub-task {target_id} reached max cycles and cannot continue.",
-                    error_code="sub_task_max_cycles_reached",
-                    details={"task_id": target_id},
-                )
-            try:
-                manager._continue_task_with_context(
-                    task_id=target_id,
-                    prompt=message,
-                    context=context,
-                )
-            except KeyError:
-                return _error(
-                    f"Sub-task {target_id} not found.",
-                    error_code="sub_task_not_found",
-                    details={"task_id": target_id},
-                )
-            except (RuntimeError, ValueError) as exc:
-                return _error(
-                    str(exc),
-                    error_code="sub_task_continue_failed",
-                    details={"task_id": target_id},
-                )
-            interaction = {
-                "task_id": target_id,
-                "action": "continued",
-                "previous_status": previous_status,
-            }
-
-        if wait_for_response:
-            manager.wait(target_id)
+        return status_with_store(context, arguments)
 
     if wait_for_completion:
         tasks, running_task_ids, wait_exceeded = _wait_for_sub_task_completion(

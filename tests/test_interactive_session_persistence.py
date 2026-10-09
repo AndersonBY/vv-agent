@@ -1,340 +1,84 @@
+"""Creation seed and durable transcript projections replace mutable backing sessions."""
+
 from __future__ import annotations
 
-import json
-from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
-from support import FixedModelProvider
 
-from vv_agent import (
-    AgentSessionOptions,
-    AgentSessionRun,
-    AgentStatus,
-    InteractiveAgentClient,
-    InteractiveAgentDefinition,
-    MemorySession,
-    MemorySessionStore,
-    Message,
-    RunResult,
-    create_agent_session,
-)
-from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.llm import LlmRequest, ScriptedLLM
-from vv_agent.types import AgentResult, LLMResponse
-
-CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
+from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, Message, ScriptedModelProvider, SQLiteStore
+from vv_agent.session.store import Conflict
+from vv_agent.types import LLMResponse
 
 
-def _resolved() -> ResolvedModelConfig:
-    endpoint = EndpointConfig(endpoint_id="fake", api_key="key", api_base="https://example.invalid/v1")
-    return ResolvedModelConfig(
-        backend="test",
-        requested_model="test-model",
-        selected_model="test-model",
-        model_id="test-model",
-        endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
-    )
-
-
-def _definition() -> InteractiveAgentDefinition:
-    return InteractiveAgentDefinition(
-        description="Remember the full conversation and finish each turn.",
-        model="test-model",
-        max_cycles=1,
-    )
-
-
-def _standalone_run(*, prompt: str, messages: list[Message]) -> AgentSessionRun:
-    return AgentSessionRun(
-        agent_name="inline",
-        result=AgentResult(
-            status=AgentStatus.COMPLETED,
-            messages=messages,
-            cycles=[],
-            final_answer=f"answer: {prompt}",
-            shared_state={"todo_list": []},
+def client(tmp_path, steps, store=None):
+    return InteractiveAgentClient(
+        options=AgentSessionOptions(
+            model_provider=ScriptedModelProvider.from_steps("test", "m", steps),
+            workspace=tmp_path,
         ),
-        resolved=_resolved(),
+        store=store,
     )
 
 
-def test_interactive_client_hydrates_and_reuses_backing_session_without_duplicates(tmp_path: Path) -> None:
-    backing = MemorySession("persistent-thread")
-    seeded = [
-        Message(role="user", content="earlier question", metadata={"turn": 0}),
-        Message(role="assistant", content="earlier answer", metadata={"turn": 0}),
-    ]
-    backing.add_items(seeded)
-    requests: list[list[Message]] = []
-    turn = 0
+def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tmp_path: Path):
+    requests = []
 
-    def respond(request: LlmRequest) -> LLMResponse:
-        nonlocal turn
-        turn += 1
-        current_turn = turn
-        requests.append(list(request.messages))
-        return LLMResponse(content=f"done {current_turn}")
+    def respond(request):
+        requests.append(request.messages)
+        return LLMResponse(f"done {len(requests)}")
 
-    client = InteractiveAgentClient(
-        options=AgentSessionOptions(
-            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond, respond]), _resolved()),
-            workspace=tmp_path,
-            session=backing,
-        )
-    )
-
-    first_facade = client.create_session(agent=_definition())
-    assert first_facade.session_id == "persistent-thread"
-    assert first_facade.session is backing
-    assert first_facade.messages == seeded
-
-    first_run = first_facade.prompt("first", auto_follow_up=False)
-    after_first = backing.get_items()
-    assert isinstance(first_run, RunResult)
-    assert first_run.agent_name == "inline"
-    assert first_run.run_id.startswith("run_")
-    assert first_run.trace_id.startswith("trace_")
-    assert first_run.new_items == after_first[len(seeded) :]
-    assert first_run.resolved is not None
-    assert first_run.resolved.model_id == "test-model"
-    assert first_facade.messages == after_first
-    assert [message.content for message in after_first if message.role == "user"] == [
-        "earlier question",
-        "first",
-    ]
-
-    rebuilt_facade = client.create_session(agent=_definition())
-    assert rebuilt_facade.session_id == first_facade.session_id
-    assert rebuilt_facade.messages == after_first
-    rebuilt_facade.prompt("second", auto_follow_up=False)
-
-    persisted = backing.get_items()
-    assert rebuilt_facade.messages == persisted
-    assert [message.content for message in persisted if message.role == "user"] == [
-        "earlier question",
-        "first",
-        "second",
-    ]
-    assert [message.content for message in requests[1] if message.role == "user"] == [
-        "earlier question",
-        "first",
-        "second",
-    ]
-    assert [message.content for message in persisted if message.role == "assistant"] == [
-        "earlier answer",
-        "done 1",
-        "done 2",
-    ]
-    assert not any(message.role == "tool" or message.tool_calls for message in persisted)
+    seed = {
+        "messages": [Message("user", "earlier question").to_dict(), Message("assistant", "earlier answer").to_dict()],
+        "shared_state": {"host": "seeded"},
+    }
+    store = SQLiteStore(str(tmp_path / "sessions.sqlite"))
+    first_client = client(tmp_path, [respond], store)
+    first = first_client.create_session(agent=Agent("assistant", "Remember context."), session_id="thread", session=seed)
+    assert [m.content for m in first.messages] == ["earlier question", "earlier answer"]
+    result = first.prompt("first", auto_follow_up=False)
+    assert result.raw_result.session_id == "thread"
+    first_client.driver.close()
+    store.connection.close()
+    reopened = SQLiteStore(str(tmp_path / "sessions.sqlite"))
+    second_client = client(tmp_path, [respond], reopened)
+    second = second_client.create_session(agent=Agent("assistant", "Remember context."), session_id="thread")
+    assert second.shared_state["host"] == "seeded"
+    second.prompt("second", auto_follow_up=False)
+    assert [m.content for m in second.messages if m.role == "user"] == ["earlier question", "first", "second"]
+    assert [m.content for m in requests[-1] if m.role == "user"] == ["earlier question", "first", "second"]
+    second_client.driver.close()
+    reopened.connection.close()
 
 
-def test_create_agent_session_hydrates_replaces_and_validates_backing_session(tmp_path: Path) -> None:
-    backing = MemorySession("stored-id")
-    backing.add_items([Message(role="user", content="stored")])
-
-    def execute_run(**_: Any) -> AgentSessionRun:
-        raise AssertionError("replace_messages must not execute a run")
-
-    facade = create_agent_session(
-        execute_run=execute_run,
-        agent_name="inline",
-        definition=_definition(),
-        workspace=tmp_path,
-        session=backing,
-    )
-    replacement = [
-        Message(role="user", content="replacement"),
-        Message(role="assistant", content="replacement answer", metadata={"source": "host"}),
-    ]
-
-    assert facade.session_id == "stored-id"
-    assert facade.messages == backing.get_items()
-    facade.replace_messages(replacement)
-
-    assert facade.messages == replacement
-    assert backing.get_items() == replacement
-    rebuilt = create_agent_session(
-        execute_run=execute_run,
-        agent_name="inline",
-        definition=_definition(),
-        workspace=tmp_path,
-        session=backing,
-    )
-    assert rebuilt.messages == replacement
-
-    with pytest.raises(ValueError, match="does not match backing Session"):
-        create_agent_session(
-            execute_run=execute_run,
-            session_id="different-id",
-            agent_name="inline",
-            definition=_definition(),
-            workspace=tmp_path,
-            session=backing,
-        )
+def test_creation_seed_is_immutable_and_transcript_is_detached(tmp_path):
+    owner = client(tmp_path, [])
+    agent = Agent("assistant", "Answer.")
+    seed = {"messages": [Message("user", "stored").to_dict()], "shared_state": {"nested": {"value": 1}}}
+    session = owner.create_session(agent=agent, session_id="immutable", session=seed)
+    seed["messages"][0]["content"] = "host mutation"
+    session.messages[0].content = "projection mutation"
+    session.shared_state["nested"]["value"] = 9
+    assert session.messages[0].content == "stored" and session.shared_state["nested"]["value"] == 1
+    with pytest.raises(Conflict):
+        owner.create_session(agent=agent, session_id="immutable", session=seed)
+    owner.driver.close()
 
 
-def test_client_session_override_and_store_isolation(tmp_path: Path) -> None:
-    store = MemorySessionStore()
-    default_backing = store.session("default-thread")
-    override_backing = store.session("override-thread")
-    default_backing.add_items([Message(role="user", content="default history")])
-    override_backing.add_items([Message(role="user", content="override history")])
-    client = InteractiveAgentClient(
-        options=AgentSessionOptions(
-            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
-            workspace=tmp_path,
-            session=default_backing,
-        )
-    )
-
-    default_facade = client.create_session(agent=_definition())
-    override_facade = client.create_session(agent=_definition(), session=override_backing)
-    override_facade.replace_messages([Message(role="assistant", content="override replacement")])
-
-    assert default_facade.session_id == "default-thread"
-    assert default_facade.messages == [Message(role="user", content="default history")]
-    assert override_facade.session_id == "override-thread"
-    assert override_backing.get_items() == [Message(role="assistant", content="override replacement")]
-    assert default_backing.get_items() == [Message(role="user", content="default history")]
+@pytest.mark.parametrize("seed", [{}, {"messages": []}, {"messages": [], "shared_state": {}, "extra": True}])
+def test_seed_is_closed(tmp_path, seed):
+    owner = client(tmp_path, [])
+    with pytest.raises(ValueError, match="exactly"):
+        owner.create_session(agent=Agent("assistant", "Answer."), session=seed)
+    owner.driver.close()
 
 
-def test_session_without_explicit_storage_uses_memory_session_as_source_of_truth(tmp_path: Path) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def execute_run(**kwargs: Any) -> AgentSessionRun:
-        calls.append(kwargs)
-        history = list(kwargs["session"].get_items())
-        prompt = kwargs["prompt"]
-        messages = [
-            *history,
-            Message(role="user", content=prompt),
-            Message(role="assistant", content=f"answer: {prompt}"),
-        ]
-        return _standalone_run(prompt=prompt, messages=messages)
-
-    facade = create_agent_session(
-        execute_run=execute_run,
-        session_id="memory-only",
-        agent_name="inline",
-        definition=_definition(),
-        workspace=tmp_path,
-    )
-
-    facade.prompt("first", auto_follow_up=False)
-    facade.prompt("second", auto_follow_up=False)
-
-    assert isinstance(facade.session, MemorySession)
-    assert calls[0]["session"] is facade.session
-    assert calls[1]["session"] is facade.session
-    assert calls[0]["initial_messages"] is None
-    assert calls[1]["initial_messages"] is None
-    assert [message.content for message in facade.messages] == [
-        "first",
-        "answer: first",
-        "second",
-        "answer: second",
-    ]
-
-
-def test_custom_run_replaces_rewritten_history_without_duplicate_continuations(tmp_path: Path) -> None:
-    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))["continuation"]
-    assert contract["history_update"] == "replace_when_existing_prefix_is_rewritten"
-
-    backing = MemorySession("rewritten-history")
-    backing.add_items(
-        [
-            Message(role="user", content="seed question", metadata={"revision": 0}),
-            Message(role="assistant", content="seed answer", metadata={"revision": 0}),
-        ]
-    )
-    turn = 0
-
-    def execute_run(**kwargs: Any) -> AgentSessionRun:
-        nonlocal turn
-        turn += 1
-        rewritten = [
-            replace(message, metadata={**message.metadata, "revision": turn}) for message in kwargs["session"].get_items()
-        ]
-        prompt = kwargs["prompt"]
-        return _standalone_run(
-            prompt=prompt,
-            messages=[
-                *rewritten,
-                Message(role="user", content=prompt),
-                Message(role="assistant", content=f"answer: {prompt}"),
-            ],
-        )
-
-    facade = create_agent_session(
-        execute_run=execute_run,
-        agent_name="inline",
-        definition=_definition(),
-        workspace=tmp_path,
-        session=backing,
-    )
-
-    facade.prompt("first continuation", auto_follow_up=False)
-    facade.prompt("second continuation", auto_follow_up=False)
-
-    persisted = backing.get_items()
-    contents = [message.content for message in persisted]
-    assert contents == [
-        "seed question",
-        "seed answer",
-        "first continuation",
-        "answer: first continuation",
-        "second continuation",
-        "answer: second continuation",
-    ]
-    has_duplicate_history = len(contents) != len(set(contents))
-    assert has_duplicate_history is contract["duplicate_history_allowed"]
-    assert [message.metadata.get("revision") for message in persisted[:4]] == [2, 2, 2, 2]
-
-
-def test_kernel_file_facade_rebuild_resume_and_control_identity(tmp_path):
-    from vv_agent import Agent, ScriptedModelProvider
-    from vv_agent.session.interactive import _KernelAgentSession
-    from vv_agent.session.store import Conflict
-    from vv_agent.session.surfaces import _SessionKernel
-    from vv_agent.types import ToolCall
-
-    path = tmp_path / "interactive.sqlite"
-    provider = ScriptedModelProvider.new(
-        "test",
-        "m",
-        [
-            LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Need input"})]),
-            LLMResponse("done"),
-        ],
-    )
-    first_kernel = _SessionKernel(path)
-    first = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path), _kernel=first_kernel)
-    first_facade = first.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent")
-    waiting = first_facade.prompt("go", auto_follow_up=False)
-    assert waiting.status == AgentStatus.WAIT_USER
-    retained_messages = first_facade.messages
-    first_kernel.close()
-    kernel = _SessionKernel(path)
-    try:
-        rebuilt = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path), _kernel=kernel)
-        facade = cast(_KernelAgentSession, rebuilt.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent"))
-        latest = facade.latest_run
-        assert latest is not None and latest.run_id == waiting.run_id
-        assert facade.messages == retained_messages
-        final = facade.continue_run("answer")
-        assert final.run_id == waiting.run_id and final.final_output == "done"
-        assert facade.archive(input_id="archive").replayed is False
-        assert facade.archive(input_id="archive").replayed is True
-        with pytest.raises(Conflict):
-            kernel.control("persistent", "close", "archive")
-        assert facade.close(input_id="close") is True
-        assert facade.close(input_id="close") is False
-        with pytest.raises(Conflict):
-            kernel.control("persistent", "archive", "close")
-        assert kernel.store.read_state("persistent")[0].closed
-        with pytest.raises(RuntimeError, match="closed"):
-            facade.prompt("late")
-    finally:
-        kernel.close()
+def test_store_sessions_are_isolated(tmp_path):
+    owner = client(tmp_path, [LLMResponse("one"), LLMResponse("two")])
+    a = owner.create_session(agent=Agent("assistant", "Answer."), session_id="a")
+    b = owner.create_session(agent=Agent("assistant", "Answer."), session_id="b")
+    a.prompt("first", auto_follow_up=False)
+    b.prompt("second", auto_follow_up=False)
+    assert [m.content for m in a.messages if m.role == "user"] == ["first"]
+    assert [m.content for m in b.messages if m.role == "user"] == ["second"]
+    owner.driver.close()

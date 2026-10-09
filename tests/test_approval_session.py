@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from support import FixedModelProvider
 
-from vv_agent import Agent, ApprovalRequestedEvent, RunConfig, Runner, build_default_registry, function_tool
+from vv_agent import Agent, AgentStatus, ApprovalRequestedEvent, RunConfig, Runner, build_default_registry, function_tool
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
@@ -100,14 +100,15 @@ def test_allow_session_skips_same_function_tool_but_other_tool_still_requests() 
         "go",
         run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), approval_provider=provider),
     )
-    requested: list[str] = []
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            requested.append(event.tool_name)
-            decision = ApprovalDecision.allow_session() if event.tool_name == "alpha" else ApprovalDecision.allow()
-            handle.approve(event.request_id, decision)
-
-    assert handle.result(timeout=2).final_output == "done"
+    requested = []
+    result = handle.result()
+    while result.status is AgentStatus.WAIT_USER:
+        for entry in result.metadata["session_waits"]:
+            requested.extend(entry["scope"])
+            decision = ApprovalDecision.allow_session() if entry["scope"] == ["alpha"] else ApprovalDecision.allow()
+            handle.approve(entry["request_id"], decision)
+        result = handle.resume()
+    assert result.final_output == "done"
     assert requested == ["alpha", "beta"]
     assert provider.requested_tools == ["alpha", "beta"]
     assert calls == ["alpha", "alpha", "beta"]
@@ -149,13 +150,10 @@ def test_allow_session_is_honored_by_executor_orchestrator_path() -> None:
             tool_registry_factory=registry_factory,
         ),
     )
-    requests = 0
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            requests += 1
-            handle.approve(event.request_id, ApprovalDecision.allow_session())
-
-    assert handle.result(timeout=2).final_output == "done"
-    assert requests == 1
+    waiting = handle.result()
+    requests = [e for e in waiting.events if isinstance(e, ApprovalRequestedEvent)]
+    assert len(requests) == 1
+    handle.approve(requests[0].request_id, ApprovalDecision.allow_session())
+    assert handle.resume().final_output == "done"
     assert provider.requested_tools == ["guarded_executor"]
     assert calls == ["ran", "ran"]

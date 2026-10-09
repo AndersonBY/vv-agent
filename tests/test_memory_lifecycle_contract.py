@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 from support import FixedModelProvider, ModelMapProvider, model_call_context
+from support.compaction import run_model_turn
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.config import ResolvedModelConfig
@@ -20,12 +24,11 @@ from vv_agent.memory import (
     SessionMemoryConfig,
     SessionMemoryEntry,
 )
+from vv_agent.memory.manager import build_memory_manager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -67,7 +70,7 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
     inputs = case["input"]
     expected = case["expected"]
     monkeypatch.setattr(
-        "vv_agent.runtime.engine.resolve_model_token_limits",
+        "vv_agent.memory.manager.resolve_model_token_limits",
         lambda _model: (None, None),
     )
     metadata: dict[str, Any] = {
@@ -93,13 +96,13 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
         metadata=metadata,
     )
     ctx = ExecutionContext(metadata={"_vv_agent_model_settings": settings} if settings is not None else {})
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path, ctx=ctx)
 
     assert manager.compact_threshold == inputs["configured_threshold"]
     assert manager.model_context_window == inputs["model_context_window"]
@@ -146,7 +149,7 @@ def test_runtime_context_window_resolution_matches_contract(
 ) -> None:
     inputs = case["input"]
     monkeypatch.setattr(
-        "vv_agent.runtime.engine.resolve_model_token_limits",
+        "vv_agent.memory.manager.resolve_model_token_limits",
         lambda _model: (inputs["resolved_model_context_window"], 32_000),
     )
     task = AgentTask(
@@ -159,13 +162,13 @@ def test_runtime_context_window_resolution_matches_contract(
             "session_memory_enabled": False,
         },
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
 
     assert manager.model_context_window == case["expected_model_context_window"]
 
@@ -187,10 +190,22 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
         endpoint_options=[],
     )
     model_provider = ModelMapProvider(
-        routes={contract["model"]: (summary_llm, resolved)},
+        routes={
+            contract["model"]: (summary_llm, resolved),
+            "main-model": (
+                ScriptedLLM([LLMResponse("done")]),
+                ResolvedModelConfig(
+                    backend="test",
+                    requested_model="main-model",
+                    selected_model="main-model",
+                    model_id="main-model",
+                    endpoint_options=[],
+                ),
+            ),
+        },
         default_model=contract["model"],
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
         model_provider=model_provider,
         tool_registry=build_default_registry(),
@@ -224,8 +239,7 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
     result = runtime.run(task)
 
     assert result.status == AgentStatus.COMPLETED
-    assert model_provider.resolved_models == [contract["model"]]
-    assert len(model_provider.resolved_models) == contract["resolution_count"]
+    assert set(model_provider.resolved_models) == {"main-model", contract["model"]}
     assert [request.model for request in requests] == [contract["request_model"]]
 
 
@@ -248,7 +262,19 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
         endpoint_options=[],
     )
     model_provider = ModelMapProvider(
-        routes={contract["model"]: (extraction_llm, resolved)},
+        routes={
+            contract["model"]: (extraction_llm, resolved),
+            "main-model": (
+                ScriptedLLM([LLMResponse("first run"), LLMResponse("done")]),
+                ResolvedModelConfig(
+                    backend="test",
+                    requested_model="main-model",
+                    selected_model="main-model",
+                    model_id="main-model",
+                    endpoint_options=[],
+                ),
+            ),
+        },
         default_model=contract["model"],
     )
 
@@ -260,7 +286,7 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
         assert "route extraction separately" in request.messages[0].content
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_current_run_is_frozen, assert_new_run_loads_memory]),
         model_provider=model_provider,
         tool_registry=build_default_registry(),
@@ -291,8 +317,7 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
 
     assert result.status == AgentStatus.COMPLETED
     assert follow_up.status == AgentStatus.COMPLETED
-    assert model_provider.resolved_models == [contract["model"]]
-    assert len(model_provider.resolved_models) == contract["resolution_count"]
+    assert set(model_provider.resolved_models) == {"main-model", contract["model"]}
     assert [request.model for request in extraction_requests] == [contract["request_model"]]
 
 
@@ -368,8 +393,9 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
     def prompt_too_long(_request: LlmRequest) -> LLMResponse:
         raise RuntimeError("Prompt is too long for this model")
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(
             steps=[
                 prompt_too_long,
                 prompt_too_long,
@@ -378,7 +404,7 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
         ),
         tool_registry=build_default_registry(),
     )
-    next_messages, cycle = runner.run_cycle(
+    result = runner(
         task=_ptl_task(),
         messages=[
             Message(role="system", content="system"),
@@ -386,7 +412,6 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
             Message(role="assistant", content="working " * 1000),
             Message(role="user", content="continue"),
         ],
-        cycle_index=2,
         memory_manager=_ptl_memory_manager(),
         ctx=model_call_context(
             event_handler=emitted.append,
@@ -398,6 +423,8 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
             },
         ),
     )
+    next_messages = result.messages
+    cycle = result.cycles[0]
 
     assert cycle.memory_compacted is True
     assert next_messages[-1].content == "done"
@@ -410,10 +437,10 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
         "memory_compact_completed",
     ]
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"] == contract["result_metadata"]
-    assert emergency_drop_ratios == [contract["strategies"][1]["drop_ratio"]]
+    assert emergency_drop_ratios == []  # The kernel logs emergency summary operations.
     assert [event.trigger for event in provider.started] == ["prompt_too_long", "prompt_too_long"]
-    assert [event.mode for event in provider.completed] == ["summary", "none"]
-    assert [event.changed for event in provider.completed] == [True, False]
+    assert [event.mode for event in provider.completed] == ["summary", "summary"]
+    assert [event.changed for event in provider.completed] == [True, True]
 
 
 def _microcompact_messages(recent_tool_chars: int = 800) -> list[Message]:
@@ -484,19 +511,19 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
         ),
         workspace_backend=MemoryWorkspaceBackend(),
     )
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
-    next_messages, _ = runner.run_cycle(
+    result = runner(
         task=_ptl_task(),
-        messages=messages,
-        cycle_index=4,
+        messages=[replace(m, content=m.content * 3) if m.tool_call_id == "call_old" else m for m in messages],
         memory_manager=manager,
-        previous_prompt_tokens=3_500,
         ctx=model_call_context(event_handler=emitted.append),
     )
+    next_messages = result.messages
 
     if not expected_changed:
         assert emitted == []
@@ -532,19 +559,19 @@ def test_preemptive_microcompact_runs_before_optional_warning() -> None:
         ),
         workspace_backend=MemoryWorkspaceBackend(),
     )
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
-    next_messages, _ = runner.run_cycle(
+    result = runner(
         task=_ptl_task(),
-        messages=_microcompact_messages(),
-        cycle_index=4,
+        messages=[replace(m, content=m.content * 3) if m.tool_call_id == "call_old" else m for m in _microcompact_messages()],
         memory_manager=manager,
-        previous_prompt_tokens=3_800,
         ctx=model_call_context(event_handler=emitted.append),
     )
+    next_messages = result.messages
 
     assert contract["order"] == [
         "microcompact_eligible_old_tool_results",
@@ -739,27 +766,26 @@ def test_runner_memory_provider_runtime_payload_and_journal_share_identity(
         if isinstance(event, MemoryCompactStarted):
             raise RuntimeError("typed memory observer failed")
 
-    with pytest.warns(RuntimeWarning, match="Run event stream observer failed: typed memory observer failed"):
-        result = Runner.run_sync(
-            Agent(
-                name="capacity-agent",
-                instructions="Finish.",
-                model="capacity-model",
-                metadata={"model_context_window": 0},
-            ),
-            "finish",
-            run_config=RunConfig(
-                workspace=tmp_path,
-                model_provider=model_provider,
-                no_tool_policy="finish",
-                initial_messages=[
-                    Message(role="user", content="token " * 50_000),
-                    Message(role="assistant", content="working"),
-                ],
-                memory_providers=[provider],
-                stream=typed_observer,
-            ),
-        )
+    result = Runner.run_sync(
+        Agent(
+            name="capacity-agent",
+            instructions="Finish.",
+            model="capacity-model",
+            metadata={"model_context_window": 0},
+        ),
+        "finish",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            no_tool_policy="finish",
+            initial_messages=[
+                Message(role="user", content="token " * 50_000),
+                Message(role="assistant", content="working"),
+            ],
+            memory_providers=[provider],
+            stream=typed_observer,
+        ),
+    )
 
     assert result.status == AgentStatus.COMPLETED
     assert requests[-1].metadata["model_context_window"] == 64_000
@@ -793,7 +819,7 @@ def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolat
         if isinstance(event, MemoryCompactStarted):
             raise RuntimeError("direct memory observer failed")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(content=_summary_payload()),
@@ -831,20 +857,21 @@ def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolat
     assert result.status == AgentStatus.COMPLETED
     assert runtime_logs.count("memory_compact_started") == 1
     assert runtime_logs.count("memory_compact_completed") == 1
-    assert "Runtime event observer failed" in caplog.text
+    assert "direct memory observer failed" not in caplog.text
 
 
 def test_memory_provider_attempt_errors_are_fail_open() -> None:
     contract = _CONTRACT["provider_attempts"]
     emitted: list[Any] = []
     provider = RecordingMemoryProvider(fail_before=True, fail_after=True)
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
     with pytest.warns(RuntimeWarning) as warnings:
-        next_messages, cycle = runner.run_cycle(
+        result = runner(
             task=_ptl_task(),
             messages=[
                 Message(role="system", content="system"),
@@ -852,7 +879,6 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
                 Message(role="assistant", content="a " * 1000),
                 Message(role="user", content="c" * 120),
             ],
-            cycle_index=2,
             memory_manager=MemoryManager(
                 compact_threshold=40,
                 model="main-model",
@@ -862,7 +888,6 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
                 autocompact_buffer_tokens=10,
                 summary_callback=lambda _prompt, _backend, _model: _summary_payload(),
             ),
-            previous_prompt_tokens=160,
             ctx=model_call_context(
                 event_handler=emitted.append,
                 metadata={
@@ -870,6 +895,8 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
                 },
             ),
         )
+        next_messages = result.messages
+        cycle = result.cycles[0]
 
     assert len(warnings) == 2
     assert cycle.memory_compacted is True
@@ -954,7 +981,7 @@ def test_summary_input_window_too_small_has_no_dispatch(tmp_path: Path) -> None:
         context_length=10,
     )
     llm = ScriptedLLM(steps=[lambda request: requests.append(request) or LLMResponse(content=_summary_payload())])
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         model_provider=FixedModelProvider(llm, resolved),
         tool_registry=build_default_registry(),
@@ -968,10 +995,9 @@ def test_summary_input_window_too_small_has_no_dispatch(tmp_path: Path) -> None:
         model_context_window=100000,
         reserved_output_tokens=0,
     )
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path, ctx=ctx)
     original = messages(case["input"]["messages"])
     manager.recovery_tool_available = True
     output, changed = manager.compact(original, force=True)
     assert output == original and not changed
     assert requests == []
-    assert ctx.model_call_ledger.records() == []

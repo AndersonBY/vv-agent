@@ -59,41 +59,36 @@ not contain a price table, convert currencies, or subtract an implicit
 baseline. Unit, optional currency, and monotonicity must match the configured
 limit exactly.
 
-For distributed execution, register the meter in the worker-local capability
-registry and set `RuntimeRecipe.capabilities.host_cost_meter_ref`. Process-local
-meter objects are not serialized into Celery envelopes.
+A durable host must reconstruct the named host binding for the retained turn.
+Process-local meter objects are not serialized into session records.
 
 ## Resume And Child Runs
 
-Approval resume preserves the source run's usage while excluding approval wait
-time. The resumed model loop still receives the normal fresh `max_cycles`
-allowance. Independent Runner calls start fresh.
+Approval and user replies continue the same retained turn, preserving usage and
+cycle allowances while excluding wait time. Fresh turns start fresh counters.
 
 Framework-created child runs inherit limits but use fresh token, tool, cycle,
 and elapsed counters. A parent host meter is not propagated implicitly. Share a
 host-scoped meter explicitly when parent and child work must consume one global
 ledger.
 
-Distributed workers persist `budget_usage` in the current checkpoint and add
-only each active monotonic worker segment. Queue time is excluded. Checkpoint
-state does not claim exactly-once behavior for external effects.
+The session log retains accounting observations for each active monotonic
+segment. Queue time is excluded. Lost intervals remain unavailable; a retained
+receipt is reused without dispatch or another usage charge.
 
 ## Verification
 
 ```bash
 uv run pytest tests/test_run_budget.py
-uv run pytest tests/test_distributed_checkpoint.py tests/test_checkpoint.py
+uv run pytest tests/session/test_capability_parity.py tests/test_run_resume.py
 uv run pytest tests/test_app_server_contract_parity.py
 ```
 
 The normative cross-language behavior is pinned by `contract.lock.json` and
 the vendored `run_budget.json` and `budget_events.jsonl` fixtures.
 
-Model admission is checked before every new internal or primary request,
-including a primary request immediately following compaction in the same cycle.
-This uses the existing `cycle_start` admission boundary without incrementing
-the started-cycle count. Completed checkpoint model receipts replay without
-another admission check or usage charge.
-Celery workers bind the same admission callback when reconstructing their
-model coordinator. Distributed compaction boundary regressions live in
-`tests/test_distributed_checkpoint.py`.
+Model admission is checked before every primary, compaction, Session Memory and
+output-repair operation. Atomic completion accounts for failures and unknown usage,
+and checks overshoot before the next operation. A reserved tool batch completes as
+a whole. Cancellation and an existing operation failure keep terminal priority.
+Completed retained receipts replay without another dispatch or usage charge.

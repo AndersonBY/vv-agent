@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, ModelSettings, RunConfig, Runner, VvLlmModelProvider
 
@@ -25,19 +26,20 @@ profiles = {
 
 
 def main() -> None:
-    profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
-    agent = profiles.get(profile, profiles["researcher"])
-    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "minimax" if profile == "translator" else "moonshot")
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=backend,
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain what this package is for.")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
+        agent = profiles.get(profile, profiles["researcher"])
+        backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "minimax" if profile == "translator" else "moonshot")
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=backend,
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain what this package is for.")
+        result = Runner.run_sync(agent, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

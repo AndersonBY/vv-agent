@@ -14,16 +14,11 @@ from __future__ import annotations
 
 import os
 import sys
-import uuid
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
 
-from vv_agent.config import build_vv_llm_from_local_settings
+from vv_agent import Agent, ModelProvider, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.events import DiagnosticEvent, RunEvent
-from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime
-from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentTask
 from vv_agent.workspace import (
     FileInfo,
     LocalWorkspaceBackend,
@@ -103,7 +98,7 @@ def _build_and_run(
     label: str,
     workspace_backend: WorkspaceBackend | None,
     workspace: Path,
-    llm_client: Any,
+    model_provider: ModelProvider,
     model_id: str,
     verbose: bool,
     prompt: str,
@@ -112,32 +107,20 @@ def _build_and_run(
     print(f"[demo] {label}")
     print(f"{'=' * 60}")
 
-    runtime = AgentRuntime(
-        llm_client=llm_client,
-        tool_registry=build_default_registry(),
-        default_workspace=workspace,
-        event_handler=event_handler if verbose else None,
-        workspace_backend=workspace_backend,
+    agent = Agent("workspace-demo", "Use workspace tools to complete tasks.", model=model_id)
+    result = Runner.run_sync(
+        agent,
+        prompt,
+        run_config=RunConfig(
+            model_provider=model_provider,
+            workspace=workspace,
+            workspace_backend=workspace_backend,
+            stream=event_handler if verbose else None,
+            max_cycles=5,
+        ),
     )
-
-    system_prompt = build_system_prompt(
-        "You are a helpful agent. Use workspace tools to complete tasks.",
-        language="zh-CN",
-        allow_interruption=True,
-        use_workspace=True,
-    )
-
-    task = AgentTask(
-        task_id=f"ws_backend_{uuid.uuid4().hex[:8]}",
-        model=model_id,
-        system_prompt=system_prompt,
-        user_prompt=prompt,
-        max_cycles=5,
-    )
-
-    result = runtime.run(task, workspace=workspace)
     print(f"\n  状态: {result.status.value}")
-    print(f"  回答: {result.final_answer}")
+    print(f"  回答: {result.final_output}")
 
 
 # ---------------------------------------------------------------------------
@@ -164,104 +147,100 @@ def _load_dotenv(path: Path) -> None:
 
 def main() -> None:
     # 自动加载 examples/.env (不覆盖已有环境变量)
-    _load_dotenv(Path(__file__).parent / ".env")
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        _load_dotenv(Path(__file__).parent / ".env")
 
-    settings_file = Path(
-        os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"),
-    )
-    backend_name = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-    workspace = Path(
-        os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace"),
-    ).resolve()
-    verbose = os.getenv(
-        "VV_AGENT_EXAMPLE_VERBOSE",
-        "true",
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    mode = os.getenv("VV_AGENT_EXAMPLE_WS_MODE", "all").strip().lower()
+        settings_file = Path(
+            os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"),
+        )
+        backend_name = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+        model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+        workspace = Path(
+            os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace),
+        ).resolve()
+        verbose = os.getenv(
+            "VV_AGENT_EXAMPLE_VERBOSE",
+            "true",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        mode = os.getenv("VV_AGENT_EXAMPLE_WS_MODE", "all").strip().lower()
 
-    workspace.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, resolved = build_vv_llm_from_local_settings(
-        settings_file,
-        backend=backend_name,
-        model=model,
-    )
-    common = dict(
-        workspace=workspace,
-        llm_client=llm,
-        model_id=resolved.model_id,
-        verbose=verbose,
-    )
-
-    # --- 方式 1: 默认 (不传 workspace_backend, 自动 LocalWorkspaceBackend) ---
-    if mode in {"all", "default"}:
-        _build_and_run(
-            label="方式 1: 默认 — 自动使用 LocalWorkspaceBackend",
-            workspace_backend=None,
-            prompt=("在 workspace 中创建 hello.txt 写入 'Hello from default backend', 然后读取并输出内容。"),
-            **common,
+        common = dict(
+            workspace=workspace,
+            model_provider=VvLlmModelProvider(settings_file=settings_file, default_backend=backend_name),
+            model_id=model,
+            verbose=verbose,
         )
 
-    # --- 方式 2: MemoryWorkspaceBackend (纯内存, 不落盘) ---
-    if mode in {"all", "memory"}:
-        _build_and_run(
-            label="方式 2: MemoryWorkspaceBackend — 纯内存, 不落盘",
-            workspace_backend=MemoryWorkspaceBackend(),
-            prompt=("在 workspace 中创建 memo.txt 写入 'Hello from memory backend', 然后读取并输出内容。"),
-            **common,
-        )
-        # 验证: 文件不会出现在磁盘上
-        if not (workspace / "memo.txt").exists():
-            print("  ✓ 验证通过: memo.txt 未落盘 (纯内存)")
-
-    # --- 方式 3: S3WorkspaceBackend (S3 兼容存储) ---
-    if mode in {"all", "s3"}:
-        s3_bucket = os.getenv("S3_BUCKET", "")
-        if not s3_bucket:
-            if mode == "s3":
-                print(
-                    "[跳过] S3 模式需要设置 S3_BUCKET 环境变量.\n       参见 examples/.env.example",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print("\n[跳过] 方式 3: S3 — 未设置 S3_BUCKET, 跳过")
-        else:
-            from vv_agent.workspace import S3WorkspaceBackend
-
-            s3_backend = S3WorkspaceBackend(
-                bucket=s3_bucket,
-                prefix=os.getenv("S3_PREFIX", ""),
-                endpoint_url=os.getenv("S3_ENDPOINT_URL") or None,
-                region_name=os.getenv("S3_REGION") or None,
-                aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID") or None,
-                aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY") or None,
-                addressing_style=os.getenv("S3_ADDRESSING_STYLE", "virtual"),
-            )
+        # --- 方式 1: 默认 (不传 workspace_backend, 自动 LocalWorkspaceBackend) ---
+        if mode in {"all", "default"}:
             _build_and_run(
-                label="方式 3: S3WorkspaceBackend — S3 兼容存储",
-                workspace_backend=s3_backend,
-                prompt=("在 workspace 中创建 s3_test.txt 写入 'Hello from S3 backend', 然后读取并输出内容。"),
+                label="方式 1: 默认 — 自动使用 LocalWorkspaceBackend",
+                workspace_backend=None,
+                prompt=("在 workspace 中创建 hello.txt 写入 'Hello from default backend', 然后读取并输出内容。"),
                 **common,
             )
 
-    # --- 方式 4: 自定义 PrefixedBackend (装饰器模式) ---
-    if mode in {"all", "custom"}:
-        inner = LocalWorkspaceBackend(workspace)
-        prefixed = PrefixedBackend(inner, prefix="[AUTO-TAG] ")
-        _build_and_run(
-            label="方式 4: PrefixedBackend — 自定义装饰器后端",
-            workspace_backend=prefixed,
-            prompt=("在 workspace 中创建 tagged.txt 写入 'custom backend works', 然后读取并输出内容。"),
-            **common,
-        )
-        # 验证: 文件内容带前缀
-        tagged = workspace / "tagged.txt"
-        if tagged.exists():
-            content = tagged.read_text(encoding="utf-8")
-            print(f"  ✓ 磁盘内容: {content!r}")
+        # --- 方式 2: MemoryWorkspaceBackend (纯内存, 不落盘) ---
+        if mode in {"all", "memory"}:
+            _build_and_run(
+                label="方式 2: MemoryWorkspaceBackend — 纯内存, 不落盘",
+                workspace_backend=MemoryWorkspaceBackend(),
+                prompt=("在 workspace 中创建 memo.txt 写入 'Hello from memory backend', 然后读取并输出内容。"),
+                **common,
+            )
+            # 验证: 文件不会出现在磁盘上
+            if not (workspace / "memo.txt").exists():
+                print("  ✓ 验证通过: memo.txt 未落盘 (纯内存)")
 
-    print("\n[demo] 完成!")
+        # --- 方式 3: S3WorkspaceBackend (S3 兼容存储) ---
+        if mode in {"all", "s3"}:
+            s3_bucket = os.getenv("S3_BUCKET", "")
+            if not s3_bucket:
+                if mode == "s3":
+                    print(
+                        "[跳过] S3 模式需要设置 S3_BUCKET 环境变量.\n       参见 examples/.env.example",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print("\n[跳过] 方式 3: S3 — 未设置 S3_BUCKET, 跳过")
+            else:
+                from vv_agent.workspace import S3WorkspaceBackend
+
+                s3_backend = S3WorkspaceBackend(
+                    bucket=s3_bucket,
+                    prefix=os.getenv("S3_PREFIX", ""),
+                    endpoint_url=os.getenv("S3_ENDPOINT_URL") or None,
+                    region_name=os.getenv("S3_REGION") or None,
+                    aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID") or None,
+                    aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY") or None,
+                    addressing_style=os.getenv("S3_ADDRESSING_STYLE", "virtual"),
+                )
+                _build_and_run(
+                    label="方式 3: S3WorkspaceBackend — S3 兼容存储",
+                    workspace_backend=s3_backend,
+                    prompt=("在 workspace 中创建 s3_test.txt 写入 'Hello from S3 backend', 然后读取并输出内容。"),
+                    **common,
+                )
+
+        # --- 方式 4: 自定义 PrefixedBackend (装饰器模式) ---
+        if mode in {"all", "custom"}:
+            inner = LocalWorkspaceBackend(workspace)
+            prefixed = PrefixedBackend(inner, prefix="[AUTO-TAG] ")
+            _build_and_run(
+                label="方式 4: PrefixedBackend — 自定义装饰器后端",
+                workspace_backend=prefixed,
+                prompt=("在 workspace 中创建 tagged.txt 写入 'custom backend works', 然后读取并输出内容。"),
+                **common,
+            )
+            # 验证: 文件内容带前缀
+            tagged = workspace / "tagged.txt"
+            if tagged.exists():
+                content = tagged.read_text(encoding="utf-8")
+                print(f"  ✓ 磁盘内容: {content!r}")
+
+        print("\n[demo] 完成!")
 
 
 if __name__ == "__main__":

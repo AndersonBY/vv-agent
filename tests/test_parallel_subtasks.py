@@ -1,283 +1,133 @@
-from __future__ import annotations
+"""Configured batches use retained kernel child admissions and results."""
 
-import threading
-import time
-from pathlib import Path
+import json
+from threading import Event
 
 import pytest
+from session.test_delegation_parity import routed
+from support.kernel_runtime import start_runner
 
-from vv_agent.agent import RunContext
-from vv_agent.runtime.backends.thread import ThreadBackend
-from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.sub_task_manager import SubTaskManager
-from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.sub_agents import create_sub_task
-from vv_agent.types import AgentStatus, SubTaskOutcome, SubTaskRequest, ToolResultStatus
-from vv_agent.workspace import INVALID_EXCLUDE_FILES_PATTERN_CODE, INVALID_EXCLUDE_FILES_PATTERN_MESSAGE, LocalWorkspaceBackend
+from vv_agent import Agent, RunConfig, SubAgentConfig
+from vv_agent.session.surfaces import SessionDriver
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
+from vv_agent.workspace import INVALID_EXCLUDE_FILES_PATTERN_CODE, INVALID_EXCLUDE_FILES_PATTERN_MESSAGE
 
 
-def _build_manager() -> SubTaskManager:
-    return SubTaskManager(
-        register_session=lambda *_args, **_kwargs: None,
-        unregister_session=lambda *_args, **_kwargs: None,
-    )
+@pytest.fixture
+def driver():
+    value = SessionDriver()
+    try:
+        yield value
+    finally:
+        value.close()
 
 
-class TestParallelSubTasks:
-    def test_create_sub_task_lineage_prefers_run_context_without_task_id_fallback(self, tmp_path: Path) -> None:
-        captured: list[SubTaskRequest] = []
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=lambda request: captured.append(request) or _completed_outcome(request),
-            task_id="parent-task",
-            ctx=ExecutionContext(metadata={"_vv_agent_run_id": "execution-run"}),
-            run_context=RunContext(run_id="public-run"),
-            tool_call_id="delegate",
-        )
-
-        result = create_sub_task(
-            context,
-            {"agent_id": "worker", "task_description": "inspect lineage"},
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert captured[0].metadata["parent_run_id"] == "public-run"
-        assert captured[0].metadata["parent_tool_call_id"] == "delegate"
-
-        captured.clear()
-        context.run_context = None
-        context.ctx = None
-        result = create_sub_task(
-            context,
-            {"agent_id": "worker", "task_description": "inspect missing lineage"},
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert "parent_run_id" not in captured[0].metadata
-
-    @pytest.mark.parametrize("pattern", [r"(?=secret)", r"(a)\1", r"\p{Greek}"])
-    def test_create_sub_task_rejects_non_portable_regex_before_start(
-        self,
-        tmp_path: Path,
-        pattern: str,
-    ) -> None:
-        calls: list[SubTaskRequest] = []
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=lambda request: calls.append(request) or _completed_outcome(request),
-            sub_task_manager=_build_manager(),
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {
-                "agent_id": "worker",
-                "task_description": "inspect files",
-                "exclude_files_pattern": pattern,
-            },
-        )
-
-        assert result.status_code == ToolResultStatus.ERROR
-        assert result.error_code == INVALID_EXCLUDE_FILES_PATTERN_CODE
-        assert result.metadata == {
-            "ok": False,
-            "error": INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
-            "error_code": INVALID_EXCLUDE_FILES_PATTERN_CODE,
-        }
-        assert calls == []
-
-    def test_create_sub_task_accepts_portable_non_capturing_group(self, tmp_path: Path) -> None:
-        calls: list[SubTaskRequest] = []
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=lambda request: calls.append(request) or _completed_outcome(request),
-            sub_task_manager=_build_manager(),
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {
-                "agent_id": "worker",
-                "task_description": "inspect files",
-                "exclude_files_pattern": r"^(?:generated|logs)/",
-            },
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert [request.exclude_files_pattern for request in calls] == [r"^(?:generated|logs)/"]
-
-    def test_create_sub_task_batch_uses_parallel_map(self, tmp_path: Path):
-        call_log: list[str] = []
-        lock = threading.Lock()
-
-        def mock_runner(request: SubTaskRequest) -> SubTaskOutcome:
-            with lock:
-                call_log.append(request.task_description)
-            return SubTaskOutcome(
-                task_id=f"sub_{request.task_description}",
-                agent_name=request.agent_name,
-                status=AgentStatus.COMPLETED,
-                final_answer=f"done: {request.task_description}",
-            )
-
-        backend = ThreadBackend(max_workers=4)
-        ctx = ExecutionContext(metadata={"execution_backend": backend})
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=mock_runner,
-            sub_task_manager=_build_manager(),
-            ctx=ctx,
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {
-                "agent_id": "worker",
-                "tasks": [
-                    {"task_description": "task A"},
-                    {"task_description": "task B"},
-                    {"task_description": "task C"},
-                ],
-            },
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert set(call_log) == {"task A", "task B", "task C"}
-
-    def test_create_sub_task_batch_fallback_serial(self, tmp_path: Path):
-        call_order: list[str] = []
-
-        def mock_runner(request: SubTaskRequest) -> SubTaskOutcome:
-            call_order.append(request.task_description)
-            return SubTaskOutcome(
-                task_id=f"sub_{request.task_description}",
-                agent_name=request.agent_name,
-                status=AgentStatus.COMPLETED,
-                final_answer=f"done: {request.task_description}",
-            )
-
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=mock_runner,
-            sub_task_manager=_build_manager(),
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {
-                "agent_id": "worker",
-                "tasks": [
-                    {"task_description": "first"},
-                    {"task_description": "second"},
-                ],
-            },
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert call_order == ["first", "second"]
-
-    def test_create_sub_task_batch_async_returns_task_ids(self, tmp_path: Path):
-        def mock_runner(request: SubTaskRequest) -> SubTaskOutcome:
-            time.sleep(0.05)
-            return SubTaskOutcome(
-                task_id=str(request.metadata.get("task_id")),
-                session_id=str(request.metadata.get("session_id")),
-                agent_name=request.agent_name,
-                status=AgentStatus.COMPLETED,
-                final_answer=f"done: {request.task_description}",
-            )
-
-        manager = _build_manager()
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=mock_runner,
-            sub_task_manager=manager,
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {
-                "agent_id": "worker",
-                "tasks": [
-                    {"task_description": "first"},
-                    {"task_description": "second"},
-                ],
-                "wait_for_completion": False,
-            },
-        )
-
-        assert result.status_code == ToolResultStatus.SUCCESS
-        assert len(result.metadata["task_ids"]) == 2
-        assert all(manager.wait(task_id) is not None for task_id in result.metadata["task_ids"])
-
-    def test_create_sub_task_requires_agent_id(self, tmp_path: Path):
-        context = ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=LocalWorkspaceBackend(tmp_path),
-            sub_task_runner=lambda request: SubTaskOutcome(
-                task_id="unused",
-                agent_name=request.agent_name,
-                status=AgentStatus.COMPLETED,
+def start(driver, workspace, arguments, children):
+    return start_runner(
+        driver,
+        "parent",
+        Agent("parent", "Delegate.", model="parent", sub_agents={"worker": SubAgentConfig(model="m", description="Work.")}),
+        "go",
+        run_config=RunConfig(
+            workspace=workspace,
+            model_provider=routed(
+                [LLMResponse("", [ToolCall("delegate", "create_sub_task", arguments)]), LLMResponse("parent done")],
+                children,
             ),
-            sub_task_manager=_build_manager(),
-            task_id="parent_task",
-        )
-
-        result = create_sub_task(
-            context,
-            {"task_description": "missing required agent id"},
-        )
-
-        assert result.status_code == ToolResultStatus.ERROR
-        assert result.metadata["error_code"] == "agent_id_required"
-
-    def test_thread_backend_parallel_map_concurrency(self):
-        backend = ThreadBackend(max_workers=4)
-        thread_ids: list[int] = []
-        lock = threading.Lock()
-
-        def worker(x: int) -> int:
-            with lock:
-                thread_ids.append(threading.current_thread().ident or 0)
-            time.sleep(0.05)
-            return x * 2
-
-        results = backend.parallel_map(worker, [1, 2, 3, 4])
-        assert results == [2, 4, 6, 8]
-        unique_threads = set(thread_ids)
-        assert len(unique_threads) >= 2, f"Expected parallel execution, got threads: {unique_threads}"
-
-
-def _completed_outcome(request: SubTaskRequest) -> SubTaskOutcome:
-    return SubTaskOutcome(
-        task_id="sub-task",
-        session_id="sub-session",
-        agent_name=request.agent_name,
-        status=AgentStatus.COMPLETED,
-        final_answer="done",
+        ),
     )
+
+
+def tool_result(handle):
+    result = handle.result()
+    assert result.status is AgentStatus.COMPLETED
+    return result.raw_result.cycles[0].tool_results[0]
+
+
+def test_create_sub_task_lineage_is_frozen_from_parent_turn(driver, tmp_path):
+    handle = start(driver, tmp_path, {"agent_id": "worker", "task_description": "work"}, [LLMResponse("done")])
+    assert tool_result(handle).status_code is ToolResultStatus.SUCCESS
+    child = next(sid for sid in driver.store.list_sessions() if sid != "parent")
+    created = driver.store.read(child, limit=1).records[0].record
+    metadata = created.payload["attributes"]["child_admission"]["definition"]["task"]["metadata"]
+    assert metadata["parent_run_id"] == handle.run_id
+    assert metadata["parent_tool_call_id"] == "delegate"
+    assert metadata["session_id"] == child
+
+
+@pytest.mark.parametrize("pattern", [r"(?=secret)", r"(a)\1", r"\p{Greek}"])
+def test_create_sub_task_rejects_non_portable_regex_before_admission(driver, tmp_path, pattern):
+    handle = start(driver, tmp_path, {"agent_id": "worker", "task_description": "work", "exclude_files_pattern": pattern}, [])
+    result = tool_result(handle)
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == INVALID_EXCLUDE_FILES_PATTERN_CODE
+    assert result.metadata == {
+        "ok": False,
+        "error": INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+        "error_code": INVALID_EXCLUDE_FILES_PATTERN_CODE,
+    }
+    assert driver.store.list_sessions() == ("parent",)
+
+
+def test_create_sub_task_accepts_portable_non_capturing_group(driver, tmp_path):
+    pattern = r"^(?:generated|logs)/"
+    handle = start(
+        driver,
+        tmp_path,
+        {"agent_id": "worker", "task_description": "work", "exclude_files_pattern": pattern},
+        [LLMResponse("done")],
+    )
+    assert tool_result(handle).status_code is ToolResultStatus.SUCCESS
+    child = next(sid for sid in driver.store.list_sessions() if sid != "parent")
+    assert (
+        driver.store.read(child, limit=1).records[0].record.payload["attributes"]["child_admission"]["exclude_files_pattern"]
+        == pattern
+    )
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_create_sub_task_batch_has_durable_identities_and_terminal_results(driver, tmp_path, wait):
+    entered, release = Event(), Event()
+
+    def blocked(_request):
+        entered.set()
+        assert release.wait(5)
+        return LLMResponse("child done")
+
+    args = {
+        "agent_id": "worker",
+        "tasks": [{"task_description": "first"}, {"task_description": "second"}],
+        "wait_for_completion": wait,
+    }
+    handle = start(driver, tmp_path, args, [LLMResponse("child done")] * 2 if wait else [blocked] * 2)
+    try:
+        result = tool_result(handle)
+        if not wait:
+            assert entered.wait(2)
+    finally:
+        release.set()
+    for child_handle in driver.handles:
+        child_handle.join(5)
+        assert not child_handle._thread.is_alive()
+    payload = json.loads(result.content)
+    ids = [entry["task_id"] for entry in payload["results"]]
+    assert len(set(ids)) == 2 and payload["summary"]["total"] == 2
+    if not wait:
+        assert payload["task_ids"] == ids
+        assert all(entry["status"] == "running" for entry in payload["results"])
+    else:
+        assert all(entry["status"] == "completed" and entry["final_answer"] == "child done" for entry in payload["results"])
+    manager = handle.runtime.child_tasks(driver.store, "parent")
+    for sid in ids:
+        entry = manager.get(sid)
+        assert entry is not None and entry.outcome.status is AgentStatus.COMPLETED
+        assert entry.outcome.final_answer == "child done"
+        assert len(driver.store.read_state(sid)[0].turns) == 1
+
+
+def test_create_sub_task_requires_agent_id_before_admission(driver, tmp_path):
+    handle = start(driver, tmp_path, {"task_description": "work"}, [])
+    result = tool_result(handle)
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert driver.store.list_sessions() == ("parent",)

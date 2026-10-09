@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from vv_agent import Agent, RunConfig, ToolPolicy, VvLlmModelProvider
@@ -20,11 +21,11 @@ def print_event(event: RunEvent) -> None:
         print(f"runtime: {event.to_dict()}", flush=True)
 
 
-def _host() -> DefaultAppServerHost:
+def _host(temporary_workspace: str) -> DefaultAppServerHost:
     settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
     model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)).resolve()
     verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
     max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "3"))
 
@@ -57,55 +58,78 @@ def _send(server: AppServer, transport: ChannelTransport, payload: dict[str, Any
 def _drain_until(transport: ChannelTransport, label: str, method: str) -> None:
     while True:
         message = transport.receive_outbound(timeout=180)
+        if label == "conn_1":
+            assert message.get("method") != "thread/status/changed"
         _print(label, message)
         if message.get("method") == method:
             return
 
 
 def main() -> None:
-    prompt = os.getenv(
-        "VV_AGENT_EXAMPLE_PROMPT",
-        "请把这句话翻译成英文: notification opt-out 可以让客户端跳过不需要的状态通知。",
-    )
-    first = ChannelTransport(connection_id="conn_1")
-    server = AppServer(transport=first, host=_host())
-    second = ChannelTransport(connection_id="conn_2")
-    server.router.register_transport(second)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        prompt = os.getenv(
+            "VV_AGENT_EXAMPLE_PROMPT",
+            "请把这句话翻译成英文: notification opt-out 可以让客户端跳过不需要的状态通知。",
+        )
+        first = ChannelTransport(connection_id="conn_1")
+        server = AppServer(transport=first, host=_host(temporary_workspace))
+        second = ChannelTransport(connection_id="conn_2")
+        server.router.register_transport(second)
 
-    server.processor.process_message(
-        "conn_1",
-        {
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "status-muted-client"},
-                "capabilities": {"optOutNotificationMethods": ["thread/status/changed"]},
-            },
-        },
-    )
-    server.processor.process_message(
-        "conn_2",
-        {"id": 10, "method": "initialize", "params": {"clientInfo": {"name": "full-client"}}},
-    )
-    _print("conn_1", first.receive_outbound(timeout=1))
-    _print("conn_2", second.receive_outbound(timeout=1))
-    server.processor.process_message("conn_1", {"method": "initialized"})
-    server.processor.process_message("conn_2", {"method": "initialized"})
+        try:
+            server.processor.process_message(
+                "conn_1",
+                {
+                    "id": 0,
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "status-muted-client"},
+                        "capabilities": {"optOutNotificationMethods": ["thread/status/changed"]},
+                    },
+                },
+            )
+            server.processor.process_message(
+                "conn_2",
+                {"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {"clientInfo": {"name": "full-client"}}},
+            )
+            _print("conn_1", first.receive_outbound(timeout=1))
+            _print("conn_2", second.receive_outbound(timeout=1))
+            server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
+            server.processor.process_message("conn_2", {"jsonrpc": "2.0", "method": "initialized"})
 
-    _send(server, first, {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}})
-    _drain_until(first, "conn_1", "thread/started")
-    _print("conn_1", first.receive_outbound(timeout=1))
+            _send(
+                server,
+                first,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "thread/start",
+                    "params": {"agentKey": "default", "cwd": temporary_workspace},
+                },
+            )
+            _drain_until(first, "conn_1", "thread/started")
 
-    server.processor.process_message("conn_2", {"id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}})
-    _print("conn_2", second.receive_outbound(timeout=1))
+            server.processor.process_message(
+                "conn_2", {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}}
+            )
+            _print("conn_2", second.receive_outbound(timeout=1))
 
-    _send(
-        server,
-        first,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]}},
-    )
-    _drain_until(first, "conn_1", "turn/completed")
-    _drain_until(second, "conn_2", "turn/completed")
+            _send(
+                server,
+                first,
+                {
+                    "id": 2,
+                    "jsonrpc": "2.0",
+                    "method": "turn/start",
+                    "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]},
+                },
+            )
+            _drain_until(first, "conn_1", "turn/completed")
+            _drain_until(second, "conn_2", "turn/completed")
+        finally:
+            server.run_adapter.join()
+            server.kernel.close()
 
 
 if __name__ == "__main__":

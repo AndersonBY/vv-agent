@@ -8,7 +8,7 @@ from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_o
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 
@@ -178,5 +178,5 @@ class ToolRegistry:
         )
         self._add_planner_extra_tool_name(name)
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | HostToolOutcome:
         return self.get_executor(call.name).execute(call, context)

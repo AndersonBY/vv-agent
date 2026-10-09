@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vv_agent.agent import Agent
+    from vv_agent.run_config import RunConfig
+
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -242,3 +248,16 @@ class VvLlmModelProvider:
 
     def default_model_ref(self) -> ModelRef | None:
         return None
+
+
+def resolve_run_model(*, agent: Agent, run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
+    provider = run_config.model_provider
+    if provider is None:
+        raise ValueError("RunConfig.model_provider is required.")
+    model = run_config.model or agent.model
+    if model is None:
+        model = provider.default_model_ref()
+    if model is None:
+        raise ValueError("Agent.model, RunConfig.model, or ModelProvider.default_model_ref() is required.")
+    resolved = provider.resolve(ModelRef.coerce(model))
+    return provider.client(resolved), resolved

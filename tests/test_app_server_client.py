@@ -109,7 +109,7 @@ def _approval_client(calls: list[str]) -> AppServerClient:
 def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
     client = _client()
     initialized = client.initialize(ClientInfo(name="test-client"))
-    assert initialized["protocolVersion"] == "v1"
+    assert initialized["protocolVersion"] == "v2"
 
     thread = client.start_thread(ThreadStartParams(agent_key="default"))
     thread_id = str(thread["threadId"])
@@ -124,7 +124,8 @@ def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
     unsubscribed = client.unsubscribe_thread(ThreadUnsubscribeParams(thread_id=thread_id))
     assert unsubscribed["subscribed"] is False
     assert unsubscribed["closed"] is True
-    assert client.resume_thread(ThreadResumeParams(thread_id=thread_id))["thread"]["status"] == "idle"
+    with pytest.raises(AppServerClientError, match="Thread is closed"):
+        client.resume_thread(ThreadResumeParams(thread_id=thread_id))
     assert client.archive_thread(ThreadArchiveParams(thread_id=thread_id))["archived"] is True
     assert client.close() is True
     assert client.close() is False

@@ -4,7 +4,6 @@ from vv_agent.tools.executor import FunctionToolExecutor, RegistryToolExecutor, 
 from vv_agent.tools.function import FunctionTool, Tool, function_tool
 from vv_agent.tools.metadata import ToolMetadata, ToolResultRetention, ToolSideEffect
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.tools.outputs import (
     ToolOutput,
     ToolOutputError,
@@ -27,7 +26,6 @@ __all__ = [
     "FunctionToolExecutor",
     "RegistryToolExecutor",
     "Tool",
-    "ToolCallOutcome",
     "ToolContext",
     "ToolExecutor",
     "ToolExposure",

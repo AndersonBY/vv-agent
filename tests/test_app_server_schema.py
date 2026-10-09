@@ -93,8 +93,8 @@ def test_typescript_generation_is_self_contained(tmp_path) -> None:
     assert "export interface TurnStartParams" in source
     assert 'export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";' in source
     assert 'export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";' in source
-    assert '"host_interaction"' in source
-    assert '"suspended"' in source
+    assert "CheckpointSummary" not in source
+    assert "InterruptionSummary" not in source
     assert "import " not in source
 
 
@@ -102,7 +102,7 @@ def test_schema_bundle_file_sets_and_sources_match_shared_fixture(tmp_path) -> N
     contract = _observable_contract()
     schema_contract = contract["schema"]
     assert isinstance(schema_contract, dict)
-    expected_json_files = schema_contract["json"]
+    expected_json_files = [name + ".json" for name in schema_contract["json"]]
     expected_typescript_files = schema_contract["typescript"]
     assert isinstance(expected_json_files, list)
     assert isinstance(expected_typescript_files, list)
@@ -154,7 +154,7 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     router.register_transport(transport)
-    processor = AppServer(transport=transport, router=router, _kernel=surface).processor
+    processor = AppServer(transport=transport, router=router, store=surface.store).processor
     processor.process_message(
         "conn_1",
         {
@@ -170,35 +170,29 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
 
     result = transport.receive_outbound(timeout=1)["result"]
     assert result == {
-        "jsonSchema": json_schema_bundle(_kernel=surface is not None),
-        "typescript": typescript_schema_bundle(_kernel=surface is not None),
+        "jsonSchema": json_schema_bundle(),
+        "typescript": typescript_schema_bundle(),
     }
-    if surface is not None:
-        definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
-        assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v2"}
-        assert definitions["AppThread"]["properties"]["status"]["enum"] == [
-            "idle",
-            "running",
-            "interrupted",
-            "archived",
-            "closed",
-        ]
-        assert definitions["ModelCallRecord"]["properties"]["schemaVersion"] == {"const": "vv-agent.model-call.v2"}
-        assert "output_repair" in definitions["ModelCallRecord"]["properties"]["operation"]["enum"]
-        assert definitions["TaskTokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.task-token-usage.v3"}
-        assert definitions["TokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.token-usage.v1"}
-        assert definitions["TurnResumeParams"]["required"] == ["threadId", "turnId"]
-        assert "CheckpointSummary" not in definitions
+    definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
+    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v2"}
+    assert definitions["AppThread"]["properties"]["status"]["enum"] == [
+        "idle",
+        "running",
+        "interrupted",
+        "archived",
+        "closed",
+    ]
+    assert definitions["ModelCallRecord"]["properties"]["schemaVersion"] == {"const": "vv-agent.model-call.v2"}
+    assert "output_repair" in definitions["ModelCallRecord"]["properties"]["operation"]["enum"]
+    assert definitions["TaskTokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.task-token-usage.v3"}
+    assert definitions["TokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.token-usage.v1"}
+    assert definitions["TurnResumeParams"]["required"] == ["threadId", "turnId"]
+    assert "CheckpointSummary" not in definitions
     assert json.loads(result["jsonSchema"]["ClientRequest"])["title"] == "ClientRequest"
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
     assert len(result["jsonSchema"]) == 19
     assert len(result["typescript"]) == 18
-    if surface is None:
-        checkpoint_schema = json.loads(result["jsonSchema"]["ThreadResumeResponse"])
-        assert "deferred" in checkpoint_schema["$defs"]["CheckpointSummary"]["properties"]["status"]["enum"]
-        assert '"deferred"' in result["typescript"]["ThreadResumeResponse.ts"]
-    else:
-        assert '"deferred"' not in result["typescript"]["ThreadResumeResponse.ts"]
+    assert '"deferred"' not in result["typescript"]["ThreadResumeResponse.ts"]
 
     processor.process_message(
         "conn_1",

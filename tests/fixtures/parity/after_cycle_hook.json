@@ -1,14 +1,607 @@
 {
-  "schema_version": "vv-agent.after-cycle-hook.v2",
+  "boundary_cases": [
+    {
+      "records": [
+        "session/cut_boundary_recorded/created",
+        "input/initial/applied",
+        "turn/cut_boundary_recorded/turn/initial/started",
+        "usage/active/cut_boundary_recorded/turn/initial/1/1",
+        "turn/cut_boundary_recorded/turn/initial/boundary/before_memory/1",
+        "usage/active/cut_boundary_recorded/turn/initial/2/1",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_boundary_recorded/turn/initial/2/2",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_boundary_recorded/turn/initial/2/3",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/1/result",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/1/1/planned",
+        "usage/active/cut_boundary_recorded/turn/initial/2/4",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+        "usage/active/cut_boundary_recorded/turn/initial/2/5",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/cut_boundary_recorded/turn/initial/2/6",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/cut_boundary_recorded/turn/initial/2/7",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/1/1/prepared",
+        "usage/active/cut_boundary_recorded/turn/initial/2/8",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/1/1/started",
+        "usage/active/cut_boundary_recorded/turn/initial/2/9",
+        "op/cut_boundary_recorded/turn/initial/model/primary/1/attempt/1/tool/1/1/result",
+        "usage/active/cut_boundary_recorded/turn/initial/2/10",
+        "turn/cut_boundary_recorded/turn/initial/boundary/before_memory/2",
+        "usage/active/cut_boundary_recorded/turn/initial/2/11",
+        "op/cut_boundary_recorded/turn/initial/model/primary/2/1/planned",
+        "usage/active/cut_boundary_recorded/turn/initial/2/12",
+        "op/cut_boundary_recorded/turn/initial/model/primary/2/1/started",
+        "usage/active/cut_boundary_recorded/turn/initial/2/13",
+        "op/cut_boundary_recorded/turn/initial/model/primary/2/1/result",
+        "usage/active/cut_boundary_recorded/turn/initial/2/14",
+        "turn/cut_boundary_recorded/turn/initial/ended"
+      ],
+      "session_id": "cut_boundary_recorded"
+    },
+    {
+      "records": [
+        "session/boundary_before_commit/created",
+        "input/initial/applied",
+        "turn/boundary_before_commit/turn/initial/started",
+        "usage/active/boundary_before_commit/turn/initial/1/1",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/planned",
+        "usage/active/boundary_before_commit/turn/initial/1/2",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/started",
+        "usage/active/boundary_before_commit/turn/initial/1/3",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/result",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/boundary_before_commit/turn/initial/1/4",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/boundary_before_commit/turn/initial/1/5",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/boundary_before_commit/turn/initial/2/1",
+        "turn/boundary_before_commit/turn/initial/boundary/after_cycle/boundary_before_commit/turn/initial/model/primary/1",
+        "usage/active/boundary_before_commit/turn/initial/2/2",
+        "op/boundary_before_commit/turn/initial/model/primary/2/1/planned",
+        "usage/active/boundary_before_commit/turn/initial/2/3",
+        "op/boundary_before_commit/turn/initial/model/primary/2/1/started",
+        "usage/active/boundary_before_commit/turn/initial/2/4",
+        "op/boundary_before_commit/turn/initial/model/primary/2/1/result",
+        "usage/active/boundary_before_commit/turn/initial/2/5",
+        "turn/boundary_before_commit/turn/initial/boundary/after_cycle/boundary_before_commit/turn/initial/model/primary/2",
+        "usage/active/boundary_before_commit/turn/initial/2/6",
+        "turn/boundary_before_commit/turn/initial/ended"
+      ],
+      "session_id": "boundary_before_commit"
+    },
+    {
+      "records": [
+        "session/boundary_after_commit/created",
+        "input/initial/applied",
+        "turn/boundary_after_commit/turn/initial/started",
+        "usage/active/boundary_after_commit/turn/initial/1/1",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/planned",
+        "usage/active/boundary_after_commit/turn/initial/1/2",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/started",
+        "usage/active/boundary_after_commit/turn/initial/1/3",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/result",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/boundary_after_commit/turn/initial/1/4",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/boundary_after_commit/turn/initial/1/5",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/boundary_after_commit/turn/initial/1/6",
+        "turn/boundary_after_commit/turn/initial/boundary/after_cycle/boundary_after_commit/turn/initial/model/primary/1",
+        "usage/active/boundary_after_commit/turn/initial/2/1",
+        "op/boundary_after_commit/turn/initial/model/primary/2/1/planned",
+        "usage/active/boundary_after_commit/turn/initial/2/2",
+        "op/boundary_after_commit/turn/initial/model/primary/2/1/started",
+        "usage/active/boundary_after_commit/turn/initial/2/3",
+        "op/boundary_after_commit/turn/initial/model/primary/2/1/result",
+        "usage/active/boundary_after_commit/turn/initial/2/4",
+        "turn/boundary_after_commit/turn/initial/boundary/after_cycle/boundary_after_commit/turn/initial/model/primary/2",
+        "usage/active/boundary_after_commit/turn/initial/2/5",
+        "turn/boundary_after_commit/turn/initial/ended"
+      ],
+      "session_id": "boundary_after_commit"
+    }
+  ],
+  "composition": {
+    "failure_merge": "first_exception_or_invalid_decision_fails_closed",
+    "hook_order": "runner_default_then_per_run",
+    "permission_merge": "set_union_then_utf16_sort_for_durable_state",
+    "snapshot_visibility": "all_hooks_receive_the_same_immutable_base_snapshot",
+    "steering_merge": "concatenate_in_registration_order",
+    "stop_merge": "first_stop_wins_and_later_hooks_are_not_called"
+  },
+  "decision": {
+    "action_values": [
+      "continue",
+      "steer",
+      "stop_non_success"
+    ],
+    "canonical_continue": {
+      "action": "continue",
+      "disallow_tools": [],
+      "steering_messages": [],
+      "stop": null
+    },
+    "closed_fields": [
+      "action",
+      "steering_messages",
+      "disallow_tools",
+      "stop"
+    ],
+    "error_codes": {
+      "control_state_invalid": "after_cycle_control_state_invalid",
+      "hook_failure": "after_cycle_hook_failed",
+      "invalid_decision": "after_cycle_decision_invalid",
+      "steer_unavailable": "after_cycle_steer_unavailable"
+    },
+    "limits": {
+      "max_disallow_tools": 1024,
+      "max_steering_message_utf8_bytes": 16384,
+      "max_steering_messages": 32,
+      "max_stop_code_ascii_bytes": 128,
+      "max_stop_message_utf8_bytes": 4096,
+      "max_tool_name_utf8_bytes": 256,
+      "max_total_steering_utf8_bytes": 65536
+    },
+    "rules": {
+      "completed_status_cannot_be_returned_by_hook": true,
+      "continue_accepts_only_optional_permission_narrowing": true,
+      "permission_changes_are_union_only": true,
+      "permission_expansion_fields_do_not_exist": true,
+      "steer_requires_one_or_more_non_empty_user_messages": true,
+      "steering_messages_are_next_cycle_user_messages": true,
+      "steering_replaces_default_continuation_hint": true,
+      "stop_completion_reason": "failed",
+      "stop_requires_non_empty_code_and_message": true,
+      "stop_status": "failed",
+      "unknown_fields_are_invalid": true,
+      "wait_user_status_cannot_be_returned_by_hook": true
+    }
+  },
   "default_behavior": {
     "configured_hooks": [],
+    "continuation_hint_unchanged": true,
     "invocation_count": 0,
     "runtime_trace_unchanged": true,
-    "tool_permissions_unchanged": true,
-    "continuation_hint_unchanged": true,
-    "checkpoint_extension_state_added": false
+    "tool_permissions_unchanged": true
   },
+  "durability": {
+    "committed_boundary_reuses_decision": true,
+    "external_effects_must_be_idempotent": true,
+    "precommit_may_rerun": true
+  },
+  "invalid_decisions": [
+    {
+      "decision": {
+        "action": "complete",
+        "disallow_tools": [],
+        "steering_messages": [],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid",
+      "name": "unknown_action"
+    },
+    {
+      "decision": {
+        "action": "steer",
+        "disallow_tools": [],
+        "steering_messages": [],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid",
+      "name": "empty_steer"
+    },
+    {
+      "decision": {
+        "action": "continue",
+        "disallow_tools": [],
+        "steering_messages": [],
+        "stop": {
+          "code": "unexpected",
+          "message": "not allowed"
+        }
+      },
+      "error_code": "after_cycle_decision_invalid",
+      "name": "continue_with_stop_payload"
+    },
+    {
+      "decision": {
+        "action": "stop_non_success",
+        "disallow_tools": [],
+        "steering_messages": [],
+        "stop": {
+          "code": "host.stop",
+          "message": ""
+        }
+      },
+      "error_code": "after_cycle_decision_invalid",
+      "name": "stop_without_message"
+    },
+    {
+      "decision": {
+        "action": "continue",
+        "allow_tools": [
+          "bash"
+        ],
+        "disallow_tools": [],
+        "steering_messages": [],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid",
+      "name": "permission_expansion_field"
+    }
+  ],
+  "permission_state": {
+    "applies_to_next_model_tool_schema_and_tool_dispatch": true,
+    "cannot_remove_agent_runner_or_run_level_denials": true,
+    "closed_fields": [
+      "schema_version",
+      "disallowed_tools"
+    ],
+    "created_only_after_non_empty_permission_narrowing": true,
+    "reserved_shared_state_key": "_vv_agent_after_cycle_control",
+    "schema_version": "vv-agent.after-cycle-control.v1",
+    "survives_session_resume": true
+  },
+  "runner_cases": [
+    {
+      "cycles": [
+        {
+          "assistant": "still working",
+          "tool_calls": []
+        }
+      ],
+      "expected": {
+        "hook_invocations": 0,
+        "native_outcome": "continue",
+        "next_user_messages": [
+          "Continue working on the task."
+        ],
+        "reserved_state_present": false
+      },
+      "hooks": [],
+      "max_cycles": 2,
+      "name": "disabled_is_exact_noop",
+      "no_tool_policy": "continue",
+      "producer": {
+        "records": [
+          "session/c1c/disabled_is_exact_noop/created",
+          "input/initial/applied",
+          "turn/c1c/disabled_is_exact_noop/turn/initial/started",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/1",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/2",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/3",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/4",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/5",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/6",
+          "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/7",
+          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/8",
+          "turn/c1c/disabled_is_exact_noop/turn/initial/ended"
+        ],
+        "session_id": "c1c/disabled_is_exact_noop"
+      }
+    },
+    {
+      "cycles": [
+        {
+          "assistant": "done",
+          "tool_calls": []
+        }
+      ],
+      "expected": {
+        "completion_reason": "no_tool_finish",
+        "hook_invocations": 1,
+        "messages_added_by_hook": 0,
+        "reserved_state_present": false,
+        "status": "completed"
+      },
+      "hooks": [
+        {
+          "decision": {
+            "action": "continue",
+            "disallow_tools": [],
+            "steering_messages": [],
+            "stop": null
+          }
+        }
+      ],
+      "max_cycles": 2,
+      "name": "continue_observes_without_mutation",
+      "no_tool_policy": "finish",
+      "producer": {
+        "records": [
+          "session/c1c/continue_observes_without_mutation/created",
+          "input/initial/applied",
+          "turn/c1c/continue_observes_without_mutation/turn/initial/started",
+          "usage/active/c1c/continue_observes_without_mutation/turn/initial/1/1",
+          "op/c1c/continue_observes_without_mutation/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/continue_observes_without_mutation/turn/initial/1/2",
+          "op/c1c/continue_observes_without_mutation/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/continue_observes_without_mutation/turn/initial/1/3",
+          "op/c1c/continue_observes_without_mutation/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/continue_observes_without_mutation/turn/initial/1/4",
+          "turn/c1c/continue_observes_without_mutation/turn/initial/boundary/after_cycle/c1c/continue_observes_without_mutation/turn/initial/model/primary/1",
+          "usage/active/c1c/continue_observes_without_mutation/turn/initial/1/5",
+          "turn/c1c/continue_observes_without_mutation/turn/initial/ended"
+        ],
+        "session_id": "c1c/continue_observes_without_mutation"
+      }
+    },
+    {
+      "cycles": [
+        {
+          "assistant": "first answer",
+          "tool_calls": []
+        },
+        {
+          "assistant": "checked answer",
+          "tool_calls": []
+        }
+      ],
+      "expected": {
+        "completion_reason": "no_tool_finish",
+        "default_continuation_hint_count": 0,
+        "hook_invocations": 2,
+        "injected_user_messages": [
+          "Check the output once more."
+        ],
+        "status": "completed"
+      },
+      "hooks": [
+        {
+          "decisions": [
+            {
+              "action": "steer",
+              "disallow_tools": [],
+              "steering_messages": [
+                "Check the output once more."
+              ],
+              "stop": null
+            },
+            {
+              "action": "continue",
+              "disallow_tools": [],
+              "steering_messages": [],
+              "stop": null
+            }
+          ]
+        }
+      ],
+      "max_cycles": 3,
+      "name": "steer_defers_native_completion",
+      "no_tool_policy": "finish",
+      "producer": {
+        "records": [
+          "session/c1c/steer_defers_native_completion/created",
+          "input/initial/applied",
+          "turn/c1c/steer_defers_native_completion/turn/initial/started",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/1",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/2",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/3",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/4",
+          "turn/c1c/steer_defers_native_completion/turn/initial/boundary/after_cycle/c1c/steer_defers_native_completion/turn/initial/model/primary/1",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/5",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/6",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/7",
+          "op/c1c/steer_defers_native_completion/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/8",
+          "turn/c1c/steer_defers_native_completion/turn/initial/boundary/after_cycle/c1c/steer_defers_native_completion/turn/initial/model/primary/2",
+          "usage/active/c1c/steer_defers_native_completion/turn/initial/1/9",
+          "turn/c1c/steer_defers_native_completion/turn/initial/ended"
+        ],
+        "session_id": "c1c/steer_defers_native_completion"
+      }
+    },
+    {
+      "expected": {
+        "dispatch_of_bash": "tool_not_allowed",
+        "durable_control_state": {
+          "disallowed_tools": [
+            "bash"
+          ],
+          "schema_version": "vv-agent.after-cycle-control.v1"
+        },
+        "next_available_tools": [
+          "read_file"
+        ]
+      },
+      "hooks": [
+        {
+          "decision": {
+            "action": "continue",
+            "disallow_tools": [
+              "bash"
+            ],
+            "steering_messages": [],
+            "stop": null
+          }
+        }
+      ],
+      "initial_available_tools": [
+        "bash",
+        "read_file"
+      ],
+      "name": "permission_narrowing_is_enforced_and_durable",
+      "producer": {
+        "records": [
+          "session/c1c/permission_narrowing_is_enforced_and_durable/created",
+          "input/initial/applied",
+          "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/started",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/1",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/2",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/3",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/4",
+          "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/boundary/after_cycle/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/1",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/5",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/6",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/7",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2/1/result",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/8",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2/attempt/1/tool/0/1/result",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/9",
+          "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/boundary/after_cycle/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/2",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/10",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/3/1/planned",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/11",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/3/1/started",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/12",
+          "op/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/3/1/result",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/13",
+          "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/boundary/after_cycle/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/3",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/14",
+          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/15",
+          "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/ended"
+        ],
+        "session_id": "c1c/permission_narrowing_is_enforced_and_durable"
+      }
+    },
+    {
+      "expected": {
+        "completion_reason": "failed",
+        "error": "host.policy_stop: Host policy stopped this run.",
+        "final_answer": null,
+        "run_completed_event_count": 0,
+        "status": "failed"
+      },
+      "hooks": [
+        {
+          "decision": {
+            "action": "stop_non_success",
+            "disallow_tools": [],
+            "steering_messages": [],
+            "stop": {
+              "code": "host.policy_stop",
+              "message": "Host policy stopped this run."
+            }
+          }
+        }
+      ],
+      "name": "stop_cannot_be_projected_as_success",
+      "native_outcome": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "kind": "completed",
+        "steer_allowed": true
+      },
+      "producer": {
+        "records": [
+          "session/c1c/stop_cannot_be_projected_as_success/created",
+          "input/initial/applied",
+          "turn/c1c/stop_cannot_be_projected_as_success/turn/initial/started",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/1",
+          "op/c1c/stop_cannot_be_projected_as_success/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/2",
+          "op/c1c/stop_cannot_be_projected_as_success/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/3",
+          "op/c1c/stop_cannot_be_projected_as_success/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/4",
+          "turn/c1c/stop_cannot_be_projected_as_success/turn/initial/boundary/after_cycle/c1c/stop_cannot_be_projected_as_success/turn/initial/model/primary/1",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/5",
+          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/6",
+          "turn/c1c/stop_cannot_be_projected_as_success/turn/initial/ended"
+        ],
+        "session_id": "c1c/stop_cannot_be_projected_as_success"
+      }
+    },
+    {
+      "expected": {
+        "additional_model_calls": 0,
+        "completion_reason": "failed",
+        "error_code": "agent_failed",
+        "status": "failed"
+      },
+      "hooks": [
+        {
+          "decision": {
+            "action": "steer",
+            "disallow_tools": [],
+            "steering_messages": [
+              "Try again."
+            ],
+            "stop": null
+          }
+        }
+      ],
+      "name": "steer_at_max_cycles_fails_closed",
+      "native_outcome": {
+        "completion_reason": "max_cycles",
+        "completion_tool_name": null,
+        "kind": "max_cycles",
+        "steer_allowed": false
+      },
+      "producer": {
+        "records": [
+          "session/c1c/steer_at_max_cycles_fails_closed/created",
+          "input/initial/applied",
+          "turn/c1c/steer_at_max_cycles_fails_closed/turn/initial/started",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/1",
+          "op/c1c/steer_at_max_cycles_fails_closed/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/2",
+          "op/c1c/steer_at_max_cycles_fails_closed/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/3",
+          "op/c1c/steer_at_max_cycles_fails_closed/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/4",
+          "turn/c1c/steer_at_max_cycles_fails_closed/turn/initial/boundary/after_cycle/c1c/steer_at_max_cycles_fails_closed/turn/initial/model/primary/1",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/5",
+          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/6",
+          "turn/c1c/steer_at_max_cycles_fails_closed/turn/initial/ended"
+        ],
+        "session_id": "c1c/steer_at_max_cycles_fails_closed"
+      }
+    }
+  ],
+  "schema_version": "vv-agent.after-cycle-hook.v2",
   "snapshot": {
+    "copy_semantics": "hook_mutation_cannot_mutate_runtime_messages_cycle_or_shared_state",
+    "cumulative_token_usage": {
+      "cache_usage_source": "aggregate",
+      "closed_fields": [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+        "cache_usage"
+      ],
+      "includes_archived_model_calls_in_totals": true,
+      "includes_model_call_records": false,
+      "type": "TaskTokenUsageTotals"
+    },
+    "native_outcome": {
+      "kind_values": [
+        "continue",
+        "completed",
+        "wait_user",
+        "max_cycles"
+      ],
+      "required_fields": [
+        "kind",
+        "completion_reason",
+        "completion_tool_name",
+        "steer_allowed"
+      ],
+      "steer_allowed_for": [
+        "continue",
+        "completed"
+      ]
+    },
     "required_fields": [
       "task_id",
       "cycle_index",
@@ -22,26 +615,6 @@
       "disallowed_tool_names",
       "native_outcome"
     ],
-    "copy_semantics": "hook_mutation_cannot_mutate_runtime_messages_cycle_or_shared_state",
-    "timing": "after_assistant_and_all_planned_tool_results_before_native_terminal_projection_or_cycle_commit",
-    "native_outcome": {
-      "required_fields": [
-        "kind",
-        "completion_reason",
-        "completion_tool_name",
-        "steer_allowed"
-      ],
-      "kind_values": [
-        "continue",
-        "completed",
-        "wait_user",
-        "max_cycles"
-      ],
-      "steer_allowed_for": [
-        "continue",
-        "completed"
-      ]
-    },
     "task_domain_fields_forbidden": [
       "task_type",
       "research_phase",
@@ -50,75 +623,7 @@
       "answer_confidence",
       "lease_policy"
     ],
-    "cumulative_token_usage": {
-      "type": "TaskTokenUsageTotals",
-      "closed_fields": [
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "reasoning_tokens",
-        "cache_usage"
-      ],
-      "includes_archived_model_calls_in_totals": true,
-      "includes_model_call_records": false,
-      "cache_usage_source": "aggregate"
-    }
-  },
-  "decision": {
-    "closed_fields": [
-      "action",
-      "steering_messages",
-      "disallow_tools",
-      "stop"
-    ],
-    "action_values": [
-      "continue",
-      "steer",
-      "stop_non_success"
-    ],
-    "canonical_continue": {
-      "action": "continue",
-      "steering_messages": [],
-      "disallow_tools": [],
-      "stop": null
-    },
-    "rules": {
-      "continue_accepts_only_optional_permission_narrowing": true,
-      "steer_requires_one_or_more_non_empty_user_messages": true,
-      "steering_messages_are_next_cycle_user_messages": true,
-      "steering_replaces_default_continuation_hint": true,
-      "stop_requires_non_empty_code_and_message": true,
-      "stop_status": "failed",
-      "stop_completion_reason": "failed",
-      "completed_status_cannot_be_returned_by_hook": true,
-      "wait_user_status_cannot_be_returned_by_hook": true,
-      "permission_changes_are_union_only": true,
-      "permission_expansion_fields_do_not_exist": true,
-      "unknown_fields_are_invalid": true
-    },
-    "limits": {
-      "max_steering_messages": 32,
-      "max_steering_message_utf8_bytes": 16384,
-      "max_total_steering_utf8_bytes": 65536,
-      "max_disallow_tools": 1024,
-      "max_tool_name_utf8_bytes": 256,
-      "max_stop_code_ascii_bytes": 128,
-      "max_stop_message_utf8_bytes": 4096
-    },
-    "error_codes": {
-      "invalid_decision": "after_cycle_decision_invalid",
-      "hook_failure": "after_cycle_hook_failed",
-      "steer_unavailable": "after_cycle_steer_unavailable",
-      "control_state_invalid": "after_cycle_control_state_invalid"
-    }
-  },
-  "composition": {
-    "hook_order": "runner_default_then_per_run",
-    "snapshot_visibility": "all_hooks_receive_the_same_immutable_base_snapshot",
-    "steering_merge": "concatenate_in_registration_order",
-    "permission_merge": "set_union_then_utf16_sort_for_durable_state",
-    "stop_merge": "first_stop_wins_and_later_hooks_are_not_called",
-    "failure_merge": "first_exception_or_invalid_decision_fails_closed"
+    "timing": "after_assistant_and_all_planned_tool_results_before_native_terminal_projection_or_cycle_commit"
   },
   "terminal_precedence": [
     "already_raised_execution_failure",
@@ -129,323 +634,5 @@
     "native_completed_or_wait_user",
     "max_cycles",
     "continue"
-  ],
-  "permission_state": {
-    "schema_version": "vv-agent.after-cycle-control.v1",
-    "reserved_shared_state_key": "_vv_agent_after_cycle_control",
-    "closed_fields": [
-      "schema_version",
-      "disallowed_tools"
-    ],
-    "created_only_after_non_empty_permission_narrowing": true,
-    "survives_current_checkpoint_round_trip": true,
-    "applies_to_next_model_tool_schema_and_tool_dispatch": true,
-    "cannot_remove_agent_runner_or_run_level_denials": true
-  },
-  "durability": {
-    "stateful_hook_uses_existing_checkpoint_extension_protocol": true,
-    "hook_and_state_codec_may_be_the_same_host_object": true,
-    "extension_namespace_and_version_are_pinned_in_run_definition": true,
-    "extension_snapshot_occurs_after_decision_before_cycle_commit": true,
-    "extension_restore_occurs_before_first_resumed_cycle": true,
-    "committed_cycle_hook_is_not_reinvoked_on_resume": true,
-    "uncommitted_cycle_may_be_replayed": true,
-    "hook_must_not_perform_unjournaled_external_side_effects": true,
-    "decision_for_same_snapshot_must_be_deterministic_or_idempotent": true
-  },
-  "distributed": {
-    "wire_field": "recipe.capabilities.after_cycle_hook_refs",
-    "reference_shape": {
-      "id": "lifecycle.policy",
-      "version": "1"
-    },
-    "resolved_before_claim": true,
-    "run_definition_capability_slots": [
-      "after_cycle_hook:0"
-    ],
-    "stateful_pairing": {
-      "hook_ref": {
-        "id": "lifecycle.policy",
-        "version": "1"
-      },
-      "checkpoint_extension_ref": {
-        "namespace": "com.example.lifecycle",
-        "reference": {
-          "id": "lifecycle.policy-state",
-          "version": "1"
-        },
-        "required": true
-      }
-    },
-    "missing_hook_failure_boundary": "before_checkpoint_claim_model_or_tool_operation"
-  },
-  "runner_cases": [
-    {
-      "name": "disabled_is_exact_noop",
-      "hooks": [],
-      "cycles": [
-        {
-          "assistant": "still working",
-          "tool_calls": []
-        }
-      ],
-      "no_tool_policy": "continue",
-      "max_cycles": 2,
-      "expected": {
-        "hook_invocations": 0,
-        "next_user_messages": [
-          "Continue working on the task."
-        ],
-        "reserved_state_present": false,
-        "native_outcome": "continue"
-      }
-    },
-    {
-      "name": "continue_observes_without_mutation",
-      "hooks": [
-        {
-          "decision": {
-            "action": "continue",
-            "steering_messages": [],
-            "disallow_tools": [],
-            "stop": null
-          }
-        }
-      ],
-      "cycles": [
-        {
-          "assistant": "done",
-          "tool_calls": []
-        }
-      ],
-      "no_tool_policy": "finish",
-      "max_cycles": 2,
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "hook_invocations": 1,
-        "messages_added_by_hook": 0,
-        "reserved_state_present": false
-      }
-    },
-    {
-      "name": "steer_defers_native_completion",
-      "hooks": [
-        {
-          "decisions": [
-            {
-              "action": "steer",
-              "steering_messages": [
-                "Check the output once more."
-              ],
-              "disallow_tools": [],
-              "stop": null
-            },
-            {
-              "action": "continue",
-              "steering_messages": [],
-              "disallow_tools": [],
-              "stop": null
-            }
-          ]
-        }
-      ],
-      "cycles": [
-        {
-          "assistant": "first answer",
-          "tool_calls": []
-        },
-        {
-          "assistant": "checked answer",
-          "tool_calls": []
-        }
-      ],
-      "no_tool_policy": "finish",
-      "max_cycles": 3,
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "hook_invocations": 2,
-        "injected_user_messages": [
-          "Check the output once more."
-        ],
-        "default_continuation_hint_count": 0
-      }
-    },
-    {
-      "name": "permission_narrowing_is_enforced_and_durable",
-      "hooks": [
-        {
-          "decision": {
-            "action": "continue",
-            "steering_messages": [],
-            "disallow_tools": [
-              "bash"
-            ],
-            "stop": null
-          }
-        }
-      ],
-      "initial_available_tools": [
-        "bash",
-        "read_file"
-      ],
-      "expected": {
-        "next_available_tools": [
-          "read_file"
-        ],
-        "dispatch_of_bash": "tool_not_allowed",
-        "durable_control_state": {
-          "schema_version": "vv-agent.after-cycle-control.v1",
-          "disallowed_tools": [
-            "bash"
-          ]
-        }
-      }
-    },
-    {
-      "name": "stop_cannot_be_projected_as_success",
-      "hooks": [
-        {
-          "decision": {
-            "action": "stop_non_success",
-            "steering_messages": [],
-            "disallow_tools": [],
-            "stop": {
-              "code": "host.policy_stop",
-              "message": "Host policy stopped this run."
-            }
-          }
-        }
-      ],
-      "native_outcome": {
-        "kind": "completed",
-        "completion_reason": "no_tool_finish",
-        "completion_tool_name": null,
-        "steer_allowed": true
-      },
-      "expected": {
-        "status": "failed",
-        "completion_reason": "failed",
-        "final_answer": null,
-        "error": "host.policy_stop: Host policy stopped this run.",
-        "run_completed_event_count": 0
-      }
-    },
-    {
-      "name": "steer_at_max_cycles_fails_closed",
-      "hooks": [
-        {
-          "decision": {
-            "action": "steer",
-            "steering_messages": [
-              "Try again."
-            ],
-            "disallow_tools": [],
-            "stop": null
-          }
-        }
-      ],
-      "native_outcome": {
-        "kind": "max_cycles",
-        "completion_reason": "max_cycles",
-        "completion_tool_name": null,
-        "steer_allowed": false
-      },
-      "expected": {
-        "status": "failed",
-        "completion_reason": "failed",
-        "error_code": "after_cycle_steer_unavailable",
-        "additional_model_calls": 0
-      }
-    },
-    {
-      "name": "checkpoint_resume_restores_hook_and_control_state",
-      "hook": {
-        "namespace": "com.example.lifecycle",
-        "version": "1",
-        "required": true,
-        "snapshot_after_cycle_1": {
-          "observed_cycles": 1
-        }
-      },
-      "committed_control_state": {
-        "schema_version": "vv-agent.after-cycle-control.v1",
-        "disallowed_tools": [
-          "bash"
-        ]
-      },
-      "expected_after_resume": {
-        "first_hook_snapshot_cycle": 2,
-        "restored_extension_state": {
-          "observed_cycles": 1
-        },
-        "available_tools": [
-          "read_file"
-        ],
-        "cycle_1_hook_reinvocations": 0
-      }
-    }
-  ],
-  "invalid_decisions": [
-    {
-      "name": "unknown_action",
-      "decision": {
-        "action": "complete",
-        "steering_messages": [],
-        "disallow_tools": [],
-        "stop": null
-      },
-      "error_code": "after_cycle_decision_invalid"
-    },
-    {
-      "name": "empty_steer",
-      "decision": {
-        "action": "steer",
-        "steering_messages": [],
-        "disallow_tools": [],
-        "stop": null
-      },
-      "error_code": "after_cycle_decision_invalid"
-    },
-    {
-      "name": "continue_with_stop_payload",
-      "decision": {
-        "action": "continue",
-        "steering_messages": [],
-        "disallow_tools": [],
-        "stop": {
-          "code": "unexpected",
-          "message": "not allowed"
-        }
-      },
-      "error_code": "after_cycle_decision_invalid"
-    },
-    {
-      "name": "stop_without_message",
-      "decision": {
-        "action": "stop_non_success",
-        "steering_messages": [],
-        "disallow_tools": [],
-        "stop": {
-          "code": "host.stop",
-          "message": ""
-        }
-      },
-      "error_code": "after_cycle_decision_invalid"
-    },
-    {
-      "name": "permission_expansion_field",
-      "decision": {
-        "action": "continue",
-        "steering_messages": [],
-        "disallow_tools": [],
-        "allow_tools": [
-          "bash"
-        ],
-        "stop": null
-      },
-      "error_code": "after_cycle_decision_invalid"
-    }
   ]
 }

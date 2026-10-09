@@ -1,21 +1,12 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
-
-import pytest
 
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import BASH_TOOL_NAME, FIND_FILES_TOOL_NAME
-from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
-from vv_agent.runtime.tool_planner import plan_tool_names
-from vv_agent.types import AgentTask, Message
+from vv_agent.types import AgentTask
 
 
 def _resolved(
@@ -33,34 +24,6 @@ def _resolved(
         context_length=context_length,
         max_output_tokens=max_output_tokens,
     )
-
-
-def _frozen_definition(*, run_metadata: dict[str, object]) -> dict[str, object]:
-    fixture_path = Path(__file__).parent / "fixtures" / "parity" / "run_definition.json"
-    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-    definition = deepcopy(next(case["definition"] for case in fixture["golden_cases"] if case["name"] == "minimal"))
-    definition["root_input"] = "go"
-    definition["prompt_bundle"] = build_raw_system_prompt_bundle("Answer.").to_dict()
-    definition["initial_messages"] = []
-    definition["initial_shared_state"] = {}
-    definition["run_metadata"] = run_metadata
-    definition["model"]["model_id"] = "model-id"
-    definition["agent"]["type"] = None
-    definition["runtime_controls"].update(
-        {
-            "max_cycles": 8,
-            "session_memory_enabled": False,
-            "memory_compact_threshold": 128_000,
-            "memory_threshold_percentage": 90,
-            "no_tool_policy": "continue",
-            "allow_interruption": True,
-            "native_multimodal": False,
-            "tool_use_behavior": "run_llm_again",
-            "stop_at_tool_names": [],
-        }
-    )
-    definition["tools"] = []
-    return definition
 
 
 def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
@@ -139,126 +102,6 @@ def test_agent_compiler_treats_non_positive_context_metadata_as_absent() -> None
     assert task.metadata["model_max_output_tokens"] == 8_192
 
 
-def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting_record() -> None:
-    definition = _frozen_definition(run_metadata={"reserved_output_tokens": 4_096})
-    system_message = Message(
-        role="system",
-        content="Answer.",
-        metadata={"reserved_output_tokens": 4_096},
-    )
-    checkpoint = SimpleNamespace(
-        run_definition=definition,
-        messages=[system_message],
-        task_id="checkpoint-task",
-    )
-    original_definition = deepcopy(definition)
-    original_metadata = dict(system_message.metadata)
-
-    task = AgentCompiler().compile_frozen_checkpoint(
-        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
-        run_config=RunConfig(),
-        resolved=_resolved(context_length=32_000, max_output_tokens=8_192),
-        checkpoint=checkpoint,
-        trace_id="trace-resume-capacity",
-    )
-
-    assert task.memory_compact_threshold == 128_000
-    assert task.metadata["model_context_window"] == 32_000
-    assert task.metadata["model_max_output_tokens"] == 8_192
-    assert task.metadata["reserved_output_tokens"] == 4_096
-    assert definition == original_definition
-    assert system_message.metadata == original_metadata
-
-
-def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_builtins() -> None:
-    definition = _frozen_definition(run_metadata={})
-    cast(dict[str, object], definition["agent"])["type"] = "computer"
-    definition["tools"] = [
-        {"schema": {"function": {"name": BASH_TOOL_NAME}}},
-        {"schema": {"function": {"name": FIND_FILES_TOOL_NAME}}},
-        {"schema": {"function": {"name": "lookup"}}},
-    ]
-    checkpoint = SimpleNamespace(
-        run_definition=definition,
-        messages=[Message(role="system", content="Answer.")],
-        task_id="computer-extra-tool-task",
-    )
-
-    task = AgentCompiler().compile_frozen_checkpoint(
-        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
-        run_config=RunConfig(),
-        resolved=_resolved(),
-        checkpoint=checkpoint,
-        trace_id="trace-computer-extra-tool",
-    )
-
-    assert task.agent_type == "computer"
-    assert task.use_workspace
-    assert task.extra_tool_names == [BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, "lookup"]
-    planned = plan_tool_names(task)
-    for name in task.extra_tool_names:
-        assert planned.count(name) == 1
-
-
-def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty() -> None:
-    definition = _frozen_definition(
-        run_metadata={
-            "reserved_output_tokens": 4_096,
-            "host_request_id": "request-42",
-            "model_context_window": 48_000,
-        }
-    )
-    system_message = Message(role="system", content="Answer.", metadata={})
-    checkpoint = SimpleNamespace(
-        run_definition=definition,
-        messages=[system_message],
-        task_id="frozen-metadata-task",
-    )
-    original_definition = deepcopy(definition)
-
-    task = AgentCompiler().compile_frozen_checkpoint(
-        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
-        run_config=RunConfig(),
-        resolved=_resolved(context_length=32_000, max_output_tokens=8_192),
-        checkpoint=checkpoint,
-        trace_id="trace-frozen-metadata",
-    )
-
-    assert task.metadata["reserved_output_tokens"] == 4_096
-    assert task.metadata["host_request_id"] == "request-42"
-    assert task.metadata["model_context_window"] == 48_000
-    assert task.metadata["model_max_output_tokens"] == 8_192
-    assert task.metadata["trace_id"] == "trace-frozen-metadata"
-    assert definition == original_definition
-    assert system_message.metadata == {}
-
-    stale_system_message = Message(
-        role="system",
-        content="Answer.",
-        metadata={
-            "reserved_output_tokens": 1_024,
-            "host_request_id": "stale-request",
-            "model_context_window": 16_000,
-        },
-    )
-    precedence_task = AgentCompiler().compile_frozen_checkpoint(
-        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
-        run_config=RunConfig(),
-        resolved=_resolved(context_length=32_000, max_output_tokens=8_192),
-        checkpoint=SimpleNamespace(
-            run_definition=definition,
-            messages=[stale_system_message],
-            task_id="frozen-metadata-precedence-task",
-        ),
-        trace_id="trace-frozen-metadata-precedence",
-    )
-
-    assert precedence_task.metadata["reserved_output_tokens"] == 4_096
-    assert precedence_task.metadata["host_request_id"] == "request-42"
-    assert precedence_task.metadata["model_context_window"] == 48_000
-    assert stale_system_message.metadata["host_request_id"] == "stale-request"
-
-
 def test_agent_compiler_freezes_loaded_session_memory_into_a_new_run_bundle(tmp_path: Path) -> None:
     storage = tmp_path / ".memory" / "session" / "shared-session" / "session_memory.json"
     storage.parent.mkdir(parents=True)
@@ -290,44 +133,3 @@ def test_agent_compiler_freezes_loaded_session_memory_into_a_new_run_bundle(tmp_
 
     assert [section.id for section in task.prompt_bundle.sections] == ["agent_instructions", "session_memory"]
     assert "reuse the reviewed evidence" in task.prompt_bundle.flatten()
-
-
-def test_frozen_checkpoint_preserves_non_ascii_whitespace_in_static_instructions() -> None:
-    instructions = "\u00a0Answer.\u00a0"
-    definition = _frozen_definition(run_metadata={})
-    definition["prompt_bundle"] = build_raw_system_prompt_bundle(instructions).to_dict()
-    checkpoint = SimpleNamespace(
-        run_definition=definition,
-        messages=[Message(role="system", content=instructions)],
-        task_id="ascii-trim-checkpoint",
-    )
-
-    task = AgentCompiler().compile_frozen_checkpoint(
-        agent=Agent(name="assistant", instructions=instructions, model="model-id"),
-        run_config=RunConfig(),
-        resolved=_resolved(),
-        checkpoint=checkpoint,
-        trace_id="trace-ascii-trim",
-    )
-
-    assert task.prompt_bundle.flatten() == instructions
-
-
-def test_frozen_checkpoint_rejects_conflicting_system_history() -> None:
-    definition = _frozen_definition(run_metadata={})
-    checkpoint = SimpleNamespace(
-        run_definition=definition,
-        messages=[Message(role="system", content="untrusted system")],
-        task_id="conflicting-system-checkpoint",
-    )
-
-    with pytest.raises(CheckpointError, match="does not match") as error:
-        AgentCompiler().compile_frozen_checkpoint(
-            agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
-            run_config=RunConfig(),
-            resolved=_resolved(),
-            checkpoint=checkpoint,
-            trace_id="trace-conflicting-system",
-        )
-
-    assert error.value.code == "checkpoint_definition_mismatch"

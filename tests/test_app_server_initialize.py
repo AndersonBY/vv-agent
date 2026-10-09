@@ -37,7 +37,7 @@ def test_initialize_enables_dispatch(surface) -> None:
 
     initialize_response = transport.receive_outbound(timeout=1)
     model_response = transport.receive_outbound(timeout=1)
-    assert initialize_response["result"]["protocolVersion"] == ("v2" if surface else "v1")
+    assert initialize_response["result"]["protocolVersion"] == ("v2")
     assert model_response == {"jsonrpc": "2.0", "id": 2, "result": {"models": []}}
 
 

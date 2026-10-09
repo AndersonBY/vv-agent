@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from support import ModelMapProvider
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
@@ -17,7 +18,6 @@ from vv_agent.events import (
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, ToolCall
@@ -80,6 +80,7 @@ def test_session_graph_events_round_trip_from_dict() -> None:
             token_usage={"total_tokens": 12},
         ),
         HandoffStartedEvent(
+            session_id="parent",
             run_id="run_parent",
             trace_id="trace_1",
             source_agent="planner",
@@ -88,6 +89,7 @@ def test_session_graph_events_round_trip_from_dict() -> None:
             child_session_id="session_child",
         ),
         HandoffCompletedEvent(
+            session_id="parent",
             run_id="run_parent",
             trace_id="trace_1",
             source_agent="planner",
@@ -143,7 +145,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
             "_vv_agent_session_id": "session_parent",
         },
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=provider.client(provider.resolve(ModelRef.named("parent-model"))),
         model_provider=provider,
         tool_registry=build_default_registry(),
@@ -168,7 +170,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
     result = runtime.run(task, ctx=ctx)
 
     assert result.status == AgentStatus.COMPLETED
-    assert provider.resolved_models == ["parent-model", "kimi-k2.5"]
+    assert set(provider.resolved_models) == {"parent-model", "kimi-k2.5"}
     started_events = [event for event in emitted if isinstance(event, SubRunStartedEvent)]
     completed_events = [event for event in emitted if isinstance(event, SubRunCompletedEvent)]
     assert len(started_events) == 1
@@ -176,15 +178,15 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
 
     started = started_events[0]
     completed = completed_events[0]
-    assert started.parent_run_id == "run_parent"
+    assert started.run_id == result.turn_id and started.parent_run_id is None
     assert started.parent_tool_call_id == "call_create_sub_task"
-    assert started.agent_name == "research-sub"
+    assert started.agent_name == "test"
     assert started.session_id
-    assert started.child_session_id == started.session_id
+    assert started.child_session_id != started.session_id
     assert completed.run_id == started.run_id
     assert completed.session_id == started.session_id
-    assert completed.child_session_id == started.session_id
-    assert completed.parent_run_id == "run_parent"
+    assert completed.child_session_id == started.child_session_id
+    assert completed.run_id == result.turn_id and completed.parent_run_id is None
     assert completed.parent_tool_call_id == "call_create_sub_task"
     assert completed.status == AgentStatus.COMPLETED.value
     assert completed.final_output == "sub done"

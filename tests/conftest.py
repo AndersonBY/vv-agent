@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from vv_agent.session.surfaces import _SessionKernel
+from vv_agent.session.surfaces import SessionDriver
 
 
-@pytest.fixture(params=["current", "kernel"])
+@pytest.fixture
 def surface(request, monkeypatch):
-    kernel = _SessionKernel() if request.param == "kernel" else None
+    driver = SessionDriver()
     module = request.module
     servers = []
+    clients = []
     if hasattr(module, "AppServer"):
         original_server = module.AppServer
 
         def server_factory(**kwargs):
-            kwargs.setdefault("_kernel", kernel)
+            kwargs.setdefault("store", driver.store)
             server = original_server(**kwargs)
             servers.append(server)
             return server
@@ -22,12 +23,29 @@ def surface(request, monkeypatch):
         monkeypatch.setattr(module, "AppServer", server_factory)
     if hasattr(module, "InteractiveAgentClient"):
         original_client = module.InteractiveAgentClient
-        monkeypatch.setattr(module, "InteractiveAgentClient", lambda **kwargs: original_client(**kwargs, _kernel=kernel))
-    yield kernel
-    if kernel:
-        for server in servers:
-            for handle in kernel.handles:
-                handle.cancel("test teardown")
-            server.router.cancel_matching_server_requests()
-            server.run_adapter.join()
-        kernel.close()
+
+        def client_factory(**kwargs):
+            kwargs["options"].session_store = driver.store
+            client = original_client(**kwargs)
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(module, "InteractiveAgentClient", client_factory)
+    yield driver
+    for server in servers:
+        for handle in server.kernel.handles:
+            handle.cancel("test teardown")
+        server.router.cancel_matching_server_requests()
+        server.run_adapter.join()
+        server.kernel.close()
+    for client in clients:
+        for handle in client.driver.handles:
+            handle.cancel("test teardown")
+        client.driver.close()
+    driver.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_working_directory(tmp_path, monkeypatch):
+    """Default workspace projections belong to each disposable test directory."""
+    monkeypatch.chdir(tmp_path)

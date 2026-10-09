@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
@@ -37,22 +38,23 @@ def load_agent(path: Path, profile: str) -> Agent:
 
 
 def main() -> None:
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace"))
-    profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
-    agent = load_agent(workspace / "agent_profiles.json", profile)
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=workspace,
-    )
-    result = Runner.run_sync(
-        agent,
-        os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain why resource-backed profiles are useful."),
-        run_config=config,
-    )
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace))
+        profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
+        agent = load_agent(workspace / "agent_profiles.json", profile)
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=workspace,
+        )
+        result = Runner.run_sync(
+            agent,
+            os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain why resource-backed profiles are useful."),
+            run_config=config,
+        )
+        print(result.final_output)
 
 
 if __name__ == "__main__":

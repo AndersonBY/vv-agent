@@ -1,53 +1,38 @@
 from __future__ import annotations
 
-import threading
-from collections.abc import Callable, Iterator
+import warnings
+from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol
+from threading import Condition, Thread
+from typing import TYPE_CHECKING, Literal, Protocol
+from uuid import uuid4
 
-from vv_agent.agent import Agent
-from vv_agent.approval import ApprovalBroker, ApprovalDecision
 from vv_agent.events import RunEvent
-from vv_agent.result import RunResult, RunState
-from vv_agent.run_config import RunConfig
-from vv_agent.runtime.cancellation import CancellationToken, CancelledError
-from vv_agent.types import AgentStatus, _agent_result_error_text
+from vv_agent.result import RunResult
+from vv_agent.session.children import cancel_children, child_delivery, child_handles
+from vv_agent.session.events import SessionRunEventStore
+from vv_agent.session.records import InboxItem
+from vv_agent.session.store import Conflict, LeaseLost, LeaseRetryExhausted
+from vv_agent.tracing import trace_processors
 
-ApprovalInput = ApprovalDecision | str
+if TYPE_CHECKING:
+    from vv_agent.session.runtime import Runtime
+    from vv_agent.session.surfaces import SessionDriver
+
 RunHandleStatus = Literal[
     "pending",
     "running",
     "host_interaction",
     "suspended",
-    "deferred",
-    "reconciliation_required",
     "wait_user",
     "completed",
     "failed",
     "max_cycles",
     "cancelled",
+    "reconciliation_required",
+    "deferred",
 ]
-
-
-class RunHandleController(Protocol):
-    def steer(self, message: str) -> None: ...
-
-    def follow_up(self, message: str) -> None: ...
-
-
-class RunHandleRunner(Protocol):
-    def _run(
-        self,
-        agent: Agent,
-        input: str,
-        *,
-        run_config: RunConfig,
-        event_sink: Callable[[RunEvent], None] | None = None,
-        _compiled_invocation: Any | None = None,
-        _approval_invocation: Any | None = None,
-    ) -> RunResult: ...
-
-    def resume(self, state: RunState, *, input: str | None = None) -> RunResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,294 +43,236 @@ class RunHandleState:
     error: str | None = None
 
 
+class RunHandleController(Protocol):
+    def steer(self, message: str) -> None: ...
+
+    def follow_up(self, message: str) -> None: ...
+
+
 class RunHandle:
-    def __init__(
-        self,
-        *,
-        events: list[RunEvent],
-        event_condition: threading.Condition,
-        done_event: threading.Event,
-        thread: threading.Thread,
-        cancellation_token: CancellationToken,
-        approval_broker: ApprovalBroker,
-        runner: RunHandleRunner,
-    ) -> None:
-        self._events = events
-        self._event_condition = event_condition
-        self._done_event = done_event
-        self._thread = thread
-        self._cancellation_token = cancellation_token
-        self._approval_broker = approval_broker
-        self._runner = runner
-        self._lock = threading.Lock()
-        self._result: RunResult | None = None
-        self._exception: BaseException | None = None
-        self._cancel_requested = False
-        self._terminal_event_seen = False
-        self._terminal_seen_during_handoff = False
-        self._active_handoffs = 0
-        self._lifecycle_event_ids: set[str] = set()
-        self._active_sub_run_ids: set[str] = set()
-        self._controller: RunHandleController | None = None
+    def __init__(self, kernel: SessionDriver, sid: str, tid: str, runtime: Runtime, consumer: str | None) -> None:
+        self.kernel, self.session_id, self.run_id, self.runtime, self.consumer = kernel, sid, tid, runtime, consumer
+        self._condition = Condition()
+        self._events: list[RunEvent] = []
+        self._observer = runtime.config.stream
+        runtime.config = replace(runtime.config, stream=self._emit)
+        self._done = False
+        self._cancel_bound = False
+        self._error: BaseException | None = None
+        self._deliver_to_parent = False
+        self._thread = Thread(target=self._run, name="session-surface-driver")
+        original_hook = runtime.hook
 
-    @classmethod
-    def _start_worker(
-        cls,
-        *,
-        agent: Agent,
-        input: str,
-        run_config: RunConfig,
-        runner: RunHandleRunner,
-        _compiled_invocation: Any | None = None,
-    ) -> RunHandle:
-        events: list[RunEvent] = []
-        event_condition = threading.Condition()
-        done_event = threading.Event()
-        cancellation_token = run_config.cancellation_token or CancellationToken()
-        approval_broker = run_config.approval_broker or ApprovalBroker()
-        worker_config = run_config.with_cancellation_token(cancellation_token)
-        worker_config.approval_broker = approval_broker
+        def hook(point, record):
+            original_hook(point, record)
+            if point == "after_commit":
+                self._bind_cancel()
+                self._publish()
+            if point in {"after_commit", "after_drive", "after_input"}:
+                self._schedule_background()
 
-        handle = cls(
-            events=events,
-            event_condition=event_condition,
-            done_event=done_event,
-            thread=threading.Thread(),
-            cancellation_token=cancellation_token,
-            approval_broker=approval_broker,
-            runner=runner,
-        )
+        runtime.hook = hook
 
-        original_stream = worker_config.stream
+    def _bind_cancel(self) -> None:
+        token = self.runtime.config.cancellation_token
+        if self._cancel_bound or token is None:
+            return
+        state, _, _ = self.kernel.store.read_state(self.session_id)
+        if self.run_id not in state.turns:
+            return
+        self._cancel_bound = True
 
-        def stream(event: RunEvent) -> None:
-            handle._mark_terminal_event(event)
-            if original_stream is not None:
-                original_stream(event)
+        def cancel() -> None:
+            self.cancel()
 
-        worker_config = replace(worker_config, stream=stream)
+        token.on_cancel(cancel)
 
-        def event_sink(event: RunEvent) -> None:
-            handle._mark_terminal_event(event)
-            with event_condition:
-                events.append(event)
-                if event.type == "sub_run_started":
-                    handle._active_sub_run_ids.add(event.run_id)
-                elif event.type == "sub_run_completed":
-                    handle._active_sub_run_ids.discard(event.run_id)
-                event_condition.notify_all()
+    def start(self) -> None:
+        self._thread.start()
 
-        def worker() -> None:
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread.ident is not None:
+            self._thread.join(timeout)
+
+    def _emit(self, event: RunEvent) -> None:
+        if self.runtime.config.event_store:
             try:
-                result = runner._run(
-                    agent,
-                    input,
-                    run_config=worker_config,
-                    event_sink=event_sink,
-                    _compiled_invocation=_compiled_invocation,
-                )
-            except BaseException as exc:
-                with handle._lock:
-                    handle._exception = exc
-            else:
-                with handle._lock:
-                    handle._result = result
-            finally:
-                done_event.set()
-                with event_condition:
-                    event_condition.notify_all()
+                self.runtime.config.event_store.append(event)
+            except Exception as exc:
+                if self.runtime.config.event_store_fail_closed:
+                    raise
+                warnings.warn(f"Run event store append failed: {exc}", RuntimeWarning, stacklevel=2)
+        if self._observer:
+            with suppress(Exception):
+                self._observer(event)
+        with self._condition:
+            self._events.append(event)
+            self._condition.notify_all()
 
-        handle._thread = threading.Thread(target=worker, name="vv-agent-run-handle", daemon=False)
-        handle._thread.start()
-        return handle
+    def _publish(self) -> None:
+        if self.consumer is None:
+            return
+
+        events = SessionRunEventStore(self.kernel.store, self.session_id, self.consumer)
+        while events.consume(self._emit):
+            pass
+        from vv_agent.session.tracing import deliver_spans
+
+        processors = trace_processors(self.runtime.config)
+        if processors:
+            deliver_spans(self.kernel.store, self.session_id, processors)
+
+    def _schedule_background(self) -> None:
+        parent_state, _, _ = self.kernel.store.read_state(self.session_id)
+        for operation in parent_state.operations.values():
+            for attempt in operation.attempts.values():
+                if attempt.child_handle is None:
+                    continue
+                for child in child_handles(attempt.child_handle):
+                    self._schedule_child(child)
+
+    def _schedule_child(self, child) -> None:
+        sid = child["session_id"]
+        with self.kernel._background_lock:
+            previous = self.kernel._background.get(sid)
+            if previous is not None and not previous.done():
+                return
+            state, _, _ = self.kernel.store.read_state(sid)
+            pending = self.kernel.store.peek_inbox(sid)
+            if not child["background"] and not (
+                state.active_turn_id is None and state.turns and any(item.item.kind == "follow_up" for item in pending)
+            ):
+                return
+            if state.turns and state.active_turn_id is None and not pending:
+                return
+            handle = RunHandle(self.kernel, sid, child["turn_id"], self.runtime.child_runtime(self.kernel.store, sid), None)
+            handle._deliver_to_parent = True
+            self.kernel._background[sid] = handle
+            self.kernel.handles.append(handle)
+            handle.start()
+
+    def _drive_tree(self, sid: str, runtime: Runtime, tid: str) -> None:
+        from vv_agent.session.kernel import drive
+
+        losses = 0
+        while True:
+            try:
+                drive(self.kernel.store, sid, runtime=runtime, _one_turn=True, _wait_for_lease=True)
+            except LeaseLost as exc:
+                state = None
+                with suppress(LeaseLost):
+                    state, _, _ = self.kernel.store.read_state(sid)
+                # A terminal receipt already committed by this drive must not admit another turn.
+                if state is None or tid not in state.turns or not state.turns[tid].ended:
+                    losses += 1
+                    if losses >= runtime.lease_retry_attempts:
+                        raise LeaseRetryExhausted(sid, tid, losses) from exc
+                    delay = min(runtime.lease_retry_cap_seconds, runtime.lease_retry_base_seconds * 2 ** min(losses - 1, 30))
+                    runtime.lease_retry_sleep(runtime.lease_retry_jitter(delay / 2, delay))
+                    continue
+            state, _, _ = self.kernel.store.read_state(sid)
+            completed = False
+            for (oid, _), wait in state.waits.items():
+                handle = wait["handle"]
+                if state.operations[oid].turn_id != state.active_turn_id or handle["kind"] != "child" or handle["background"]:
+                    continue
+                for child in child_handles(handle):
+                    child_id = child["session_id"]
+                    self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
+                    with self.kernel.store.atomic() as tx:
+                        delivered = child_delivery(self.kernel.store, tx, child_id)
+                    child_state, _, _ = self.kernel.store.read_state(child_id)
+                    completed |= bool(delivered and child_state.turns[child["turn_id"]].ended)
+            if not completed:
+                return
+
+    def _run(self) -> None:
+        try:
+            self._bind_cancel()
+            self._publish()
+            self._schedule_background()
+            self._drive_tree(self.session_id, self.runtime, self.run_id)
+            if self._deliver_to_parent:
+                with self.kernel.store.atomic() as tx:
+                    child_delivery(self.kernel.store, tx, self.session_id)
+            self._publish()
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            with self._condition:
+                self._done = True
+                self._condition.notify_all()
 
     def events(self) -> Iterator[RunEvent]:
-        index = 0
+        position = 0
         while True:
-            with self._event_condition:
-                while index >= len(self._events) and not self._event_stream_done():
-                    self._event_condition.wait()
-                if index >= len(self._events):
+            with self._condition:
+                self._condition.wait_for(lambda position=position: position < len(self._events) or self._done)
+                if position < len(self._events):
+                    event = self._events[position]
+                    position += 1
+                else:
                     return
-                event = self._events[index]
-                index += 1
             yield event
 
     def result(self, timeout: float | None = None) -> RunResult:
-        self._thread.join(timeout)
-        if self._thread.is_alive():
-            raise TimeoutError("RunHandle result was not ready before timeout.")
-        with self._lock:
-            if self._exception is not None:
-                raise self._exception
-            if self._result is None:
-                raise RuntimeError("RunHandle completed without a result.")
-            return self._result
+        from vv_agent.session.result import project_result
 
-    def done(self) -> bool:
-        with self._event_condition:
-            return self._done_event.is_set() and not self._active_sub_run_ids
+        self.join(timeout)
+        if not self._done:
+            raise TimeoutError("session execution is still active")
+        if self._error:
+            raise self._error
+        state, _, _ = self.kernel.store.read_state(self.session_id)
+        tid = self.run_id if self.run_id in state.turns else state.active_turn_id or next(reversed(state.turns), "")
+        if not tid:
+            raise Conflict("session has no admitted turn")
+        self.run_id = tid
+        result = project_result(self.kernel.store, self.session_id, tid, runtime=self.runtime)
+        waits = self.kernel.waits(self.session_id, self.runtime)
+        if waits:
+            result.metadata["session_waits"] = [{"session_id": sid, **wait} for sid, _, wait in waits]
+            result.raw_result.wait_reason = waits[0][2].get("question", result.raw_result.wait_reason)
+        result._session_driver = self.kernel
+        return result
 
     def cancel(self, reason: str = "") -> bool:
-        with self._lock:
-            with self._event_condition:
-                active_sub_runs = bool(self._active_sub_run_ids)
-            if (
-                (self._result is not None and not active_sub_runs)
-                or (self._exception is not None and not active_sub_runs)
-                or (self._terminal_event_seen and not active_sub_runs)
-                or self._cancel_requested
-                or (self.done() and not active_sub_runs)
-            ):
+        del reason
+        state, _, _ = self.kernel.store.read_state(self.session_id)
+        if state.active_turn_id != self.run_id:
+            return False
+        with self.kernel.store.atomic() as tx:
+            state, _, _ = self.kernel.store.read_state(self.session_id)
+            if state.active_turn_id != self.run_id:
                 return False
-            self._cancel_requested = True
-        self._cancellation_token.cancel(reason or "Run was cancelled.")
-        return True
+            receipt = tx.push(self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id))
+            cancel_children(self.kernel.store, tx, state, self.session_id, self.run_id)
+        return not receipt.replayed
 
-    def attach_controller(self, controller: RunHandleController) -> None:
-        with self._lock:
-            self._controller = controller
-
-    def detach_controller(self, controller: RunHandleController | None = None) -> None:
-        with self._lock:
-            if controller is not None and self._controller is not controller:
-                return
-            self._controller = None
-
-    def steer(self, message: str) -> None:
-        self._require_controller("steer").steer(message)
-
-    def follow_up(self, message: str) -> None:
-        self._require_controller("follow_up").follow_up(message)
-
-    def approve(self, request_id: str, decision: ApprovalInput) -> None:
-        if not self._approval_broker.resolve(request_id, decision):
-            raise KeyError(f"Unknown approval request: {request_id}")
-
-    def resume(
-        self,
-        state_or_token: RunState | str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> RunResult | None:
-        if isinstance(state_or_token, str):
-            controller = self._require_controller("resume")
-            resume = getattr(controller, "resume", None)
-            if callable(resume):
-                resume(state_or_token, payload)
-                return None
-            raise NotImplementedError("The attached controller does not support RunHandle.resume().")
-
-        state = state_or_token or self.result().into_state()
-        resume_input = payload.get("input") if payload is not None else None
-        return self._runner.resume(state, input=str(resume_input) if resume_input is not None else None)
+    def done(self) -> bool:
+        return self._done
 
     def state(self) -> RunHandleState:
-        with self._lock:
-            with self._event_condition:
-                active_sub_runs = bool(self._active_sub_run_ids)
-            if active_sub_runs:
-                return RunHandleState(
-                    status="running",
-                    done=False,
-                    cancelled=self._cancel_requested or self._cancellation_token.cancelled,
-                )
-            if self._exception is not None:
-                if self._is_cancelled_error(self._exception):
-                    return RunHandleState(status="cancelled", done=True, cancelled=True, error=str(self._exception))
-                return RunHandleState(status="failed", done=True, error=str(self._exception))
-            if self._cancel_requested and self._done_event.is_set():
-                return RunHandleState(
-                    status="cancelled",
-                    done=True,
-                    cancelled=True,
-                    error=self._cancellation_token.reason,
-                )
-            if self._result is not None:
-                if self._result_was_cancelled(self._result):
-                    return RunHandleState(
-                        status="cancelled",
-                        done=True,
-                        cancelled=True,
-                        error=self._error_text(self._result.raw_result.error),
-                    )
-                return RunHandleState(
-                    status=self._status_from_result(self._result.status),
-                    done=True,
-                    error=self._error_text(self._result.raw_result.error),
-                )
-        if not self.done():
-            return RunHandleState(
-                status="running",
-                done=False,
-                cancelled=self._cancel_requested or self._cancellation_token.cancelled,
-            )
-        if self._cancel_requested or self._cancellation_token.cancelled:
-            return RunHandleState(
-                status="cancelled",
-                done=True,
-                cancelled=True,
-                error=self._cancellation_token.reason,
-            )
-        return RunHandleState(status="completed", done=True)
+        if self._error:
+            return RunHandleState("failed", True, error=str(self._error))
+        if not self._done:
+            return RunHandleState("running", False)
+        result = self.result()
+        cancelled = bool(result.completion_reason and result.completion_reason.value == "cancelled")
+        return RunHandleState("cancelled" if cancelled else result.status.value, True, cancelled)
 
-    def _is_cancelled_error(self, error: BaseException) -> bool:
-        return isinstance(error, CancelledError) or (self._cancellation_token.cancelled and "cancel" in str(error).lower())
+    def approve(self, request_id: str, decision) -> None:
+        self.kernel.approve(self.session_id, self.runtime, request_id, decision, f"approval/{request_id}/answer")
 
-    def _result_was_cancelled(self, result: RunResult) -> bool:
-        return (
-            result.status == AgentStatus.FAILED
-            and self._cancellation_token.cancelled
-            and "cancel" in (self._error_text(result.raw_result.error) or "").lower()
-        )
+    def steer(self, message: str) -> None:
+        self.kernel.push(self.session_id, InboxItem(uuid4().hex, "steer", {"content": message}, self.run_id))
 
-    @staticmethod
-    def _error_text(error: dict[str, Any] | None) -> str | None:
-        return _agent_result_error_text(error)
+    def follow_up(self, message: str) -> None:
+        self.kernel.push(self.session_id, InboxItem(uuid4().hex, "follow_up", {"content": message}))
 
-    def _event_stream_done(self) -> bool:
-        return self._done_event.is_set() and not self._active_sub_run_ids
+    def resume(self, state_or_token=None, payload=None) -> RunResult:
+        if state_or_token is not None or payload is not None:
+            raise ValueError("resume uses the retained session and turn without new input")
+        from vv_agent.session.surfaces import resume_turn
 
-    @staticmethod
-    def _status_from_result(status: AgentStatus) -> RunHandleStatus:
-        return status.value
-
-    def _require_controller(self, method: str) -> RunHandleController:
-        with self._lock:
-            controller = self._controller
-        if controller is None:
-            raise NotImplementedError(
-                f"RunHandle.{method}() is only available when the handle is attached to an interactive session."
-            )
-        return controller
-
-    def _mark_terminal_event(self, event: RunEvent) -> None:
-        if event.type not in {
-            "handoff_started",
-            "handoff_completed",
-            "run_completed",
-            "run_failed",
-            "run_cancelled",
-        }:
-            return
-        with self._lock:
-            if event.event_id in self._lifecycle_event_ids:
-                return
-            self._lifecycle_event_ids.add(event.event_id)
-            if event.type == "handoff_started":
-                self._active_handoffs += 1
-                self._terminal_event_seen = False
-                self._terminal_seen_during_handoff = False
-                return
-            if event.type == "handoff_completed":
-                self._active_handoffs = max(self._active_handoffs - 1, 0)
-                if bool(event.metadata.get("chain_continues")):
-                    self._terminal_event_seen = False
-                    self._terminal_seen_during_handoff = False
-                elif self._active_handoffs == 0 and self._terminal_seen_during_handoff:
-                    self._terminal_event_seen = True
-                    self._terminal_seen_during_handoff = False
-                return
-            if self._active_handoffs:
-                self._terminal_seen_during_handoff = True
-            else:
-                self._terminal_event_seen = True
+        return resume_turn(self.session_id, self.run_id)

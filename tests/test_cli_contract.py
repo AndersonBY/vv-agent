@@ -249,7 +249,7 @@ def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, t
 
     monkeypatch.setattr(cli, "VvLlmModelProvider", ConfiguredProvider)
     code = cli._run_task_cli(
-        ["--prompt", "hello", "--model", "deepseek-v4-pro", "--workspace", str(tmp_path), "--verbose"], _kernel=surface
+        ["--prompt", "hello", "--model", "deepseek-v4-pro", "--workspace", str(tmp_path), "--verbose"], store=surface.store
     )
     captured = capsys.readouterr()
     assert code == 0
@@ -258,16 +258,15 @@ def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, t
     assert payload["cycles"] == 1
     assert "[run_started]" in captured.err
     assert "run_completed" in captured.err
-    if surface:
-        assert surface.path == ":memory:"
-        assert surface.store.connection.execute("SELECT count(*) FROM sk_session").fetchone()[0] == 1
+    assert surface.path == ":memory:"
+    assert surface.store.connection.execute("SELECT count(*) FROM sk_session").fetchone()[0] == 1
 
 
 def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsys, tmp_path):
     from support import FixedModelProvider
 
     from vv_agent.llm import ScriptedLLM
-    from vv_agent.session.surfaces import _SessionKernel
+    from vv_agent.session.surfaces import SessionDriver
     from vv_agent.types import LLMResponse
 
     requests = []
@@ -291,13 +290,13 @@ def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsy
     monkeypatch.setattr(cli, "VvLlmModelProvider", ConfiguredProvider)
     path = tmp_path / "persistent.sqlite"
     for prompt in ("first", "second"):
-        kernel = _SessionKernel(path)
+        kernel = SessionDriver(path)
         try:
             assert (
                 cli._run_task_cli(
                     ["--prompt", prompt, "--model", "deepseek-v4-pro", "--workspace", str(tmp_path)],
-                    _kernel=kernel,
-                    _session_id="persistent",
+                    store=kernel.store,
+                    session_id="persistent",
                 )
                 == 0
             )

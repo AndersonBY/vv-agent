@@ -9,45 +9,20 @@ from typing import Any
 import pytest
 
 import vv_agent.interactive as interactive_module
-from vv_agent import AgentSessionRun, AgentStatus, InteractiveAgentDefinition, Message, create_agent_session
-from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent import Agent, AgentSessionOptions, ScriptedModelProvider, create_agent_session
 from vv_agent.events import DiagnosticEvent
 from vv_agent.interactive import AgentSessionEventGapError, AgentSessionEventStreamClosed
-from vv_agent.types import AgentResult
+from vv_agent.types import LLMResponse
 
 
-def _resolved() -> ResolvedModelConfig:
-    endpoint = EndpointConfig(endpoint_id="fake", api_key="key", api_base="https://example.invalid/v1")
-    return ResolvedModelConfig(
-        backend="test",
-        requested_model="test-model",
-        selected_model="test-model",
-        model_id="test-model",
-        endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
-    )
-
-
-def _completed_run(prompt: str) -> AgentSessionRun:
-    return AgentSessionRun(
-        agent_name="inline",
-        result=AgentResult(
-            status=AgentStatus.COMPLETED,
-            messages=[Message(role="user", content=prompt), Message(role="assistant", content="done")],
-            cycles=[],
-            final_answer="done",
-            shared_state={"todo_list": []},
-        ),
-        resolved=_resolved(),
-    )
-
-
-def _session(tmp_path: Path, execute_run=None):
+def _session(tmp_path: Path, provider=None):
     return create_agent_session(
-        execute_run=execute_run or (lambda **kwargs: _completed_run(kwargs["prompt"])),
+        agent=Agent("inline", "Answer."),
+        options=AgentSessionOptions(
+            model_provider=provider or ScriptedModelProvider.from_callback("test", "m", lambda request: LLMResponse("done")),
+            workspace=tmp_path,
+        ),
         session_id="interactive-lifecycle",
-        agent_name="inline",
-        definition=InteractiveAgentDefinition(description="assistant", model="test-model"),
-        workspace=tmp_path,
     )
 
 
@@ -138,11 +113,11 @@ def test_background_completion_emits_idle_notification_for_host_resume(monkeypat
     monkeypatch.setattr(interactive_module, "background_session_manager", manager)
     prompts: list[str] = []
 
-    def execute_run(**kwargs):
-        prompts.append(kwargs["prompt"])
-        return _completed_run(kwargs["prompt"])
+    def respond(request):
+        prompts.append(next(m.content for m in reversed(request.messages) if m.role == "user"))
+        return LLMResponse("done")
 
-    session = _session(tmp_path, execute_run)
+    session = _session(tmp_path, ScriptedModelProvider.from_callback("test", "m", respond))
     events: list[tuple[str, dict[str, Any]]] = []
     session.subscribe(lambda event, payload: events.append((event, payload)))
     session._session_event_handler(_background_started_event("bg_contract"))
@@ -164,61 +139,43 @@ def test_background_completion_emits_idle_notification_for_host_resume(monkeypat
     assert session.state().pending_steering == 0
 
 
-class _ActiveHandle:
-    def __init__(self) -> None:
-        self.cancel_reasons: list[str] = []
-        self.attached = False
+def test_close_aborts_active_handle_closes_stream_and_rejects_new_work(tmp_path):
+    active, release = threading.Event(), threading.Event()
 
-    def attach_controller(self, _controller) -> None:
-        self.attached = True
-
-    def detach_controller(self, _controller) -> None:
-        self.attached = False
-
-    def cancel(self, reason: str = "") -> bool:
-        self.cancel_reasons.append(reason)
-        return True
-
-
-def test_close_aborts_active_handle_closes_stream_and_rejects_new_work(tmp_path: Path) -> None:
-    active = threading.Event()
-    handle = _ActiveHandle()
-
-    def execute_run(**kwargs):
-        kwargs["active_handle_callback"](handle)
+    def respond(request):
         active.set()
-        token = kwargs["cancellation_token"]
-        cancelled = threading.Event()
-        token.on_cancel(cancelled.set)
-        assert cancelled.wait(timeout=3)
-        return _completed_run(kwargs["prompt"])
+        release.wait(2)
+        return LLMResponse("late answer")
 
-    session = _session(tmp_path, execute_run)
-    stream = session.subscribe(capacity=16)
-    worker = threading.Thread(target=lambda: session.prompt("run", auto_follow_up=False), daemon=True)
-    worker.start()
-    assert active.wait(timeout=3)
-
-    assert session.close() is True
-    worker.join(timeout=3)
-
-    assert not worker.is_alive()
-    assert session.closed is True
-    assert session.active_run_handle is None
-    assert handle.cancel_reasons == ["interactive session closed"]
-    assert handle.attached is False
-    assert session.close() is False
-    with pytest.raises(RuntimeError, match="closed"):
-        session.prompt("after close")
-
-    observed = []
-    while True:
-        try:
-            observed.append(stream.recv(timeout=0).event)
-        except AgentSessionEventStreamClosed:
-            break
-    assert "session_active_run_handle_changed" in observed
-    assert "session_closed" in observed
+    session = _session(tmp_path, ScriptedModelProvider.from_callback("test", "m", respond))
+    stream = session.subscribe(capacity=128)
+    outcomes = []
+    worker = threading.Thread(target=lambda: outcomes.append(session.prompt("run", auto_follow_up=False)))
+    try:
+        worker.start()
+        assert active.wait(2)
+        handle = session.active_run_handle
+        assert handle is not None
+        assert session.close() is True
+        worker.join(2)
+        assert not worker.is_alive()
+        assert session.closed and session.active_run_handle is None
+        assert handle.done()
+        assert session.close() is False
+        with pytest.raises(RuntimeError, match="closed"):
+            session.prompt("after close")
+        observed = []
+        while True:
+            try:
+                observed.append(stream.recv(timeout=0).event)
+            except AgentSessionEventStreamClosed:
+                break
+        assert "session_active_run_handle_changed" in observed
+        assert "session_closed" in observed
+    finally:
+        release.set()
+        worker.join(2)
+        session.driver.close()
 
 
 def test_dropping_session_unsubscribes_background_completion_listener(monkeypatch, tmp_path: Path) -> None:

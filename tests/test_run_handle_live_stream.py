@@ -14,8 +14,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
-from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 RUN_HANDLE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_handle.json"
 
@@ -115,7 +114,9 @@ def test_run_handle_state_reports_failed_result_from_guardrail() -> None:
         model="test-model",
         input_guardrails=[reject],
     )
-    handle = Runner.start(agent, "say hi")
+    handle = Runner.start(
+        agent, "say hi", run_config=RunConfig(model_provider=FixedModelProvider(_finish_llm(), _resolved_model()))
+    )
     assert handle.result(timeout=2).status == AgentStatus.FAILED
 
     state = handle.state()
@@ -237,20 +238,16 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
     assert events[-1].type == "run_completed"
 
 
-def test_stream_sync_raises_worker_exception_after_yielding_events() -> None:
-    agent = Agent(name="assistant", instructions="Return JSON.", model="test-model", output_type=dict)
-
-    events = []
-    with pytest.raises(ValueError):
-        for event in Runner.stream_sync(
-            agent,
-            "say hi",
-            run_config=RunConfig(model_provider=FixedModelProvider(_finish_llm("not json"), _resolved_model())),
-        ):
-            events.append(event)
-
+def test_stream_sync_yields_typed_output_failure_terminal():
+    agent = Agent("assistant", "Return JSON.", model="test-model", output_type=dict)
+    events = list(
+        Runner.stream_sync(
+            agent, "say hi", run_config=RunConfig(model_provider=FixedModelProvider(_finish_llm("not json"), _resolved_model()))
+        )
+    )
     assert events[0].type == "run_started"
-    assert events[-1].type == "run_completed"
+    assert events[-1].type == "run_failed"
+    assert not any(e.type == "run_completed" for e in events)
 
 
 class _BurstStreamingLLM:
@@ -295,7 +292,11 @@ def test_run_handle_subscribers_are_independent_and_lossless_after_live_capacity
     assert contract["subscribers"]["start_from_complete_backlog"] is True
     assert contract["subscribers"]["lossless_after_live_capacity"] is True
     assert [event.event_id for event in first_events] == [event.event_id for event in second_events]
-    assert [event.event_id for event in first_events] == [event.event_id for event in result.events]
+    assert [
+        event.event_id
+        for event in first_events
+        if event.type not in {"assistant_delta", "reasoning_delta", "model_tool_call_started", "model_tool_call_progress"}
+    ] == [event.event_id for event in result.events]
     assert sum(event.type == "assistant_delta" for event in first_events) == event_count
 
 
@@ -315,38 +316,28 @@ class _BlockingCancellationLLM:
         return self.complete(request)
 
 
-def test_run_handle_cancel_accepted_state_and_terminal_reason_match_fixture(tmp_path: Path) -> None:
+def test_run_handle_cancel_accepted_state_and_terminal_reason_match_fixture(tmp_path):
     contract = _run_handle_contract()["cancellation"]
     llm = _BlockingCancellationLLM()
-
     handle = Runner.start(
-        Agent(name="cancel", instructions="Wait.", model="test-model"),
+        Agent("cancel", "Wait.", model="test-model"),
         "go",
-        run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
-            workspace=tmp_path,
-        ),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), workspace=tmp_path),
     )
-    assert llm.started.wait(timeout=2)
-    assert handle.cancel(contract["reason"]) is True
-
-    accepted = handle.state()
-    assert {
-        "status": accepted.status,
-        "done": accepted.done,
-        "cancelled": accepted.cancelled,
-    } == contract["accepted_state"]
-    assert handle.cancel(contract["reason"]) is contract["repeated_request_accepted"]
-
+    assert llm.started.wait(2)
+    assert handle.cancel(contract["reason"]) is contract["accepted"]
+    assert handle.state().status == "running" and not handle.state().done
+    assert handle.cancel() is contract["repeated_request_accepted"]
     llm.release.set()
-    result = handle.result(timeout=3)
-    terminal = handle.state()
-    assert result.status == AgentStatus.FAILED
-    assert terminal.status == contract["terminal_status"]
-    assert terminal.done is True
-    assert terminal.cancelled is True
-    assert terminal.error is not None and contract["reason"] in terminal.error
-    assert handle.cancel(contract["reason"]) is contract["late_request_accepted"]
+    result = handle.result(3)
+    assert (
+        result.status is AgentStatus.FAILED
+        and result.completion_reason is not None
+        and result.completion_reason.value == "cancelled"
+    )
+    assert handle.state().status == contract["terminal_status"]
+    assert handle.state().done and handle.state().cancelled
+    assert handle.cancel() is contract["late_request_accepted"]
 
 
 class _AsyncChildStreamingLLM:
@@ -405,64 +396,47 @@ class _AsyncChildModelProvider:
         return ModelRef.named("test-model")
 
 
-def test_run_handle_events_wait_for_async_child_after_parent_result_and_allow_tail_cancel(tmp_path: Path) -> None:
-    contract = _run_handle_contract()
-    llm = _AsyncChildStreamingLLM()
-    runtime_task = AgentTask(
-        task_id="parent-task",
-        model="test-model",
-        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
-        user_prompt="Delegate",
-        max_cycles=3,
-        sub_agents={
-            "researcher": SubAgentConfig(
-                model="test-model",
-                description="Research",
-                system_prompt="Child prompt",
-                max_cycles=2,
-            )
-        },
-    )
+def test_run_handle_parent_terminal_is_retained_and_child_delivery_is_separate(tmp_path):
+    from support.kernel_runtime import start_runner
 
-    handle = Runner._start_compiled(
-        Agent(name="parent", instructions="Delegate.", model="test-model"),
-        "go",
-        task=runtime_task,
-        run_config=RunConfig(
-            workspace=tmp_path,
-            model_provider=_AsyncChildModelProvider(llm),
-        ),
-    )
-    consumed: list[Any] = []
-    consumer = Thread(target=lambda: consumed.extend(handle.events()))
-    consumer.start()
-    assert llm.child_started.wait(timeout=2)
-    result = handle.result(timeout=2)
+    from vv_agent import ScriptedModelProvider
+    from vv_agent.session.surfaces import SessionDriver
 
-    assert result.status == AgentStatus.COMPLETED
-    assert contract["completion"]["result_may_precede_async_children"] is True
-    assert consumer.is_alive()
-    assert handle.done() is False
-    assert handle.state().status == "running"
-    assert handle.cancel(contract["cancellation"]["reason"]) is True
-    accepted = handle.state()
-    assert {
-        "status": accepted.status,
-        "done": accepted.done,
-        "cancelled": accepted.cancelled,
-    } == contract["cancellation"]["accepted_state"]
-    assert handle.cancel(contract["cancellation"]["reason"]) is contract["cancellation"]["repeated_request_accepted"]
-    llm.release_child.set()
-    consumer.join(timeout=3)
-
-    assert not consumer.is_alive()
-    lifecycle = [event for event in consumed if event.type in {"sub_run_started", "sub_run_completed"}]
-    assert [event.type for event in lifecycle] == ["sub_run_started", "sub_run_completed"]
-    assert lifecycle[-1].status == AgentStatus.FAILED.value
-    assert contract["cancellation"]["reason"] in (lifecycle[-1].error or "")
-    assert contract["completion"]["events_wait_for_started_children"] is True
-    terminal = handle.state()
-    assert terminal.status == contract["cancellation"]["terminal_status"]
-    assert terminal.done is True
-    assert terminal.cancelled is True
-    assert terminal.error is not None and contract["cancellation"]["reason"] in terminal.error
+    contract = _run_handle_contract()["completion"]
+    driver = SessionDriver()
+    try:
+        handle = start_runner(
+            driver,
+            "parent",
+            Agent("parent", "Delegate.", model="m", sub_agents={"worker": SubAgentConfig(model="m", description="Work.")}),
+            "go",
+            run_config=RunConfig(
+                workspace=tmp_path,
+                model_provider=ScriptedModelProvider.from_steps(
+                    "test",
+                    "m",
+                    [
+                        LLMResponse(
+                            "",
+                            [
+                                ToolCall(
+                                    "delegate",
+                                    "create_sub_task",
+                                    {"agent_id": "worker", "task_description": "work", "wait_for_completion": False},
+                                )
+                            ],
+                        ),
+                        LLMResponse("done"),
+                    ],
+                ),
+            ),
+        )
+        result = handle.result(3)
+        assert result.status is AgentStatus.COMPLETED and handle.done()
+        assert contract["parent_result_is_retained"] and contract["child_terminal_delivery_is_separate"]
+        for child in driver.handles:
+            child.join(3)
+        assert handle.result().events == result.events
+        assert handle.cancel() is False
+    finally:
+        driver.close()

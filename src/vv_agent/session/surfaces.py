@@ -1,42 +1,46 @@
-"""Private host assembly selector. No environment switch or public export."""
+"""Session host assembly and retained runtime bindings."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from threading import Condition, RLock, Thread
+from threading import RLock
 from typing import Any
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
-from vv_agent.events import RunEvent
+from vv_agent.memory import MemoryManager
+from vv_agent.model import resolve_run_model
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
-from vv_agent.runner import Runner
+from vv_agent.run_handle import RunHandle
 from vv_agent.types import AgentTask, Message
 
-from .children import child_delivery, child_handles
+from .children import child_handles
 from .context import project_context
-from .events import SessionRunEventStore
 from .kernel import drive
+from .postgres import PostgresStore
 from .records import InboxItem, SessionSpec
 from .result import project_result
 from .runtime import Runtime
 from .sqlite import SQLiteStore
-from .store import Conflict, LeaseLost
+from .store import Conflict, SessionStore
+
+_DRIVERS: WeakValueDictionary[str, SessionDriver] = WeakValueDictionary()
 
 
-class _SessionKernel:
-    def __init__(self, path: str | Path = ":memory:") -> None:
-        self.path = str(path)
-        self.store = SQLiteStore(self.path)
-        if not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
+class SessionDriver:
+    def __init__(self, path: str | Path = ":memory:", *, store: SessionStore | None = None) -> None:
+        self._owns_store = store is None
+        self.store = store if store is not None else SQLiteStore(str(path))
+        self.path = self.store.path if isinstance(self.store, SQLiteStore) else None
+        if isinstance(self.store, SQLiteStore) and not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
             self.store.install_schema()
-        self.handles: list[_KernelHandle] = []
-        self._background: dict[str, _KernelHandle] = {}
+        self.handles: list[RunHandle] = []
+        self._background: dict[str, RunHandle] = {}
         self._background_lock = RLock()
 
     def _control_runtime(self, sid: str) -> Runtime:
@@ -48,22 +52,54 @@ class _SessionKernel:
     def close(self) -> None:
         for handle in self.handles:
             handle.join()
-        self.store.connection.close()
+        if self._owns_store and isinstance(self.store, SQLiteStore):
+            self.store.connection.close()
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
+        _DRIVERS[sid] = self
         with self.store.atomic() as tx:
             tx.create(SessionSpec(sid, "local", workspace, attributes=attributes), consumers=("events", "app_server", "traces"))
 
     def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
-        llm, resolved = Runner._resolve_model(agent=agent, run_config=config)
+
+        llm, resolved = resolve_run_model(agent=agent, run_config=config)
+        metadata = dict(agent.metadata) | config.metadata
+        settings = config.model_provider.default_settings(resolved) if config.model_provider else agent.model_settings
+        settings = settings.resolve(agent.model_settings).resolve(config.model_settings) if settings else config.model_settings
+        reserved = settings.max_tokens if settings else None
+        source = "model_settings" if reserved is not None else "framework_fallback"
+        if reserved is None and isinstance(metadata.get("reserved_output_tokens"), int):
+            reserved, source = metadata["reserved_output_tokens"], "task_metadata"
+        if reserved is None:
+            reserved = min(16_000, resolved.max_output_tokens) if resolved.max_output_tokens is not None else 16_000
+            if reserved < 16_000:
+                source = "framework_fallback_capped_by_model_capability"
+        memory = MemoryManager(
+            model_context_window=resolved.context_length or metadata.get("model_context_window") or 279_000,
+            model_max_output_tokens=resolved.max_output_tokens,
+            reserved_output_tokens=reserved,
+            reserved_output_source=source,
+            compact_threshold=task.memory_compact_threshold if task else 250_000,
+            autocompact_buffer_tokens=metadata.get("autocompact_buffer_tokens", 13_000),
+            keep_recent_messages=metadata.get("memory_keep_recent_messages", 10),
+            microcompaction_policy=task.microcompaction_policy if task else config.microcompaction_policy,
+        )
         return Runtime(
             agent,
-            replace(config, session=None),
+            config,
             resolved,
             llm,
-            (lambda: nullcontext(self.store)) if self.path == ":memory:" else (lambda: SQLiteStore.standalone(self.path)),
+            self._heartbeat_store,
             frozen_task=task,
+            memory_manager=memory,
         )
+
+    def _heartbeat_store(self):
+        if isinstance(self.store, SQLiteStore) and self.store.path != ":memory:":
+            return SQLiteStore.standalone(self.store.path)
+        if isinstance(self.store, PostgresStore):
+            return PostgresStore.standalone(self.store.connection.info.dsn)
+        return nullcontext(self.store)
 
     def start(
         self,
@@ -76,7 +112,7 @@ class _SessionKernel:
         task: AgentTask | None = None,
         consumer: str = "events",
         autostart: bool = True,
-    ) -> _KernelHandle:
+    ) -> RunHandle:
         state, _, _ = self.store.read_state(sid)
         if state.turns and config.shared_state is None:
             prior = project_result(self.store, sid, next(reversed(state.turns)))
@@ -100,7 +136,7 @@ class _SessionKernel:
                 None,
             )
             tid = state.active_turn_id or (f"{sid}/turn/{queued['input_id']}" if queued else next(reversed(state.turns), ""))
-        handle = _KernelHandle(self, sid, tid, runtime, consumer)
+        handle = RunHandle(self, sid, tid, runtime, consumer)
         self.handles.append(handle)
         if autostart:
             handle.start()
@@ -226,164 +262,24 @@ class _SessionKernel:
         return None
 
 
-class _KernelHandle:
-    def __init__(self, kernel: _SessionKernel, sid: str, tid: str, runtime: Runtime, consumer: str | None) -> None:
-        self.kernel, self.session_id, self.run_id, self.runtime, self.consumer = kernel, sid, tid, runtime, consumer
-        self._condition = Condition()
-        self._events: list[RunEvent] = []
-        self._done = False
-        self._cancel_bound = False
-        self._error: BaseException | None = None
-        self._deliver_to_parent = False
-        self._thread = Thread(target=self._run, name="session-surface-driver")
-        original_hook = runtime.hook
+def resume_turn(session_id: str, turn_id: str) -> RunResult:
+    from .bindings import MissingHostBinding
 
-        def hook(point, record):
-            original_hook(point, record)
-            if point == "after_commit":
-                self._bind_cancel()
-                self._publish()
-                self._schedule_background()
-
-        runtime.hook = hook
-
-    def _bind_cancel(self) -> None:
-        token = self.runtime.config.cancellation_token
-        if self._cancel_bound or token is None:
-            return
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        if self.run_id not in state.turns:
-            return
-        self._cancel_bound = True
-        token.on_cancel(
-            lambda: self.kernel.push(
-                self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id)
-            )
-        )
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def join(self, timeout: float | None = None) -> None:
-        if self._thread.ident is not None:
-            self._thread.join(timeout)
-
-    def _publish(self) -> None:
-        if self.consumer is None:
-            return
-
-        def sink(event):
-            if self.runtime.config.stream:
-                with suppress(Exception):
-                    self.runtime.config.stream(event)
-            with self._condition:
-                self._events.append(event)
-                self._condition.notify_all()
-
-        events = SessionRunEventStore(self.kernel.store, self.session_id, self.consumer)
-        while events.consume(sink):
-            pass
-
-    def _schedule_background(self) -> None:
-        _, records, _ = self.kernel.store.read_state(self.session_id)
-        for stored in records:
-            r = stored.record
-            if r.kind != "op_parked" or r._payload["handle"]["kind"] != "child" or not r._payload["handle"]["background"]:
-                continue
-            for child in child_handles(r._payload["handle"]):
-                sid = child["session_id"]
-                with self.kernel._background_lock:
-                    if sid in self.kernel._background:
-                        continue
-                    state, _, _ = self.kernel.store.read_state(sid)
-                    if state.turns and state.active_turn_id is None:
-                        continue
-                    handle = _KernelHandle(
-                        self.kernel, sid, child["turn_id"], self.runtime.child_runtime(self.kernel.store, sid), None
-                    )
-                    handle._deliver_to_parent = True
-                    self.kernel._background[sid] = handle
-                    self.kernel.handles.append(handle)
-                    handle.start()
-
-    def _drive_tree(self, sid: str, runtime: Runtime, tid: str) -> None:
-        while True:
-            try:
-                drive(self.kernel.store, sid, runtime=runtime, _one_turn=True, _wait_for_lease=True)
-            except LeaseLost:
-                state, _, _ = self.kernel.store.read_state(sid)
-                # A terminal receipt already committed by this drive must not admit another turn.
-                if tid not in state.turns or not state.turns[tid].ended:
-                    continue
-            state, _, _ = self.kernel.store.read_state(sid)
-            completed = False
-            for (oid, _), wait in state.waits.items():
-                handle = wait["handle"]
-                if state.operations[oid].turn_id != state.active_turn_id or handle["kind"] != "child" or handle["background"]:
-                    continue
-                for child in child_handles(handle):
-                    child_id = child["session_id"]
-                    self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
-                    with self.kernel.store.atomic() as tx:
-                        delivered = child_delivery(self.kernel.store, tx, child_id)
-                    child_state, _, _ = self.kernel.store.read_state(child_id)
-                    completed |= bool(delivered and child_state.turns[child["turn_id"]].ended)
-            if not completed:
-                return
-
-    def _run(self) -> None:
-        try:
-            self._bind_cancel()
-            self._publish()
-            self._schedule_background()
-            self._drive_tree(self.session_id, self.runtime, self.run_id)
-            if self._deliver_to_parent:
-                with self.kernel.store.atomic() as tx:
-                    child_delivery(self.kernel.store, tx, self.session_id)
-            self._publish()
-        except BaseException as exc:
-            self._error = exc
-        finally:
-            with self._condition:
-                self._done = True
-                self._condition.notify_all()
-
-    def events(self) -> Iterator[RunEvent]:
-        position = 0
-        while True:
-            with self._condition:
-                self._condition.wait_for(lambda position=position: position < len(self._events) or self._done)
-                if position < len(self._events):
-                    event = self._events[position]
-                    position += 1
-                else:
-                    return
-            yield event
-
-    def result(self, timeout: float | None = None) -> RunResult:
-        self.join(timeout)
-        if not self._done:
-            raise TimeoutError("session execution is still active")
-        if self._error:
-            raise self._error
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        tid = self.run_id if self.run_id in state.turns else state.active_turn_id or next(reversed(state.turns), "")
-        if not tid:
-            raise Conflict("session has no admitted turn")
-        self.run_id = tid
-        result = project_result(self.kernel.store, self.session_id, tid, runtime=self.runtime)
-        waits = self.kernel.waits(self.session_id, self.runtime)
-        if waits:
-            result.metadata["session_waits"] = [{"session_id": sid, **wait} for sid, _, wait in waits]
-            result.raw_result.wait_reason = waits[0][2].get("question", result.raw_result.wait_reason)
-        return result
-
-    def cancel(self, reason: str = "") -> bool:
-        del reason
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        if state.active_turn_id != self.run_id:
-            return False
-        receipt = self.kernel.push(
-            self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id)
-        )
-        return not receipt.replayed
+    if not isinstance(session_id, str) or not isinstance(turn_id, str):
+        raise TypeError("resume requires session_id and turn_id strings")
+    driver = _DRIVERS.get(session_id)
+    if driver is None:
+        raise MissingHostBinding("resume requires the original host runtime; use AgentSession for durable sessions")
+    state, _, _ = driver.store.read_state(session_id)
+    if state.closed or state.archived:
+        raise ValueError("session is closed or archived")
+    if turn_id not in state.turns or state.active_turn_id not in {None, turn_id}:
+        raise ValueError("turn_id does not identify the resumable turn")
+    handle = next((h for h in reversed(driver.handles) if h.session_id == session_id and h.run_id == turn_id), None)
+    if handle is None:
+        raise MissingHostBinding("resume requires the original host runtime")
+    if not handle.done():
+        return handle.result()
+    if state.turns[turn_id].ended:
+        return handle.result()
+    return driver.start(session_id, handle.runtime.agent, handle.runtime.config, None).result()

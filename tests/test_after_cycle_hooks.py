@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+from support.kernel_runtime import KernelRuntime
+
 from vv_agent import (
     AfterCycleDecision,
     AfterCycleSnapshot,
@@ -13,8 +16,7 @@ from vv_agent import (
 from vv_agent.constants import ASK_USER_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
-from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_STATE_KEY
+from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_STATE_KEY, AfterCycleHookError
 from vv_agent.tools import build_default_registry
 from vv_agent.types import (
     AgentStatus,
@@ -61,7 +63,7 @@ def test_after_cycle_steer_defers_no_tool_completion(tmp_path: Path) -> None:
             AfterCycleDecision.continue_run(),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 lambda request: requests.append(request) or LLMResponse(content="first answer"),
@@ -118,7 +120,7 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
         ]
     )
     requests: list[LlmRequest] = []
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -213,7 +215,7 @@ def test_after_cycle_permission_narrowing_hides_schema_and_blocks_dispatch(
             AfterCycleDecision.continue_run(),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 lambda request: requests.append(request) or LLMResponse(content="first cycle"),
@@ -256,7 +258,7 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
             )
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="candidate answer")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -282,12 +284,12 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
         "message": "host.policy_stop: Host policy stopped this run.",
         "retryable": False,
     }
-    assert "after_cycle_stopped" in events
+    assert "run_failed" in events
     assert "run_completed" not in events
 
 
 def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> None:
-    wait_runtime = AgentRuntime(
+    wait_runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -316,7 +318,7 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         )
     )
 
-    max_runtime = AgentRuntime(
+    max_runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="candidate")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -351,30 +353,26 @@ def test_after_cycle_invalid_durable_control_state_fails_before_model(
         model_calls += 1
         return LLMResponse(content="must not run")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[complete]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
-    result = runtime.run(
-        AgentTask(
-            task_id="after-cycle-invalid-state",
-            model="test-model",
-            prompt_bundle=build_raw_system_prompt_bundle("system"),
-            user_prompt="answer",
-            initial_shared_state={
-                AFTER_CYCLE_CONTROL_STATE_KEY: {
-                    "schema_version": "vv-agent.after-cycle-control.v1",
-                    "disallowed_tools": ["z", "a"],
-                }
-            },
+    with pytest.raises(AfterCycleHookError, match="sorted and unique"):
+        runtime.run(
+            AgentTask(
+                task_id="after-cycle-invalid-state",
+                model="test-model",
+                prompt_bundle=build_raw_system_prompt_bundle("system"),
+                user_prompt="answer",
+                initial_shared_state={
+                    AFTER_CYCLE_CONTROL_STATE_KEY: {
+                        "schema_version": "vv-agent.after-cycle-control.v1",
+                        "disallowed_tools": ["z", "a"],
+                    }
+                },
+            )
         )
-    )
-
-    assert result.status is AgentStatus.FAILED
-    assert result.error is not None
-    assert result.error["code"] == "agent_failed"
-    assert result.error["message"].startswith("after_cycle_control_state_invalid:")
     assert model_calls == 0
 
 
@@ -382,7 +380,7 @@ def test_after_cycle_hook_is_not_called_when_budget_stops_after_model(
     tmp_path: Path,
 ) -> None:
     hook = RecordingHook(decisions=[AfterCycleDecision.continue_run()])
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -429,7 +427,7 @@ def test_after_cycle_snapshot_is_detached_and_composition_overflow_is_typed(
             snapshot.cycle.assistant_message = "mutated copy"
             return AfterCycleDecision.continue_run()
 
-    detached = AgentRuntime(
+    detached = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="original")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -450,7 +448,7 @@ def test_after_cycle_snapshot_is_detached_and_composition_overflow_is_typed(
     assert detached.shared_state["nested"] == {"values": []}
 
     steering = [f"message-{index}" for index in range(20)]
-    overflow = AgentRuntime(
+    overflow = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="continue")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,

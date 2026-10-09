@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.runtime.hooks import AfterLLMEvent, BaseRuntimeHook, BeforeLLMEvent
@@ -29,21 +30,22 @@ class AuditHook(BaseRuntimeHook):
 
 
 def main() -> None:
-    agent = Agent(
-        name="hooked",
-        instructions="Answer the user.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        hooks=[TimingHook(), AuditHook()],
-    )
-    result = Runner.run_sync(agent, "Describe composed hooks.", run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        agent = Agent(
+            name="hooked",
+            instructions="Answer the user.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            hooks=[TimingHook(), AuditHook()],
+        )
+        result = Runner.run_sync(agent, "Describe composed hooks.", run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

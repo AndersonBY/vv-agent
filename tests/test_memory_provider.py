@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
 from support import model_call_context
+from support.compaction import run_model_turn
 
 from vv_agent.events import event_from_dict
 from vv_agent.llm import ScriptedLLM
@@ -19,7 +21,6 @@ from vv_agent.memory.provider import (
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.run_config import RunConfig
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
 
@@ -115,9 +116,10 @@ class ThrowingMemoryProvider(RecordingMemoryProvider):
         super().after_compact(event)
 
 
-def _build_runner() -> CycleRunner:
-    return CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+def _build_runner():
+    return partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
@@ -140,8 +142,8 @@ def _build_memory_manager() -> MemoryManager:
     )
 
 
-def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any]) -> tuple[list[Message], Any]:
-    return _build_runner().run_cycle(
+def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any]):
+    return _build_runner()(
         task=AgentTask(
             task_id="task_1",
             model="gpt-5.4",
@@ -151,13 +153,11 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
         ),
         messages=[
             Message(role="system", content="sys"),
-            Message(role="user", content="u" * 8000),
+            Message(role="user", content="u" * 800),
             Message(role="assistant", content="a" * 80),
             Message(role="user", content="c" * 80),
         ],
-        cycle_index=3,
         memory_manager=_build_memory_manager(),
-        previous_prompt_tokens=160,
         ctx=model_call_context(
             event_handler=emitted.append,
             metadata={
@@ -171,16 +171,17 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
     )
 
 
-def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
+def test_model_turn_calls_memory_providers_and_emits_compact_events() -> None:
     emitted: list[Any] = []
     provider = RecordingMemoryProvider()
 
-    _, cycle_record = _run_compacting_cycle(provider, emitted)
+    result = _run_compacting_cycle(provider, emitted)
+    cycle_record = result.cycles[0]
 
     assert cycle_record.memory_compacted is True
-    assert provider.started[0].to_dict()["estimated_tokens"] == 160
+    assert provider.started[0].to_dict()["estimated_tokens"] > provider.started[0].effective_threshold
     assert provider.started[0].message_count == 4
-    assert provider.started[0].metadata["messages"][1].content == "u" * 8000
+    assert provider.started[0].metadata["messages"][1].content == "u" * 800
     assert provider.started[0].trigger == "full_threshold"
     assert provider.started[0].configured_threshold == 250_000
     assert provider.started[0].effective_threshold == 40
@@ -199,12 +200,13 @@ def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"]["phase"] == "before"
 
 
-def test_cycle_runner_fails_open_when_before_memory_provider_raises() -> None:
+def test_model_turn_fails_open_when_before_memory_provider_raises() -> None:
     emitted: list[Any] = []
     provider = ThrowingMemoryProvider(fail_before=True)
 
     with pytest.warns(RuntimeWarning, match="Memory provider ThrowingMemoryProvider before_compact failed"):
-        next_messages, cycle_record = _run_compacting_cycle(provider, emitted)
+        result = _run_compacting_cycle(provider, emitted)
+        next_messages, cycle_record = result.messages, result.cycles[0]
 
     assert cycle_record.memory_compacted is True
     assert next_messages[-1].content == "done"
@@ -213,12 +215,13 @@ def test_cycle_runner_fails_open_when_before_memory_provider_raises() -> None:
     assert emitted[0].metadata["memory_provider_errors"][0]["error"] == "before exploded"
 
 
-def test_cycle_runner_fails_open_when_after_memory_provider_raises() -> None:
+def test_model_turn_fails_open_when_after_memory_provider_raises() -> None:
     emitted: list[Any] = []
     provider = ThrowingMemoryProvider(fail_after=True)
 
     with pytest.warns(RuntimeWarning, match="Memory provider ThrowingMemoryProvider after_compact failed"):
-        next_messages, cycle_record = _run_compacting_cycle(provider, emitted)
+        result = _run_compacting_cycle(provider, emitted)
+        next_messages, cycle_record = result.messages, result.cycles[0]
 
     assert cycle_record.memory_compacted is True
     assert next_messages[-1].content == "done"

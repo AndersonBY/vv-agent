@@ -1,288 +1,116 @@
-from __future__ import annotations
+"""Thread, turn and item snapshots are projections of the sole session ledger."""
 
-import sqlite3
-from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
-from vv_agent.app_server import ThreadItem
-from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent import Agent, RunConfig, ScriptedModelProvider, SQLiteStore
+from vv_agent.app_server import AppServer, ChannelTransport
+from vv_agent.app_server.host import DefaultAppServerHost
+from vv_agent.types import LLMResponse, ToolCall
 
 
-def test_create_thread_returns_stable_id_and_stores_metadata() -> None:
-    store = ThreadStore()
+@pytest.fixture(params=["memory", "file"])
+def server(request, tmp_path):
+    with SQLiteStore.standalone(":memory:" if request.param == "memory" else str(tmp_path / "threads.sqlite")) as store:
+        store.install_schema()
+        value = AppServer(
+            transport=ChannelTransport(connection_id="owner"),
+            store=store,
+            host=DefaultAppServerHost(
+                agent=Agent("assistant", "Answer."),
+                run_config=RunConfig(
+                    model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("first"), LLMResponse("second")])
+                ),
+            ),
+        )
+        yield value
+        for handle in value.kernel.handles:
+            handle.cancel("test teardown")
+        value.run_adapter.join()
+        value.kernel.close()
 
-    thread = store.create_thread(agent_key="default", cwd="/tmp/project", metadata={"source": "test"})
 
+def start(server, thread, text="hello"):
+    started = server.run_adapter.start_turn(
+        connection_id="owner", thread_id=thread.thread_id, input=[{"type": "text", "text": text}]
+    )
+    started.handle.result(timeout=2)
+    server.run_adapter.join()
+    return started.turn
+
+
+def test_create_thread_returns_stable_id_and_stores_metadata(server):
+    thread = server.store.create_thread(agent_key="default", cwd="/tmp/project", metadata={"source": "test"})
     assert thread.thread_id == "thread_1"
     assert thread.agent_key == "default"
     assert thread.cwd == "/tmp/project"
     assert thread.metadata == {"source": "test"}
+    rows = server.kernel.store.read_state(thread.thread_id)[1]
+    assert rows[0].record.payload["attributes"]["app_server"]["metadata"] == thread.metadata
 
 
-def test_create_turn_links_to_thread() -> None:
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-
-    turn = store.create_turn(thread_id=thread.thread_id, input=[{"type": "text", "text": "hello"}], run_id="run_1")
-
-    assert turn.turn_id == "turn_1"
+def test_real_turn_links_to_thread_and_retains_wire_input(server):
+    thread = server.store.create_thread(agent_key="default")
+    turn = start(server, thread)
+    assert turn.turn_id == turn.run_id == "thread_1/turn/turn_1"
     assert turn.thread_id == thread.thread_id
-    assert turn.run_id == "run_1"
     assert turn.input == [{"type": "text", "text": "hello"}]
+    assert server.store.read_thread(thread.thread_id).turns[0].status == "completed"
 
 
-def test_append_item_and_read_thread_preserves_creation_order() -> None:
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-    first_turn = store.create_turn(thread_id=thread.thread_id, input=[{"type": "text", "text": "first"}])
-    second_turn = store.create_turn(thread_id=thread.thread_id, input=[{"type": "text", "text": "second"}])
+def test_read_thread_preserves_turn_and_item_order(server):
+    thread = server.store.create_thread(agent_key="default")
+    first, second = start(server, thread, "first"), start(server, thread, "second")
+    snapshot = server.store.read_thread(thread.thread_id)
+    assert [turn.turn_id for turn in snapshot.turns] == [first.turn_id, second.turn_id]
+    messages = [item for item in snapshot.items if item.item_type == "agentMessage"]
+    assert [item.payload["text"] for item in messages] == ["first", "second"]
+    assert [item.turn_id for item in messages] == [first.turn_id, second.turn_id]
+    assert len({item.item_id for item in snapshot.items}) == len(snapshot.items)
 
-    first_item = ThreadItem(
-        item_id="item_1",
-        thread_id=thread.thread_id,
-        turn_id=first_turn.turn_id,
-        item_type="agentMessage",
-        status="completed",
-        payload={"text": "first"},
-        created_at=1,
-        updated_at=1,
+
+def test_archive_hides_thread_from_active_list(server):
+    thread = server.store.create_thread(agent_key="default")
+    assert [record.thread_id for record in server.store.list_threads()] == [thread.thread_id]
+    server.store.archive_thread(thread.thread_id)
+    assert server.store.list_threads() == []
+    assert [record.thread_id for record in server.store.list_threads(include_archived=True)] == [thread.thread_id]
+    assert server.store.read_thread(thread.thread_id).thread.status == "archived"
+
+
+def test_projection_reopen_preserves_metadata_turns_items_and_status(server):
+    from vv_agent.app_server.thread_store import ThreadStore
+
+    thread = server.store.create_thread(agent_key="default", metadata={"source": "persist"})
+    start(server, thread)
+    reopened = ThreadStore(server.kernel.store)
+    assert reopened.read_thread(thread.thread_id) == server.store.read_thread(thread.thread_id)
+    assert reopened.read_thread(thread.thread_id).thread.status == "idle"
+
+
+def test_reopening_waiting_thread_retains_original_active_turn(server):
+    server.host._run_config.model_provider = ScriptedModelProvider.new(
+        "test", "m", [LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Which?"})])]
     )
-    second_item = ThreadItem(
-        item_id="item_2",
-        thread_id=thread.thread_id,
-        turn_id=second_turn.turn_id,
-        item_type="agentMessage",
-        status="completed",
-        payload={"text": "second"},
-        created_at=2,
-        updated_at=2,
-    )
+    thread = server.store.create_thread(agent_key="default")
+    turn = start(server, thread)
+    from vv_agent.app_server.thread_store import ThreadStore
 
-    store.append_item(first_item)
-    store.append_item(second_item)
-    snapshot = store.read_thread(thread.thread_id)
-
-    assert [turn.turn_id for turn in snapshot.turns] == ["turn_1", "turn_2"]
-    assert [item.item_id for item in snapshot.items] == ["item_1", "item_2"]
-    assert snapshot.items[1].payload == {"text": "second"}
+    reopened = ThreadStore(server.kernel.store).read_thread(thread.thread_id)
+    assert reopened.thread.status == "interrupted"
+    assert reopened.thread.active_turn_id == turn.turn_id
+    assert reopened.turns[0].result["waitReason"] == "Which?"
 
 
-def test_archive_hides_thread_from_active_list() -> None:
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-
-    assert [record.thread_id for record in store.list_threads()] == [thread.thread_id]
-    store.archive_thread(thread.thread_id)
-
-    assert store.list_threads() == []
-    assert [record.thread_id for record in store.list_threads(include_archived=True)] == [thread.thread_id]
-
-
-def test_store_persists_thread_turn_and_item_metadata(tmp_path: Path) -> None:
-    db_path = tmp_path / "app_server.sqlite"
-    store = ThreadStore(db_path)
-    thread = store.create_thread(agent_key="default", metadata={"source": "persist"})
-    turn = store.create_turn(thread_id=thread.thread_id, input=[{"type": "text", "text": "hello"}], run_id="run_1")
-    store.append_item(
-        ThreadItem(
-            item_id="item_1",
-            thread_id=thread.thread_id,
-            turn_id=turn.turn_id,
-            item_type="agentMessage",
-            status="completed",
-            payload={"text": "hello"},
-            created_at=1,
-            updated_at=2,
-        )
-    )
-
-    reopened = ThreadStore(db_path)
-    snapshot = reopened.read_thread(thread.thread_id)
-
-    assert snapshot.thread.metadata == {"source": "persist"}
-    assert snapshot.turns[0].run_id == "run_1"
-    assert snapshot.items[0].payload == {"text": "hello"}
-
-
-def test_store_recovers_running_thread_state_on_reopen(tmp_path: Path) -> None:
-    db_path = tmp_path / "app_server.sqlite"
-    store = ThreadStore(db_path)
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[])
-
-    store.set_active_turn(thread.thread_id, turn.turn_id, "running")
-    running = store.read_thread(thread.thread_id).thread
-    assert running.status == "running"
-    assert running.active_turn_id == turn.turn_id
-
-    recovered = ThreadStore(db_path).read_thread(thread.thread_id).thread
-    assert recovered.status == "idle"
-    assert recovered.active_turn_id is None
-
-
-def test_duplicate_item_id_fails_without_reordering_replay() -> None:
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[])
-    item = ThreadItem(
-        item_id="item_1",
-        thread_id=thread.thread_id,
-        turn_id=turn.turn_id,
-        item_type="agentMessage",
-        status="completed",
-        payload={"text": "original"},
-        created_at=1,
-        updated_at=1,
-    )
-    store.append_item(item)
-
-    with pytest.raises(sqlite3.IntegrityError):
-        store.append_item(
-            ThreadItem(
-                item_id="item_1",
-                thread_id=thread.thread_id,
-                turn_id=turn.turn_id,
-                item_type="agentMessage",
-                status="completed",
-                payload={"text": "replacement"},
-                created_at=2,
-                updated_at=2,
-            )
-        )
-
-    snapshot = store.read_thread(thread.thread_id)
-    assert [item.item_id for item in snapshot.items] == ["item_1"]
-    assert snapshot.items[0].payload == {"text": "original"}
-
-
-def test_duplicate_run_event_replays_identical_item_once(tmp_path: Path) -> None:
-    db_path = tmp_path / "thread-store.sqlite"
-    first_store = ThreadStore(db_path)
-    thread = first_store.create_thread(agent_key="default")
-    turn = first_store.create_turn(thread_id=thread.thread_id, input=[])
-    item = ThreadItem(
-        item_id="item_evt_1",
-        thread_id=thread.thread_id,
-        turn_id=turn.turn_id,
-        item_type="agentMessage",
-        status="completed",
-        payload={"text": "durable"},
-        created_at=1,
-        updated_at=1,
-    )
-
-    assert first_store.append_item(item, run_event_id="evt_1") is True
-    assert ThreadStore(db_path).append_item(item, run_event_id="evt_1") is False
-
-    snapshot = first_store.read_thread(thread.thread_id)
-    assert snapshot.items == [item]
-
-
-def test_duplicate_run_event_rejects_conflicting_projection() -> None:
-    store = ThreadStore()
-    thread = store.create_thread(agent_key="default")
-    turn = store.create_turn(thread_id=thread.thread_id, input=[])
-    original = ThreadItem(
-        item_id="item_evt_1",
-        thread_id=thread.thread_id,
-        turn_id=turn.turn_id,
-        item_type="agentMessage",
-        status="completed",
-        payload={"text": "original"},
-        created_at=1,
-        updated_at=1,
-    )
-    store.append_item(original, run_event_id="evt_1")
-
-    with pytest.raises(sqlite3.IntegrityError, match="conflicting App Server item projection"):
-        store.append_item(
-            ThreadItem(
-                item_id=original.item_id,
-                thread_id=original.thread_id,
-                turn_id=original.turn_id,
-                item_type=original.item_type,
-                status=original.status,
-                payload={"text": "replacement"},
-                created_at=original.created_at,
-                updated_at=original.updated_at,
-            ),
-            run_event_id="evt_1",
-        )
-
-    assert store.read_thread(thread.thread_id).items == [original]
-
-
-def test_opening_unversioned_database_is_rejected_without_mutation(tmp_path: Path) -> None:
-    db_path = tmp_path / "unversioned.sqlite"
-    connection = sqlite3.connect(db_path)
-    connection.executescript(
-        """
-        CREATE TABLE threads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL UNIQUE,
-            agent_key TEXT NOT NULL,
-            cwd TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            archived_at REAL,
-            metadata_json TEXT NOT NULL
-        );
-        INSERT INTO threads (
-            thread_id, agent_key, cwd, created_at, updated_at, archived_at, metadata_json
-        ) VALUES ('thread_1', 'default', NULL, 1.0, 1.0, NULL, '{}');
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(RuntimeError, match="schema version 0 does not match required version 1"):
-        ThreadStore(db_path)
-
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")}
-        assert columns == {
-            "id",
-            "thread_id",
-            "agent_key",
-            "cwd",
-            "created_at",
-            "updated_at",
-            "archived_at",
-            "metadata_json",
-        }
-        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 0
-    finally:
-        connection.close()
-
-
-def test_opening_wrong_schema_version_is_rejected(tmp_path: Path) -> None:
-    db_path = tmp_path / "wrong-version.sqlite"
-    ThreadStore(db_path)
-    connection = sqlite3.connect(db_path)
-    connection.execute("PRAGMA user_version = 2")
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(RuntimeError, match="schema version 2 does not match required version 1"):
-        ThreadStore(db_path)
-
-
-def test_opening_malformed_current_schema_is_rejected(tmp_path: Path) -> None:
-    db_path = tmp_path / "malformed.sqlite"
-    connection = sqlite3.connect(db_path)
-    connection.executescript(
-        """
-        PRAGMA user_version = 1;
-        CREATE TABLE threads (id INTEGER PRIMARY KEY);
-        CREATE TABLE turns (id INTEGER PRIMARY KEY);
-        CREATE TABLE items (id INTEGER PRIMARY KEY);
-        CREATE UNIQUE INDEX items_run_event_id_unique ON items(id);
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(RuntimeError, match="table threads does not match the current schema"):
-        ThreadStore(db_path)
+def test_item_validation_has_no_second_ledger_and_rejects_fabrication(server):
+    thread = server.store.create_thread(agent_key="default")
+    start(server, thread)
+    before = server.kernel.store.read_state(thread.thread_id)[1]
+    item = server.store.read_thread(thread.thread_id).items[-1]
+    assert server.store.append_item(item, run_event_id="projection") is True
+    assert server.store.append_item(item, run_event_id="projection") is True
+    with pytest.raises(ValueError, match="project kernel records"):
+        server.store.append_item(replace(item, payload={"text": "replacement"}))
+    assert server.kernel.store.read_state(thread.thread_id)[1] == before
+    assert server.store.read_thread(thread.thread_id).items[-1] == item

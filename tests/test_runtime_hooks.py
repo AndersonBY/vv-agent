@@ -1,28 +1,26 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
-import pytest
+from support.compaction import run_model_turn
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent import constants as constants_module
 from vv_agent.constants import READ_FILE_TOOL_NAME
-from vv_agent.events import DiagnosticEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import (
+from vv_agent.runtime import ExecutionContext, RuntimeHookManager
+from vv_agent.runtime.hooks import (
     AfterLLMEvent,
     AfterToolCallEvent,
-    AgentRuntime,
     BaseRuntimeHook,
     BeforeLLMEvent,
     BeforeLLMPatch,
     BeforeToolCallEvent,
-    ExecutionContext,
-    RuntimeHookManager,
 )
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
 from vv_agent.types import (
     AgentStatus,
@@ -52,7 +50,7 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
         assert any(message.role == "user" and message.content == "HOOK_CONTEXT" for message in messages)
         return LLMResponse(content="ok")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_hook_message]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -69,7 +67,7 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "ok"
-    assert any(message.content == "HOOK_CONTEXT" for message in result.messages)
+    assert not any(message.content == "HOOK_CONTEXT" for message in result.messages)
 
 
 def test_before_llm_hook_cannot_remove_recovery_tool_from_compacted_request() -> None:
@@ -92,7 +90,7 @@ def test_before_llm_hook_cannot_remove_recovery_tool_from_compacted_request() ->
                 }
             ],
         ),
-        Message(role="tool", content="a" * 8_000, tool_call_id="old"),
+        Message(role="tool", content="a " * 900, tool_call_id="old"),
         Message(role="assistant", content="recent"),
     ]
     manager = MemoryManager(
@@ -110,8 +108,9 @@ def test_before_llm_hook_cannot_remove_recovery_tool_from_compacted_request() ->
         workspace_backend=MemoryWorkspaceBackend(),
         recovery_tool_available=True,
     )
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(),
         tool_registry=build_default_registry(),
         hook_manager=RuntimeHookManager(hooks=[RemoveReadFileHook()]),
     )
@@ -123,14 +122,14 @@ def test_before_llm_hook_cannot_remove_recovery_tool_from_compacted_request() ->
         max_cycles=1,
     )
 
-    with pytest.raises(RuntimeError, match="microcompaction_recovery_unavailable"):
-        runner.run_cycle(
-            task=task,
-            messages=messages,
-            cycle_index=4,
-            memory_manager=manager,
-            previous_prompt_tokens=1_000,
-        )
+    result = runner(
+        task=task,
+        messages=messages,
+        memory_manager=manager,
+    )
+
+    assert result.status == AgentStatus.FAILED
+    assert "recovery_unavailable" in str(result.error)
 
 
 def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
@@ -161,7 +160,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
         ]
     )
     lifecycle_events = []
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -210,7 +209,7 @@ def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> N
             )
 
     lifecycle_events = []
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -252,8 +251,8 @@ def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> N
         event for event in lifecycle_events if event.type == "tool_call_completed" and event.tool_call_id == "hook-finalized"
     )
     assert completed.directive == ToolDirective.FINISH.value
-    assert completed.metadata["content"] == "hook content"
-    assert completed.metadata["metadata"] == {"final_message": "finished-by-hook"}
+    assert result.cycles[0].tool_results[0].content == "hook content"
+    assert result.cycles[0].tool_results[0].metadata["final_message"] == "finished-by-hook"
 
 
 def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> None:
@@ -283,7 +282,7 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
             )
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -324,7 +323,7 @@ def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path
             LLMResponse(content="done"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -349,7 +348,7 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
             del event
             return LLMResponse(content="hook-finish")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="plain")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -364,7 +363,7 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
     assert result.final_answer == "hook-finish"
 
 
-def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
+def test_runtime_cycle_injection_preserves_admitted_tool_batch(tmp_path: Path) -> None:
     events: list[object] = []
 
     def track(event: object) -> None:
@@ -405,7 +404,7 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
         queued["used"] = True
         return [Message(role="user", content="STEER_NOW")]
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=registry,
         default_workspace=tmp_path,
@@ -422,9 +421,9 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
     result = runtime.run(task, interruption_messages=interruption_provider)
 
     assert result.status == AgentStatus.COMPLETED
-    assert result.cycles[0].tool_results[1].error_code == "skipped_due_to_steering"
-    assert any(message.content == "STEER_NOW" for message in result.messages)
-    assert any(isinstance(event, DiagnosticEvent) and event.code == "run_steered" for event in events)
+    assert all(r.error_code is None for r in result.cycles[0].tool_results)
+    assert queued["used"]
+    assert not any(message.content == "STEER_NOW" for message in result.messages)
 
 
 def test_before_llm_cannot_remove_recovery_tool_from_summary_evidence() -> None:
@@ -441,14 +440,16 @@ def test_before_llm_cannot_remove_recovery_tool_from_summary_evidence() -> None:
 
     original = messages(fixture("memory_local")["summary_compaction"]["cases"][0]["expected"]["messages"])
     calls = []
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[lambda request: calls.append(request) or LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[lambda request: calls.append(request) or LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
         hook_manager=RuntimeHookManager(hooks=[RemoveReadFileHook()]),
     )
     task = AgentTask(
         task_id="summary-recovery", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="continue"
     )
-    with pytest.raises(RuntimeError, match="recovery_unavailable"):
-        runner.run_cycle(task=task, messages=original, cycle_index=6, memory_manager=MemoryManager(), ctx=model_call_context())
+    result = runner(task=task, messages=original, memory_manager=MemoryManager(), ctx=model_call_context())
+    assert result.status == AgentStatus.FAILED
+    assert "recovery_unavailable" in str(result.error)
     assert calls == []

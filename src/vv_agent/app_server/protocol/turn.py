@@ -106,51 +106,11 @@ class TurnStartParams:
 class TurnResumeParams:
     thread_id: str
     turn_id: str
-    checkpoint_key: str
 
     def to_dict(self) -> dict[str, str]:
         return {
             "threadId": self.thread_id,
             "turnId": self.turn_id,
-            "checkpointKey": self.checkpoint_key,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class CheckpointSummary:
-    key: str
-    resume_attempt: int
-    cycle_index: int
-    status: str
-    terminal_acknowledged: bool
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "key": self.key,
-            "resumeAttempt": self.resume_attempt,
-            "cycleIndex": self.cycle_index,
-            "status": self.status,
-            "terminalAcknowledged": self.terminal_acknowledged,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class InterruptionSummary:
-    reason: str
-    operation_id: str
-    operation_kind: str
-    cycle_index: int
-    risk: str
-    idempotency_support: str | None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "reason": self.reason,
-            "operationId": self.operation_id,
-            "operationKind": self.operation_kind,
-            "cycleIndex": self.cycle_index,
-            "risk": self.risk,
-            "idempotencySupport": self.idempotency_support,
         }
 
 
@@ -165,8 +125,6 @@ class TurnResumeResponse:
     completion_tool_name: str | None = None
     partial_output: str | None = None
     wait_reason: str | None = None
-    checkpoint: CheckpointSummary | None = None
-    interruption: InterruptionSummary | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -185,10 +143,6 @@ class TurnResumeResponse:
             "error": self.error,
         }
         payload.update({name: value for name, value in optional_fields.items() if value is not None})
-        if self.checkpoint is not None:
-            payload["checkpoint"] = self.checkpoint.to_dict()
-        if self.interruption is not None:
-            payload["interruption"] = self.interruption.to_dict()
         return payload
 
 

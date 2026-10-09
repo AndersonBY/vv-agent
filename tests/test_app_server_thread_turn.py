@@ -276,7 +276,7 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
 
     assert methods.count("turn/started") == 2
     assert methods.count("turn/completed") == 2
-    assert seen_user_messages == ([["hello", "continue"]] if hasattr(server.store, "kernel") else [["continue"]])
+    assert seen_user_messages == ([["hello", "continue"]])
 
 
 def test_turn_interrupt_cancels_active_turn() -> None:
@@ -325,7 +325,7 @@ def test_turn_interrupt_cancels_active_turn() -> None:
         "id": 3,
         "result": {
             "threadId": "thread_1",
-            "turnId": ("thread_1/turn/turn_1" if hasattr(server.store, "kernel") else "turn_1"),
+            "turnId": ("thread_1/turn/turn_1"),
             "cancelled": True,
         },
     }
@@ -418,10 +418,6 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         },
     )
     first = _drain_until_turn_completed(transport)
-    if surface is None:
-        assert cast(dict[str, Any], first[-1]["params"])["status"] == "completed"
-        assert cast(dict[str, Any], first[-1]["params"])["finalOutput"] == "child done"
-        return
     cast(Any, server.run_adapter).join()
     interrupted = next(
         m
@@ -453,7 +449,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     final = _drain_until_turn_completed(transport)[-1]
     assert cast(dict[str, Any], final["params"])["finalOutput"] == "parent done"
     cast(Any, server.run_adapter).join()
-    from vv_agent.runtime.controller import derive_controller_command_id
+    from vv_agent.interaction import derive_controller_command_id
 
     input_id = derive_controller_command_id("thread_1", parent_tid, "reply-child")
     child_state = surface.store.read_state(wait["sessionId"])[0]

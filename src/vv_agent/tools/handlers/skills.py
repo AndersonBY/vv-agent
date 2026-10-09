@@ -18,7 +18,7 @@ def activate_skill(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     if not skill_name:
         return _error(error_code="skill_name_required", message="`skill_name` is required")
 
-    raw_skills = context.shared_state.get("available_skills")
+    raw_skills = context.shared_state.get("available_skills", context.task_metadata.get("available_skills"))
     entries = normalize_skill_list(raw_skills, workspace=context.workspace, load_instructions=True)
     entry_map = {e.name: e for e in entries}
 

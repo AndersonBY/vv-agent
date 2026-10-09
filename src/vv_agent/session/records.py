@@ -669,7 +669,7 @@ class Record:
 
             for message in self.payload["attributes"]["seed"]["messages"]:
                 try:
-                    Message.from_dict(message, _kernel=True)
+                    Message.from_dict(message)
                 except (ValueError, TypeError, KeyError) as exc:
                     raise RecordError(str(exc)) from exc
         for field_name, schema in (("definition", TASK_SESSION_METADATA), ("request", REQUEST_SESSION_METADATA)):

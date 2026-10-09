@@ -208,9 +208,6 @@ class BackgroundAgentTask(FunctionTool):
             model_provider=(
                 config.model_provider if config.model_provider is not None else runtime_metadata.get("_vv_agent_model_provider")
             ),
-            execution_backend=(
-                config.execution_backend if config.execution_backend is not None else runtime_metadata.get("execution_backend")
-            ),
             context=config.context if config.context is not None else parent_context,
             cancellation_token=cancellation_token,
             shared_state=shared_state,

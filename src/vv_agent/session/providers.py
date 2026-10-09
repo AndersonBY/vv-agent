@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
 
 from .records import InboxItem, Record
@@ -102,8 +102,8 @@ class FunctionProvider:
                 ).to_dict(),
                 ("cooperative-stop",),
             )
-        if isinstance(result, ToolCallOutcome):
-            return Unknown("checkpoint-bound deferred outcome requires a session provider adapter")
+        if isinstance(result, HostToolOutcome):
+            return Unknown("host interaction outcome requires a session provider adapter")
         if result.error_code == "tool_timeout":
             return Unknown("handler timeout; thread may still be running")
         return Definitive(result.to_dict())

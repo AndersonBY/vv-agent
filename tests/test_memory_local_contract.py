@@ -61,6 +61,7 @@ def _first_json_object(text: str) -> dict[str, Any]:
 
 def test_memory_local_fixture_identity_and_fields() -> None:
     assert set(_CONTRACT) == {
+        "session_kernel_producers",
         "contract",
         "character_unit",
         "token_counts",

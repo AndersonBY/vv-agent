@@ -4,9 +4,8 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
-from vv_agent.checkpoint import EventCursor
 from vv_agent.events import RunEvent, event_from_dict
 
 
@@ -35,36 +34,13 @@ class EventStoreError(RuntimeError):
         )
 
 
-class RunEventStore(Protocol):
-    def append(self, event: RunEvent) -> None:
-        raise NotImplementedError
-
-    def replay(
-        self,
-        query: RunEventReplayQuery | None = None,
-        *,
-        run_id: str | None = None,
-    ) -> Iterator[RunEvent]:
-        raise NotImplementedError
-
-
-@runtime_checkable
-class IdempotentRunEventStore(RunEventStore, Protocol):
-    def append_once(
-        self,
-        event_id: str,
-        payload_digest: str,
-        event: RunEvent,
-    ) -> EventCursor:
-        """Append one stable event or return the original cursor for an identical duplicate."""
-
-        raise NotImplementedError
+class _RunEventSink(Protocol):
+    def append(self, event: RunEvent) -> None: ...
 
 
 class JsonlRunEventStore:
-    def __init__(self, path: str | Path, *, _kernel: bool = False) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._kernel = _kernel
 
     def append(self, event: RunEvent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +64,7 @@ class JsonlRunEventStore:
                     payload = json.loads(line)
                     if not isinstance(payload, dict):
                         raise TypeError("Run event line must contain a JSON object")
-                    event = event_from_dict(payload, _kernel=self._kernel)
+                    event = event_from_dict(payload)
                 except (KeyError, TypeError, ValueError) as error:
                     raise EventStoreError.corrupt_line(line_number) from error
 

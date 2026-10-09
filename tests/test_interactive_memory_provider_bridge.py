@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
-
 from support import FixedModelProvider
 
-import vv_agent.interactive as interactive_mod
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
@@ -17,9 +14,7 @@ from vv_agent.memory.provider import (
     MemorySearchRequest,
     MemorySearchResult,
 )
-from vv_agent.result import RunResult
-from vv_agent.run_config import RunConfig
-from vv_agent.types import AgentResult, AgentStatus, Message
+from vv_agent.types import LLMResponse
 
 
 class _MemoryProvider:
@@ -50,90 +45,58 @@ def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedMo
     )
 
 
-def _run_result() -> RunResult:
-    raw_result = AgentResult(
-        status=AgentStatus.COMPLETED,
-        messages=[Message(role="assistant", content="done")],
-        cycles=[],
-        final_answer="done",
-    )
-    return RunResult(
-        input="hello",
-        new_items=[],
-        final_output="done",
-        status=AgentStatus.COMPLETED,
-        raw_result=raw_result,
-    )
+def test_interactive_session_options_pass_memory_providers_to_run_config(monkeypatch, tmp_path):
+    from vv_agent.session.surfaces import SessionDriver
 
-
-def test_interactive_session_options_pass_memory_providers_to_run_config(monkeypatch, tmp_path) -> None:
     provider = _MemoryProvider()
-    seen_configs: list[RunConfig] = []
+    seen_configs = []
+    original = SessionDriver.runtime
 
-    class _Handle:
-        def events(self) -> list[Any]:
-            return []
+    def capture(self, agent, config, task=None):
+        seen_configs.append(config)
+        return original(self, agent, config, task)
 
-        def result(self) -> RunResult:
-            return _run_result()
-
-    def fake_start(_agent: Any, _input: str, *, task: Any, run_config: RunConfig) -> _Handle:
-        del task
-        seen_configs.append(run_config)
-        return _Handle()
-
-    monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
-
+    monkeypatch.setattr(SessionDriver, "runtime", capture)
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
+            model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("done")]), _resolved()),
             workspace=tmp_path,
             memory_providers=[provider],
         )
     )
     session = client.create_session(
-        session_id="session_1",
-        agent=InteractiveAgentDefinition(description="assistant", model="test-model"),
+        agent=InteractiveAgentDefinition(description="assistant", model="test-model"), session_id="memory-options"
     )
+    try:
+        assert session.prompt("hello").final_output == "done"
+        assert seen_configs[0].memory_providers == [provider]
+    finally:
+        client.driver.close()
 
-    session.prompt("hello", auto_follow_up=False)
 
-    assert seen_configs[0].memory_providers == [provider]
+def test_interactive_agent_definition_passes_memory_providers_to_run_config(monkeypatch, tmp_path):
+    from vv_agent.session.surfaces import SessionDriver
 
-
-def test_interactive_agent_definition_passes_memory_providers_to_run_config(monkeypatch, tmp_path) -> None:
     provider = _MemoryProvider()
-    seen_configs: list[RunConfig] = []
+    seen_configs = []
+    original = SessionDriver.runtime
 
-    class _Handle:
-        def events(self) -> list[Any]:
-            return []
+    def capture(self, agent, config, task=None):
+        seen_configs.append(config)
+        return original(self, agent, config, task)
 
-        def result(self) -> RunResult:
-            return _run_result()
-
-    def fake_start(_agent: Any, _input: str, *, task: Any, run_config: RunConfig) -> _Handle:
-        del task
-        seen_configs.append(run_config)
-        return _Handle()
-
-    monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
-
+    monkeypatch.setattr(SessionDriver, "runtime", capture)
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
-            workspace=tmp_path,
+            model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("done")]), _resolved()), workspace=tmp_path
         )
     )
     session = client.create_session(
-        session_id="session_1",
-        agent=InteractiveAgentDefinition(
-            description="assistant",
-            model="test-model",
-            memory_providers=[provider],
-        ),
+        agent=InteractiveAgentDefinition(description="assistant", model="test-model", memory_providers=[provider]),
+        session_id="memory-definition",
     )
-
-    session.prompt("hello", auto_follow_up=False)
-
-    assert seen_configs[0].memory_providers == [provider]
+    try:
+        assert session.prompt("hello").final_output == "done"
+        assert seen_configs[0].memory_providers == [provider]
+    finally:
+        client.driver.close()

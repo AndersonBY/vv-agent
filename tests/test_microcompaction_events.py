@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from support import model_call_context
+from support.compaction import run_model_turn
 
 from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.events import event_from_dict
@@ -9,7 +12,6 @@ from vv_agent.llm import ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -64,22 +66,22 @@ def _messages(result_chars: int) -> list[Message]:
 
 def test_microcompact_events_include_candidate_and_archive_statistics() -> None:
     emitted = []
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
-    runner.run_cycle(
+    runner(
         task=_task(),
-        messages=_messages(2_000),
-        cycle_index=3,
+        messages=_messages(6_400),
         memory_manager=_manager(),
-        previous_prompt_tokens=900,
         ctx=model_call_context(
             event_handler=emitted.append,
             metadata={
                 "_vv_agent_run_id": "run-micro-events",
                 "_vv_agent_trace_id": "trace-micro-events",
+                "_vv_agent_session_id": "micro-events",
             },
         ),
     )
@@ -105,17 +107,16 @@ def test_microcompact_events_include_candidate_and_archive_statistics() -> None:
 
 def test_microcompact_threshold_without_candidate_emits_no_memory_event() -> None:
     emitted = []
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
 
-    runner.run_cycle(
+    runner(
         task=_task(),
         messages=_messages(500),
-        cycle_index=3,
         memory_manager=_manager(),
-        previous_prompt_tokens=900,
         ctx=model_call_context(event_handler=emitted.append),
     )
 
@@ -130,21 +131,22 @@ def test_microcompact_does_not_archive_when_read_file_is_not_model_visible(confi
         task.use_workspace = False
     else:
         task.exclude_tools = [READ_FILE_TOOL_NAME]
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
     )
     manager = _manager()
-    messages = _messages(2_000)
+    messages = _messages(6_400)
 
-    next_messages, _cycle = runner.run_cycle(
+    result = runner(
         task=task,
         messages=messages,
-        cycle_index=3,
         memory_manager=manager,
-        previous_prompt_tokens=900,
         ctx=model_call_context(event_handler=emitted.append),
     )
+    next_messages = result.messages
+    _cycle = result.cycles[0]
 
     assert next_messages[2].content == messages[2].content
     assert [event for event in emitted if event.type.startswith("memory_compact_")] == []

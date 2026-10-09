@@ -1,26 +1,91 @@
 {
-  "version": "v1",
-  "subscribers": {
-    "independent": true,
-    "start_from_complete_backlog": true,
-    "lossless_after_live_capacity": true,
-    "burst_event_count": 1100
+  "authority": "session_log_and_inbox",
+  "cancellation": {
+    "accepted": true,
+    "late_request_accepted": false,
+    "read_only_phase": "idle",
+    "reason": "cancel_requested",
+    "repeated_request_accepted": false,
+    "terminal_status": "cancelled"
   },
   "completion": {
-    "result_may_precede_async_children": true,
-    "events_wait_for_started_children": true
+    "child_terminal_delivery_is_separate": true,
+    "parent_result_is_retained": true
   },
-  "cancellation": {
-    "accepted_state": {
-      "status": "running",
-      "done": false,
-      "cancelled": true
-    },
-    "terminal_status": "cancelled",
-    "repeated_request_accepted": false,
-    "late_request_accepted": false,
-    "reason": "host requested cancellation",
-    "child_reason_propagates": true,
-    "shared_broker_isolated": true
-  }
+  "controls": [
+    {
+      "records": [
+        "session/controls/created",
+        "input/initial/applied",
+        "turn/controls/turn/initial/started",
+        "usage/active/controls/turn/initial/1/1",
+        "op/controls/turn/initial/model/primary/1/1/planned",
+        "usage/active/controls/turn/initial/1/2",
+        "input/follow/applied",
+        "usage/active/controls/turn/initial/1/3",
+        "op/controls/turn/initial/model/primary/1/1/started",
+        "usage/active/controls/turn/initial/1/4",
+        "op/controls/turn/initial/model/primary/1/1/result",
+        "usage/active/controls/turn/initial/1/5",
+        "input/steer/applied",
+        "usage/active/controls/turn/initial/1/6",
+        "op/controls/turn/initial/model/primary/2/1/planned",
+        "usage/active/controls/turn/initial/1/7",
+        "op/controls/turn/initial/model/primary/2/1/started",
+        "usage/active/controls/turn/initial/1/8",
+        "op/controls/turn/initial/model/primary/2/1/result",
+        "usage/active/controls/turn/initial/1/9",
+        "turn/controls/turn/initial/ended",
+        "turn/controls/turn/follow/started",
+        "usage/active/controls/turn/follow/2/1",
+        "op/controls/turn/follow/model/primary/1/1/planned",
+        "usage/active/controls/turn/follow/2/2",
+        "op/controls/turn/follow/model/primary/1/1/started",
+        "usage/active/controls/turn/follow/2/3",
+        "op/controls/turn/follow/model/primary/1/1/unknown",
+        "usage/active/controls/turn/follow/2/4",
+        "op/controls/turn/follow/model/primary/1/2/planned",
+        "usage/active/controls/turn/follow/2/5",
+        "op/controls/turn/follow/model/primary/1/2/started",
+        "usage/active/controls/turn/follow/2/6",
+        "op/controls/turn/follow/model/primary/1/2/unknown",
+        "usage/active/controls/turn/follow/2/7",
+        "usage/active/controls/turn/follow/2/8",
+        "turn/controls/turn/follow/ended",
+        "input/archive/applied"
+      ],
+      "session_id": "controls"
+    }
+  ],
+  "event_replay": {
+    "count": 37,
+    "first_event_id": "sk/c83b232cfa31d3f693528b80b7c334ba27c48b52092d0d0c828e292bf3f24c7d/event",
+    "last_event_id": "sk/f5e9209fa5c4d928360b938edd6e799c5946139ca5b6d4aa17e0cff54482867f/event",
+    "ordered": false
+  },
+  "independent_replays": true,
+  "read_only_state": "idle",
+  "result": {
+    "completion_reason": "no_tool_finish",
+    "completion_tool_name": null,
+    "cycles": 2,
+    "error": null,
+    "error_code": null,
+    "final_answer": "done",
+    "final_output": "done",
+    "model_calls": 2,
+    "partial_output": null,
+    "session_id": "tools",
+    "status": "completed",
+    "tool_execution_count": 1,
+    "turn_id": "tools/turn/initial",
+    "wait_reason": null
+  },
+  "subscribers": {
+    "burst_event_count": 1123,
+    "independent": true,
+    "lossless_after_live_capacity": true,
+    "start_from_complete_backlog": true
+  },
+  "version": "v2"
 }

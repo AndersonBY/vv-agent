@@ -12,7 +12,7 @@ def test_kernel_imports_use_f1_modules():
     retired = (
         "vv_agent.checkpoint",
         "vv_agent.runtime.controller",
-        "vv_agent.runtime.cycle_runner",
+        "vv_agent.runtime.model_turn",
         "vv_agent.deferred",
         "vv_agent.runtime.state",
         "vv_agent.runtime.stores",
@@ -39,7 +39,7 @@ class Forbidden(importlib.abc.MetaPathFinder):
             raise AssertionError(f'unexpected import: {fullname}')
 sys.meta_path.insert(0, Forbidden())
 import vv_agent
-assert not any(name.startswith('vv_agent.session.') for name in sys.modules)
+assert not any(name.split('.')[0] in {'psycopg', 'django'} for name in sys.modules)
 import pytest
 raise SystemExit(pytest.main(['tests/session/test_records_reducer.py', '-q', '-p', 'no:cacheprovider']))
 """

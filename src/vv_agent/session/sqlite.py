@@ -71,6 +71,7 @@ class SQLiteStore(SQLStore):
     clock_sql = "session_now_ms()"
 
     def __init__(self, path: str):
+        self.path = path
         self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()

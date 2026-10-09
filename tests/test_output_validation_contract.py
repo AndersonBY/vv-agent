@@ -69,7 +69,10 @@ def _observable_trace(result: RunResult) -> tuple[list[dict[str, Any]], dict[str
                 if key in payload
             }
         )
-    return event_projection, result.metadata["run_span"]["metadata"]
+    return event_projection, {
+        "status": result.status.value,
+        "completion_reason": result.completion_reason.value if result.completion_reason else None,
+    }
 
 
 def test_output_validation_is_disabled_by_default_without_trace_or_terminal_changes() -> None:
@@ -148,7 +151,7 @@ def test_invalid_output_without_repair_is_persisted_as_typed_failure() -> None:
     }
     assert result.partial_output == "invalid"
     assert result.events[-1].type == "run_failed"
-    assert result.events[-1].to_dict()["error"] == "output_validation_failed: format_invalid: expected a valid marker"
+    assert result.events[-1].to_dict()["error"] == expected["error_code"]
 
 
 def test_one_tools_free_repair_is_revalidated_without_an_extra_model_call() -> None:
@@ -362,10 +365,11 @@ def test_approved_finish_validates_repaired_output_before_terminal_commit() -> N
     )
     assert interrupted.status is AgentStatus.WAIT_USER
     assert validator_calls == 0
-    state = interrupted.into_state()
-    state.approve(state.pending_approval_ids()[0])
-
-    resumed = Runner.resume(state)
+    sid, tid = interrupted.raw_result.session_id, interrupted.raw_result.turn_id
+    assert sid is not None and tid is not None
+    owner = interrupted._session_driver
+    owner.approve(sid, owner.handles[-1].runtime, interrupted.metadata["session_waits"][0]["request_id"], "approve", "approval")
+    resumed = Runner.resume(sid, tid)
 
     assert validator_calls == 2
     assert repair_calls == 1

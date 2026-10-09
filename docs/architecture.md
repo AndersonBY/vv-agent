@@ -8,49 +8,20 @@ directive or the configured no-tool policy ends or pauses the run.
 ## Top-Level Flow
 
 ```text
-Public SDK
-  -> Agent / RunConfig / ModelSettings
-  -> Runner
-  -> RunHandle for live runs
-  -> AgentTask
-  -> runtime.AgentRuntime
-      -> CycleRunner
-      -> MemoryManager
-      -> ToolPlanner
-      -> ToolCallRunner
-      -> ExecutionBackend
-  -> RunResult / RunEvent / RunEventStore replay
-
-Interactive session SDK
-  -> InteractiveAgentDefinition / AgentSessionOptions
-  -> InteractiveAgentClient
-  -> AgentSession
-  -> runtime.AgentRuntime
-      -> CycleRunner
-      -> MemoryManager
-      -> ToolPlanner
-      -> ToolCallRunner
-      -> ExecutionBackend
-  -> AgentSessionRun / AgentSessionState
-
-CLI / low-level runtime API
-  -> config.load_llm_settings_from_file
-  -> config.resolve_model_endpoint
-  -> llm.VvLlmClient
-  -> runtime.AgentRuntime
-      -> CycleRunner
-      -> MemoryManager
-      -> ToolPlanner
-      -> ToolCallRunner
-      -> ExecutionBackend
-  -> AgentResult
+Runner / ConfiguredRunner / InteractiveAgentClient / CLI / AppServer
+  -> SessionDriver and RunHandle
+  -> SessionStore log, inbox, leases and consumer cursors
+  -> session.kernel.drive
+      -> frozen AgentTask, model operation and tool operation plans
+      -> provider receipts and retained hook/memory boundaries
+      -> atomic child admission and authenticated terminal delivery
+  -> RunResult, RunEvent, tracing and App Server projections
 ```
 
-The default `no_tool_policy` is `finish`: an assistant response without tool
-calls supplies the final answer. `ask_user` waits for required input. Hosts can
-explicitly select `continue` or `wait_user`, and existing after-cycle hooks can
-steer a completion candidate before finalization. The runtime does not classify
-response text or use TODO state as a success predicate.
+Ordinary runs use SQLite `:memory:`. Durable stores are opt-in. Default no-tool
+policy is finish; explicit continue and wait_user retain their configured cycle
+budget. Waiting is non-terminal and replies resume the same turn. Resource
+budgets govern admission and accounting, not semantic task completion.
 
 ## Runtime Boundary
 
@@ -60,8 +31,8 @@ response text or use TODO state as a success predicate.
   `RunEvent` objects.
 - Prompt assembly, model calls, tool planning, tool dispatch, approval
   interruption, cancellation, memory compaction, and runtime hooks.
-- Replayable app history through `RunEventStore`; `JsonlRunEventStore` is the
-  built-in file-backed implementation.
+- Replayable app history through `SessionRunEventStore`; `JsonlRunEventStore` is an
+  optional file projection sink.
 - Tool execution through `vv_agent.tools.ToolExecutor` and
   `vv_agent.tools.ToolOrchestrator`, with `FunctionTool` and `@function_tool`
   as the normal public path.
@@ -78,7 +49,7 @@ implementing providers instead of patching runtime internals:
   compaction lifecycle integration.
 - `vv_agent.tools.ToolExecutor` or `FunctionTool` collections for product
   tools.
-- `RunEventStore` for app history and parent/child run graph replay.
+- `SessionRunEventStore` for app history and parent/child run graph replay.
 - `AfterCycleHook` for an optional task-neutral observation/control point after
   a complete cycle. It may steer the next cycle, add tool denials, or stop with
   failure; it cannot expand permissions or manufacture success/waiting states.
@@ -88,7 +59,7 @@ producers create lifecycle events directly, and LLM adapters project only valid
 assistant/reasoning deltas and model tool-call start/progress events before the
 payload leaves the adapter boundary. Model tool generation uses
 `model_tool_call_*`; actual tool execution uses `tool_call_planned`,
-`tool_call_started`, and `tool_call_completed`, with `tool_call_deferred` for
+`tool_call_started`, and `tool_call_completed`, with parked operation records for
 admitted durable external work. Unknown or malformed provider
 payloads are dropped. Reasoning remains private telemetry and is not rendered
 as App Server answer text.
@@ -106,7 +77,7 @@ cache total only when every included cycle reports that metric.
 | `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
 | `src/vv_agent/interaction.py` | Host-interaction request values, closed wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
-| `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, deferred handle identity, and definitive-result validation; stores own admission and receipts. |
+| `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes and definitive-result validation; stores own admission and receipts. |
 | `src/vv_agent/llm/errors.py` | Provider prompt-too-long classification and its retry limit, shared by model callers and compaction. |
 | `src/vv_agent/config.py` | Settings-file loading, provider/backend lookup, endpoint resolution, and `vv-llm` settings construction. |
 | `src/vv_agent/cli.py` | Command-line argument parsing and one-shot runtime execution. |
@@ -124,111 +95,32 @@ cache total only when every included cycle reports that metric.
 | `src/vv_agent/guardrails.py` | Public guardrail result contract and decorators. |
 | `src/vv_agent/interactive.py` | Public stateful session/client API for desktop runtimes, interruptions, follow-ups, cancellation, and shared tool state. |
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
-| `src/vv_agent/sessions/` | Public `Session` protocol plus memory, SQLite, and Redis implementations. |
 | `src/vv_agent/tracing.py` | Public trace spans and processor protocol. |
 | `src/vv_agent/runtime/compiler.py` | Compile layer: `Agent + input + RunConfig -> AgentTask`. Import this submodule directly to avoid runtime package initialization cycles. |
 | `src/vv_agent/types.py` | Runtime protocol types: tasks, messages, tool calls, results, statuses, and token usage. |
 | `src/vv_agent/llm/` | LLM protocol adapters, scripted test clients, prompt cache behavior, and `vv-llm` client bridge. |
-| `src/vv_agent/runtime/` | Core loop, cycle execution, hooks, cancellation, backends, checkpoint stores, and sub-task coordination. |
+| `src/vv_agent/runtime/` | Shared compiler, hooks, lifecycle, cancellation, tool planning/results, token usage and process management. |
 | `src/vv_agent/tools/` | Tool registry, OpenAI-compatible schemas, dispatcher, and built-in handlers. |
 | `src/vv_agent/memory/` | Token counting, history-preserving summary compaction, archive-backed microcompaction, and session memory. |
 | `src/vv_agent/prompt/` | System prompt construction and prompt-cache section tracking. |
 | `src/vv_agent/workspace/` | Local, memory, and S3-compatible workspace storage backends. |
+| `src/vv_agent/integrations/` | Direct public module for the SkillIntegration extension protocol. |
 | `src/vv_agent/skills/` | Skill metadata parsing, validation, normalization, and prompt rendering. |
 
-## Execution Backends
+## Execution and persistence
 
-- `InlineBackend`: default synchronous cycle execution.
-- `ThreadBackend`: non-blocking submission with futures.
-- `CeleryBackend`: distributed cycle execution. Distributed mode requires a
-  `RuntimeRecipe`, a declared checkpoint-store capability, and a shared
-  `CheckpointStore` resolved by each worker.
+The session log and inbox are the sole execution ledger. SQL transactions atomically
+admit ordered plans, reserve budgets and append receipts. An execution lease fences
+writes and external dispatch. Consumers have separate acknowledged prefixes and
+need no execution lease. Wake is a hint; scanning discovers due work and consumer
+lag. Durable effects can remain unknown and must reconcile against trusted evidence.
 
-`CeleryBackend.execute_local()` is a thin single-process adapter for callers
-that intentionally wait outside a Celery worker. It consumes immediate or
-completed worker responses through the same `advance()` decisions used by
-event-driven hosts; the generic `CeleryBackend.execute()` seam rejects direct
-use. Event-driven hosts use
-`Runner.start_distributed()` plus `CeleryBackend.start()` and `advance()`.
-`start()` admits the checkpoint, enqueues at most Cycle 1, and returns a passive
-`DistributedRunHandle`; `advance()` performs one authoritative checkpoint read,
-returns one `DistributedAdvanceDecision`, and enqueues at most one envelope. It
-does not poll, sleep, call `AsyncResult.get()`, or recursively drive the run.
+Blocking and background children use independently scheduled sessions. Parent
+admission freezes identity, prompt, policy, model, JSON state and budget. Parent
+closure targets live descendants atomically. Intermediate user waits stay on the
+child; the parent adopts only an authenticated terminal for the original handle.
 
-The transport callback passes its decision to `Runner.finalize_distributed()`
-only for `finalize_required`. Output guardrails, optional validation,
-append-once session persistence, the terminal event outbox, checkpoint
-finalization, and acknowledgement therefore remain framework-owned. Celery
-Cycle tasks registered by `register_cycle_task()` use late acknowledgement and
-reject-on-worker-loss so a worker loss after durable progress can replay from
-the checkpoint. Host-registered advance callbacks and terminal-finalizer tasks
-must use the same Celery options. Duplicate deliveries reuse the stable Cycle
-task id; callbacks older than authoritative progress return
-`superseded_delivery` without dispatching another Cycle.
-
-Nonblocking runs reject brokered approval providers before enqueueing. A tool
-approval without a blocking provider may still produce `wait_user` and stop
-dispatch, but cross-process approval continuation requires the separate durable
-approval protocol rather than an in-process `ApprovalBroker`.
-
-Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
-Backends must preserve the same `AgentResult` and checkpoint payload shape as
-inline execution.
-
-Ordinary tool receipts and deferred admission, resolution, and recovery
-acceptance share snapshot transitions in `runtime/state.py`. Each transition
-receives the event timestamp explicitly and leaves its input snapshots intact.
-Memory locking, SQLite transactions, and Redis WATCH/MULTI own persistence;
-receipt replays retain the stored event bytes without a write.
-Controller admission, host-request/response snapshots, notification delivery,
-and response-claim recovery share transformations in `stores/controller_store.py`.
-Event identities and timestamps enter those transformations as explicit values.
-Durable stores apply those values inside their native transactions; the memory
-store owns its locked index updates.
-
-Optional run budgets are evaluated at stable runtime boundaries shared by all
-backends. Inline and thread runs keep one evaluator for the active run.
-Distributed limits travel in each envelope, while cumulative usage is stored
-in the checkpoint so each worker adds only its active monotonic segment. Host
-cost remains a worker-local capability and is never reconstructed from an SDK
-price table. See `run-budgets.md` for public API and terminal precedence.
-
-Distributed mode sends a versioned `DistributedRunEnvelope` for each cycle.
-Workers resolve all referenced capabilities before claiming state, then use a
-revision/token lease with heartbeat renewal and CAS commit. The scheduler
-accepts a result only after reconciling it with the durable checkpoint;
-terminal checkpoints are immutable and replayable until acknowledged. SQLite
-uses WAL, a bounded busy timeout, and the current checkpoint schema only.
-Worker replies use one closed tagged response with `pending`, `committed`,
-`terminal_candidate`, or `terminal_replay`; the scheduler rejects missing,
-unknown, mixed, and historical response shapes before applying them.
-Before entering the runtime cycle, a worker must complete one successful lease
-renewal; initial and renewed lease expiry never extends beyond the job deadline.
-Each periodic wait is derived from that renewal's actual deadline-clamped lease,
-not only from the configured duration. A renewal result must return before both
-the previously known expiry and the new expiry it requested. Response checks
-use the conservative maximum of current wall time and request-start wall time
-plus monotonic elapsed time, covering wall-clock jumps in either direction.
-SQLite refreshes effective time after acquiring its write lock. Redis renewal
-uses one atomic script: Redis `TIME` validates both expiries and the original
-JSON is the compare-and-set value, so an expired or replaced owner cannot write
-a new expiry. The script distinguishes CAS loss from authoritative expiry, so
-commit-race suppression can apply only to claim consumption and never to an
-expired lease; authoritative expiry takes precedence when both conditions are
-observed. Heartbeat renewal uses an independent store connection and remains
-active through an explicit commit phase. A durable commit suppresses only an
-active-claim rejection from a renewal that started in that commit phase and
-returned before its applicable lease expiry. Renewals that started before
-commit, expired leases, and other coordination failures remain visible even if
-the checkpoint commit later succeeds.
-Redis connection I/O and non-renewal optimistic-transaction retries are bounded
-so stopping or unwinding a worker cannot wait forever on the heartbeat thread.
-
-This is an at-least-once execution model. Celery revoke during cancellation is
-best effort, and an active worker claim may still complete after the scheduler
-stops waiting. The cycle idempotency key does not provide an event outbox,
-durable cancellation record, or idempotency for external tool side effects.
-See `parity-contract.md` for the complete cross-language contract.
+See [session-kernel.md](session-kernel.md) for store transactions and recovery.
 
 ## Tool Boundaries
 
@@ -281,7 +173,7 @@ as an executor or invoked through `ToolOrchestrator`. All agent-as-tool calls
 use the same child-run path; the Runner does not intercept tool metadata to
 start a separate child. Missing runtime/provider scope returns the existing
 `sub_agents_not_enabled` tool error before starting a run. Child cancellation
-is linked to the parent, and child checkpoint/session state remains separate. `handoff()`
+is linked to the parent, and child session state remains separate. `handoff()`
 compiles to a transfer tool whose result uses a finish directive; the target
 agent output becomes the run output and a typed `HandoffEvent` is emitted.
 
@@ -291,7 +183,7 @@ In addition to `allowed_tools`, `disallowed_tools`, and `can_use_tool`, it has
 `denied_cost_dimensions`. List values form a normalized set union across Agent,
 configured Runner, and per-run layers; the terminal boolean uses logical OR.
 Configured sub-agents, agent-as-tool runs, and handoff targets inherit the
-effective parent denials and may only add more. Distributed execution carries
+effective parent denials and may only add more. Child admission freezes
 that already-effective policy instead of creating another permission layer.
 
 These fields only deny declared capabilities. They use exact matching, return
@@ -308,8 +200,7 @@ no tool lifecycle. Unknown tools, policy denials, and approval short-circuits
 have planned plus completed but no started event. Completed events add the
 result directive, nullable error code, `execution_started`, nullable monotonic
 `duration_ms`, and the optional declaration. Cancellation or process loss may
-leave a started event without completion; checkpoint v12's operation journal,
-not telemetry, owns ambiguity and recovery.
+leave a started event without completion; retained session operations own ambiguity and recovery.
 
 When no typed declaration exists, metadata-denial fields do not match that
 tool. Telemetry observation does not change result, policy, approval,
@@ -323,15 +214,8 @@ sentinel, while explicit `approval="on_request"` overrides lower layers and
 follows the selected tool's static or dynamic approval declaration. `always`
 and `never` do not evaluate dynamic tool approval predicates.
 
-Interrupted results expose `RunState` and structured approval snapshots. An
-approved result resume executes the captured tool call once. Live
-`ApprovalProvider` runs remain active and continue to use `ApprovalBroker` plus
-`RunHandle.approve()`. An `allow_session` decision grants only the same tool for
-the lifetime of that broker.
-
-Session persistence stores the complete current-turn message delta, including
-assistant tool calls and tool results, so the next model request receives an
-executable conversation history rather than a reconstructed summary pair.
+Interrupted results retain session_id and turn_id. Replies enter the inbox;
+Runner.resume(session_id, turn_id) drives the same retained turn using its durable identity.
 
 ## Guardrails And Tracing
 
@@ -373,7 +257,7 @@ and `tests/test_tools.py`.
   `InteractiveAgentClient` for stateful host-controlled runtimes.
 - Long outputs should keep structured data in metadata and model-facing text in
   content.
-- Cancellation, streaming, hooks, memory compaction, and execution backends must
+- Cancellation, streaming, hooks, memory compaction, and session stores must
   compose without changing public result shapes.
 - New public behavior needs tests in the closest `tests/test_*.py` module.
 

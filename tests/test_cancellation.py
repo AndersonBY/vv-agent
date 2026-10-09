@@ -101,16 +101,17 @@ class TestExecutionContext:
 
 
 class TestCancellationInRuntime:
-    """Test cancellation integrated with AgentRuntime cycle loop."""
+    """Test cancellation integrated with KernelRuntime cycle loop."""
 
     def test_cancel_before_first_cycle(self):
+        from support.kernel_runtime import KernelRuntime
+
         from vv_agent.llm.scripted import ScriptedLLM
-        from vv_agent.runtime import AgentRuntime
         from vv_agent.tools import build_default_registry
         from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
         llm = ScriptedLLM(steps=[LLMResponse(content="hello")])
-        runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
+        runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry())
         task = AgentTask(
             task_id="cancel-test",
             model="test",
@@ -125,12 +126,13 @@ class TestCancellationInRuntime:
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.FAILED
         assert result.error is not None
-        assert result.error["code"] == "cancelled"
-        assert "cancelled" in result.error["message"].lower()
+        assert result.error["code"] == "cancel_requested"
+        assert result.error["message"] == "cancel_requested"
 
     def test_cancel_between_cycles(self):
+        from support.kernel_runtime import KernelRuntime
+
         from vv_agent.llm.scripted import ScriptedLLM
-        from vv_agent.runtime import AgentRuntime
         from vv_agent.tools import build_default_registry
         from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
@@ -142,7 +144,7 @@ class TestCancellationInRuntime:
                 LLMResponse(content="cycle3"),
             ]
         )
-        runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
+        runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry())
         task = AgentTask(
             task_id="cancel-test-2",
             model="test",
@@ -163,8 +165,8 @@ class TestCancellationInRuntime:
         result = runtime.run(task, ctx=ctx, before_cycle_messages=cancel_on_cycle_2)
         assert result.status == AgentStatus.FAILED
         assert result.error is not None
-        assert result.error["code"] == "cancelled"
-        assert "cancelled" in result.error["message"].lower()
+        assert result.error["code"] == "cancel_requested"
+        assert result.error["message"] == "cancel_requested"
 
 
 def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:

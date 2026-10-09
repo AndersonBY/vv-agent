@@ -66,7 +66,7 @@ def test_task_aggregation_uses_complete_model_call_ledger() -> None:
     cases = _contract()["task_aggregation_cases"]
     empty = TaskTokenUsage()
     assert empty.to_dict() == {
-        "schema_version": "vv-agent.task-token-usage.v2",
+        "schema_version": "vv-agent.task-token-usage.v3",
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
@@ -102,26 +102,15 @@ def test_duplicate_model_call_ids_and_superseded_task_wire_are_rejected() -> Non
         TaskTokenUsage.from_dict(superseded)
 
 
-def test_non_kernel_model_call_and_task_usage_reject_output_repair() -> None:
-    payload = _contract()["task_aggregation_cases"][1]["model_calls"][0]
-    invalid = payload | {"operation": "output_repair"}
-    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
-        ModelCallRecord(**(invalid | {"usage": TokenUsage.from_dict(payload["usage"])}))
-    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
-        ModelCallRecord.from_dict(invalid)
-
+def test_current_model_call_and_task_usage_support_output_repair():
+    payload = _contract()["task_aggregation_cases"][1]["model_calls"][0] | {"operation": "output_repair"}
+    record = ModelCallRecord.from_dict(payload)
+    assert record.operation is ModelCallOperation.OUTPUT_REPAIR
     summary = TaskTokenUsage()
-    summary.add_model_call(ModelCallRecord.from_dict(payload))
-    wire = summary.to_dict()
-    wire["model_calls"][0]["operation"] = "output_repair"
-    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
-        TaskTokenUsage.from_dict(wire)
-
-    kernel = ModelCallRecord.from_dict(invalid | {"schema_version": "vv-agent.model-call.v2"}, _kernel=True)
-    assert kernel.operation is ModelCallOperation.OUTPUT_REPAIR
-    kernel_usage = TaskTokenUsage(_kernel=True)
-    kernel_usage.add_model_call(kernel)
-    assert TaskTokenUsage.from_dict(kernel_usage.to_dict(), _kernel=True) == kernel_usage
+    summary.add_model_call(record)
+    assert TaskTokenUsage.from_dict(summary.to_dict()) == summary
+    with pytest.raises(ValueError, match="unsupported"):
+        ModelCallRecord.from_dict(payload | {"schema_version": "vv-agent.model-call.v1"})
 
 
 def test_explicit_zero_usage_is_observable_and_superseded_wire_is_rejected() -> None:
@@ -155,62 +144,79 @@ def test_native_cache_write_usage_is_normalized_without_public_aliases() -> None
 
 
 @pytest.mark.parametrize("case", _contract()["compaction_cases"][:3], ids=lambda case: case["name"])
-def test_compaction_accounting_real_producer(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    from support import model_call_context
-    from support.compaction import case_manager, fixture, messages, prune_case_manager
+def test_compaction_accounting_real_producer(case):
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider, ToolOutputText, function_tool
+    from vv_agent.llm import ScriptedLLM
+    from vv_agent.llm.scripted import ScriptStep
+    from vv_agent.memory import MemoryManager
+    from vv_agent.microcompaction import MicrocompactionPolicy
+    from vv_agent.session.kernel import drive
+    from vv_agent.session.records import InboxItem, Record
+    from vv_agent.session.result import project_result
+    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.tools import ToolRegistry, build_default_registry
+    from vv_agent.types import LLMResponse
+    from vv_agent.workspace import MemoryWorkspaceBackend
 
-    from vv_agent.llm import LlmRequest
-    from vv_agent.types import LLMResponse, Message
-
-    inputs, expected = case["input"], case["expected"]
-    filename, pointer = inputs["transcript_ref"].split("#")
-    transcript = fixture(filename.removesuffix(".json"))
-    for key in pointer.strip("/").split("/"):
-        transcript = transcript[int(key)] if isinstance(transcript, list) else transcript[key]
-    ctx = model_call_context()
-    ctx.model_call_ledger.replace([ModelCallRecord.from_dict(record) for record in inputs["existing_model_calls"]])
-    coordinator = ctx.model_call_coordinator
-    assert coordinator is not None
-    before = ctx.model_call_ledger.usage().total_tokens
-    assert before is not None
-    dispatched = []
-    allocations = iter(inputs["allocated_operations"])
-    responses = iter(inputs["provider_responses"])
-
-    def summarize(prompt: str, *_args: Any) -> str:
-        allocation = next(allocations)
-
-        def invoke() -> LLMResponse:
-            dispatched.append(prompt)
-            raw = next(responses)
-            return LLMResponse(content=raw["content"], raw={"usage": raw["usage"]})
-
-        result = coordinator.dispatch(
-            operation=ModelCallOperation.MEMORY_COMPACTION,
-            cycle_index=allocation["cycle_index"],
-            operation_slot=allocation["operation_id"].removeprefix(f"op_model_cycle_{allocation['cycle_index']}_"),
-            backend=allocation["backend"],
-            model=allocation["model"],
-            request=LlmRequest(model=allocation["model"], messages=[Message(role="user", content=prompt)]),
-            invoke=invoke,
-        )
-        return result.response.content
-
-    if inputs["action"] == "compact":
-        manager = prune_case_manager(transcript, monkeypatch)
-        result = manager.compact_with_result(messages(transcript["input"]["messages"]), cycle_index=1000).messages
+    sid = case["input"]["session_id"]
+    source = json.loads((FIXTURE_PATH.parent / "session_projection.json").read_text())["source_records"][sid]
+    wires = [r["wire"] for r in source]
+    start = next(r for r in wires if r["kind"] == "turn_started")
+    definition = start["payload"]["definition"]
+    task = Record(**start).task()
+    summary_source = json.loads((FIXTURE_PATH.parent / "session_projection.json").read_text())["source_records"]["summary"]
+    summary = next(r["wire"]["payload"]["result"]["content"] for r in summary_source if r["wire"]["kind"] == "op_completed")
+    steps: list[ScriptStep]
+    if sid == "micro":
+        steps = [LLMResponse("done")]
+    elif sid == "summary":
+        steps = [LLMResponse(summary), LLMResponse("done")]
     else:
-        manager, _ = case_manager(transcript, monkeypatch, summary_callback=summarize)
-        original = messages(transcript["input"]["messages"])
-        result = (
-            manager.emergency_compact(original, cycle_index=5, drop_ratio=transcript["input"]["drop_ratio"])
-            if inputs["action"] == "emergency_compact"
-            else manager.compact(original, cycle_index=5, force=True)[0]
-        )
-    assert [message.to_dict() for message in result] == transcript["expected"]["messages"]
-    assert [record.to_dict() for record in ctx.model_call_ledger.records()] == expected["model_calls"]
-    assert len(dispatched) == expected["new_model_dispatches"]
-    assert len(ctx.model_call_ledger.records()) - len(inputs["existing_model_calls"]) == expected["new_model_call_records"]
-    after = ctx.model_call_ledger.usage().total_tokens
-    assert after is not None
-    assert after - before == expected["new_budget_total_tokens"]
+        from vv_agent.types import ToolCall
+
+        tool = next(r["payload"]["request"] for r in wires if r["kind"] == "op_planned" and r["payload"]["op_kind"] == "tool")
+        steps = [LLMResponse(summary), LLMResponse("", [ToolCall.from_dict(tool)]), LLMResponse(summary), LLMResponse("done")]
+
+    @function_tool
+    def more() -> ToolOutputText:
+        return ToolOutputText("new " * 1200)
+
+    def registry():
+        result = ToolRegistry()
+        if sid == "second_summary":
+            result.register_executor(more.to_executor())
+        builtins = build_default_registry()
+        for schema in definition["tools"]:
+            name = schema["function"]["name"]
+            if builtins.has_executor(name):
+                result.register_executor(builtins.get_executor(name))
+        return result
+
+    provider = ScriptedModelProvider("scripted", "m", ScriptedLLM(steps), context_length=None, max_output_tokens=None)
+    driver = SessionDriver()
+    try:
+        config = RunConfig(model_provider=provider, workspace="/fixture", tool_registry_factory=registry)
+        runtime = driver.runtime(Agent("fixture", task.prompt_bundle, model="m"), config, task)
+        settings = dict(definition["memory_settings"])
+        settings["microcompaction_policy"] = MicrocompactionPolicy.from_dict(settings["microcompaction_policy"])
+        runtime.memory_manager = MemoryManager(**settings, workspace_backend=MemoryWorkspaceBackend())
+        driver.create(sid, "/fixture")
+        driver.push(sid, InboxItem("initial", "user", {"content": "go"}))
+        if sid == "second_summary":
+
+            def steer(point, record):
+                if point == "after_commit" and record.kind == "op_completed" and record.operation_id.endswith("/tool/0"):
+                    runtime.hook = lambda *_: None
+                    driver.push(sid, InboxItem("continue", "steer", {"content": "continue"}, record.turn_id))
+
+            runtime.hook = steer
+        drive(driver.store, sid, runtime=runtime)
+        result = project_result(driver.store, sid, f"{sid}/turn/initial", runtime=runtime)
+        calls = [r.to_dict() for r in result.token_usage.model_calls if r.operation is ModelCallOperation.MEMORY_COMPACTION]
+        expected = case["expected"]
+        assert calls == expected["model_calls"]
+        assert len(calls) == expected["new_model_dispatches"] == expected["new_model_call_records"]
+        total = None if any(r["usage"]["total_tokens"] is None for r in calls) else sum(r["usage"]["total_tokens"] for r in calls)
+        assert total == expected["new_budget_total_tokens"]
+    finally:
+        driver.close()

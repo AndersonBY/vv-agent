@@ -13,6 +13,7 @@ def test_replay_query_includes_children_by_default_and_can_exclude_them(tmp_path
     store = JsonlRunEventStore(tmp_path / "events.jsonl")
     store.append(
         RunStartedEvent(
+            session_id="replay",
             run_id="run_parent",
             trace_id="trace_store",
             input="first",
@@ -22,6 +23,7 @@ def test_replay_query_includes_children_by_default_and_can_exclude_them(tmp_path
     )
     store.append(
         RunStartedEvent(
+            session_id="replay",
             run_id="run_child",
             trace_id="trace_store",
             input="child",
@@ -32,6 +34,7 @@ def test_replay_query_includes_children_by_default_and_can_exclude_them(tmp_path
     )
     store.append(
         RunStartedEvent(
+            session_id="replay",
             run_id="run_parent",
             trace_id="trace_store",
             input="last",
@@ -55,15 +58,17 @@ def test_replay_query_includes_children_by_default_and_can_exclude_them(tmp_path
     ]
 
 
-def test_jsonl_replay_is_lazy_and_stops_at_the_corrupt_contract_line() -> None:
-    iterator = JsonlRunEventStore(FIXTURE_PATH).replay(RunEventReplayQuery.run("run_parent"))
+def test_jsonl_replay_is_lazy_and_stops_at_a_corrupt_line(tmp_path):
+    import json
 
-    first = next(iterator)
-    assert first.event_id == "evt_parent"
-
+    rows = FIXTURE_PATH.read_text().splitlines()
+    first_wire = json.loads(rows[0])
+    path = tmp_path / "corrupt.jsonl"
+    path.write_text(rows[0] + "\n{invalid\n" + rows[-1] + "\n")
+    iterator = JsonlRunEventStore(path).replay(RunEventReplayQuery.run(first_wire["run_id"]))
+    assert next(iterator).to_dict() == first_wire
     with pytest.raises(EventStoreError) as caught:
         next(iterator)
-
     assert caught.value.code == "event_store_corrupt_line"
     assert caught.value.line_number == 2
     assert str(caught.value) == "event store corrupt line 2"
