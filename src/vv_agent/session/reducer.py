@@ -101,6 +101,7 @@ class ExecutionState:
     cancel_requested: bool = False
     suspend_requested: bool = False
     phase: str = "idle"
+    due_ms: tuple[int, ...] = ()
     next_drive_ms: int | None = None
     terminal_seq: int = 0
     applied_inputs: dict[str, Record] = field(default_factory=dict)
@@ -436,6 +437,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
 
 def _schedule(state: ExecutionState) -> None:
     state.cancel_requested = state.suspend_requested = False
+    state.due_ms = ()
     state.next_drive_ms = None
     if state.active_turn_id is None:
         state.phase = "closed" if state.closed else "idle"
@@ -445,11 +447,13 @@ def _schedule(state: ExecutionState) -> None:
             and applied._payload["input"]["kind"] in {"user", "follow_up"}
             for input_id, applied in state.applied_inputs.items()
         ):
+            state.due_ms = (0,)
             state.next_drive_ms = 0
         return
     turn = state.turns[state.active_turn_id]
     state.cancel_requested, state.suspend_requested = turn.cancelled, turn.suspended
     if turn.cancelled:
+        state.due_ms = (0,)
         state.phase, state.next_drive_ms = "active", 0
         return
     if turn.suspended:
@@ -492,7 +496,8 @@ def _schedule(state: ExecutionState) -> None:
     if not unresolved:
         due.append(0)  # Next model step or unfinished turn finalization.
     state.phase = "parked" if waiting and not due else "active"
-    state.next_drive_ms = min(due) if due else None
+    state.due_ms = tuple(due)
+    state.next_drive_ms = min(state.due_ms) if state.due_ms else None
 
 
 def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord]) -> None:

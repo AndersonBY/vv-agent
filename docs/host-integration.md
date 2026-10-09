@@ -66,12 +66,28 @@ the holder's post-release check sees the committed input; if it arrives after
 that check, its own wake can acquire the released lease. Local RunHandle child
 scheduling uses explicit `after_drive`/`after_input` hooks, separate from wake.
 
-Provider polling retains its immutable initial `poll_at_ms`: an `Accepted` query
-does not advance it. Once due, that session remains runnable and immediate wakes
-can repeatedly dispatch polls. Hosts using accepted provider jobs need a wake
-policy that limits polling frequency; tick cadence alone does not throttle an
-immediate wake transport. Advancing durable poll deadlines is an open scheduling
-decision, separate from the idle-session wake fix.
+An idle parked provider job is polled at most once per `Runtime.poll_ms` interval
+through due-session dispatch. An `Accepted` query leaves the immutable
+`poll_at_ms` and execution log unchanged. Before releasing its lease, an idle
+driver defers a stale SQL `next_drive_ms` to database now plus the poll interval,
+capped by the earliest future operation deadline, poll, not-before/retry time or
+inbox availability. The reducer retains all operation due times in
+`ExecutionState.due_ms`; the store uses that list without duplicating operation
+scheduling rules. `next_drive_ms` in the folded state remains its minimum.
+Deadline handling therefore remains due at its original
+time. New input is immediately runnable through the inbox predicate and does
+not wait for the deferred poll. A subsequent commit recomputes the schedule
+from the log. Completed `_one_turn` drives return without this idle deferral,
+so queued turns remain immediately runnable.
+
+Custom `SessionStore` implementations must implement the public, typed
+`defer_idle_drive(lease, *, poll_ms) -> bool` and
+`is_runnable(session_id) -> bool` methods. Deferral returns whether it changed
+the schedule, rejects stale/expired leases with `LeaseLost`, and leaves null or
+future schedules untouched. Hold the session write lock, read database time
+after acquiring it, and fence the update by the lease; a concurrent commit's
+newer future schedule must survive. `is_runnable` uses the same lease/due/inbox
+predicate as `list_runnable`.
 
 Waiting for approval, a user reply or a child releases the lease and returns the
 worker. Route approval/user replies to that waiting session's inbox, with its

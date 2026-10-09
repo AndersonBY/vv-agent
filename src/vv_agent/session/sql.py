@@ -300,7 +300,33 @@ class SQLStore:
             self._rows("UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL WHERE session_id=%s", (lease.session_id,))
             return True
 
-    def _is_runnable(self, session_id: str) -> bool:
+    def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
+        """Defer a stale idle schedule without changing execution facts or future due work."""
+        _positive(poll_ms, "poll_ms")
+        with self._transaction():
+            sid = lease.session_id
+            row = self._lock(sid)
+            now = self._now()
+            self._check_lease(sid, lease, row, now)
+            scheduled = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (sid,))[0]
+            if scheduled is None or scheduled > now:
+                return False
+            state = self._prefix(sid, row).reducer.state
+            due = [now + poll_ms, *(t for t in state.due_ms if t > now)]
+            available = self._one(
+                "SELECT min(available_ms) FROM sk_inbox WHERE session_id=%s AND consumed_seq IS NULL AND available_ms>%s",
+                (sid, now),
+            )[0]
+            if available is not None:
+                due.append(available)
+            return bool(
+                self._rows(
+                    "UPDATE sk_session SET next_drive_ms=%s WHERE session_id=%s AND next_drive_ms<=%s RETURNING session_id",
+                    (min(due), sid, now),
+                )
+            )
+
+    def is_runnable(self, session_id: str) -> bool:
         # Check after release in a fresh transaction so a pusher racing the holder is visible.
         with self._transaction():
             return bool(

@@ -1,20 +1,27 @@
 """Host-controlled at-least-once delivery against both durable SQL stores."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import replace
 from itertools import pairwise
 from threading import Event
 
 import pytest
 
+from vv_agent.run_handle import RunHandle
 from vv_agent.session.children import child_delivery
-from vv_agent.session.kernel import drive, read_state
+from vv_agent.session.kernel import _Driver, drive, read_state
+from vv_agent.session.providers import Definitive
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.supervisor import tick
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 
 from .conftest import open_store
+from .controlled import ControlledProvider
+from .helpers import record
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime
 
@@ -172,7 +179,7 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
     transport.push("s", prompt())
     store = transport.store
     release = store.release
-    check = store._is_runnable
+    check = store.is_runnable
     raced = False
 
     def push():
@@ -204,7 +211,7 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
         return check(sid)
 
     monkeypatch.setattr(store, "release", exiting)
-    monkeypatch.setattr(store, "_is_runnable", fresh_check)
+    monkeypatch.setattr(store, "is_runnable", fresh_check)
     transport.deliver()
     assert transport.queue == ["s"]
     assert transport.wakes == ["s", "s", "s"]
@@ -250,7 +257,7 @@ def test_abandoned_worker_recovers_from_committed_log_after_ttl(transport, clock
             transport.deliver()
     assert transport.queue == []
     assert calls == ["model"]
-    assert not transport.store._is_runnable("s")
+    assert not transport.store.is_runnable("s")
     transport.tick()
     assert calls == ["model"]
     clock(rt.ttl_ms)  # Heartbeat has stopped; equality at expiry is runnable.
@@ -296,7 +303,7 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
     park = next(r for r in records(transport.store, kind="op_parked") if r.payload["handle"]["kind"] == wait_kind)
     handle = park.payload["handle"]
     assert transport.store._rows("SELECT lease_owner FROM sk_session") == [(None,)]
-    assert not transport.store._is_runnable("s")
+    assert not transport.store.is_runnable("s")
     transport.create("other", steps=[LLMResponse("worker free")])
     transport.push("other", prompt())
     transport.deliver()
@@ -356,12 +363,12 @@ def test_delayed_input_becomes_runnable_exactly_when_due(transport, clock):
     transport.push("s", prompt(available_ms=1_000_100))
     transport.deliver()
     assert transport.queue == []
-    assert not transport.store._is_runnable("s")
+    assert not transport.store.is_runnable("s")
     clock(99)
     transport.tick()
     assert len(transport.runtimes["s"].llm.steps) == 1
     clock(1)
-    assert transport.store._is_runnable("s")
+    assert transport.store.is_runnable("s")
     transport.tick()
     assert len(records(transport.store, kind="turn_ended")) == 1
     assert transport.wakes == ["s"]
@@ -421,7 +428,7 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
     store = transport.store
 
     def agree(expected):
-        assert store._is_runnable("s") is expected
+        assert store.is_runnable("s") is expected
         assert any(w.kind == "drive" for w in store.list_runnable()) is expected
 
     agree(False)  # Consumer lag alone must not wake execution.
@@ -442,3 +449,260 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
     agree(False)
     clock(1)
     agree(True)
+
+
+class PollingProvider(ControlledProvider):
+    def __init__(self, database):
+        super().__init__(database, "accepted")
+        self.queries = []
+        self.deadline = None
+
+    def query(self, handle):
+        with open_store(self.database) as store:
+            now = store._now()
+        self.queries.append(now)
+        if self.deadline is not None and now >= self.deadline:
+            return Definitive(
+                ToolExecutionResult(tool_call_id="job", content="deadline handled").to_dict(), (handle["evidence"],)
+            )
+        return super().query(handle)
+
+
+@pytest.fixture
+def provider_wait(transport, clock):
+    @function_tool
+    def effect() -> str:
+        return "unused synchronous handler"
+
+    provider = PollingProvider(transport.database)
+    provider.install()
+    transport.create(steps=[LLMResponse("", [ToolCall("job", "effect", {})]), LLMResponse("done")], tools=[effect])
+    transport.runtimes["s"].providers["effect"] = provider
+    return provider
+
+
+def scheduled(store):
+    return store._one("SELECT next_drive_ms FROM sk_session WHERE session_id='s'")[0]
+
+
+def test_accepted_provider_poll_cadence_and_zero_immediate_rewakes(transport, clock, provider_wait, record_property):
+    period, duration = 1000, 10_250
+    transport.runtimes["s"].poll_ms = period
+    transport.push("s", prompt())
+    transport.drain()
+    initial = tuple(r.encode() for r in records(transport.store))
+    polls = []
+    for elapsed in range(25, duration + 1, 25):
+        clock(25)
+        if elapsed % period == 0:
+            assert transport.store.is_runnable("s")
+        transport.tick()
+        assert transport.queue == []
+        assert transport.wakes == ["s"]
+        assert not transport.store.is_runnable("s")
+        assert scheduled(transport.store) == 1_000_000 + (1 + elapsed // period) * period
+        assert tuple(r.encode() for r in records(transport.store)) == initial
+        if elapsed % period == 0:
+            polls.append(
+                {
+                    "clock_ms": 1_000_000 + elapsed,
+                    "due_after_query": scheduled(transport.store),
+                    "wakes": 0,
+                    "runnable": False,
+                    "queue_length": len(transport.queue),
+                }
+            )
+    # Include the existing query immediately following submission at time zero.
+    assert provider_wait.queries == [1_000_000 + n * period for n in range(1 + duration // period)]
+    assert len(provider_wait.queries) == 1 + duration // period == 11
+    assert scheduled(transport.store) == 1_011_000
+    record_property("poll_queries_ms", provider_wait.queries)
+    record_property("poll_count_bound", "1 + floor(T/P) = 11; T=10250ms, P=1000ms")
+    record_property("immediate_rewakes", 0)
+    record_property("accepted_queries", polls)
+
+
+def test_provider_deadline_caps_idle_deferral(transport, clock, provider_wait, monkeypatch):
+    provider_wait.deadline = 1_001_250
+    parked = _Driver.parked
+
+    def with_deadline(self, plan, handle, *, after):
+        value = parked(self, plan, handle, after=after)
+        return replace(value, payload=value.payload | {"deadline_ms": provider_wait.deadline})
+
+    monkeypatch.setattr(_Driver, "parked", with_deadline)
+    transport.push("s", prompt())
+    transport.drain()
+    clock(1000)
+    transport.tick()
+    assert scheduled(transport.store) == provider_wait.deadline
+    clock(249)
+    transport.tick()
+    assert provider_wait.queries == [1_000_000, 1_001_000]
+    clock(1)
+    transport.tick()
+    assert provider_wait.queries[-1] == provider_wait.deadline
+    assert records(transport.store, kind="turn_ended")[0].payload["status"] == "completed"
+    assert transport.queue == []
+
+
+def test_input_during_deferred_provider_wait_is_immediate(transport, clock, provider_wait):
+    transport.push("s", prompt())
+    transport.drain()
+    clock(1000)
+    transport.tick()
+    assert scheduled(transport.store) == 1_002_000
+    clock(1)
+    transport.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/initial"))
+    assert transport.store.is_runnable("s")
+    transport.drain()
+    assert records(transport.store, kind="turn_ended")[0].payload["status"] == "cancelled"
+    assert provider_wait.queries == [1_000_000, 1_001_000]
+    assert transport.queue == []
+
+
+@pytest.mark.parametrize("surface", ["one_turn", "run_handle"])
+def test_queued_turn_has_no_poll_delay(transport, clock, surface):
+    starts = []
+
+    def first(_request):
+        starts.append(transport.store._now())
+        transport.push("s", InboxItem("next", "follow_up", {"content": "next"}))
+        return LLMResponse("first")
+
+    def second(_request):
+        starts.append(transport.store._now())
+        return LLMResponse("second")
+
+    transport.create(steps=[first, second])
+    transport.push("s", prompt())
+    rt = transport.runtimes["s"]
+    rt.poll_ms = 10_000
+    kernel = SessionDriver(store=transport.store)
+
+    def run(input_id):
+        if surface == "one_turn":
+            drive(transport.store, "s", runtime=rt, _one_turn=True)
+        else:
+            handle = RunHandle(kernel, "s", f"s/turn/{input_id}", rt, None)
+            handle.start()
+            assert handle.result(timeout=10).final_output in {"first", "second"}
+
+    run("initial")
+    assert starts == [1_000_000]
+    assert scheduled(transport.store) == 0
+    assert transport.store.is_runnable("s")
+    run("next")
+    assert starts == [1_000_000, 1_000_000]
+    assert len(records(transport.store, kind="turn_ended")) == 2
+
+
+@pytest.mark.parametrize("loss", ["expired", "replaced", "released"])
+def test_stale_holder_cannot_defer(transport, clock, loss):
+    transport.create()
+    store = transport.store
+    lease = store.acquire("s", owner="stale", ttl_ms=100)
+    assert lease is not None
+    with store.atomic():
+        store._rows("UPDATE sk_session SET next_drive_ms=0 WHERE session_id='s'")
+    if loss == "released":
+        assert store.release(lease)
+    else:
+        clock(100)
+        if loss == "replaced":
+            assert store.acquire("s", owner="new", ttl_ms=100) is not None
+    with pytest.raises(LeaseLost):
+        store.defer_idle_drive(lease, poll_ms=1000)
+    assert scheduled(store) == 0
+
+
+def test_any_idle_drive_defers_a_stale_due_without_records(transport, clock, monkeypatch):
+    transport.create()
+    store = transport.store
+    initial = tuple(r.encode() for r in records(store))
+    with store.atomic():
+        store._rows("UPDATE sk_session SET next_drive_ms=0 WHERE session_id='s'")
+    monkeypatch.setattr(_Driver, "step", lambda self: False)
+    transport.queue.append("s")
+    transport.drain()
+    assert scheduled(store) == 1_001_000
+    assert not store.is_runnable("s")
+    assert transport.wakes == []
+    assert transport.queue == []
+    assert tuple(r.encode() for r in records(store)) == initial
+
+
+@pytest.mark.parametrize("due_source", ["deadline", "poll", "not_before", "retry", "inbox"])
+def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_source):
+    transport.create()
+    store = transport.store
+    lease = store.acquire("s", owner="holder", ttl_ms=1000)
+    assert lease is not None
+    future = 1_000_250
+    values = [record("turn_started"), record("op_planned"), record("op_started"), record("op_parked", poll_at_ms=0)]
+    if due_source == "deadline":
+        values[-1] = record("op_parked", poll_at_ms=0, deadline_ms=future)
+    elif due_source == "poll":
+        values += [record("op_planned", oid="future"), record("op_started", oid="future")]
+        values.append(record("op_parked", oid="future", poll_at_ms=future))
+    elif due_source in {"not_before", "retry"}:
+        values.append(record("op_planned", oid="future", not_before_ms=future if due_source == "not_before" else None))
+        if due_source == "retry":
+            values += [record("op_started", oid="future"), record("op_unknown", oid="future", retry_at_ms=future)]
+    with store.atomic() as tx:
+        tx.append("s", lease=lease, expected_seq=1, commit_id="waiting", records=tuple(values))
+        if due_source == "inbox":
+            tx.push("s", prompt(available_ms=future))
+    assert scheduled(store) == 0
+    state = store.read_state("s")[0]
+    assert state.due_ms == ((0,) if due_source == "inbox" else (0, future))
+    assert state.next_drive_ms == min(state.due_ms) == 0
+    assert store.defer_idle_drive(lease, poll_ms=1000)
+    assert scheduled(store) == future
+    assert store.read_state("s")[0].due_ms == state.due_ms
+
+
+def test_idle_deferral_does_not_overwrite_new_commit_schedule(transport, clock, monkeypatch):
+    transport.create()
+    store = transport.store
+    lease = store.acquire("s", owner="holder", ttl_ms=1000)
+    assert lease is not None
+    with store.atomic():
+        store._rows("UPDATE sk_session SET next_drive_ms=0 WHERE session_id='s'")
+    transaction = store._transaction
+
+    @contextmanager
+    def commit_before_transaction():
+        with open_store(transport.database) as concurrent, concurrent.atomic() as tx:
+            tx.append(
+                "s",
+                lease=lease,
+                expected_seq=1,
+                commit_id="future",
+                records=(record("turn_started"), record("op_planned", not_before_ms=1_000_250)),
+            )
+        with transaction():
+            yield
+
+    monkeypatch.setattr(store, "_transaction", commit_before_transaction)
+    assert not store.defer_idle_drive(lease, poll_ms=1000)
+    assert scheduled(store) == 1_000_250
+
+
+@pytest.mark.parametrize("exit_reason", ["error", "lease_loss"])
+def test_failed_drive_does_not_defer(transport, clock, monkeypatch, exit_reason):
+    transport.create()
+    store = transport.store
+    with store.atomic():
+        store._rows("UPDATE sk_session SET next_drive_ms=0 WHERE session_id='s'")
+
+    def stop(self):
+        if exit_reason == "error":
+            raise RuntimeError("failed step")
+        self.scope.lost = True
+        return False
+
+    monkeypatch.setattr(_Driver, "step", stop)
+    with pytest.raises(RuntimeError if exit_reason == "error" else LeaseLost):
+        drive(store, "s", runtime=transport.runtimes["s"])
+    assert scheduled(store) == 0

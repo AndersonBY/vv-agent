@@ -1614,6 +1614,10 @@ def drive(
         while not scope.lost:
             try:
                 if not driver.step():
+                    with scope.lock:
+                        if scope.lost:
+                            raise LeaseLost("heartbeat lost ownership")
+                        store.defer_idle_drive(scope.lease, poll_ms=runtime.poll_ms)
                     break
                 if _one_turn and driver.records[-1].record.kind == "turn_ended":
                     break
@@ -1629,5 +1633,5 @@ def drive(
         with suppress(Exception):
             runtime.hook("after_drive", None)
         with suppress(Exception):
-            if store._is_runnable(session_id):
+            if store.is_runnable(session_id):
                 runtime.wake(session_id)
