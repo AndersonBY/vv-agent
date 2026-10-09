@@ -426,6 +426,9 @@ def test_run_handle_parent_terminal_is_retained_and_child_delivery_is_separate(t
                                 )
                             ],
                         ),
+                        # Child completion can also require one more parent model call.
+                        LLMResponse("done"),
+                        LLMResponse("done"),
                         LLMResponse("done"),
                     ],
                 ),

@@ -381,6 +381,8 @@ def test_sub_agent_stream_callback_retains_child_identity(tmp_path):
                     )
                 ],
             ),
+            # An early child completion can require another parent model call.
+            LLMResponse("parent done"),
             LLMResponse("parent done"),
         ]
     )
