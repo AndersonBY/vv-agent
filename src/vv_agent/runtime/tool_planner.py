@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from vv_agent.constants import (
@@ -192,3 +194,23 @@ def plan_tool_schemas(
     if not include_dynamic_hints:
         return schemas
     return _patch_dynamic_tool_schemas(task=task, tool_schemas=schemas)
+
+
+def toolset_schema_digest(
+    registry: ToolRegistry,
+    *,
+    task: AgentTask | None = None,
+) -> str:
+    """Return the digest for a registry or its task-scoped schema projection.
+
+    ``task`` uses vv-agent's canonical planner and deliberately excludes
+    request-local dynamic hints.
+    """
+
+    schemas = (
+        plan_tool_schemas(registry=registry, task=task, include_dynamic_hints=False)
+        if task is not None
+        else registry.list_openai_schemas()
+    )
+    canonical = json.dumps(schemas, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()

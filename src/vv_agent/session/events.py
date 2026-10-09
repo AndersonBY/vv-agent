@@ -1,4 +1,4 @@
-"""RunEventStore projection and acknowledgements over the store's consumer cursors."""
+"""Session event projection and acknowledgements over the store's consumer cursors."""
 
 from __future__ import annotations
 

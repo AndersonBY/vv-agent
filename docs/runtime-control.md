@@ -21,7 +21,7 @@ the retained wait and is queued through the owning SessionDriver, AgentSession o
 App Server. Approval decisions write inbox items; call handle.resume(),
 Runner.resume(session_id, turn_id), AgentSession.continue_run() or turn/resume to
 drive after a parked handle completes. Replies preserve the original turn and
-budget. Fresh turns get fresh counters. RunState resume is retired.
+budget. Fresh turns get fresh counters.
 
 Terminal replay reads the original retained prefix without re-running tools or
 models. An old result cannot absorb a child's later continuation. Same-ID
@@ -30,8 +30,7 @@ same-byte input replays; changed bytes conflict without writes.
 ## Session state
 
 AgentSession messages and shared_state are detached, read-only projections.
-Creation-time seed contains messages and JSON shared_state. There is no writable
-Session, replace_messages, replace_shared_state or clear_queues capability.
+Creation-time seed contains messages and JSON shared_state. Pass initial history and JSON state at creation; see [the seed migration](migration-v8.md#creation-time-seed).
 Steer targets the current turn; an idle queued steer is consumed after admission.
 Follow-up queues a fresh turn after completion. Closed sessions reject execution.
 

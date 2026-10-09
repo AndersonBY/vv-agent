@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from support import ModelMapProvider
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
@@ -145,7 +145,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
             "_vv_agent_session_id": "session_parent",
         },
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=provider.client(provider.resolve(ModelRef.named("parent-model"))),
         model_provider=provider,
         tool_registry=build_default_registry(),

@@ -6,14 +6,15 @@ import json
 from copy import deepcopy
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.output_validation import coerce_output_type
 from vv_agent.result import RunResult
-from vv_agent.runner import Runner
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
     CompletionReason,
     CycleRecord,
+    Message,
     ModelCallOperation,
     ModelCallRecord,
     ModelCallStatus,
@@ -213,7 +214,7 @@ def project_result(
                 error = transferred.raw_result.error
                 break
     if status == AgentStatus.COMPLETED and transferred is None and runtime:
-        output = Runner._coerce_output_type(agent=runtime.agent, final_output=output)
+        output = coerce_output_type(agent=runtime.agent, final_output=output)
     partial = cycles[-1].assistant_message or None if cycles and status != AgentStatus.COMPLETED else None
     checked = state.boundaries.get((turn_id, "output_checked", "final"))
     if checked and checked._payload["data"]["status"] == "failed" and "partial_output" in checked._payload["data"]:
@@ -249,7 +250,7 @@ def project_result(
     )
     return RunResult(
         input=task.user_prompt,
-        new_items=Runner._new_session_items(initial_messages=task.initial_messages, result=raw),
+        new_items=new_session_items(initial_messages=task.initial_messages, result=raw),
         final_output=output,
         status=status,
         raw_result=raw,
@@ -265,3 +266,14 @@ def project_result(
         else turn.start._payload["definition"]["agent_name"],
         resolved_model=transferred.resolved_model if transferred else runtime.resolved if runtime else None,
     )
+
+
+def new_session_items(*, initial_messages: list[Message] | None, result: AgentResult) -> list[Message]:
+    history = list(initial_messages or [])
+    result_messages = list(result.messages)
+    prefix_length = len(history)
+    if not history or history[0].role != "system":
+        prefix_length += 1
+    if prefix_length > len(result_messages):
+        return []
+    return deepcopy(result_messages[prefix_length:])

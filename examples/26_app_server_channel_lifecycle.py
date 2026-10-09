@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from vv_agent import Agent, RunConfig, ToolPolicy, VvLlmModelProvider
@@ -22,11 +23,11 @@ def print_event(event: RunEvent) -> None:
         print(f"\n[runtime:{event.type}] {event.to_dict()}", flush=True)
 
 
-def _host() -> DefaultAppServerHost:
+def _host(temporary_workspace: str) -> DefaultAppServerHost:
     settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
     model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)).resolve()
     verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
     max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "3"))
 
@@ -67,43 +68,63 @@ def _drain_until(transport: ChannelTransport, *, response_id: int | None = None,
 
 
 def main() -> None:
-    prompt = os.getenv(
-        "VV_AGENT_EXAMPLE_PROMPT",
-        "请把这句话翻译成英文: vv-agent App Server 正在通过真实模型处理 ChannelTransport 请求。",
-    )
-    transport = ChannelTransport(connection_id="example")
-    server = AppServer(transport=transport, host=_host())
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        prompt = os.getenv(
+            "VV_AGENT_EXAMPLE_PROMPT",
+            "请把这句话翻译成英文: vv-agent App Server 正在通过真实模型处理 ChannelTransport 请求。",
+        )
+        transport = ChannelTransport(connection_id="example")
+        server = AppServer(transport=transport, host=_host(temporary_workspace))
 
-    _send(
-        server,
-        transport,
-        {
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "channel-example"},
-                "capabilities": {"optOutNotificationMethods": []},
-            },
-        },
-    )
-    _drain_until(transport, response_id=0)
-    _send(server, transport, {"method": "initialized"})
+        try:
+            _send(
+                server,
+                transport,
+                {
+                    "id": 0,
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "channel-example"},
+                        "capabilities": {"optOutNotificationMethods": []},
+                    },
+                },
+            )
+            _drain_until(transport, response_id=0)
+            _send(server, transport, {"jsonrpc": "2.0", "method": "initialized"})
 
-    _send(server, transport, {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}})
-    _drain_until(transport, response_id=1)
+            _send(
+                server,
+                transport,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "thread/start",
+                    "params": {"agentKey": "default", "cwd": temporary_workspace},
+                },
+            )
+            _drain_until(transport, response_id=1)
 
-    _send(
-        server,
-        transport,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]}},
-    )
-    _drain_until(transport, method="turn/completed")
+            _send(
+                server,
+                transport,
+                {
+                    "id": 2,
+                    "jsonrpc": "2.0",
+                    "method": "turn/start",
+                    "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]},
+                },
+            )
+            _drain_until(transport, method="turn/completed")
 
-    _send(server, transport, {"id": 3, "method": "thread/list"})
-    _drain_until(transport, response_id=3)
+            _send(server, transport, {"jsonrpc": "2.0", "id": 3, "method": "thread/list"})
+            _drain_until(transport, response_id=3)
 
-    _send(server, transport, {"id": 4, "method": "thread/archive", "params": {"threadId": "thread_1"}})
-    _drain_until(transport, method="thread/status/changed")
+            _send(server, transport, {"jsonrpc": "2.0", "id": 4, "method": "thread/archive", "params": {"threadId": "thread_1"}})
+            _drain_until(transport, method="thread/status/changed")
+        finally:
+            server.run_adapter.join()
+            server.kernel.close()
 
 
 if __name__ == "__main__":

@@ -68,8 +68,8 @@ For App Server changes, also check CLI entrypoints and schema generation:
 uv run pytest tests/test_app_server_*.py
 uv run python -m vv_agent --help
 uv run python -m vv_agent app-server --help
-uv run python -m vv_agent app-server schema --out ./app-server-schema
-uv run python -m vv_agent app-server generate-ts --out ./app-server-schema/typescript
+uv run python -m vv_agent app-server schema --out /tmp/vv-agent-schema
+uv run python -m vv_agent app-server generate-ts --out /tmp/vv-agent-schema/typescript
 uv run python -m vv_agent debug app-server send-message hello
 ```
 
@@ -101,6 +101,11 @@ Useful live-test environment variables:
 | `VV_AGENT_LIVE_BACKEND` | `moonshot` | Provider backend for live smoke tests. |
 | `VV_AGENT_LIVE_MODEL` | `kimi-k3` | Model key for live smoke tests. |
 
+Tests isolate default workspaces with `tmp_path`. Scripted smoke processes and
+examples use temporary workspaces; run generation with an output directory under
+`/tmp`, never the vendored snapshot. PostgreSQL cases use a local Unix socket or
+`VV_AGENT_TEST_POSTGRES_DSN` and create/drop disposable databases.
+
 ## Test Ownership
 
 | Change area | Primary tests |
@@ -115,7 +120,7 @@ Useful live-test environment variables:
 | Optional output validation and tools-free repair | `tests/test_output_validation_contract.py` |
 | Settings/model resolution | `tests/test_config.py` |
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
-| Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |
+| Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_model_turn.py` |
 | Public SDK contract | `tests/test_public_agent.py`, `tests/test_runner.py`, `tests/test_model_settings.py`, `tests/test_function_tool.py`, `tests/test_run_events.py`, `tests/test_agent_as_tool.py`, `tests/test_handoffs.py`, `tests/test_tool_policy.py`, `tests/test_tool_approval.py`, `tests/test_guardrails.py`, `tests/test_tracing.py`, `tests/test_compiler.py` |
 | Live handles and event replay | `tests/test_run_handle_live_stream.py`, `tests/test_event_store.py`, `tests/test_events_contract.py`, `tests/test_session_graph_events.py` |
 | App Server protocol, transport, replay, approvals, schema, and CLI | `tests/test_app_server_jsonrpc.py`, `tests/test_app_server_initialize.py`, `tests/test_app_server_transport.py`, `tests/test_app_server_request_serialization.py`, `tests/test_app_server_thread_store.py`, `tests/test_app_server_thread_turn.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_approval.py`, `tests/test_app_server_replay.py`, `tests/test_app_server_schema.py`, `tests/test_app_server_cli.py` |
@@ -123,7 +128,7 @@ Useful live-test environment variables:
 | LLM/tool hooks and after-cycle lifecycle hooks | `tests/test_runtime_hooks.py`, `tests/test_after_cycle_hooks.py` |
 | Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py`, `tests/test_tool_orchestrator.py` |
 | Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_microcompaction_policy.py`, `tests/test_microcompaction_events.py`, `tests/test_memory_local_contract.py`, `tests/test_session_memory.py` |
-| Execution backends | `tests/test_backends.py` |
+| Session execution and persistence | `tests/session/`, `tests/test_run_resume.py` |
 | Workspace backends | `tests/test_workspace_backends.py` |
 | Live provider behavior | `tests/test_live_moonshot.py` |
 

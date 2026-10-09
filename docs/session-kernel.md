@@ -8,8 +8,7 @@ SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
 The lock selects contract 24.0.1. Current codecs are RunEvent v6, model-call v2,
 task-token-usage v3, strict Message and App Server protocol v2. Public exports
 match public_api v8. Rust remains frozen at contract 23.0.0 and is outside this
-Python adoption. Retired execution modules remain on disk for F3b extraction;
-they supply no public execution path.
+Python adoption. All execution uses the same kernel and retained log.
 
 Runner.resume(session_id, turn_id) reads the retained identity. User and approval
 replies continue the same turn; a fresh prompt after a terminal admits a fresh
@@ -52,7 +51,7 @@ same cap. A committed terminal completes its original turn without re-dispatch.
 - `surfaces.py` assembles the SQLite owner and host handles; ordinary
   runs use `:memory:` and retained sessions use a SQLite file. Blocking children
   drive after releasing the parent lease; background children drive independently.
-- `interactive.py` implements steering, follow-up, user/approval replies,
+- `vv_agent/interactive.py` implements steering, follow-up, user/approval replies,
   archive and close through inbox items, with transcript/result projections.
 - `app_server.py` projects threads, turns and timeline items from records. It
   creates no second thread ledger. App Server metadata uses the closed reserved
@@ -66,8 +65,7 @@ Images retain both their wire input and model messages. Child waits expose safe
 session/turn/interaction identities; responses target the child's inbox before
 the parent adopts its terminal. Archive and close use stable control identities:
 equal bytes replay, different bytes conflict, and closed turns never revive.
-Current adoption and fixture correction evidence is recorded in
-[`session-kernel-f3a-report.md`](session-kernel-f3a-report.md).
+Host migration is documented in [migration-v8.md](migration-v8.md).
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
 with SHA-256 digests. Producer construction validates and freezes each Record's
@@ -262,9 +260,7 @@ preserves the last valid definition cache. Dynamic `is_enabled`
 predicates are reevaluated when compiling each new turn. Dispatch reevaluates
 current authorization and retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
 executors, honoring FunctionTool `is_enabled` and registry exposure. The capability
-matrix in `session-kernel-capability-matrix.md` distinguishes paired evidence from
-unimplemented lifecycle and SDK adapters. It does not run the old checkpoint controller or
-its deferred lifecycle.
+matrix in `session-kernel-capability-matrix.md` records the current producer evidence.
 
 | Need | Existing implementation called |
 | --- | --- |
@@ -277,9 +273,8 @@ its deferred lifecycle.
 | Compaction | `memory/manager.py:MemoryManager.plan_microcompaction`, `apply_microcompaction`, `plan_summary`, `accept_summary`, `compaction_evidence` |
 | Event types | `events.py:RunEvent` and existing typed lifecycle subclasses |
 
-`CycleRunner._complete_llm` couples request construction to the old coordinator.
-The kernel builds the same LlmRequest and uses the same client, replacing only
-operation admission/persistence. It freezes `RetrySettings(max_attempts=1)` and binds one VvLlmClient endpoint per
+The kernel builds LlmRequest and uses the configured client with logged
+operation admission and persistence. It freezes `RetrySettings(max_attempts=1)` and binds one VvLlmClient endpoint per
 logged attempt, following the frozen preferred/randomized order. Custom clients must also perform exactly one
 provider attempt per `complete` call. No network/provider
 credentials are needed by the scripted recovery tests.
@@ -288,8 +283,7 @@ credentials are needed by the scripted recovery tests.
 pre-dispatch callback, then stops without executing the handler. Its real submit
 uses the same orchestrator and original handler. This avoids duplicating policy,
 argument validation or callable approval predicates. Ordinary handler timeout
-is unknown because the handler thread may continue. Checkpoint-bound deferred
-outcomes do not count as trusted session acceptance. Executors marked
+is unknown because the handler thread may continue. Executors marked
 `policy_managed_by_handler` are rejected before preflight because they bypass
 the orchestrator dispatch callback; they cannot execute through this wrapper.
 
@@ -382,9 +376,9 @@ counts or substitute a stale host meter value for a missing current observation.
 `projection.project_records` maps a consistent log prefix to existing RunEvent
 types with stable session-scoped IDs, original database timestamps and
 `metadata.session_seq`. Host-interaction event digests reuse the existing
-`HostInteractionRequest` value type; no controller instance is constructed. It is pure; it never dispatches or acknowledges.
+`HostInteractionRequest` value type. Projection never dispatches or acknowledges.
 Consumers can filter the prefix by their durable cursor. Kernel v6 events use
-`session_id` and omit retired checkpoint/revision carriers. Provider waits use a
+`session_id`. Provider waits use a
 typed parked run-state projection.
 The formal App Server/product adapter belongs to the later default cut-over.
 
@@ -439,7 +433,7 @@ records, and the source never resumes model execution after transfer. The source
 log remains the durable owner, while result agent/model/state/output project the
 terminal target. Target validation runs once on execution; the source's transient
 Runner transfer marker is not a user-facing final output and is not validated.
-See the F2d-3 report for the pending C1 decisions on these internal semantics.
+See [migration-v8.md](migration-v8.md) for current host API migration.
 
 ### Shared-state host bindings
 
@@ -521,7 +515,7 @@ background safe points, cancellation, and late-generation audit. Central contrac
 The host supplies `Runtime.memory_manager`; its value settings, including tool
 retention declarations, are frozen in the turn definition. Drift stops resume
 through the existing definition check. The kernel does not call the legacy
-summary callback, checkpoint coordinator, or Session Memory extraction loop.
+summary callback or Session Memory extraction loop.
 Summary inference uses the runtime's bound model and client, with tools disabled,
 a text-only prompt, one transport attempt, and the existing budget evaluator.
 
@@ -566,13 +560,11 @@ results do not become assistant answers or tool plans. They retain their own
 A provider prompt-too-long error is a definitive logged failure rather than an
 ambiguous dispatch. Emergency summarization uses MemoryManager's smaller-tail
 plan with `drop_ratio = 0.2 * consecutive_prompt_too_long_failures`; the manager
-clamps it under contract 23. Each PTL recovery permits a new primary operation, with the existing three-retry
+clamps it under the current compaction contract. Each PTL recovery permits a new primary operation, with the existing three-retry
 limit. Rejected or unavailable summaries retain history; equal source/tail
 targets reuse their retained receipt. PTL exhaustion ends the turn with
 `CompactionExhaustedError` without dropping history. PTL failures and summary
-operations do not spend `AgentTask.max_cycles`. This
-kernel does not reproduce the old CycleRunner's initial forced normal-tail
-retry; its PTL path goes directly to the specified smaller emergency tail.
+operations do not spend `AgentTask.max_cycles`. PTL recovery goes directly to the specified smaller emergency tail.
 
 Retries of an existing operation reuse its exact request and context version;
 the reducer rejects a changed version, purpose, request digest or binding.
@@ -638,17 +630,13 @@ python3 scripts/contract_snapshot.py check
 uv run ruff format --check .
 uv run ruff check .
 uv run ty check
-# Full gates require both real PostgreSQL and real Redis.
-VV_AGENT_TEST_REDIS_URL=redis://127.0.0.1:6395/15 uv run pytest
+# Full gates require real PostgreSQL.
+uv run pytest
 ```
 
-The imported capacity regressions exercise cold 2,000-record recovery, 5,000-record
-cancellation/fencing, cache disposal, rollback, mutable caller isolation and
-external tails. Full F2 capability completion and the short-run overhead benchmark
-(single-turn added p95 <=50 ms and ten-turn added p95 <=100 ms against Runner) remain prerequisites
-for F3, as do the complete SDK/tool matrix and formal App Server adapter. This
-internal promotion does not claim those later gates or contract-24 adoption.
-
+Capacity regressions exercise cold recovery, long-log cancellation/fencing,
+cache disposal, rollback, mutable caller isolation and external tails. Current
+absolute measurements are in [session-kernel-baseline.md](session-kernel-baseline.md).
 
 The M6 script uses the same bounded 1 KiB receipt history as the capacity tests,
 real PostgreSQL and disposable databases. Its checks require cold recovery at
@@ -660,7 +648,7 @@ uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1
 ```
 
 
-## F2d-2 memory, decisions and budgets
+## Memory, decisions and budgets
 
 `boundary_recorded` retains closed, stage-specific callback, decision, output and
 budget data. Before-memory replacements include the exact source context digest
@@ -694,7 +682,7 @@ model calls. Host metrics retain unavailable classifications across reconstructi
 lost active intervals are explicitly unavailable, and strict policy stops instead
 of inventing wall time. No wall time is inferred from process downtime.
 
-## F2d-2 model and result adapters
+## Model and result adapters
 
 Endpoint order freezes the existing preference/randomization policy in the model
 request; each logged attempt selects exactly one endpoint from that order. Client
@@ -702,7 +690,7 @@ and transport retries are set to one, and fallback is represented by another log
 attempt. The last durable model success supplies later-turn preference. Request
 and endpoint drift are rejected before dispatch.
 
-Typed output checks and one tools-free repair reuse Runner coercion/validation.
+Typed output checks and one tools-free repair use output_validation helpers.
 Repair is a logged `output_repair` operation; reported usage participates in budget
 and result ledgers, and an uncertain repair is never retried automatically.
 Candidate/partial output and final decisions survive recovery. Completed results
@@ -710,15 +698,14 @@ use their terminal prefix, so later turns cannot change an older result. Per-cyc
 compaction flags, waits, errors, budget exhaustion and typed JSON output are
 reconstructed from records. Kernel accounting exposes `output_repair` directly,
 with model-call v2 and task-token-usage v3; TokenUsage remains v1. Kernel events
-use v6. The default entrypoints retain their v23 versions until F3.
+use v6 across all entrypoints.
 
-## F2d-2 events, streams and tracing
+## Events, streams and tracing
 
 Typed RunEvents project agent/cycle/diagnostic/budget/memory/child lifecycle from
 records with stable event IDs and `metadata.session_seq`. Child admission/completion
 events use parent records and carry child session/turn identities. Existing wait,
-approval, skipped-tool and cancellation differences remain explicit. This is an
-internal producer adapter, not App Server/default-entry adoption.
+approval, skipped-tool and cancellation differences remain explicit. All public entrypoints use this projection.
 
 `SessionRunEventStore` implements replay and validates append against the existing
 projection without another event ledger. `batch(tx)` bridges consumer cursors to
@@ -739,129 +726,41 @@ isolated. Span output is detached before delivery so processors cannot mutate
 retained result data. Host assembly supplies processors explicitly, and all
 public entrypoints use these kernel projections.
 
-## C1b reviewer decisions and v24 authoring
+## Reserved metadata and seed
 
 Kernel task metadata reserves one closed `vv_session` object containing optional
 `host_binding_names`, `max_handoffs`, `handoff_targets`, `input_messages`,
-`memory_initial_state` and `input_blocked`. User-supplied `vv_session` is rejected
-at compile time. Kernel request metadata has a separate closed `vv_session`
-object containing optional `endpoint_order`, `endpoint_id`, `shared_state` and
-`cycle_index`. All other metadata keys remain opaque JSON, including names
-previously used by the kernel. Completion state lives in required-nullable
-`op_completed.shared_state`; usage contains measurements. `output_repair` is a
-model-call v2 operation; older model-call versions are rejected.
-Other extension content remains opaque JSON. Hashes require exactly 64 lowercase
-hex characters, including at nested inbox/handle boundaries; a newline fails.
-Compaction identity has no summary segment when `summary_operation_id` is null.
+`memory_initial_state` and `input_blocked`. User-supplied `vv_session` rejects
+at compile time. Request metadata reserves its own closed `vv_session` object
+with optional `endpoint_order`, `endpoint_id`, `shared_state` and `cycle_index`.
+Other metadata stays opaque JSON. Completion state is `op_completed.shared_state`;
+usage contains measurements. Hashes are exactly 64 lowercase hex characters.
+Compaction IDs omit the summary segment when summary_operation_id is null.
 
-Creation may carry closed `attributes.seed = {messages, shared_state}`, with both
-members required. History projects immediately, and the first turn receives the
-seed before context compilation. Kernel AgentSession exposes detached message
-and state projections; it has no history/state replacement, queue clearing or
-writable session access. Seed cannot be changed after creation.
+Creation can carry closed `attributes.seed = {messages, shared_state}`, both
+required. History projects immediately, before the first turn compilation.
+Messages and JSON state are detached projections after creation. A reset uses a
+new durable identity; see [the seed migration](migration-v8.md#creation-time-seed).
 
-| Behavior change | Host migration / adoption boundary |
-| --- | --- |
-| v-claw history hydration and retry reset | Pass host history and shared state when creating a new SDK session; create a new durable session for a reset. Stop calling `replace_messages` / `replace_shared_state`. |
-| Thread status | One projection and enum (`idle`, `running`, `interrupted`, `archived`, `closed`) supplies snapshot, status response and status notifications. |
-| Closed execution | `turn/start`, `turn/resume` and execution-subscribing `thread/resume` reject with -32602 `Thread is closed`; read/list and nonexecuting resume remain available. |
-| Lost approval owner | Retain the original owner; observers cannot approve or take over. A configured absolute deadline resolves unanswered approval using timeoutDecision, including after owner loss/restart; recovery never resets it. Hosts configure finite `approval_timeout_seconds` for bounded waits. |
-| Provider completion | Inbox discriminator is `provider_result`; the retired discriminator is rejected. |
-| Q4 public execution API | Runner.resume uses explicit session/turn IDs; RunState wrappers and public AgentRuntime/ToolCallRunner execution surfaces are removed. SessionRunEventStore and JSONL remain projection/sink capabilities; the old RunEventStore protocol and IdempotentRunEventStore ledger are removed. F3a adopts this wiring. |
-| Q8 public versions | Private App Server and both schema exporters emit protocol v2 now. Public API fixture v8 and default adoption belong to F3; bundle names stay unchanged. |
+## Transport ownership
 
-`scripts/session_kernel_fixtures.py --output DIR` authors forty-five v24 files
-from real kernel/store/surface/App Server/schema producers using scripted doubles,
-fixed database/elapsed/prompt clocks and deterministic semantic identities. It
-never writes the vendored v23 fixtures. Node supplies an independent RFC8785 JCS
-path, including ECMAScript number encoding and UTF-16 key order; base64 bytes,
-hashes, embedded digests and record identities are checked independently.
-The generator asserts complete kind/stage/handle/optional-field coverage and
-separates codec, constructor, fold and authenticated admission rejection cases.
-Ordinary producer agents register only the tools required by their scenario. The
-curation helper defines per-file coverage keys (closed fields, optional presence,
-nullability, enums, event/span variants and named scenarios), then performs
-deterministic greedy set cover with byte-size and producer-order tie breaks.
-Every file compares its full-producer and curated key sets. Semantic/recovery
-scenarios occur once; compaction keeps each named scenario and second-compaction
-receipt. Schema exports retain all bundle types with JSON whitespace compacted.
-Projection events include field/nullability and behavioral variants, not only
-event types. Events, spans and prefix states are selected across the full corpus;
-fold cases retain complete prefixes, while other projection cases retain their
-source records and planning context.
-The fixture test generates twice, compares all forty-five files, validates schemas,
-reparses every selected vector, refolds the retained negative and projection
-prefixes, and recomputes event/span projections from their real source records.
-The full streams are refolded before selection. Tests cap each file at 512,000
-bytes and all forty-five outputs at 3,000,000 bytes, and reconstruct each emitted
-coverage set to compare against the full producer set. Recovery vectors record actual barrier cuts and effect/callback
-counts; they complement the durable-store process-kill suites.
+SQLite and PostgreSQL are the only kernel stores. There is no Redis store or
+framework Redis dependency. Celery transport integration is deferred to backend
+B1, which owns its tasks, queue routing, connection/runtime factories and wake
+transport. F3 builds no `[celery]` extra or integration module; contract v24 has
+no Celery surface. Host transport can call `drive`, scan via `tick` and supply
+`Runtime.wake`; durable execution authority remains in the store.
 
-The private authoring helper starts from the unchanged v23 snapshot and authors
-the 34 replacement fixtures. Retained prompt bytes and local memory vectors are
-checked against their shared real producers. Retired cases are removed explicitly;
-rejected wire inputs are encoded and replayed through current decoders. The JSONL
-replay corpus contains no deliberately invalid line. Seven Keep fixtures are
-checked without writing them. The entrypoint writes the case disposition report
-to `/tmp/c1c1b-fixture-diff.md`, including per-file coverage keys.
-The final authoring self-check resolves every fixture reference and RFC 6901
-pointer against the forty-five outputs and the seven Keep files. It rejects
-deleted fixture names and superseded discriminators, including embedded schema
-and TypeScript text, and checks optional-field inventories against their current
-closed producer schemas/codecs. Deliberately unsupported version mutations in
-negative cases are reported separately; they do not carry obsolete version names.
-Host-interaction value codecs supply the public API's wire references in
-`app_server_protocol.json`. The terminal optional inventory comes from the
-kernel `TurnCompletedParams` schema, including `waitReason`. Transcript set cover
-preserves closed-thread execution rejection for both explicit and default
-subscription, alongside the nonexecuting snapshot. Accounting references retain
-their real projection source records after curation. Prompt descriptors identify
-`turn_started.definition` and `task.prompt_bundle` without changing prompt bytes.
-Memory-model bindings cache unchanged primary-only route selections. Alternate
-routes reuse resolved clients and recheck their endpoint bindings on each read;
-route-key changes still resolve and freeze the matching client/endpoints. Continuation hints use the
-existing folded boundary index instead of rescanning the raw log for steering.
-Internal shared-state and compaction configuration readers borrow the retained
-task without copying unrelated metadata/messages. Shared-state values remain
-detached; host/provider callbacks still receive detached tasks. Disabled session
-memory checks its retained flag before making a task copy. Empty assistant
-messages are filtered when entering the context projection, instead of scanning
-the complete projected history again.
-Each runtime reuses its bound workspace backend for dispatch and compaction.
-Model contexts omit tool-policy assembly; actual tool dispatch retains the full
-policy checks. Model planning borrows its retained task when no host hooks can
-observe it, and still detaches the task before host callbacks.
-Result projection reads retained tasks and scalar plan fields without copying
-unrelated tool schemas; its returned messages and shared state remain detached.
+## Fixture generation
 
-Runner and ConfiguredRunner use one session driver. Handles project committed
-records, expose independent event iterators, isolate observer failures and translate
-cancellation tokens into durable inbox controls. Resume identifies an existing
-session and turn and rejects closed sessions before writing. Message decoding uses
-the strict shared codec; JSONL sinks accept only v6 projected events.
-Compilation binds the supplied turn identity before freezing the definition.
-Cancellation requests share a retained inbox identity, so repeated requests do
-not create another control. Approval-provider failures retain a failed terminal
-and discard the outstanding broker request before projecting the result.
-Configured summary and session-extraction models resolve once per runtime binding.
-Their admitted definition retains the provider, model and endpoint set; planning,
-dispatch validation and usage projection select that same binding. Saved receipts
-reuse the result without another provider resolution or dispatch. Capacity vectors
-enter the kernel through the shared MemoryManager resolver and are rechecked from
-the admitted manager projection.
-Context projection uses the shared empty-assistant sanitizer, preserving reasoning
-and tool calls while excluding fully empty turns from model and resumable history.
-
-The public API v8 file matches actual Python exports and accepted session names.
-Store and transaction capabilities have names and behavior only. Public root
-exports and `Runner.resume(session_id, turn_id)` select this path.
-
-Record encoding reuses the exact nested JCS bytes already checked for an embedded
-digest when composing the closed ASCII-key record envelope. Other payload fields
-are encoded in contiguous sorted groups instead of separate key/value calls.
-Recovery of completion effects reuses the committed model receipt without
-constructing and discarding another receipt. Parsing and production
-retain the same schema, identity, digest and nested I-JSON rejection checks. The
-byte-equivalence suite compares composed bytes against the shared full JCS encoder,
-including floats, Unicode key ordering and invalid nested values. Task copies remain
-at callback boundaries; internal read-only definition checks use the retained task.
+`scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
+forty-five files from real store/kernel/public-surface/App Server producers with
+scripted providers and fixed semantic identities/clocks. It never edits the
+vendored snapshot. One generation compares all forty-five bytes with v24.0.1.
+Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
+kind/stage/handle/optional-field coverage and source-prefix projections are
+revalidated. Deterministic curation preserves each behavioral coverage key.
+Seven unchanged fixtures are checked directly. Invalid versions/fields remain
+negative inputs to current strict readers. The full corpus is limited to 3 MB
+and each output to 512 KB. Producer evidence supplements durable-store
+process-kill, concurrency, rollback and authentication tests.

@@ -171,7 +171,7 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
     )
 
 
-def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
+def test_model_turn_calls_memory_providers_and_emits_compact_events() -> None:
     emitted: list[Any] = []
     provider = RecordingMemoryProvider()
 
@@ -200,7 +200,7 @@ def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"]["phase"] == "before"
 
 
-def test_cycle_runner_fails_open_when_before_memory_provider_raises() -> None:
+def test_model_turn_fails_open_when_before_memory_provider_raises() -> None:
     emitted: list[Any] = []
     provider = ThrowingMemoryProvider(fail_before=True)
 
@@ -215,7 +215,7 @@ def test_cycle_runner_fails_open_when_before_memory_provider_raises() -> None:
     assert emitted[0].metadata["memory_provider_errors"][0]["error"] == "before exploded"
 
 
-def test_cycle_runner_fails_open_when_after_memory_provider_raises() -> None:
+def test_model_turn_fails_open_when_after_memory_provider_raises() -> None:
     emitted: list[Any] = []
     provider = ThrowingMemoryProvider(fail_after=True)
 

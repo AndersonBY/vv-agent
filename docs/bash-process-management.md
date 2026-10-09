@@ -17,7 +17,7 @@ For example, start a local HTTP service with a one-minute execution limit:
 
 If it remains running, the receipt includes `status=running`, `session_id` and
 bounded output. The receipt is `SUCCESS` with `continue`: the management action
-is complete, and a checkpointed Runner proceeds to its next model cycle.
+is complete, and a session-backed Runner proceeds to its next model cycle.
 The later process outcome never rewrites that recorded result or its digest.
 Use `yield_time_ms=0` to request an immediate handle. Both management tools
 accept only that handle:
@@ -84,7 +84,7 @@ successful read clears the error; retrying does not emit a second completion
 notification or delete a new file at an already released capture path.
 
 `tests/test_bash_process_management.py` exercises the real registry, SQLite
-checkpointed Runner, ScriptedLLM, real children and a loopback HTTP service.
+session-backed Runner, ScriptedLLM, real children and a loopback HTTP service.
 It covers immediate yield, elapsed yield, running queries, a mixed tool batch,
 receipt immutability, ownership denial, deadlines, stop, Unicode and artifacts.
 It also covers detached and double-fork children, original signal preservation,

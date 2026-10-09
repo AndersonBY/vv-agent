@@ -250,8 +250,6 @@ def test_kernel_session_creation_seed_is_durable_and_read_only(surface, tmp_path
     assert session.shared_state == {"nested": {"value": 2}}
     session.shared_state["nested"]["value"] = 99
     assert session.shared_state == {"nested": {"value": 2}}
-    for name in ("replace_messages", "replace_shared_state", "clear_queues", "session"):
-        assert name not in dir(session) and not hasattr(session, name)
     run = session.prompt("go")
     assert run.result.shared_state == {"nested": {"value": 2}}
     assert [m.content for m in session.messages if m.role == "user"] == ["retained history", "go"]

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from support.kernel_runtime import KernelRuntime as AgentRuntime
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.llm import ScriptedLLM
@@ -157,7 +156,7 @@ def test_sub_agent_config_uses_shared_portable_whitespace_contract() -> None:
     mutated = SubAgentConfig(model="child-model", description="Research", system_prompt="Child prompt")
     mutated.system_prompt = portable["blank_system_prompt_input"]
     with pytest.raises(ValueError, match=_contract()["validation"]["empty_system_prompt_message"]):
-        AgentRuntime._validate_sub_agent_config(mutated)
+        SubAgentConfig.from_dict(mutated.to_dict())
 
 
 @pytest.mark.parametrize(

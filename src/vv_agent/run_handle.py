@@ -14,6 +14,7 @@ from vv_agent.session.children import cancel_children, child_delivery, child_han
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.records import InboxItem
 from vv_agent.session.store import Conflict, LeaseLost, LeaseRetryExhausted
+from vv_agent.tracing import trace_processors
 
 if TYPE_CHECKING:
     from vv_agent.session.runtime import Runtime
@@ -121,10 +122,9 @@ class RunHandle:
         events = SessionRunEventStore(self.kernel.store, self.session_id, self.consumer)
         while events.consume(self._emit):
             pass
-        from vv_agent.runner import Runner
         from vv_agent.session.tracing import deliver_spans
 
-        processors = Runner._trace_processors(self.runtime.config)
+        processors = trace_processors(self.runtime.config)
         if processors:
             deliver_spans(self.kernel.store, self.session_id, processors)
 

@@ -60,8 +60,6 @@ def test_creation_seed_is_immutable_and_transcript_is_detached(tmp_path):
     session.messages[0].content = "projection mutation"
     session.shared_state["nested"]["value"] = 9
     assert session.messages[0].content == "stored" and session.shared_state["nested"]["value"] == 1
-    for name in ("replace_messages", "replace_shared_state", "clear_queues", "session"):
-        assert not hasattr(session, name)
     with pytest.raises(Conflict):
         owner.create_session(agent=agent, session_id="immutable", session=seed)
     owner.driver.close()

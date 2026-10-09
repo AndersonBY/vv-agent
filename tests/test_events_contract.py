@@ -31,7 +31,7 @@ from vv_agent import (
     ToolCallStartedEvent,
     event_from_dict,
 )
-from vv_agent.events import SessionPersistedEvent, ToolCallPlannedEvent
+from vv_agent.events import ToolCallPlannedEvent
 from vv_agent.tools.metadata import ToolMetadata
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events.jsonl"
@@ -484,7 +484,6 @@ def test_base_run_event_is_public() -> None:
     assert HandoffStartedEvent.__name__ == "HandoffStartedEvent"
     assert HandoffCompletedEvent.__name__ == "HandoffCompletedEvent"
     assert CycleStartedEvent.__name__ == "CycleStartedEvent"
-    assert SessionPersistedEvent.__name__ == "SessionPersistedEvent"
     assert RunStateChangedEvent.__name__ == "RunStateChangedEvent"
     assert RunCancelledEvent.__name__ == "RunCancelledEvent"
 

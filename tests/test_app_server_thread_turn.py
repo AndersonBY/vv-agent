@@ -449,7 +449,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     final = _drain_until_turn_completed(transport)[-1]
     assert cast(dict[str, Any], final["params"])["finalOutput"] == "parent done"
     cast(Any, server.run_adapter).join()
-    from vv_agent.runtime.controller import derive_controller_command_id
+    from vv_agent.interaction import derive_controller_command_id
 
     input_id = derive_controller_command_id("thread_1", parent_tid, "reply-child")
     child_state = surface.store.read_state(wait["sessionId"])[0]

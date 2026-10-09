@@ -123,7 +123,7 @@ def _run_parent(entrypoint, child, config, parent_llm):
 
 
 def _run_runtime(parent, config, llm, registry):
-    from support.kernel_runtime import KernelRuntime as AgentRuntime
+    from support.kernel_runtime import KernelRuntime
 
     from vv_agent.prompt import build_raw_system_prompt_bundle
     from vv_agent.runtime import ExecutionContext
@@ -137,7 +137,7 @@ def _run_runtime(parent, config, llm, registry):
         extra_tool_names=["child"],
         sub_agents=parent.sub_agents,
     )
-    AgentRuntime(
+    KernelRuntime(
         llm_client=llm,
         model_provider=config.model_provider,
         tool_registry=registry,

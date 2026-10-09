@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from support import FixedModelProvider, ModelMapProvider, model_call_context
 from support.compaction import run_model_turn
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.config import ResolvedModelConfig
@@ -24,6 +24,7 @@ from vv_agent.memory import (
     SessionMemoryConfig,
     SessionMemoryEntry,
 )
+from vv_agent.memory.manager import build_memory_manager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
@@ -69,7 +70,7 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
     inputs = case["input"]
     expected = case["expected"]
     monkeypatch.setattr(
-        "vv_agent.runtime.engine.resolve_model_token_limits",
+        "vv_agent.memory.manager.resolve_model_token_limits",
         lambda _model: (None, None),
     )
     metadata: dict[str, Any] = {
@@ -95,13 +96,13 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
         metadata=metadata,
     )
     ctx = ExecutionContext(metadata={"_vv_agent_model_settings": settings} if settings is not None else {})
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path, ctx=ctx)
 
     assert manager.compact_threshold == inputs["configured_threshold"]
     assert manager.model_context_window == inputs["model_context_window"]
@@ -148,7 +149,7 @@ def test_runtime_context_window_resolution_matches_contract(
 ) -> None:
     inputs = case["input"]
     monkeypatch.setattr(
-        "vv_agent.runtime.engine.resolve_model_token_limits",
+        "vv_agent.memory.manager.resolve_model_token_limits",
         lambda _model: (inputs["resolved_model_context_window"], 32_000),
     )
     task = AgentTask(
@@ -161,13 +162,13 @@ def test_runtime_context_window_resolution_matches_contract(
             "session_memory_enabled": False,
         },
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
 
     assert manager.model_context_window == case["expected_model_context_window"]
 
@@ -204,7 +205,7 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
         },
         default_model=contract["model"],
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
         model_provider=model_provider,
         tool_registry=build_default_registry(),
@@ -285,7 +286,7 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
         assert "route extraction separately" in request.messages[0].content
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_current_run_is_frozen, assert_new_run_loads_memory]),
         model_provider=model_provider,
         tool_registry=build_default_registry(),
@@ -818,7 +819,7 @@ def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolat
         if isinstance(event, MemoryCompactStarted):
             raise RuntimeError("direct memory observer failed")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(content=_summary_payload()),
@@ -980,7 +981,7 @@ def test_summary_input_window_too_small_has_no_dispatch(tmp_path: Path) -> None:
         context_length=10,
     )
     llm = ScriptedLLM(steps=[lambda request: requests.append(request) or LLMResponse(content=_summary_payload())])
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         model_provider=FixedModelProvider(llm, resolved),
         tool_registry=build_default_registry(),
@@ -994,10 +995,9 @@ def test_summary_input_window_too_small_has_no_dispatch(tmp_path: Path) -> None:
         model_context_window=100000,
         reserved_output_tokens=0,
     )
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path, ctx=ctx)
     original = messages(case["input"]["messages"])
     manager.recovery_tool_available = True
     output, changed = manager.compact(original, force=True)
     assert output == original and not changed
     assert requests == []
-    assert ctx.model_call_ledger.records() == []

@@ -95,16 +95,16 @@ cache total only when every included cycle reports that metric.
 | `src/vv_agent/guardrails.py` | Public guardrail result contract and decorators. |
 | `src/vv_agent/interactive.py` | Public stateful session/client API for desktop runtimes, interruptions, follow-ups, cancellation, and shared tool state. |
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
-| `src/vv_agent/sessions/` | Retired transcript stores awaiting F3b deletion. |
 | `src/vv_agent/tracing.py` | Public trace spans and processor protocol. |
 | `src/vv_agent/runtime/compiler.py` | Compile layer: `Agent + input + RunConfig -> AgentTask`. Import this submodule directly to avoid runtime package initialization cycles. |
 | `src/vv_agent/types.py` | Runtime protocol types: tasks, messages, tool calls, results, statuses, and token usage. |
 | `src/vv_agent/llm/` | LLM protocol adapters, scripted test clients, prompt cache behavior, and `vv-llm` client bridge. |
-| `src/vv_agent/runtime/` | Shared compiler/hooks/cancellation; retired loops and stores await F3b extraction. |
+| `src/vv_agent/runtime/` | Shared compiler, hooks, lifecycle, cancellation, tool planning/results, token usage and process management. |
 | `src/vv_agent/tools/` | Tool registry, OpenAI-compatible schemas, dispatcher, and built-in handlers. |
 | `src/vv_agent/memory/` | Token counting, history-preserving summary compaction, archive-backed microcompaction, and session memory. |
 | `src/vv_agent/prompt/` | System prompt construction and prompt-cache section tracking. |
 | `src/vv_agent/workspace/` | Local, memory, and S3-compatible workspace storage backends. |
+| `src/vv_agent/integrations/` | Direct public module for the SkillIntegration extension protocol. |
 | `src/vv_agent/skills/` | Skill metadata parsing, validation, normalization, and prompt rendering. |
 
 ## Execution and persistence
@@ -120,10 +120,7 @@ admission freezes identity, prompt, policy, model, JSON state and budget. Parent
 closure targets live descendants atomically. Intermediate user waits stay on the
 child; the parent adopts only an authenticated terminal for the original handle.
 
-The old checkpoint/controller/backend stack is retained only for F3b extraction.
-Current helper dependencies and deletion candidates are listed in
-[the F3a report](session-kernel-f3a-report.md). See
-[session-kernel.md](session-kernel.md) for store transactions and recovery.
+See [session-kernel.md](session-kernel.md) for store transactions and recovery.
 
 ## Tool Boundaries
 
@@ -218,8 +215,7 @@ follows the selected tool's static or dynamic approval declaration. `always`
 and `never` do not evaluate dynamic tool approval predicates.
 
 Interrupted results retain session_id and turn_id. Replies enter the inbox;
-Runner.resume(session_id, turn_id) drives the same retained turn. No RunState or
-checkpoint key is part of the public result.
+Runner.resume(session_id, turn_id) drives the same retained turn using its durable identity.
 
 ## Guardrails And Tracing
 
@@ -261,7 +257,7 @@ and `tests/test_tools.py`.
   `InteractiveAgentClient` for stateful host-controlled runtimes.
 - Long outputs should keep structured data in metadata and model-facing text in
   content.
-- Cancellation, streaming, hooks, memory compaction, and execution backends must
+- Cancellation, streaming, hooks, memory compaction, and session stores must
   compose without changing public result shapes.
 - New public behavior needs tests in the closest `tests/test_*.py` module.
 

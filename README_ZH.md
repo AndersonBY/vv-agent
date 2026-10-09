@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+[v8 迁移指南](docs/migration-v8.md)：API 替代和宿主 seed 示例。
+
 从 VectorVein 生产环境抽象出的轻量 Agent 框架。基于 cycle 的执行模型，支持可插拔 LLM 后端、工具分发、上下文压缩和持久会话调度。
 
 ## 安装
@@ -367,24 +369,7 @@ print(handle.result().final_output)
 ```
 
 See [runtime-control.md](docs/runtime-control.md) for waits, explicit resume,
-LeaseLost backoff, budgets and event projections. The old runtime loop,
-checkpoint stores and execution backends are retired implementation files awaiting
-F3b deletion.
-
-# 从另一个线程取消
-token = CancellationToken()
-ctx = ExecutionContext(cancellation_token=token)
-result = runtime.run(task, ctx=ctx)
-
-def on_event(event: RunEvent) -> None:
-    if isinstance(event, AssistantDeltaEvent):
-        print(event.delta, end="")
-
-
-# 流式输出 LLM 事件，包括 assistant delta 和工具参数进度
-ctx = ExecutionContext(event_handler=on_event)
-result = runtime.run(task, ctx=ctx)
-```
+LeaseLost backoff, budgets and event projections.
 
 ### Runtime 日志载荷
 
@@ -632,17 +617,13 @@ excerpt:
 
 使用 `Agent.as_tool()` 时，子 Agent 的结果会作为工具结果回到父 Agent，父 Agent 继续控制流程。使用 `handoff()` 时，控制权转交给目标 Agent，并由目标 Agent 的输出结束本次运行。模型需要显式管理后台或并行任务时，使用 `create_sub_task` 与 `sub_task_status`。
 
-每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。子任务的 `RunEvent` 会原样保留 run、trace、parent、task 与 session 标识，宿主应用无需经过非强类型转换即可独立订阅、持久化与回放。
+每个委托任务都是独立调度的 kernel session。父任务准入时冻结子任务身份、提示词、
+权限、模型和预算，只采纳经过认证的原始终态。用户等待保留在子任务上；父任务释放
+租约后，各子任务可以独立执行。
 
-`create_sub_task` 的批量模式现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，同步批量任务会并发执行。
-
-使用 `sub_task_status` 可以查询 runtime 子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。
-
-已完成的子任务在续传前会先清洗保存下来的会话 transcript：空 assistant、只有 thinking 的 assistant、孤儿 tool result、以及未完成的尾部 tool call 都会被移除，避免把无效历史再次注入下一轮上下文。
-
-每个子任务的 runtime metadata 现在会写入 `task_id`、`session_id` 和 `browser_scope_key`，确保浏览器这类会话级工具在并行子任务间保持隔离。
-
-宿主应用可以通过 `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)` 向正在运行的子任务定向插话。
+`sub_task_status` 用于读取所属子任务的进度、等待完成或准入后续消息。宿主通过
+store 或 interactive session 提交定向 `steer` inbox 输入。子任务生命周期事件
+保留父子身份，供订阅与回放使用。
 
 子 Agent 继承父运行显式提供的同一个 `ModelProvider`，并独立解析自己的模型；子运行不会重新读取 settings 路径或构造 backend fallback。
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import StrEnum
 from math import isfinite
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
@@ -14,11 +15,16 @@ from vv_agent.budget import (
     BudgetUsageSnapshot,
 )
 from vv_agent.canonical_json import canonical_json_sha256
-from vv_agent.checkpoint import OperationKind, OperationState, ReconciliationDecisionKind, ResumeObservation
 from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 
 if TYPE_CHECKING:
     from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata
+
+
+class OperationKind(StrEnum):
+    MODEL = "model"
+    TOOL = "tool"
+
 
 RUN_EVENT_VERSION = "v6"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
@@ -108,8 +114,6 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run_state_changed": frozenset({"state", "cancel_requested"}),
     "host_interaction_requested": frozenset(
         {
-            "checkpoint_key",
-            "resume_attempt",
             "interaction_id",
             "logical_cycle",
             "operation_id",
@@ -120,8 +124,6 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     ),
     "host_interaction_response_consumed": frozenset(
         {
-            "checkpoint_key",
-            "resume_attempt",
             "interaction_id",
             "logical_cycle",
             "operation_id",
@@ -129,7 +131,6 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
             "request_digest",
             "command_id",
             "response_digest",
-            "consumed_revision",
         }
     ),
     "diagnostic": frozenset({"level", "code", "details"}),
@@ -161,20 +162,6 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
             "tool_metadata",
             "operation_id",
             "attempt",
-            "checkpoint_key",
-        }
-    ),
-    "tool_call_deferred": frozenset(
-        {
-            "tool_call_id",
-            "tool_name",
-            "operation_id",
-            "attempt",
-            "handle",
-            "execution_started",
-            "duration_ms",
-            "checkpoint_key",
-            "operation_kind",
         }
     ),
     "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
@@ -201,7 +188,6 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "handoff_completed": frozenset(
         {"source_agent", "target_agent", "tool_call_id", "status", "child_session_id", "child_run_id"}
     ),
-    "session_persisted": frozenset(),
     "run_completed": frozenset(
         {
             "final_output",
@@ -227,15 +213,8 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run_cancelled": frozenset({"reason", "completion_reason", "partial_output", "budget_usage", "budget_exhaustion"}),
     "budget_snapshot": frozenset({"enforcement_boundary", "budget_usage"}),
     "budget_exhausted": frozenset({"enforcement_boundary", "budget_usage", "budget_exhaustion"}),
-    "checkpoint_created": frozenset({"checkpoint_key", "resume_attempt"}),
-    "checkpoint_resumed": frozenset({"checkpoint_key", "resume_attempt"}),
-    "operation_replayed": frozenset({"checkpoint_key", "operation_id", "operation_kind", "receipt_state"}),
-    "operation_ambiguous": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk", "idempotency_support"}),
-    "reconciliation_required": frozenset(
-        {"checkpoint_key", "operation_id", "operation_kind", "interruption_reason", "resume_observation"}
-    ),
-    "model_retry_duplicate_risk": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk"}),
-    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision", "claim_mode"}),
+    "operation_ambiguous": frozenset({"operation_id", "operation_kind", "risk", "idempotency_support"}),
+    "model_retry_duplicate_risk": frozenset({"operation_id", "operation_kind", "risk"}),
 }
 _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
@@ -275,17 +254,6 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "duration_ms",
         }
     ),
-    "tool_call_deferred": frozenset(
-        {
-            "tool_call_id",
-            "tool_name",
-            "operation_id",
-            "attempt",
-            "handle",
-            "execution_started",
-            "duration_ms",
-        }
-    ),
     "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
     "approval_resolved": frozenset({"request_id", "tool_name", "tool_call_id", "action"}),
     "memory_compact_started": frozenset({"message_count", *_MEMORY_COMPACT_STARTED_FIELDS}),
@@ -297,8 +265,6 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_state_changed": frozenset({"state"}),
     "host_interaction_requested": frozenset(
         {
-            "checkpoint_key",
-            "resume_attempt",
             "interaction_id",
             "logical_cycle",
             "operation_id",
@@ -310,8 +276,6 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     ),
     "host_interaction_response_consumed": frozenset(
         {
-            "checkpoint_key",
-            "resume_attempt",
             "interaction_id",
             "logical_cycle",
             "operation_id",
@@ -319,7 +283,6 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "request_digest",
             "command_id",
             "response_digest",
-            "consumed_revision",
             "cycle_index",
         }
     ),
@@ -329,17 +292,8 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_cancelled": frozenset({"reason"}),
     "budget_snapshot": frozenset({"enforcement_boundary", "budget_usage"}),
     "budget_exhausted": frozenset({"enforcement_boundary", "budget_usage", "budget_exhaustion"}),
-    "checkpoint_created": frozenset({"checkpoint_key", "resume_attempt", "cycle_index"}),
-    "checkpoint_resumed": frozenset({"checkpoint_key", "resume_attempt", "cycle_index"}),
-    "operation_replayed": frozenset({"checkpoint_key", "operation_id", "operation_kind", "receipt_state", "cycle_index"}),
-    "operation_ambiguous": frozenset(
-        {"checkpoint_key", "operation_id", "operation_kind", "risk", "idempotency_support", "cycle_index"}
-    ),
-    "reconciliation_required": frozenset(
-        {"checkpoint_key", "operation_id", "operation_kind", "interruption_reason", "resume_observation", "cycle_index"}
-    ),
-    "model_retry_duplicate_risk": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk", "cycle_index"}),
-    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision", "cycle_index"}),
+    "operation_ambiguous": frozenset({"operation_id", "operation_kind", "risk", "idempotency_support", "cycle_index"}),
+    "model_retry_duplicate_risk": frozenset({"operation_id", "operation_kind", "risk", "cycle_index"}),
 }
 
 
@@ -568,13 +522,6 @@ class RunEvent:
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload
-
-
-def _kernel_event_payload(event: RunEvent, payload: dict[str, Any]) -> dict[str, Any]:
-    if event.version == "v6":
-        for name in ("checkpoint_key", "resume_attempt", "consumed_revision"):
-            payload.pop(name, None)
-    return payload
 
 
 def _set_run_event_fields(
@@ -1003,8 +950,6 @@ def _host_interaction_prompt(value: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class HostInteractionRequestedEvent(RunEvent):
-    checkpoint_key: str = ""
-    resume_attempt: int = 1
     interaction_id: str = ""
     logical_cycle: int = 1
     operation_id: str = ""
@@ -1017,8 +962,6 @@ class HostInteractionRequestedEvent(RunEvent):
         *,
         run_id: str,
         trace_id: str,
-        checkpoint_key: str,
-        resume_attempt: int,
         interaction_id: str,
         logical_cycle: int,
         operation_id: str,
@@ -1048,8 +991,6 @@ class HostInteractionRequestedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "checkpoint_key", _host_interaction_identity(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
         object.__setattr__(self, "interaction_id", _host_interaction_identity(interaction_id, "interaction_id"))
         object.__setattr__(self, "logical_cycle", _host_interaction_cycle(logical_cycle, "logical_cycle"))
         object.__setattr__(self, "operation_id", _host_interaction_identity(operation_id, "operation_id"))
@@ -1061,8 +1002,6 @@ class HostInteractionRequestedEvent(RunEvent):
         payload = RunEvent.to_dict(self)
         payload.update(
             {
-                "checkpoint_key": self.checkpoint_key,
-                "resume_attempt": self.resume_attempt,
                 "interaction_id": self.interaction_id,
                 "logical_cycle": self.logical_cycle,
                 "operation_id": self.operation_id,
@@ -1071,13 +1010,11 @@ class HostInteractionRequestedEvent(RunEvent):
                 "prompt": self.prompt,
             }
         )
-        return _kernel_event_payload(self, payload)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
 class HostInteractionResponseConsumedEvent(RunEvent):
-    checkpoint_key: str = ""
-    resume_attempt: int = 1
     interaction_id: str = ""
     logical_cycle: int = 1
     operation_id: str = ""
@@ -1085,15 +1022,12 @@ class HostInteractionResponseConsumedEvent(RunEvent):
     request_digest: str = ""
     command_id: str = ""
     response_digest: str = ""
-    consumed_revision: int = 0
 
     def __init__(
         self,
         *,
         run_id: str,
         trace_id: str,
-        checkpoint_key: str,
-        resume_attempt: int,
         interaction_id: str,
         logical_cycle: int,
         operation_id: str,
@@ -1101,7 +1035,6 @@ class HostInteractionResponseConsumedEvent(RunEvent):
         request_digest: str,
         command_id: str,
         response_digest: str,
-        consumed_revision: int,
         cycle_index: int,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1125,8 +1058,6 @@ class HostInteractionResponseConsumedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "checkpoint_key", _host_interaction_identity(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
         object.__setattr__(self, "interaction_id", _host_interaction_identity(interaction_id, "interaction_id"))
         object.__setattr__(self, "logical_cycle", _host_interaction_cycle(logical_cycle, "logical_cycle"))
         object.__setattr__(self, "operation_id", _host_interaction_identity(operation_id, "operation_id"))
@@ -1134,16 +1065,11 @@ class HostInteractionResponseConsumedEvent(RunEvent):
         object.__setattr__(self, "request_digest", _host_interaction_digest(request_digest, "request_digest"))
         object.__setattr__(self, "command_id", _host_interaction_identity(command_id, "command_id"))
         object.__setattr__(self, "response_digest", _host_interaction_digest(response_digest, "response_digest"))
-        if isinstance(consumed_revision, bool) or not isinstance(consumed_revision, int) or consumed_revision < 0:
-            raise ValueError("Run event consumed_revision must be a non-negative integer")
-        object.__setattr__(self, "consumed_revision", consumed_revision)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload.update(
             {
-                "checkpoint_key": self.checkpoint_key,
-                "resume_attempt": self.resume_attempt,
                 "interaction_id": self.interaction_id,
                 "logical_cycle": self.logical_cycle,
                 "operation_id": self.operation_id,
@@ -1151,10 +1077,9 @@ class HostInteractionResponseConsumedEvent(RunEvent):
                 "request_digest": self.request_digest,
                 "command_id": self.command_id,
                 "response_digest": self.response_digest,
-                "consumed_revision": self.consumed_revision,
             }
         )
-        return _kernel_event_payload(self, payload)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1791,7 +1716,6 @@ class ToolCallCompletedEvent(RunEvent):
     duration_ms: int | None = None
     operation_id: str | None = None
     attempt: int | None = None
-    checkpoint_key: str | None = None
     tool_metadata: ToolMetadata | None = None
 
     def __init__(
@@ -1808,7 +1732,6 @@ class ToolCallCompletedEvent(RunEvent):
         duration_ms: int | None,
         operation_id: str | None = None,
         attempt: int | None = None,
-        checkpoint_key: str | None = None,
         tool_metadata: ToolMetadata | dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
@@ -1854,10 +1777,6 @@ class ToolCallCompletedEvent(RunEvent):
             object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
         if attempt is not None:
             object.__setattr__(self, "attempt", _positive_event_integer(attempt, "attempt"))
-        if checkpoint_key is not None:
-            object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
-        else:
-            object.__setattr__(self, "checkpoint_key", None)
         object.__setattr__(self, "tool_metadata", _event_tool_metadata(tool_metadata))
 
     def to_dict(self) -> dict[str, Any]:
@@ -1884,120 +1803,8 @@ class ToolCallCompletedEvent(RunEvent):
             payload["error_code"] = self.error_code
             payload["execution_started"] = self.execution_started
             payload["duration_ms"] = self.duration_ms
-        if self.checkpoint_key is not None:
-            payload["checkpoint_key"] = self.checkpoint_key
         if self.tool_metadata is not None:
             payload["tool_metadata"] = self.tool_metadata.to_dict()
-        return _kernel_event_payload(self, payload)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCallDeferredEvent(RunEvent):
-    """Lifecycle event for an admitted deferred tool call.
-
-    It intentionally contains the framework handle only and never a provider
-    job id, callback, or business payload.
-    """
-
-    tool_call_id: str = ""
-    tool_name: str = ""
-    operation_id: str = ""
-    attempt: int = 1
-    handle: Any = None
-    execution_started: bool = True
-    duration_ms: int | None = None
-    checkpoint_key: str | None = None
-    operation_kind: OperationKind | None = None
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        tool_call_id: str,
-        tool_name: str,
-        operation_id: str,
-        attempt: int,
-        handle: Any,
-        execution_started: bool,
-        duration_ms: int | None,
-        checkpoint_key: str | None = None,
-        operation_kind: OperationKind | str | None = None,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        from vv_agent.tools.outcomes import DeferredToolHandle
-
-        _set_run_event_fields(
-            self,
-            type="tool_call_deferred",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
-        object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
-        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
-        object.__setattr__(self, "attempt", _positive_event_integer(attempt, "attempt"))
-        if not isinstance(handle, DeferredToolHandle):
-            raise ValueError("Run event deferred handle must be a DeferredToolHandle")
-        if handle.operation_id != operation_id or handle.attempt != attempt:
-            raise ValueError("Run event deferred operation identity does not match handle")
-        object.__setattr__(self, "handle", handle)
-        if not isinstance(execution_started, bool):
-            raise ValueError("Run event execution_started must be a boolean")
-        object.__setattr__(self, "execution_started", execution_started)
-        object.__setattr__(self, "duration_ms", _tool_duration_ms(duration_ms))
-        if duration_ms is not None:
-            raise ValueError("Run event deferred duration_ms must be null")
-        if checkpoint_key is not None:
-            normalized_checkpoint_key = _required_event_text(checkpoint_key, "checkpoint_key")
-            if handle.checkpoint_key != normalized_checkpoint_key:
-                raise ValueError("Run event deferred checkpoint_key does not match handle")
-            object.__setattr__(self, "checkpoint_key", normalized_checkpoint_key)
-        else:
-            object.__setattr__(self, "checkpoint_key", None)
-        if operation_kind is not None:
-            try:
-                normalized_operation_kind = OperationKind(operation_kind)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("deferred operation_kind must be tool") from exc
-            if normalized_operation_kind is not OperationKind.TOOL:
-                raise ValueError("deferred operation_kind must be tool")
-            object.__setattr__(self, "operation_kind", normalized_operation_kind)
-        else:
-            object.__setattr__(self, "operation_kind", None)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload.update(
-            {
-                "tool_call_id": self.tool_call_id,
-                "tool_name": self.tool_name,
-                "operation_id": self.operation_id,
-                "attempt": self.attempt,
-                "handle": self.handle.to_dict(),
-                "execution_started": self.execution_started,
-                "duration_ms": self.duration_ms,
-            }
-        )
-        if self.checkpoint_key is not None:
-            payload["checkpoint_key"] = self.checkpoint_key
-        if self.operation_kind is not None:
-            payload["operation_kind"] = self.operation_kind.value
         return payload
 
 
@@ -2378,38 +2185,6 @@ class HandoffCompletedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class SessionPersistedEvent(RunEvent):
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        session_id: str,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="session_persisted",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class BudgetSnapshotEvent(RunEvent):
     enforcement_boundary: BudgetEnforcementBoundary = BudgetEnforcementBoundary.RUN_START
     budget_usage: BudgetUsageSnapshot = field(default_factory=BudgetUsageSnapshot)
@@ -2723,118 +2498,7 @@ class RunCancelledEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class CheckpointCreatedEvent(RunEvent):
-    checkpoint_key: str = ""
-    resume_attempt: int = 1
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        checkpoint_key: str,
-        resume_attempt: int,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="checkpoint_created",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload["checkpoint_key"] = self.checkpoint_key
-        payload["resume_attempt"] = self.resume_attempt
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
-class CheckpointResumedEvent(CheckpointCreatedEvent):
-    def __init__(self, **kwargs: Any) -> None:
-        CheckpointCreatedEvent.__init__(self, **kwargs)
-        object.__setattr__(self, "type", "checkpoint_resumed")
-
-
-@dataclass(frozen=True, slots=True)
-class OperationReplayedEvent(RunEvent):
-    checkpoint_key: str = ""
-    operation_id: str = ""
-    operation_kind: OperationKind = OperationKind.MODEL
-    receipt_state: OperationState = OperationState.SUCCEEDED
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        checkpoint_key: str,
-        operation_id: str,
-        operation_kind: OperationKind | str,
-        receipt_state: OperationState | str,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="operation_replayed",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        state = OperationState(receipt_state)
-        if state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
-            raise ValueError("operation replay receipt_state must be succeeded or failed")
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
-        object.__setattr__(self, "operation_kind", OperationKind(operation_kind))
-        object.__setattr__(self, "receipt_state", state)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload.update(
-            checkpoint_key=self.checkpoint_key,
-            operation_id=self.operation_id,
-            operation_kind=self.operation_kind.value,
-            receipt_state=self.receipt_state.value,
-        )
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
 class OperationAmbiguousEvent(RunEvent):
-    checkpoint_key: str = ""
     operation_id: str = ""
     operation_kind: OperationKind = OperationKind.MODEL
     risk: str = ""
@@ -2845,7 +2509,6 @@ class OperationAmbiguousEvent(RunEvent):
         *,
         run_id: str,
         trace_id: str,
-        checkpoint_key: str,
         operation_id: str,
         operation_kind: OperationKind | str,
         risk: str,
@@ -2881,7 +2544,6 @@ class OperationAmbiguousEvent(RunEvent):
             raise ValueError("ambiguous tool event requires idempotency_support")
         if kind is OperationKind.MODEL and support is not None:
             raise ValueError("ambiguous model event idempotency_support must be null")
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
         object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
         object.__setattr__(self, "operation_kind", kind)
         object.__setattr__(self, "risk", _required_event_text(risk, "risk"))
@@ -2890,87 +2552,16 @@ class OperationAmbiguousEvent(RunEvent):
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload.update(
-            checkpoint_key=self.checkpoint_key,
             operation_id=self.operation_id,
             operation_kind=self.operation_kind.value,
             risk=self.risk,
             idempotency_support=(self.idempotency_support.value if self.idempotency_support is not None else None),
-        )
-        return _kernel_event_payload(self, payload)
-
-
-@dataclass(frozen=True, slots=True)
-class ReconciliationRequiredEvent(RunEvent):
-    checkpoint_key: str = ""
-    operation_id: str = ""
-    operation_kind: OperationKind = OperationKind.MODEL
-    interruption_reason: str = "resume_requires_reconciliation"
-    resume_observation: ResumeObservation | None = None
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        checkpoint_key: str,
-        operation_id: str,
-        operation_kind: OperationKind | str,
-        interruption_reason: str,
-        resume_observation: ResumeObservation,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="reconciliation_required",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        kind = OperationKind(operation_kind)
-        if not isinstance(resume_observation, ResumeObservation):
-            raise TypeError("reconciliation event resume_observation must be ResumeObservation")
-        if resume_observation.operation_id != operation_id or resume_observation.operation_kind is not kind:
-            raise ValueError("reconciliation event operation must match resume_observation")
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
-        object.__setattr__(self, "operation_kind", kind)
-        object.__setattr__(
-            self,
-            "interruption_reason",
-            _required_event_text(interruption_reason, "interruption_reason"),
-        )
-        object.__setattr__(self, "resume_observation", resume_observation)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        assert self.resume_observation is not None
-        payload.update(
-            checkpoint_key=self.checkpoint_key,
-            operation_id=self.operation_id,
-            operation_kind=self.operation_kind.value,
-            interruption_reason=self.interruption_reason,
-            resume_observation=self.resume_observation.to_dict(),
         )
         return payload
 
 
 @dataclass(frozen=True, slots=True)
 class ModelRetryDuplicateRiskEvent(RunEvent):
-    checkpoint_key: str = ""
     operation_id: str = ""
     operation_kind: OperationKind = OperationKind.MODEL
     risk: str = ""
@@ -2980,7 +2571,6 @@ class ModelRetryDuplicateRiskEvent(RunEvent):
         *,
         run_id: str,
         trace_id: str,
-        checkpoint_key: str,
         operation_id: str,
         operation_kind: OperationKind | str,
         risk: str,
@@ -3010,7 +2600,6 @@ class ModelRetryDuplicateRiskEvent(RunEvent):
         kind = OperationKind(operation_kind)
         if kind is not OperationKind.MODEL:
             raise ValueError("model retry duplicate risk event requires model operation_kind")
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
         object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
         object.__setattr__(self, "operation_kind", kind)
         object.__setattr__(self, "risk", _required_event_text(risk, "risk"))
@@ -3018,73 +2607,10 @@ class ModelRetryDuplicateRiskEvent(RunEvent):
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload.update(
-            checkpoint_key=self.checkpoint_key,
             operation_id=self.operation_id,
             operation_kind=self.operation_kind.value,
             risk=self.risk,
         )
-        return _kernel_event_payload(self, payload)
-
-
-@dataclass(frozen=True, slots=True)
-class ReconciliationResolvedEvent(RunEvent):
-    checkpoint_key: str = ""
-    operation_id: str = ""
-    operation_kind: OperationKind = OperationKind.MODEL
-    decision: ReconciliationDecisionKind = ReconciliationDecisionKind.DEFER
-    claim_mode: str | None = None
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        checkpoint_key: str,
-        operation_id: str,
-        operation_kind: OperationKind | str,
-        decision: ReconciliationDecisionKind | str,
-        claim_mode: str | None = None,
-        cycle_index: int | None = None,
-        agent_name: str | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="reconciliation_resolved",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
-        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
-        object.__setattr__(self, "operation_kind", OperationKind(operation_kind))
-        object.__setattr__(self, "decision", ReconciliationDecisionKind(decision))
-        if claim_mode is not None and claim_mode not in {"continue", "recovery"}:
-            raise ValueError("Run event claim_mode must be 'continue' or 'recovery'")
-        object.__setattr__(self, "claim_mode", claim_mode)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload.update(
-            checkpoint_key=self.checkpoint_key,
-            operation_id=self.operation_id,
-            operation_kind=self.operation_kind.value,
-            decision=self.decision.value,
-        )
-        if self.claim_mode is not None:
-            payload["claim_mode"] = self.claim_mode
         return payload
 
 
@@ -3142,18 +2668,7 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     event_type = payload.get("type")
     if not isinstance(event_type, str) or event_type not in _EVENT_FIELDS:
         raise ValueError(f"Unsupported run event type: {event_type!r}")
-    if event_type in {
-        "checkpoint_created",
-        "checkpoint_resumed",
-        "reconciliation_required",
-        "reconciliation_resolved",
-        "tool_call_deferred",
-        "operation_replayed",
-        "session_persisted",
-    }:
-        raise ValueError("Retired kernel event type")
-    retired = {"checkpoint_key", "resume_attempt", "consumed_revision"}
-    allowed_fields = (_COMMON_EVENT_FIELDS | _EVENT_FIELDS[event_type]) - retired
+    allowed_fields = _COMMON_EVENT_FIELDS | _EVENT_FIELDS[event_type]
     unknown_fields = set(payload) - allowed_fields
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -3167,7 +2682,6 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         "created_at",
         *_EVENT_REQUIRED_FIELDS.get(event_type, ()),
     }
-    required_fields -= retired
     required_fields.add("session_id")
     missing_fields = required_fields - set(payload)
     if missing_fields:
@@ -3210,7 +2724,6 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _required_event_text(payload.get("code"), "code")
         _diagnostic_details(payload.get("details"))
     if payload["type"] == "host_interaction_requested":
-        pass
         _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
         _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
         _host_interaction_identity(payload.get("operation_id"), "operation_id")
@@ -3231,7 +2744,6 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         if request_digest != expected_digest:
             raise ValueError("Run event request_digest does not match host interaction request")
     if payload["type"] == "host_interaction_response_consumed":
-        pass
         _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
         _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
         _host_interaction_identity(payload.get("operation_id"), "operation_id")
@@ -3239,7 +2751,6 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _host_interaction_digest(payload.get("request_digest"), "request_digest")
         _host_interaction_identity(payload.get("command_id"), "command_id")
         _host_interaction_digest(payload.get("response_digest"), "response_digest")
-        pass
     if payload["type"] in {"model_call_started", "model_call_completed", "model_call_failed"}:
         _required_event_text(payload.get("call_id"), "call_id")
         _required_event_text(payload.get("operation_id"), "operation_id")
@@ -3257,12 +2768,10 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             if payload.get("outcome") not in _MODEL_CALL_OUTCOME_VALUES:
                 raise ValueError(f"Unsupported model call outcome: {payload.get('outcome')!r}")
             _required_event_text(payload.get("error_code"), "error_code")
-    tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed", "tool_call_deferred"}
+    tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed"}
     if payload["type"] in tool_lifecycle_types:
         _required_event_text(payload.get("tool_call_id"), "tool_call_id")
         _required_event_text(payload.get("tool_name"), "tool_name")
-        if "checkpoint_key" in payload:
-            _required_event_text(payload.get("checkpoint_key"), "checkpoint_key")
         if "tool_metadata" in payload:
             if not isinstance(payload["tool_metadata"], dict):
                 raise ValueError("Run event tool_metadata must be an object")
@@ -3281,34 +2790,6 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             _required_event_text(payload.get("operation_id"), "operation_id")
         if "attempt" in payload:
             _positive_event_integer(payload.get("attempt"), "attempt")
-    if payload["type"] == "tool_call_deferred":
-        _required_event_text(payload.get("operation_id"), "operation_id")
-        _positive_event_integer(payload.get("attempt"), "attempt")
-        from vv_agent.tools.outcomes import DeferredToolHandle
-
-        try:
-            handle_payload = payload.get("handle")
-            if not isinstance(handle_payload, dict):
-                raise ValueError("deferred handle must be an object")
-            handle = DeferredToolHandle.from_dict(handle_payload)
-            if handle.operation_id != payload["operation_id"] or handle.attempt != payload["attempt"]:
-                raise ValueError("deferred event operation identity does not match handle")
-            if "checkpoint_key" in payload and handle.checkpoint_key != payload["checkpoint_key"]:
-                raise ValueError("deferred event checkpoint_key does not match handle")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Run event deferred handle is invalid") from exc
-        _tool_execution_started(payload.get("execution_started"))
-        _tool_duration_ms(payload.get("duration_ms"))
-        if payload.get("duration_ms") is not None:
-            raise ValueError("Run event deferred duration_ms must be null")
-        if "operation_kind" in payload:
-            try:
-                if OperationKind(payload["operation_kind"]) is not OperationKind.TOOL:
-                    raise ValueError("deferred operation_kind must be tool")
-            except (TypeError, ValueError) as exc:
-                raise ValueError("deferred operation_kind must be tool") from exc
-        if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
-            raise ValueError("Run event duration_ms must be null when execution_started is false")
     if (
         payload["type"] == "reconciliation_resolved"
         and "claim_mode" in payload
@@ -3395,28 +2876,11 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             if budget_exhaustion.enforcement_boundary is not boundary:
                 raise ValueError("Run event budget exhaustion boundaries must match")
 
-    checkpoint_event_types = {
-        "checkpoint_created",
-        "checkpoint_resumed",
-        "operation_replayed",
-        "operation_ambiguous",
-        "reconciliation_required",
-        "model_retry_duplicate_risk",
-        "reconciliation_resolved",
-    }
-    if payload["type"] in checkpoint_event_types:
-        pass
+    if payload["type"] in {"operation_ambiguous", "model_retry_duplicate_risk"}:
         if not isinstance(payload.get("cycle_index"), int):
-            raise ValueError("Run event cycle_index is required for checkpoint lifecycle events")
-    if payload["type"] in {"checkpoint_created", "checkpoint_resumed"}:
-        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
-    if payload["type"] in checkpoint_event_types - {"checkpoint_created", "checkpoint_resumed"}:
+            raise ValueError("Run event cycle_index is required for operation lifecycle events")
         _required_event_text(payload.get("operation_id"), "operation_id")
         OperationKind(payload.get("operation_kind"))
-    if payload["type"] == "operation_replayed":
-        receipt_state = OperationState(payload.get("receipt_state"))
-        if receipt_state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
-            raise ValueError("operation replay receipt_state must be succeeded or failed")
     if payload["type"] in {"operation_ambiguous", "model_retry_duplicate_risk"}:
         _required_event_text(payload.get("risk"), "risk")
     if payload["type"] == "operation_ambiguous":
@@ -3430,16 +2894,8 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             ToolIdempotency(support)
         elif support is not None:
             raise ValueError("ambiguous model event idempotency_support must be null")
-    if payload["type"] == "reconciliation_required":
-        _required_event_text(payload.get("interruption_reason"), "interruption_reason")
-        observation = payload.get("resume_observation")
-        if not isinstance(observation, dict):
-            raise ValueError("Run event resume_observation must be an object")
-        ResumeObservation.from_dict(observation)
     if payload["type"] == "model_retry_duplicate_risk" and payload.get("operation_kind") != "model":
         raise ValueError("model retry duplicate risk event requires model operation_kind")
-    if payload["type"] == "reconciliation_resolved":
-        ReconciliationDecisionKind(payload.get("decision"))
 
 
 def event_from_dict(payload: dict[str, Any]) -> RunEvent:
@@ -3507,8 +2963,6 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "host_interaction_requested":
         return HostInteractionRequestedEvent(
-            checkpoint_key=payload["session_id"],
-            resume_attempt=1,
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
             operation_id=payload["operation_id"],
@@ -3519,8 +2973,6 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "host_interaction_response_consumed":
         return HostInteractionResponseConsumedEvent(
-            checkpoint_key=payload["session_id"],
-            resume_attempt=1,
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
             operation_id=payload["operation_id"],
@@ -3528,7 +2980,6 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_digest=payload["request_digest"],
             command_id=payload["command_id"],
             response_digest=payload["response_digest"],
-            consumed_revision=payload["metadata"]["session_seq"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "diagnostic":
@@ -3614,23 +3065,7 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
             duration_ms=payload["duration_ms"],
             operation_id=payload.get("operation_id"),
             attempt=payload.get("attempt"),
-            checkpoint_key=payload.get("checkpoint_key"),
             tool_metadata=payload.get("tool_metadata"),
-            **_with_cycle_and_agent(payload, common),
-        )
-    if event_type == "tool_call_deferred":
-        from vv_agent.tools.outcomes import DeferredToolHandle
-
-        return ToolCallDeferredEvent(
-            tool_name=payload["tool_name"],
-            tool_call_id=payload["tool_call_id"],
-            operation_id=payload["operation_id"],
-            attempt=payload["attempt"],
-            handle=DeferredToolHandle.from_dict(payload["handle"]),
-            execution_started=payload["execution_started"],
-            duration_ms=payload["duration_ms"],
-            checkpoint_key=payload.get("checkpoint_key"),
-            operation_kind=payload.get("operation_kind"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_requested":
@@ -3712,8 +3147,6 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
             created_at=common["created_at"],
             metadata=common["metadata"],
         )
-    if event_type == "session_persisted":
-        return SessionPersistedEvent(**_with_cycle_and_agent(payload, common))
     if event_type == "budget_snapshot":
         return BudgetSnapshotEvent(
             enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
@@ -3759,59 +3192,19 @@ def _event_from_dict(payload: dict[str, Any]) -> RunEvent:
             budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             **_with_cycle_and_agent(payload, common),
         )
-    if event_type == "checkpoint_created":
-        return CheckpointCreatedEvent(
-            checkpoint_key=payload["session_id"],
-            resume_attempt=1,
-            **_with_cycle_and_agent(payload, common),
-        )
-    if event_type == "checkpoint_resumed":
-        return CheckpointResumedEvent(
-            checkpoint_key=payload["session_id"],
-            resume_attempt=1,
-            **_with_cycle_and_agent(payload, common),
-        )
-    if event_type == "operation_replayed":
-        return OperationReplayedEvent(
-            checkpoint_key=payload["session_id"],
-            operation_id=payload["operation_id"],
-            operation_kind=payload["operation_kind"],
-            receipt_state=payload["receipt_state"],
-            **_with_cycle_and_agent(payload, common),
-        )
     if event_type == "operation_ambiguous":
         return OperationAmbiguousEvent(
-            checkpoint_key=payload["session_id"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             risk=payload["risk"],
             idempotency_support=payload.get("idempotency_support"),
             **_with_cycle_and_agent(payload, common),
         )
-    if event_type == "reconciliation_required":
-        return ReconciliationRequiredEvent(
-            checkpoint_key=payload["session_id"],
-            operation_id=payload["operation_id"],
-            operation_kind=payload["operation_kind"],
-            interruption_reason=payload["interruption_reason"],
-            resume_observation=ResumeObservation.from_dict(payload["resume_observation"]),
-            **_with_cycle_and_agent(payload, common),
-        )
     if event_type == "model_retry_duplicate_risk":
         return ModelRetryDuplicateRiskEvent(
-            checkpoint_key=payload["session_id"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             risk=payload["risk"],
-            **_with_cycle_and_agent(payload, common),
-        )
-    if event_type == "reconciliation_resolved":
-        return ReconciliationResolvedEvent(
-            checkpoint_key=payload["session_id"],
-            operation_id=payload["operation_id"],
-            operation_kind=payload["operation_kind"],
-            decision=payload["decision"],
-            claim_mode=payload.get("claim_mode"),
             **_with_cycle_and_agent(payload, common),
         )
 

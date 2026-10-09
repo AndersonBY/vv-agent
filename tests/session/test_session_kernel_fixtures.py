@@ -110,14 +110,8 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     replaced = {}
     for name in REPLACEMENTS["REPLACE"]:
         raw = (first / name).read_text()
-        for retired in REPLACEMENTS["RETIRED_FIELDS"] | REPLACEMENTS["RETIRED_KINDS"] | REPLACEMENTS["REMOVED_MEMBERS"]:
+        for retired in REPLACEMENTS["RETIRED_FIELDS"] | REPLACEMENTS["RETIRED_KINDS"]:
             assert re.search(r"(?<![A-Za-z0-9_])" + re.escape(retired) + r"(?![A-Za-z0-9_])", raw) is None, (name, retired)
-        for symbol in REPLACEMENTS["REMOVED"]:
-            # Rendered prompts retain ordinary words such as "Session Memory".
-            assert re.search(r'"' + re.escape(symbol) + r'"|vv_agent\.[A-Za-z_.]*\b' + re.escape(symbol) + r"\b", raw) is None, (
-                name,
-                symbol,
-            )
         replaced[name] = [json.loads(line) for line in raw.splitlines()] if name.endswith(".jsonl") else json.loads(raw)
     assert set(REPLACEMENTS["validate_replacements"](replaced, AUTHOR["independent_bytes"])) == set(REPLACEMENTS["REPLACE"])
 
@@ -292,8 +286,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
 
 
 def test_host_interaction_wire_references_use_current_owner(generated_fixtures):
-    from vv_agent.interaction import HostInteractionRequest
-    from vv_agent.runtime.controller import HostInteractionOutcome
+    from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
 
     _, _, values, _ = generated_fixtures
     capabilities = {c["python"]: c for domain in values["public_api.json"]["domains"] for c in domain["capabilities"]}

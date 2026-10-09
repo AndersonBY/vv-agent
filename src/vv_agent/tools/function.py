@@ -14,7 +14,7 @@ from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_o
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.executor import ToolExposure, normalize_tool_exposure
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
 
@@ -36,7 +36,7 @@ class Tool(Protocol):
 
     def invoke(
         self, context: ToolContext | None, arguments: dict[str, Any]
-    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome: ...
+    ) -> ToolOutput | ToolExecutionResult | HostToolOutcome: ...
 
 
 @dataclass(slots=True)
@@ -46,7 +46,7 @@ class FunctionTool:
     params_json_schema: dict[str, Any]
     on_invoke: Callable[
         [ToolContext | None, dict[str, Any]],
-        ToolOutput | ToolExecutionResult | ToolCallOutcome,
+        ToolOutput | ToolExecutionResult | HostToolOutcome,
     ]
     is_enabled: bool | Callable[[Any, Any], bool] = True
     needs_approval: bool | ApprovalPredicate = False
@@ -78,7 +78,7 @@ class FunctionTool:
 
     def invoke(
         self, context: ToolContext | None, arguments: dict[str, Any]
-    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
+    ) -> ToolOutput | ToolExecutionResult | HostToolOutcome:
         try:
             if self.timeout_seconds is None:
                 return self.on_invoke(context, arguments)
@@ -115,11 +115,11 @@ class FunctionTool:
 
     def to_tool_execution_result(
         self,
-        output: ToolOutput | ToolExecutionResult | ToolCallOutcome,
+        output: ToolOutput | ToolExecutionResult | HostToolOutcome,
         *,
         tool_call_id: str = "",
-    ) -> ToolExecutionResult | ToolCallOutcome:
-        if isinstance(output, ToolCallOutcome):
+    ) -> ToolExecutionResult | HostToolOutcome:
+        if isinstance(output, HostToolOutcome):
             return output
         if isinstance(output, ToolExecutionResult):
             if not output.tool_call_id:
@@ -247,7 +247,7 @@ def function_tool(
         def invoke(
             context: ToolContext | None,
             arguments: dict[str, Any],
-        ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
+        ) -> ToolOutput | ToolExecutionResult | HostToolOutcome:
             positional, keyword = argument_builder(arguments)
             result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
             return _coerce_tool_output(result)
@@ -309,7 +309,7 @@ def adapt_tool(tool: Tool) -> FunctionTool:
     def on_invoke(
         context: ToolContext | None,
         arguments: dict[str, Any],
-    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
+    ) -> ToolOutput | ToolExecutionResult | HostToolOutcome:
         return _coerce_tool_output(invoke(context, arguments))
 
     return FunctionTool(
@@ -392,11 +392,9 @@ def _schema_and_argument_builder(
     return schema, build, pass_context
 
 
-def _coerce_tool_output(value: Any) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
-    # Framework-owned deferred execution is a closed outcome, not a tool
-    # result.  Preserve it through the FunctionTool adapter so the runner can
-    # admit the opaque handle atomically with the started operation batch.
-    if isinstance(value, ToolCallOutcome):
+def _coerce_tool_output(value: Any) -> ToolOutput | ToolExecutionResult | HostToolOutcome:
+    # Preserve the typed host request through the FunctionTool adapter.
+    if isinstance(value, HostToolOutcome):
         return value
     if isinstance(value, ToolExecutionResult):
         return value

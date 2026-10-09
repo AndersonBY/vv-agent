@@ -30,7 +30,6 @@ from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.session.app_server import _KernelRunAdapter, _KernelThreadStore
 
 CLIENT_METHODS: tuple[str, ...] = (
@@ -676,13 +675,6 @@ class MessageProcessor:
             )
         except TurnResumeError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
-            return
-        except CheckpointError as exc:
-            self._router.send_error(
-                connection_id,
-                request.id,
-                AppServerError.invalid_params("Controller action rejected", data={"checkpointErrorCode": exc.code}),
-            )
             return
         self._router.send_response(connection_id, request.id, payload)
         status_payload = {

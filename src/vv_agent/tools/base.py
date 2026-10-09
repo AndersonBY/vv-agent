@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import (
     SubTaskOutcome,
     SubTaskRequest,
@@ -15,10 +15,10 @@ from vv_agent.types import (
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
-    from vv_agent.runtime.sub_task_manager import SubTaskManager
+    from vv_agent.session.delegation import ChildTasks
     from vv_agent.workspace.base import WorkspaceBackend
 
-ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult | ToolCallOutcome]
+ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult | HostToolOutcome]
 SubTaskRunner = Callable[[SubTaskRequest], SubTaskOutcome]
 
 
@@ -30,7 +30,7 @@ class ToolContext:
     workspace_backend: WorkspaceBackend
     task_id: str = ""
     sub_task_runner: SubTaskRunner | None = None
-    sub_task_manager: SubTaskManager | None = None
+    sub_task_manager: ChildTasks | None = None
     ctx: ExecutionContext | None = None
     task_metadata: dict[str, Any] = field(default_factory=dict)
     run_context: Any | None = None

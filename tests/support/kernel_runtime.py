@@ -9,9 +9,11 @@ from typing import Any
 from unittest.mock import patch
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy
+from vv_agent.memory.manager import build_memory_manager
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.engine import AgentRuntime as _LegacyAssembly
+from vv_agent.runtime.hooks import RuntimeHookManager
+from vv_agent.runtime.lifecycle import AfterCycleHookManager
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import AgentResult, AgentTask
 
@@ -24,11 +26,33 @@ def start_runner(driver: SessionDriver, session_id: str, agent: Agent, content: 
         return Runner.start(agent, content, run_config=run_config)
 
 
-class KernelRuntime(_LegacyAssembly):
-    # Pure memory/sub-agent construction helpers remain until F3b extracts them.
+class KernelRuntime:
+    def __init__(
+        self,
+        *,
+        llm_client,
+        tool_registry,
+        model_provider=None,
+        default_workspace=None,
+        event_handler=None,
+        log_preview_chars=None,
+        tool_registry_factory=None,
+        hooks=None,
+        after_cycle_hooks=None,
+        workspace_backend=None,
+    ):
+        self.llm_client = llm_client
+        self.tool_registry = tool_registry
+        self.model_provider = model_provider
+        self.default_workspace = default_workspace
+        self.event_handler = event_handler
+        self.log_preview_chars = max(int(log_preview_chars), 40) if log_preview_chars is not None else None
+        self.tool_registry_factory = tool_registry_factory
+        self.hook_manager = RuntimeHookManager(list(hooks or []))
+        self.after_cycle_hook_manager = AfterCycleHookManager(list(after_cycle_hooks or []))
+        self._workspace_backend = workspace_backend
+
     def run(self, task: AgentTask, **kwargs: Any) -> AgentResult:
-        if kwargs.get("checkpoint_controller") is not None or kwargs.get("sub_task_manager") is not None:
-            raise ValueError("kernel tests use session records and child admission")
         context: ExecutionContext = kwargs.get("ctx") or ExecutionContext()
         workspace = Path(kwargs.get("workspace") or self.default_workspace or ".").resolve()
         provider = self.model_provider or ScriptedModelProvider(backend="test", default_model=task.model, llm=self.llm_client)
@@ -83,7 +107,8 @@ class KernelRuntime(_LegacyAssembly):
                 task.metadata.setdefault("vv_session", {})["memory_initial_state"] = memory.state.to_dict()
             driver.create(sid, str(workspace), {"seed": seed})
             handle = driver.start(sid, agent, config, kwargs.get("user_message") or task.user_prompt, task=task, autostart=False)
-            handle.runtime.memory_manager = self._build_memory_manager(
+            handle.runtime.memory_manager = build_memory_manager(
+                tool_registry=self.tool_registry,
                 task=task,
                 workspace_path=workspace,
                 workspace_backend=self._workspace_backend,

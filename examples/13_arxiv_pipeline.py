@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
+from vv_agent import Agent, RunConfig, Runner, ToolContext, VvLlmModelProvider, function_tool
 
 
 @function_tool
@@ -23,32 +24,31 @@ def search_arxiv(query: str, max_results: int = 3) -> list[dict[str, str]]:
 
 
 @function_tool
-def save_report(path: str, content: str) -> str:
+def save_report(ctx: ToolContext, path: str, content: str) -> str:
     """Save a Markdown report."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"saved {target}"
+    ctx.workspace_backend.write_text(path, content)
+    return f"saved {path}"
 
 
 def main() -> None:
-    agent = Agent(
-        name="paper-analyst",
-        instructions="Search papers, write a short Chinese summary, save it, then report the result.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-        tools=[search_arxiv, save_report],
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        max_cycles=8,
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Find three papers about agent memory and save a report.")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        agent = Agent(
+            name="paper-analyst",
+            instructions="Search papers, write a short Chinese summary, save it, then report the result.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+            tools=[search_arxiv, save_report],
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            max_cycles=8,
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Find three papers about agent memory and save a report.")
+        result = Runner.run_sync(agent, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

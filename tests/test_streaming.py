@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.events import AssistantDeltaEvent, RunEvent
 from vv_agent.llm import LlmRequest
@@ -41,7 +41,7 @@ class TestStreamCallback:
     def test_stream_callback_receives_events(self):
         tokens = ["Hello", " ", "world", "!"]
         llm = StreamCapturingLLM(tokens=tokens)
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )
@@ -65,7 +65,7 @@ class TestStreamCallback:
     def test_no_stream_callback_still_works(self):
         tokens = ["Hi"]
         llm = StreamCapturingLLM(tokens=tokens)
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )
@@ -83,7 +83,7 @@ class TestStreamCallback:
 
     def test_scripted_llm_ignores_stream_callback(self):
         llm = ScriptedLLM(steps=[LLMResponse(content="ok")])
-        runtime = AgentRuntime(
+        runtime = KernelRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
         )

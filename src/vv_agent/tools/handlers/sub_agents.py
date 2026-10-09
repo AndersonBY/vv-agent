@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import uuid
-from dataclasses import replace
 from typing import Any, cast
 
-from vv_agent.runtime.sub_task_identity import assigned_sub_task_identity, normalize_identity_string
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json, trim_portable_whitespace
 from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, ToolResultStatus
@@ -46,23 +43,6 @@ def _success(payload: dict[str, Any]) -> ToolExecutionResult:
         content=to_json(payload),
         metadata=payload,
     )
-
-
-def _build_async_identity(context: ToolContext, agent_name: str) -> tuple[str, str]:
-    parent_task_id = str(context.task_id or "task").strip() or "task"
-    task_id = f"{parent_task_id}_sub_{agent_name}_{uuid.uuid4().hex[:8]}"
-    return task_id, task_id
-
-
-def _run_with_assigned_identity(
-    sub_task_runner: Any,
-    request: SubTaskRequest,
-    task_id: str,
-    session_id: str,
-) -> Any:
-    with assigned_sub_task_identity(task_id, session_id):
-        outcome = sub_task_runner(request)
-    return replace(outcome, task_id=task_id, session_id=session_id)
 
 
 def _extract_shared_flags(
@@ -149,16 +129,6 @@ def _run_requests_in_parallel_if_possible(
     sub_task_runner = context.sub_task_runner
     if sub_task_runner is None:
         raise RuntimeError("Sub-agent runtime is not available for this task")
-
-    execution_backend = None
-    if context.ctx is not None:
-        execution_backend = context.ctx.metadata.get("execution_backend")
-    if execution_backend is not None and hasattr(execution_backend, "parallel_map") and requests:
-        outcomes = execution_backend.parallel_map(
-            lambda item: (item[0], sub_task_runner(item[1])),
-            requests,
-        )
-        return dict(outcomes)
 
     outcome_map: dict[int, Any] = {}
     for index, request in requests:
@@ -251,7 +221,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         if argument_error is not None:
             return argument_error
         try:
-            manager_workspace_backend = _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
+            _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
         except InvalidPortableRegexError:
             return _error(
                 INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
@@ -271,39 +241,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
         if context.sub_task_manager is None:
             return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
-        task_id, session_id = _build_async_identity(context, agent_name)
-
-        def run_single_async() -> Any:
-            return _run_with_assigned_identity(
-                sub_task_runner,
-                single_request,
-                task_id,
-                session_id,
-            )
-
-        try:
-            context.sub_task_manager.submit(
-                task_id=task_id,
-                session_id=session_id,
-                agent_name=agent_name,
-                task_title=single_request.task_description,
-                workspace_backend=manager_workspace_backend,
-                parent_run_id=parent_lineage.get("parent_run_id"),
-                parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
-                runner=run_single_async,
-            )
-        except Exception as exc:
-            return _error(str(exc), error_code="sub_task_submit_failed")
-        return _success(
-            {
-                "task_id": task_id,
-                "session_id": session_id,
-                "agent_name": agent_name,
-                "status": AgentStatus.RUNNING.value,
-                "task_description": single_request.task_description,
-                "wait_for_completion": False,
-            }
-        )
+        return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
 
     if not isinstance(raw_tasks, list):
         return _error("`tasks` must be a non-empty array", error_code="invalid_tasks_payload")
@@ -349,7 +287,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         )
 
     try:
-        manager_workspace_backend = _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
+        _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
     except InvalidPortableRegexError:
         return _error(
             INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
@@ -385,77 +323,11 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             return _error("All batch sub-tasks failed", error_code="create_sub_task_batch_failed", details=payload)
         return _success(payload)
 
-    started = 0
-    failed = 0
-    task_ids: list[str] = []
-    results: list[dict[str, Any]] = []
+    return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
 
-    if context.sub_task_manager is None:
-        return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
 
-    for index, request in requests:
-        task_id, session_id = _build_async_identity(context, agent_name)
-
-        def run_batch_async(
-            _request: SubTaskRequest = request,
-            _task_id: str = task_id,
-            _session_id: str = session_id,
-        ) -> Any:
-            return _run_with_assigned_identity(
-                sub_task_runner,
-                _request,
-                _task_id,
-                _session_id,
-            )
-
-        try:
-            context.sub_task_manager.submit(
-                task_id=task_id,
-                session_id=session_id,
-                agent_name=agent_name,
-                task_title=request.task_description,
-                workspace_backend=manager_workspace_backend,
-                parent_run_id=parent_lineage.get("parent_run_id"),
-                parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
-                runner=run_batch_async,
-            )
-        except Exception as exc:
-            failed += 1
-            results.append(
-                {
-                    "index": index,
-                    "task_id": task_id,
-                    "session_id": session_id,
-                    "agent_name": agent_name,
-                    "status": AgentStatus.FAILED.value,
-                    "error": str(exc),
-                    "error_code": "sub_task_submit_failed",
-                }
-            )
-            continue
-        started += 1
-        task_ids.append(task_id)
-        results.append(
-            {
-                "index": index,
-                "task_id": task_id,
-                "session_id": session_id,
-                "agent_name": agent_name,
-                "status": AgentStatus.RUNNING.value,
-                "task_description": request.task_description,
-            }
-        )
-
-    payload = {
-        "summary": {
-            "total": len(raw_tasks),
-            "accepted": started,
-            "failed": failed,
-        },
-        "task_ids": task_ids,
-        "results": results,
-        "wait_for_completion": False,
-    }
-    if started == 0:
-        return _error("All batch sub-tasks failed", error_code="create_sub_task_batch_failed", details=payload)
-    return _success(payload)
+def normalize_identity_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None

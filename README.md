@@ -22,7 +22,8 @@ for S3 workspace storage. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
 
 Current HEAD uses contract v24, public API v8 and one session kernel execution path.
-Older runtime behavior is retained in Git tags.
+Older runtime behavior is retained in Git tags. See [v8 migration](docs/migration-v8.md)
+for API replacements and host seed examples.
 
 ## Architecture
 
@@ -245,7 +246,7 @@ Set `Agent(no_tool_policy="finish")` when a normal assistant response should
 finish the run without `task_finish`, or override it for one call with
 `RunConfig(no_tool_policy="continue" | "wait_user" | "finish")`. Per-run
 configuration wins over a configured Runner default, which wins over the
-Agent value; omitting every layer uses `continue`. Inspect
+Agent value; omitting every layer uses `finish`. Inspect
 `result.completion_reason`, `result.completion_tool_name`,
 and `result.partial_output` to distinguish natural completion, tool-driven
 completion, waits, cancellation, failure, and max-cycle exhaustion.
@@ -396,24 +397,7 @@ print(handle.result().final_output)
 ```
 
 See [runtime-control.md](docs/runtime-control.md) for waits, explicit resume,
-LeaseLost backoff, budgets and event projections. The old runtime loop,
-checkpoint stores and execution backends are retired implementation files awaiting
-F3b deletion.
-
-# Cancel from another thread
-token = CancellationToken()
-ctx = ExecutionContext(cancellation_token=token)
-result = runtime.run(task, ctx=ctx)
-
-def on_event(event: RunEvent) -> None:
-    if isinstance(event, AssistantDeltaEvent):
-        print(event.delta, end="")
-
-
-# Stream LLM output events, including assistant deltas and tool progress
-ctx = ExecutionContext(event_handler=on_event)
-result = runtime.run(task, ctx=ctx)
-```
+LeaseLost backoff, budgets and event projections.
 
 ### Runtime Log Payloads
 
@@ -695,27 +679,15 @@ continue. Use `handoff()` when the child agent should take over and finish the
 run. Use `create_sub_task` and `sub_task_status` when the model needs explicit
 background or parallel task management.
 
-Each delegated sub-task runs in a real `AgentSession` whose session id defaults
-to the sub-task id. Child `RunEvent` values preserve their run, trace, parent,
-task, and session identities so hosts can subscribe, persist, and replay them
-without an untyped event translation.
+Each delegated task is an independently scheduled kernel session. Parent admission
+freezes its identity, prompt, policy, model and budget; the parent adopts only its
+authenticated terminal. Intermediate user waits stay on the child. Batch children
+can drive independently after the parent releases its lease.
 
-Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
-
-Use `sub_task_status` to query runtime sub-task states, inspect
-lightweight progress snapshots (`detail_level=snapshot`), or send follow-up
-messages to running/completed sub-tasks.
-
-When the parent task cannot make useful progress until background sub-tasks
-finish, call `sub_task_status` with `wait_for_completion=true`. The runtime waits
-inside that tool call and returns when queried tasks finish or `max_wait_seconds`
-is reached, avoiding repeated status-polling cycles in the agent context.
-
-Before a completed sub-task is resumed, the runtime now sanitizes the saved session transcript: empty assistant turns, thinking-only turns, orphaned tool results, and unresolved tail tool calls are removed so the next follow-up prompt resumes from a coherent history.
-
-Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
-
-Host apps can interrupt a currently running sub-agent by calling `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)`.
+Use `sub_task_status` to read owner-scoped progress, wait for completion or admit
+a continuation message. Hosts steer a retained child by pushing a targeted
+`steer` inbox item through its store or interactive session. Child lifecycle events
+carry parent and child identities for subscription and replay.
 
 Configured child runs inherit the same explicit `ModelProvider` as the parent
 and resolve their own model. No settings path or backend fallback is rebuilt

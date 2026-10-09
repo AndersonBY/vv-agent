@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 
@@ -17,21 +18,24 @@ def print_event(event) -> None:
 
 
 def main() -> None:
-    agent = Agent(
-        name="advanced",
-        instructions="Stream progress when possible, then provide the final answer.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-    )
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        stream=print_event,
-    )
-    result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain retained session history."), run_config=config)
-    print("\nfinal:", result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        agent = Agent(
+            name="advanced",
+            instructions="Stream progress when possible, then provide the final answer.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+        )
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            stream=print_event,
+        )
+        result = Runner.run_sync(
+            agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain retained session history."), run_config=config
+        )
+        print("\nfinal:", result.final_output)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, RunContext, Runner, VvLlmModelProvider, function_tool
 
@@ -20,24 +21,25 @@ def temporary_lookup(key: str) -> str:
 
 
 def main() -> None:
-    agent = Agent(
-        name="temporary-tool-demo",
-        instructions="Use temporary_lookup when it is available, then provide the final answer.",
-        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
-        tools=[temporary_lookup],
-    )
-    enabled = os.getenv("VV_AGENT_TEMP_TOOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(
-            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        ),
-        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        context={"enable_temp_tool": enabled},
-    )
-    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Use temporary_lookup for key alpha if the tool exists.")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(result.final_output)
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        agent = Agent(
+            name="temporary-tool-demo",
+            instructions="Use temporary_lookup when it is available, then provide the final answer.",
+            model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
+            tools=[temporary_lookup],
+        )
+        enabled = os.getenv("VV_AGENT_TEMP_TOOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(
+                settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+            ),
+            workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)),
+            context={"enable_temp_tool": enabled},
+        )
+        prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Use temporary_lookup for key alpha if the tool exists.")
+        result = Runner.run_sync(agent, prompt, run_config=config)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

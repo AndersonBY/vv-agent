@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.constants import FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME
@@ -40,7 +40,7 @@ def _live_settings_file() -> Path:
     return settings_file
 
 
-def _build_live_runtime(workspace: Path) -> tuple[AgentRuntime, str]:
+def _build_live_runtime(workspace: Path) -> tuple[KernelRuntime, str]:
     settings_file = _live_settings_file()
     backend = os.getenv("VV_AGENT_LIVE_BACKEND", "moonshot")
     model = os.getenv("VV_AGENT_LIVE_MODEL", "kimi-k3")
@@ -49,7 +49,7 @@ def _build_live_runtime(workspace: Path) -> tuple[AgentRuntime, str]:
         settings_file=settings_file,
         default_backend=backend,
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         model_provider=provider,
         tool_registry=build_default_registry(),

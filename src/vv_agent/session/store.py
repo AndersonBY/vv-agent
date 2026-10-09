@@ -1,4 +1,4 @@
-"""Experimental synchronous transaction contract; no framework or connection ownership."""
+"""Synchronous session transactions with caller-owned connections."""
 
 from __future__ import annotations
 

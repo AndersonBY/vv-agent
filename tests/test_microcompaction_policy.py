@@ -14,7 +14,6 @@ from vv_agent import (
     ToolResultRetention,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.run_definition import _behavior_metadata
 from vv_agent.types import AgentTask
 
 
@@ -75,13 +74,6 @@ def test_run_config_and_agent_task_freeze_typed_policy_in_explicit_wire() -> Non
     assert restored.microcompaction_policy == policy
     assert task.metadata == {}
     assert restored.metadata == {}
-    assert (
-        _behavior_metadata(
-            agent=Agent(name="assistant", instructions="system"),
-            run_config=config,
-        )
-        == {}
-    )
 
 
 def test_session_definition_freezes_policy_and_restores_current_task():
@@ -99,6 +91,7 @@ def test_session_definition_freezes_policy_and_restores_current_task():
         definition = runtime.definition(task)
         assert definition["task"]["microcompaction_policy"] == policy.to_dict()
         assert definition["memory_settings"]["microcompaction_policy"] == policy.to_dict()
+        assert "microcompaction_policy" not in definition["task"]["metadata"]
         assert AgentTask.from_dict(definition["task"]).microcompaction_policy == policy
     finally:
         driver.close()

@@ -101,17 +101,17 @@ class TestExecutionContext:
 
 
 class TestCancellationInRuntime:
-    """Test cancellation integrated with AgentRuntime cycle loop."""
+    """Test cancellation integrated with KernelRuntime cycle loop."""
 
     def test_cancel_before_first_cycle(self):
-        from support.kernel_runtime import KernelRuntime as AgentRuntime
+        from support.kernel_runtime import KernelRuntime
 
         from vv_agent.llm.scripted import ScriptedLLM
         from vv_agent.tools import build_default_registry
         from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
         llm = ScriptedLLM(steps=[LLMResponse(content="hello")])
-        runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
+        runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry())
         task = AgentTask(
             task_id="cancel-test",
             model="test",
@@ -130,7 +130,7 @@ class TestCancellationInRuntime:
         assert result.error["message"] == "cancel_requested"
 
     def test_cancel_between_cycles(self):
-        from support.kernel_runtime import KernelRuntime as AgentRuntime
+        from support.kernel_runtime import KernelRuntime
 
         from vv_agent.llm.scripted import ScriptedLLM
         from vv_agent.tools import build_default_registry
@@ -144,7 +144,7 @@ class TestCancellationInRuntime:
                 LLMResponse(content="cycle3"),
             ]
         )
-        runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
+        runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry())
         task = AgentTask(
             task_id="cancel-test-2",
             model="test",

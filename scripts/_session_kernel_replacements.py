@@ -23,6 +23,7 @@ from vv_agent.events import event_from_dict
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.prompt import PromptBundle, PromptSection, SystemPromptBuilder, build_system_prompt_bundle
+from vv_agent.run_config import effective_run_config
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.lifecycle import AfterCycleDecision, AfterCycleStop
@@ -120,9 +121,6 @@ RETIRED_FIELDS = frozenset(
         "session_endpoint_id",
         "session_shared_state",
         "_vv_agent_session_memory_initial_state",
-        "replace_messages",
-        "replace_shared_state",
-        "clear_queues",
     ]
 )
 RETIRED_KINDS = frozenset(
@@ -137,98 +135,6 @@ RETIRED_KINDS = frozenset(
         "deferred_result",
     ]
 )
-REMOVED = frozenset(
-    [
-        "RunState",
-        "ApprovalSnapshot",
-        "CheckpointConfig",
-        "CheckpointExtension",
-        "ReconciliationProvider",
-        "ResumeObservation",
-        "DeferredToolHandle",
-        "AcceptDeferredDecision",
-        "DeferredResolveDecision",
-        "DeferredResolutionReceipt",
-        "DeferredResolutionConflict",
-        "DeferredResolutionStale",
-        "DeferredCheckpointClaimed",
-        "DeferredHandleError",
-        "DeferredResolutionError",
-        "DeferredResolutionResultInvalid",
-        "ToolCallOutcome",
-        "ExecutionBackend",
-        "InlineBackend",
-        "ThreadBackend",
-        "CeleryBackend",
-        "DistributedBackend",
-        "DistributedRunHandle",
-        "DistributedDeliveryOutcome",
-        "DistributedAdvanceDecision",
-        "DistributedWaitReason",
-        "DistributedRunEnvelope",
-        "DistributedCapabilityRegistry",
-        "CapabilityRef",
-        "RuntimeRecipe",
-        "Checkpoint",
-        "CheckpointStore",
-        "InMemoryCheckpointStore",
-        "SqliteCheckpointStore",
-        "RedisCheckpointStore",
-        "OperationJournalEntry",
-        "ControllerCommand",
-        "ControllerCommandReceipt",
-        "ControllerCommandResolution",
-        "Session",
-        "MemorySession",
-        "SQLiteSession",
-        "RedisSession",
-        "MemorySessionStore",
-        "SQLiteSessionStore",
-        "RedisSessionStore",
-        "CheckpointCreatedEvent",
-        "CheckpointResumedEvent",
-        "ReconciliationRequiredEvent",
-        "ReconciliationResolvedEvent",
-        "ToolCallDeferredEvent",
-        "OperationReplayedEvent",
-        "SessionPersistedEvent",
-        "AgentRuntime",
-        "ToolCallRunner",
-        "RunEventStore",
-        "IdempotentRunEventStore",
-    ]
-)
-REMOVED_MEMBERS = RETIRED_FIELDS | frozenset(
-    [
-        "into_state",
-        "start_distributed",
-        "start_distributed_compiled",
-        "finalize_distributed",
-        "defer",
-        "reap_controller_command_wakes",
-        "resolve_deferred",
-        "resolve_controller_command",
-        "produce_host_interaction",
-        "claim_and_consume_host_interaction_response",
-        "sub_task_manager",
-    ]
-)
-NEW_NAMES = {
-    "Record": "vv_agent.session.records.Record",
-    "InboxItem": "vv_agent.session.records.InboxItem",
-    "SessionSpec": "vv_agent.session.records.SessionSpec",
-    "SessionStore": "vv_agent.session.store.SessionStore",
-    "SessionTx": "vv_agent.session.store.SessionTx",
-    "SQLiteStore": "vv_agent.session.sqlite.SQLiteStore",
-    "PostgresStore": "vv_agent.session.postgres.PostgresStore",
-    "Conflict": "vv_agent.session.store.Conflict",
-    "LeaseLost": "vv_agent.session.store.LeaseLost",
-    "MissingHostBinding": "vv_agent.session.bindings.MissingHostBinding",
-    "Definitive": "vv_agent.session.providers.Definitive",
-    "Accepted": "vv_agent.session.providers.Accepted",
-    "Unknown": "vv_agent.session.providers.Unknown",
-    "SessionRunEventStore": "vv_agent.session.events.SessionRunEventStore",
-}
 REASONS = {
     "after_cycle_hook.json": "section 4 F2d-1 hooks / F2d-2 boundary wire: committed boundary decisions",
     "app_server_observable.json": "section 5 and Q5-Q8: one status projection, retained owner, v2 wire",
@@ -403,7 +309,7 @@ class Author:
                 stop_at_tool_names=case.get("stop_at_tool_names", []),
             )
             configured = Runner.configured(RunConfig(no_tool_policy=case["runner_default_policy"]))
-            config = Runner._effective_run_config(
+            config = effective_run_config(
                 agent,
                 RunConfig(no_tool_policy=case["run_policy"], max_cycles=case["max_cycles"]),
                 runner_defaults=configured.default_run_config,
@@ -1346,7 +1252,7 @@ class Author:
                 {"name": sid, "agent_result": result.raw_result.to_dict(), "public_result": result_facts(result)}
             )
         controls = self.outputs["run_config_controls.json"]
-        defaults = Runner._effective_run_config(Agent("defaults", "Use framework defaults."), RunConfig())
+        defaults = effective_run_config(Agent("defaults", "Use framework defaults."), RunConfig())
         for key in list(controls["framework_defaults"]):
             if key in RETIRED_FIELDS:
                 controls["framework_defaults"].pop(key)
@@ -1788,7 +1694,7 @@ class Author:
                 lifecycle_suite[name]()
             with pytest.MonkeyPatch.context() as monkeypatch:
                 lifecycle_suite["test_prune_only_keeps_complete_history_contract"](monkeypatch)
-            with patch.object(lifecycle_suite["SessionMemory"], "_storage_path", return_value=None):
+            with patch.object(lifecycle_suite["SessionMemory"], "storage_path", return_value=None):
                 self.memory_routes(lifecycle_suite)
         d = self.outputs["memory_local.json"]
         d["summary_compaction"]["control_failure_case"] = {
@@ -1821,7 +1727,7 @@ class Author:
         from vv_agent.session.reducer import fold
 
         capacity = self.outputs["memory_lifecycle.json"]["capacity_contract"]
-        builder = suite["AgentRuntime"]._build_memory_manager
+        builder = suite["build_memory_manager"]
         for cases, test, context_only in (
             (capacity["cases"], "test_runtime_resolves_memory_capacity_from_contract_cases", False),
             (capacity["context_window_resolution"]["cases"], "test_runtime_context_window_resolution_matches_contract", True),
@@ -1829,14 +1735,14 @@ class Author:
             for case in cases:
                 produced = []
 
-                def capture(runtime, produced=produced, **kwargs):
-                    manager = builder(runtime, **kwargs)
+                def capture(produced=produced, **kwargs):
+                    manager = builder(**kwargs)
                     produced.append(manager)
                     return manager
 
                 with (
                     pytest.MonkeyPatch.context() as monkeypatch,
-                    patch.object(suite["AgentRuntime"], "_build_memory_manager", capture),
+                    patch.dict(suite[test].__globals__, {"build_memory_manager": capture}),
                 ):
                     suite[test](case, tmp, monkeypatch)
                 assert len(produced) == 1

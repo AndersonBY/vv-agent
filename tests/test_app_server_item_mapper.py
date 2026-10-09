@@ -254,8 +254,6 @@ def test_host_interaction_and_suspended_state_map_to_status_notifications_withou
     requested = HostInteractionRequestedEvent(
         run_id="run_1",
         trace_id="trace_1",
-        checkpoint_key="checkpoint-1",
-        resume_attempt=1,
         interaction_id="interaction-1",
         logical_cycle=1,
         operation_id="operation-1",

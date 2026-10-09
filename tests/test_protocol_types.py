@@ -9,7 +9,7 @@ import pytest
 
 from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.tools.outcomes import DeferredResolutionResultInvalid, validate_definitive_result
+from vv_agent.tools.outcomes import DefinitiveResultInvalid, validate_definitive_result
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
 BOUNDED_RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "bounded_tool_result.json"
@@ -122,12 +122,12 @@ def test_bounded_tool_result_rejects_invalid_sparse_fixture_cases() -> None:
             ToolExecutionResult.from_dict(payload)
 
 
-def test_bounded_tool_result_success_error_code_is_rejected_by_deferred_validator() -> None:
+def test_bounded_tool_result_success_error_code_is_rejected_by_definitive_validator() -> None:
     fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
     case = next(case for case in fixture["invalid_cases"] if case["name"] == "success_result_has_non_null_error_code")
     result = ToolExecutionResult.from_dict(fixture["canonical_results"][case["base"]])
     result.error_code = case["mutation"]["add"]["error_code"]
-    with pytest.raises(DeferredResolutionResultInvalid, match=case["expected_error_code"]) as caught:
+    with pytest.raises(DefinitiveResultInvalid, match=case["expected_error_code"]) as caught:
         validate_definitive_result(result)
     assert caught.value.code == case["expected_error_code"]
 
@@ -207,7 +207,7 @@ def test_assistant_message_preserves_tool_call_extra_content() -> None:
     assert payload["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "sig_123"
 
 
-def test_cycle_runner_serializes_tool_call_extra_content() -> None:
+def test_model_turn_serializes_tool_call_extra_content() -> None:
     serialized = _produced_tool_calls(
         [
             ToolCall(
@@ -221,7 +221,7 @@ def test_cycle_runner_serializes_tool_call_extra_content() -> None:
     assert serialized[0]["extra_content"]["google"]["thought_signature"] == "sig_123"
 
 
-def test_cycle_runner_serializes_tool_call_arguments_as_canonical_json() -> None:
+def test_model_turn_serializes_tool_call_arguments_as_canonical_json() -> None:
     serialized = _produced_tool_calls([ToolCall(id="call_1", name="task_finish", arguments={"message": "done", "count": 2})])
 
     assert serialized[0]["function"]["arguments"] == '{"count":2,"message":"done"}'

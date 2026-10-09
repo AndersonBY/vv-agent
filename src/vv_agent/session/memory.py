@@ -54,7 +54,7 @@ def save_projection(driver: _Driver) -> None:
             continue
         task = driver.state.turns[tid].start._task()
         memory = session_memory(task, Path(driver.runtime.config.workspace or ".") if task.use_workspace else None)
-        path = memory._storage_path()
+        path = memory.storage_path()
         if path is not None:
             latest[path] = r._payload["data"]["state"]
     for path, state in latest.items():
@@ -105,17 +105,17 @@ def extract_memory(driver: _Driver, source: list[Message], current_tokens: int, 
         )
         save_projection(driver)
         return True
-    count = sum(not memory._should_skip_message(m) and bool(m.content) for m in source)
+    count = sum(not memory.skip_extraction_message(m) and bool(m.content) for m in source)
     if not memory.should_extract(current_tokens, count):
         return False
     start = memory.state.last_extracted_message_index + 1 if 0 <= memory.state.last_extracted_message_index < len(source) else 0
-    new = [m for m in source[start:] if not memory._should_skip_message(m)]
+    new = [m for m in source[start:] if not memory.skip_extraction_message(m)]
     if not new:
         return False
     _, resolved = driver.runtime.model_route("session_memory")
     request = {
         "model": resolved.model_id,
-        "messages": [Message("user", memory._build_extraction_prompt(new)).to_dict()],
+        "messages": [Message("user", memory.extraction_prompt(new)).to_dict()],
         "tools": [],
         "prompt_bundle": None,
         "model_settings": task.model_settings.to_dict() if task.model_settings else None,
@@ -148,7 +148,7 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
         event_id=f"sk/memory/{key}/started",
         created_at=driver.records[-1].created_ms / 1000,
         message_count=len(source),
-        estimated_tokens=manager._calculate_effective_length(source, total_tokens=None, recent_tool_call_ids=None),
+        estimated_tokens=manager.effective_tokens(source, total_tokens=None, recent_tool_call_ids=None),
         trigger=cast(MemoryCompactTrigger, trigger),
         configured_threshold=manager.compact_threshold,
         effective_threshold=manager.autocompact_threshold,
@@ -206,7 +206,7 @@ def finish_compact(
         created_at=driver.records[-1].created_ms / 1000,
         before_count=start["message_count"],
         after_count=len(source),
-        summary_tokens=manager._calculate_effective_length(source, total_tokens=None, recent_tool_call_ids=None),
+        summary_tokens=manager.effective_tokens(source, total_tokens=None, recent_tool_call_ids=None),
         mode=cast(MemoryCompactMode, mode) if changed else "none",
         changed=changed,
         archived_count=archived_count,

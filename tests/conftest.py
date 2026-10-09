@@ -43,3 +43,9 @@ def surface(request, monkeypatch):
             handle.cancel("test teardown")
         client.driver.close()
     driver.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_working_directory(tmp_path, monkeypatch):
+    """Default workspace projections belong to each disposable test directory."""
+    monkeypatch.chdir(tmp_path)

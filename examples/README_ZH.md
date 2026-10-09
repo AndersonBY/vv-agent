@@ -17,7 +17,7 @@ handoff、强类型事件和工具策略。低层 runtime 示例单独保留，�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM 后端配置文件 |
-| `VV_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | 工作区目录 |
+| `VV_AGENT_EXAMPLE_WORKSPACE` | temporary directory | 工作区目录 |
 | `VV_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM 后端 |
 | `VV_AGENT_EXAMPLE_MODEL` | `kimi-k3` | 模型名称 |
 | `VV_AGENT_EXAMPLE_PROMPT` | 示例内置值 | 覆盖示例 prompt |
@@ -67,8 +67,8 @@ uv run python examples/17_error_recovery.py
 | --- | --- | --- |
 | 18 | `18_cancellation.py` | 通过 RunHandle 取消运行中的任务 |
 | 19 | `19_streaming.py` | 原始 runtime stream callback 事件 |
-| 20 | `20_thread_backend.py` | RunHandle 非阻塞执行 |
-| 21 | `21_state_checkpoint.py` | SQLite 持久会话与 retained-turn 恢复 |
+| 20 | `20_background_run.py` | RunHandle 非阻塞执行 |
+| 21 | `21_durable_session.py` | SQLite 持久会话与 retained-turn 恢复 |
 | 22 | `22_sdk_advanced.py` | 公开 SDK + kernel streaming |
 | 24 | `24_workspace_backends.py` | Local、memory、S3 与自定义工作区后端 |
 | 25 | `25_temporary_tool_injection.py` | run 级别临时启用工具 |
@@ -76,8 +76,8 @@ uv run python examples/17_error_recovery.py
 ```bash
 VV_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
 uv run python examples/19_streaming.py
-uv run python examples/20_thread_backend.py
-VV_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
+uv run python examples/20_background_run.py
+VV_AGENT_EXAMPLE_DB=/tmp/vv-agent-example.db uv run python examples/21_durable_session.py
 uv run python examples/22_sdk_advanced.py
 uv run python examples/24_workspace_backends.py
 ```

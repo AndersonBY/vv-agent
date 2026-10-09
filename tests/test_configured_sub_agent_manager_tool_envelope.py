@@ -13,7 +13,7 @@ from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
 from vv_agent.session.delegation import status_with_store
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import (
     AgentStatus,
     CompletionReason,
@@ -44,7 +44,7 @@ def manager_driver():
 def _manager(driver, workspace):
     driver.create("parent", str(workspace))
     runtime = driver.runtime(Agent("parent", "Delegate."), RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [])))
-    return runtime.child_tasks(driver.store, "parent").tool_manager()
+    return runtime.child_tasks(driver.store, "parent")
 
 
 def _child(driver, workspace, response):
@@ -70,7 +70,7 @@ def _child(driver, workspace, response):
     sid = next(sid for sid in driver.store.list_sessions() if sid != "parent")
     manager = parent.runtime.child_tasks(driver.store, "parent")
     context = _context(workspace)
-    context.sub_task_manager = manager.tool_manager()
+    context.sub_task_manager = manager
     return parent, sid, manager, context
 
 
@@ -83,14 +83,14 @@ def _context(tmp_path: Path) -> ToolContext:
     )
 
 
-def _assert_error_metadata_matches_content(result: ToolExecutionResult | ToolCallOutcome) -> None:
+def _assert_error_metadata_matches_content(result: ToolExecutionResult | HostToolOutcome) -> None:
     result = require_tool_result(result)
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.ERROR
     assert result.metadata == payload
 
 
-def _assert_schema_error_metadata(result: ToolExecutionResult | ToolCallOutcome) -> None:
+def _assert_schema_error_metadata(result: ToolExecutionResult | HostToolOutcome) -> None:
     result = require_tool_result(result)
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.ERROR

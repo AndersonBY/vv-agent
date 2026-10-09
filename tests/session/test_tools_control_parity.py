@@ -371,7 +371,7 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
         return text
 
     agent = Agent("test", "test", tools=[approved])
-    # SDK broker bridge using the same deferred provider protocol.
+    # SDK broker bridge using the same provider outcome protocol.
     broker = ApprovalBroker()
 
     class Auto(Decisions):

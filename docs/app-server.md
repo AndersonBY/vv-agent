@@ -11,7 +11,7 @@ approval callbacks, replay, and generated schema files.
 
 App Server thread/turn/item state is a projection of SessionStore records. Closed
 threads reject execution and resume. User and approval replies resume the same
-turn through its inbox; no checkpoint/controller execution path is selected.
+turn through its inbox.
 Lease retry exhaustion produces a typed JSON-RPC error or failure notification.
 
 ## Startup
@@ -67,7 +67,7 @@ creates a thread, resolves the host agent key later during `turn/start`, and
 subscribes the current connection to live notifications for that thread.
 
 ```jsonl
-{"id":2,"method":"thread/start","params":{"agentKey":"default","cwd":"./workspace","metadata":{"profile":"assistant"}}}
+{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{"agentKey":"default","cwd":"./workspace","metadata":{"profile":"assistant"}}}
 ```
 
 The server emits `thread/started` and returns the same thread identity:
@@ -81,14 +81,14 @@ Use `thread/read` to read a persisted snapshot without subscribing another
 connection:
 
 ```jsonl
-{"id":3,"method":"thread/read","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":3,"method":"thread/read","params":{"threadId":"thread_1"}}
 ```
 
 Use `thread/resume` after reconnecting. It subscribes the new connection and
 returns the same snapshot shape:
 
 ```jsonl
-{"id":4,"method":"thread/resume","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"thread_1"}}
 ```
 
 Snapshots contain a `thread` object, ordered `turns`, and replayable `items`.
@@ -99,14 +99,14 @@ Use `thread/list` to list active threads. Archived threads are hidden by
 default; pass `includeArchived: true` to include them.
 
 ```jsonl
-{"id":10,"method":"thread/list","params":{"includeArchived":true}}
+{"jsonrpc":"2.0","id":10,"method":"thread/list","params":{"includeArchived":true}}
 ```
 
 Use `thread/archive` to mark a thread archived. The server rejects future
 `turn/start` requests for archived threads with error code `-32021`.
 
 ```jsonl
-{"id":11,"method":"thread/archive","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":11,"method":"thread/archive","params":{"threadId":"thread_1"}}
 ```
 
 Use `thread/unsubscribe` to remove the current connection from a thread
@@ -114,7 +114,7 @@ subscription. If the loaded thread has no subscribers and no active turn, the
 server emits `thread/closed`.
 
 ```jsonl
-{"id":12,"method":"thread/unsubscribe","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":12,"method":"thread/unsubscribe","params":{"threadId":"thread_1"}}
 ```
 
 `thread/status/changed` reports stable lifecycle changes: `running`, `idle`,
@@ -127,7 +127,7 @@ A turn is one `Runner.start()` execution inside a thread. Start a turn by
 passing input items:
 
 ```jsonl
-{"id":5,"method":"turn/start","params":{"threadId":"thread_1","input":[{"type":"text","text":"Inspect this workspace and summarize the findings."}]}}
+{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"thread_1","input":[{"type":"text","text":"Inspect this workspace and summarize the findings."}]}}
 ```
 
 The server responds when the turn is accepted, then streams lifecycle
@@ -144,9 +144,9 @@ Use `turn/steer` to queue additional user context for the active turn. Use
 from steering or interrupting a stale turn.
 
 ```jsonl
-{"id":6,"method":"turn/steer","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Also check the tests."}]}}
-{"id":7,"method":"turn/followUp","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Write a release note."}]}}
-{"id":8,"method":"turn/interrupt","params":{"threadId":"thread_1","expectedTurnId":"turn_1","reason":"User cancelled from UI"}}
+{"jsonrpc":"2.0","id":6,"method":"turn/steer","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Also check the tests."}]}}
+{"jsonrpc":"2.0","id":7,"method":"turn/followUp","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Write a release note."}]}}
+{"jsonrpc":"2.0","id":8,"method":"turn/interrupt","params":{"threadId":"thread_1","expectedTurnId":"turn_1","reason":"User cancelled from UI"}}
 ```
 
 ## Items
@@ -211,7 +211,7 @@ notification method names. The server suppresses only exact matches for that
 connection.
 
 ```jsonl
-{"id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host"},"capabilities":{"optOutNotificationMethods":["item/agentMessage/delta"]}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host"},"capabilities":{"optOutNotificationMethods":["item/agentMessage/delta"]}}}
 ```
 
 ## Approval Requests
@@ -220,14 +220,29 @@ Tools that require approval are routed as server-to-client requests. The App
 Server sends `approval/request` with a request `id` plus approval params:
 
 ```json
-{"id":"approval_1","method":"approval/request","params":{"requestId":"approval_1","threadId":"thread_1","turnId":"turn_1","toolCallId":"call_1","toolName":"write_file","preview":"Approval required for tool write_file.","arguments":{"path":"notes.md"}}}
+{
+  "jsonrpc": "2.0",
+  "id": "approval_1",
+  "method": "approval/request",
+  "params": {
+    "requestId": "approval_1",
+    "threadId": "thread_1",
+    "turnId": "turn_1",
+    "toolCallId": "call_1",
+    "toolName": "write_file",
+    "preview": "Approval required for tool write_file.",
+    "arguments": {
+      "path": "notes.md"
+    }
+  }
+}
 ```
 
 The client must answer with a normal response whose `id` matches the server
 request id:
 
 ```jsonl
-{"id":"approval_1","result":{"decision":"allow_session","message":"Approved for this tool during the session"}}
+{"jsonrpc":"2.0","id":"approval_1","result":{"decision":"allow_session","message":"Approved for this tool during the session"}}
 ```
 
 Clients that prefer request-only control can resolve the same pending callback
@@ -235,8 +250,8 @@ with `approval/resolve`. Its `threadId`, `turnId`, and `requestId` must match th
 active approval:
 
 ```jsonl
-{"id":8,"method":"approval/resolve","params":{"threadId":"thread_1","turnId":"turn_1","requestId":"approval_1","decision":"allow_session"}}
-{"id":8,"result":{}}
+{"jsonrpc":"2.0","id":8,"method":"approval/resolve","params":{"threadId":"thread_1","turnId":"turn_1","requestId":"approval_1","decision":"allow_session"}}
+{"jsonrpc":"2.0","id":8,"result":{}}
 ```
 
 The server also emits `approval/requested` and `approval/resolved` notifications
@@ -253,7 +268,7 @@ resolve as timed-out approval decisions in the runtime.
 Hosts can expose available models through `model/list`:
 
 ```jsonl
-{"id":9,"method":"model/list","params":{}}
+{"jsonrpc":"2.0","id":9,"method":"model/list","params":{}}
 ```
 
 The default host returns the models passed to `DefaultAppServerHost`. Product
@@ -298,7 +313,7 @@ Initialized clients can also fetch the same JSON Schema and TypeScript bundles
 without filesystem access:
 
 ```jsonl
-{"id":9,"method":"schema/export","params":{}}
+{"jsonrpc":"2.0","id":9,"method":"schema/export","params":{}}
 ```
 
 The debug client prints a complete JSONL flow for a single message:

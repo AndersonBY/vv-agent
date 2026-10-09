@@ -12,6 +12,7 @@ from typing import Any
 SERVER_CODE = r"""
 from pathlib import Path
 import os
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, ToolPolicy, VvLlmModelProvider
 from vv_agent.app_server.host import DefaultAppServerHost
@@ -21,7 +22,8 @@ from vv_agent.app_server.transport import StdioJsonlTransport
 settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
 backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
 model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+temporary_workspace = TemporaryDirectory(prefix="vv-agent-example-")
+workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace.name)).resolve()
 max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "3"))
 workspace.mkdir(parents=True, exist_ok=True)
 
@@ -40,12 +42,18 @@ host = DefaultAppServerHost(
         tool_policy=ToolPolicy(allowed_tools=[]),
     ),
 )
-AppServer(transport=StdioJsonlTransport(), host=host).run_forever()
+server = AppServer(transport=StdioJsonlTransport(), host=host)
+try:
+    server.run_forever()
+finally:
+    server.run_adapter.join()
+    server.kernel.close()
+    temporary_workspace.cleanup()
 """
 
 
 def _json_line(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    return json.dumps({"jsonrpc": "2.0", **payload}, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def main() -> None:
@@ -74,7 +82,7 @@ def main() -> None:
 
     for payload in [
         {"method": "initialized"},
-        {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}},
+        {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}},
         {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]}},
     ]:
         process.stdin.write(_json_line(payload))

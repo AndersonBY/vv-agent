@@ -69,13 +69,8 @@ Public producer tests establish the canonical API, runtime decisions, events,
 strict wire readers, and recovery semantics under the locked contract. Passing
 fixture or snapshot checks alone does not establish those behaviors.
 
-The SQLite and Redis exchange probes provide evidence for the physical storage
-representations, named operations, and failure windows at the pinned Python/Rust
-baseline, not arbitrary mixed-language takeover of a running deployment. Rust
-is frozen at contract 23.0.0 / 0.21.x; these probes do not establish compatibility
-with later Python contracts. Rust gates and cross-language exchange probes are
-not prerequisites for active Python adoption. Python's real producer tests and
-full quality gates remain required by the central workflow.
+Python producer and store tests cover the current SQLite/PostgreSQL execution
+semantics. The frozen Rust v23 baseline is outside current Python adoption.
 
 ## Python producer map
 
@@ -96,17 +91,15 @@ full quality gates remain required by the central workflow.
 
 RunEvent v6, model-call v2, task-token-usage v3 and strict Message each accept one
 current shape. Missing, stale, unknown and malformed versions reject. Results carry
-session_id/turn_id; checkpoint keys and resume observations are retired. App Server
+session_id/turn_id. App Server
 uses protocol v2 and a single ThreadStatus enum. There is no v23 selector/decoder.
 
 The session log is execution truth. Events, results, App Server and tracing are
 consumer projections; JSONL event stores are sinks. Same-turn recovery preserves
 frozen prompt, model, limits and usage. Durable stores are opt-in through the
-session-facing API. Legacy modules on disk await F3b helper extraction and deletion.
+session-facing API.
 
-The generated 45-file corpus is checked once against the vendored v24 snapshot.
-The reviewer-confirmed App Server memory-limit evidence defect is recorded in
-session-kernel-f3a-fixture-conflict.json; the byte test remains strict pending 24.0.1.
-Corrected candidates are generated outside the vendored directory. Contract snapshot
-integrity remains independent of producer byte equality. An implementation cannot
-be declared verified before required producer and central gates establish it.
+The generated 45-file corpus is compared byte-for-byte with vendored v24.0.1
+in one producer generation. Contract snapshot integrity is checked independently.
+An implementation cannot be declared verified before required producer and central
+gates establish it. See [migration-v8.md](migration-v8.md) for host migration.

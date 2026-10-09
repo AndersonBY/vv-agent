@@ -25,13 +25,12 @@ from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import RunBudgetLimits, UnavailableMetricPolicy
 from vv_agent.events import event_from_dict
 from vv_agent.guardrails import GuardrailResult
-from vv_agent.interaction import HostInteractionRequest
+from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.output_validation import OutputValidationResult
-from vv_agent.runtime.controller import HostInteractionOutcome
 from vv_agent.runtime.hooks import BaseRuntimeHook
 from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.context import project_context
@@ -1516,7 +1515,7 @@ def generate(output: Path):
         with TemporaryDirectory(prefix="c1b-producer-") as workspace:
             stack.enter_context(
                 patch(
-                    "vv_agent.memory.session_memory.SessionMemory._storage_path",
+                    "vv_agent.memory.session_memory.SessionMemory.storage_path",
                     return_value=Path(workspace) / "session_memory.json",
                 )
             )

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent import constants as constants_module
 from vv_agent.constants import (
@@ -15,8 +15,10 @@ from vv_agent.constants import (
 from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
+from vv_agent.memory.manager import build_memory_manager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
+from vv_agent.session.delegation import build_sub_agent_task
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import (
     AgentStatus,
@@ -55,7 +57,7 @@ def test_runtime_finishes_with_natural_output_after_tool_cycle(tmp_path: Path) -
             LLMResponse(content="all done"),
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
 
     task = AgentTask(
         task_id="task1",
@@ -81,7 +83,7 @@ def test_runtime_uses_the_frozen_bundle_as_the_only_initial_system_message(tmp_p
         ]
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_messages]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -122,7 +124,7 @@ def test_runtime_preserves_artifact_ref_when_copying_prepared_messages(tmp_path:
         assert tool_message.artifact_ref == artifact
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_artifact_ref]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -186,7 +188,7 @@ def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
             )
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task2", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="ask", max_cycles=3
     )
@@ -212,7 +214,7 @@ def test_runtime_natural_completion_preserves_pending_todos(tmp_path: Path) -> N
             LLMResponse(content="done"),
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task3", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="todo", max_cycles=6
     )
@@ -226,7 +228,7 @@ def test_runtime_natural_completion_preserves_pending_todos(tmp_path: Path) -> N
 
 def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="step1"), LLMResponse(content="step2")])
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task4",
         model="m",
@@ -245,7 +247,7 @@ def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="step1"), LLMResponse(content="step2")])
     events: list[RunEvent] = []
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -270,7 +272,7 @@ def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
 
 def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="direct answer")])
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task5",
         model="m",
@@ -306,7 +308,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     def handler(event: RunEvent) -> None:
         events.append(event)
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -355,9 +357,9 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
 
 
 def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("vv_agent.runtime.engine.resolve_model_token_limits", lambda _model: (64_000, 8_000))
+    monkeypatch.setattr("vv_agent.memory.manager.resolve_model_token_limits", lambda _model: (64_000, 8_000))
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -369,7 +371,7 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
         user_prompt="run",
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
 
     assert manager.model == "demo-model"
     assert manager.model_context_window == 64_000
@@ -382,9 +384,9 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
 
 
 def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("vv_agent.runtime.engine.resolve_model_token_limits", lambda _model: (64_000, 8_000))
+    monkeypatch.setattr("vv_agent.memory.manager.resolve_model_token_limits", lambda _model: (64_000, 8_000))
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -412,7 +414,7 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
         },
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
 
     assert manager.model_context_window == 32_000
     assert manager.model_max_output_tokens == 8_000
@@ -433,7 +435,7 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
 
 
 def test_runtime_ignores_removed_microcompaction_metadata_controls(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -451,7 +453,7 @@ def test_runtime_ignores_removed_microcompaction_metadata_controls(tmp_path: Pat
         },
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
 
     assert manager.microcompaction_policy == MicrocompactionPolicy()
 
@@ -485,7 +487,7 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
         assert "persisted workspace fact" in messages[0].content
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_session_memory]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -508,9 +510,9 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
 
 
 def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Path) -> None:
-    scoped_storage_path = tmp_path / ".memory" / "session" / "task_with_memory" / "session_memory.json"
-    scoped_storage_path.parent.mkdir(parents=True, exist_ok=True)
-    scoped_storage_path.write_text(
+    scopedstorage_path = tmp_path / ".memory" / "session" / "task_with_memory" / "session_memory.json"
+    scopedstorage_path.parent.mkdir(parents=True, exist_ok=True)
+    scopedstorage_path.write_text(
         json.dumps(
             SessionMemoryState(
                 entries=[
@@ -536,7 +538,7 @@ def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Pa
         assert "old task fact" not in messages[0].content
         return LLMResponse(content="done")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_no_session_memory]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -557,7 +559,7 @@ def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Pa
 
 
 def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -575,7 +577,7 @@ def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path)
             )
         },
     )
-    sub_task = runtime._build_sub_agent_task(
+    sub_task = build_sub_agent_task(
         parent_task=parent_task,
         sub_task_id="sub-1",
         sub_session_id="session-sub-1",
@@ -591,7 +593,7 @@ def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path)
         workspace_path=tmp_path,
     )
 
-    manager = runtime._build_memory_manager(task=sub_task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=sub_task, workspace_path=tmp_path)
 
     assert sub_task.metadata["session_memory_enabled"] is False
     assert manager.session_memory is None
@@ -614,7 +616,7 @@ def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Pat
             inspect_cycle_two_messages,
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_prompt_budget",
         model="dummy-model",
@@ -659,7 +661,7 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
             assert_image_message,
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_img",
         model="m",
@@ -692,7 +694,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     )
     events: list[RunEvent] = []
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -765,7 +767,7 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
         handler=_demo_image,
         description="Return a demo image.",
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_image_order",
         model="m",
@@ -811,7 +813,7 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
         handler=_demo_image,
         description="Return a demo image.",
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_no_multimodal",
         model="m",
@@ -862,7 +864,7 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
             ),
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_usage", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="go", max_cycles=4
     )
@@ -907,7 +909,7 @@ def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -
             LLMResponse(content="done"),
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_skill",
         model="m",
@@ -950,7 +952,7 @@ Body
         encoding="utf-8",
     )
 
-    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_skill_dir",
         model="m",
@@ -965,7 +967,7 @@ Body
 
 
 def test_memory_summary_model_uses_explicit_task_metadata(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -981,13 +983,13 @@ def test_memory_summary_model_uses_explicit_task_metadata(tmp_path: Path) -> Non
         },
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
     assert manager.summary_backend == "metadata-backend"
     assert manager.summary_model == "metadata-model"
 
 
 def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -999,7 +1001,7 @@ def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: P
         user_prompt="go",
     )
 
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    manager = build_memory_manager(tool_registry=runtime.tool_registry, task=task, workspace_path=tmp_path)
     assert manager.summary_backend is None
     assert manager.summary_model == "task-model"
 
@@ -1050,7 +1052,7 @@ def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path)
         memory_compact_threshold=1_000_000,
         metadata={"model_context_window": 2_000_000},
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     result = runtime.run(task, interruption_messages=steering)
     assert result.status is AgentStatus.COMPLETED
     original = result.messages

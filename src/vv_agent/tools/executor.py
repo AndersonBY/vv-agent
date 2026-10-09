@@ -12,7 +12,7 @@ from vv_agent.tools.argument_validation import (
 )
 from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
-from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ class ToolExecutor(Protocol):
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]: ...
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome: ...
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | HostToolOutcome: ...
 
     def requires_approval(self, context: ToolContext, arguments: dict[str, Any]) -> bool: ...
 
@@ -107,7 +107,7 @@ class FunctionToolExecutor:
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
 
-        def handler(tool_context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult | ToolCallOutcome:
+        def handler(tool_context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult | HostToolOutcome:
             call = ToolCall(id=tool_context.tool_call_id, name=self.name, arguments=dict(arguments))
             return self.execute(call, tool_context)
 
@@ -121,7 +121,7 @@ class FunctionToolExecutor:
         del context
         return self.tool.to_openai_schema()
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | HostToolOutcome:
         invalid_result = invalid_tool_arguments_result(
             tool_call_id=call.id,
             schema=self.params_json_schema,
@@ -142,7 +142,7 @@ class FunctionToolExecutor:
 @dataclass(slots=True)
 class RegistryToolExecutor:
     name: str
-    handler: Callable[[ToolContext, dict[str, Any]], ToolExecutionResult | ToolCallOutcome]
+    handler: Callable[[ToolContext, dict[str, Any]], ToolExecutionResult | HostToolOutcome]
     schema: dict[str, Any] | None = None
     description: str = ""
     exposure: ToolExposure = ToolExposure.DIRECT
@@ -203,7 +203,7 @@ class RegistryToolExecutor:
             },
         }
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | HostToolOutcome:
         invalid_result = invalid_tool_arguments_result(
             tool_call_id=call.id,
             schema=self.params_json_schema,

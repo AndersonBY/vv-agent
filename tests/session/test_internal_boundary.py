@@ -12,7 +12,7 @@ def test_kernel_imports_use_f1_modules():
     retired = (
         "vv_agent.checkpoint",
         "vv_agent.runtime.controller",
-        "vv_agent.runtime.cycle_runner",
+        "vv_agent.runtime.model_turn",
         "vv_agent.deferred",
         "vv_agent.runtime.state",
         "vv_agent.runtime.stores",

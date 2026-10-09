@@ -6,7 +6,7 @@ from pathlib import Path
 
 from vv_agent import RunConfig
 
-FIXTURE = Path("tests/fixtures/parity/run_config_controls.json")
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "parity" / "run_config_controls.json"
 
 
 def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() -> None:

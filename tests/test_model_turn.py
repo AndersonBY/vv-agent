@@ -38,7 +38,7 @@ def _fake_session_memory_extract(_prompt: str, _backend: str | None, _model: str
 
 def _build_task() -> AgentTask:
     return AgentTask(
-        task_id="task_cycle_runner",
+        task_id="task_model_turn",
         model="gpt-5.4",
         prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="start",
@@ -60,7 +60,7 @@ def _build_memory_manager(**overrides: Any) -> MemoryManager:
     return MemoryManager(**params)
 
 
-def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
+def test_model_turn_retries_prompt_too_long_with_forced_compaction() -> None:
     sent_messages: list[list[Message]] = []
 
     def raise_ptl(request: LlmRequest) -> LLMResponse:
@@ -99,7 +99,7 @@ def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
     assert next_messages[-1].content == "done"
 
 
-def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch) -> None:
+def test_model_turn_retries_prompt_too_long_then_emergency_compact(monkeypatch) -> None:
     sent_messages: list[list[Message]] = []
     emergency_calls: list[float] = []
 
@@ -152,7 +152,7 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
     assert next_messages[-1].content == "done"
 
 
-def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> None:
+def test_model_turn_raises_compaction_exhausted_after_max_ptl_retries() -> None:
     def raise_ptl(request: LlmRequest) -> LLMResponse:
         _model, _messages = request.model, request.messages
         raise RuntimeError("context_length_exceeded")
@@ -186,7 +186,7 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
     assert len([c for c in result.token_usage.model_calls if c.operation.value == "agent_cycle"]) == MAX_PTL_RETRIES + 1
 
 
-def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
+def test_model_turn_does_not_swallow_non_ptl_errors() -> None:
     def raise_other(request: LlmRequest) -> LLMResponse:
         _model, _messages = request.model, request.messages
         raise RuntimeError("network down")
@@ -207,13 +207,13 @@ def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
     assert result.error_code == "model_outcome_unknown"
 
 
-def test_cycle_runner_recognizes_prompt_too_long_patterns() -> None:
+def test_model_turn_recognizes_prompt_too_long_patterns() -> None:
     assert is_prompt_too_long_error(RuntimeError("maximum context length exceeded")) is True
     assert is_prompt_too_long_error(RuntimeError("request too large")) is True
     assert is_prompt_too_long_error(RuntimeError("network down")) is False
 
 
-def test_cycle_runner_recognizes_prompt_too_long_in_exception_chain() -> None:
+def test_model_turn_recognizes_prompt_too_long_in_exception_chain() -> None:
     inner = RuntimeError("prompt is too long")
     outer = ValueError("API call failed")
     outer.__cause__ = inner
@@ -231,7 +231,7 @@ def test_cycle_runner_recognizes_prompt_too_long_in_exception_chain() -> None:
     assert is_prompt_too_long_error(cycle) is False
 
 
-def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
+def test_model_turn_preemptively_microcompacts_before_threshold() -> None:
     sent_messages: list[list[Message]] = []
 
     def capture(request: LlmRequest) -> LLMResponse:
@@ -289,7 +289,7 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
     assert all("<Compressed Agent Memory>" not in message.content for message in sent_messages[0])
 
 
-def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() -> None:
+def test_model_turn_keeps_the_frozen_prompt_after_session_memory_extraction() -> None:
     sent_messages: list[list[Message]] = []
 
     def capture(request: LlmRequest) -> LLMResponse:

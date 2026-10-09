@@ -18,7 +18,7 @@ typed events plus cancellation or approval control through `RunHandle`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM backend settings file |
-| `VV_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | Workspace directory |
+| `VV_AGENT_EXAMPLE_WORKSPACE` | temporary directory | Workspace directory |
 | `VV_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM backend |
 | `VV_AGENT_EXAMPLE_MODEL` | `kimi-k3` | Model name |
 | `VV_AGENT_EXAMPLE_PROMPT` | example-specific | Prompt override |
@@ -69,8 +69,8 @@ These examples use kernel handles, durable sessions, streaming and workspace bac
 | --- | --- | --- |
 | 18 | `18_cancellation.py` | RunHandle cancellation |
 | 19 | `19_streaming.py` | Typed kernel stream events |
-| 20 | `20_thread_backend.py` | Non-blocking RunHandle execution |
-| 21 | `21_state_checkpoint.py` | Durable SQLite session history and retained-turn resume |
+| 20 | `20_background_run.py` | Non-blocking RunHandle execution |
+| 21 | `21_durable_session.py` | Durable SQLite session history and retained-turn resume |
 | 22 | `22_sdk_advanced.py` | Public SDK streaming on the session kernel |
 | 24 | `24_workspace_backends.py` | Local, memory, S3, and custom workspace backends |
 | 25 | `25_temporary_tool_injection.py` | Run-scoped tool enablement |
@@ -78,8 +78,8 @@ These examples use kernel handles, durable sessions, streaming and workspace bac
 ```bash
 VV_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
 uv run python examples/19_streaming.py
-uv run python examples/20_thread_backend.py
-VV_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
+uv run python examples/20_background_run.py
+VV_AGENT_EXAMPLE_DB=/tmp/vv-agent-example.db uv run python examples/21_durable_session.py
 uv run python examples/22_sdk_advanced.py
 uv run python examples/24_workspace_backends.py
 ```

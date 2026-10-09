@@ -113,16 +113,17 @@ class Agent[TContext]:
         tool_description = description or f"Run the {self.name} agent."
 
         def invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolExecutionResult | ToolOutputError:
-            from vv_agent.runner import Runner
 
-            parent_config = Runner._agent_tool_parent_config(context)
+            from vv_agent.session.delegation import agent_tool_parent_config, child_agent_prompt, run_child_agent
+
+            parent_config = agent_tool_parent_config(context)
             if parent_config is None:
-                Runner._child_agent_prompt(arguments=arguments, context=context)
+                child_agent_prompt(arguments=arguments, context=context)
                 return ToolOutputError(
                     message="Sub-agent runtime is not available for this task",
                     error_code="sub_agents_not_enabled",
                 )
-            result = Runner._run_child_agent(self, arguments=arguments, parent_config=parent_config, context=context)
+            result = run_child_agent(self, arguments=arguments, parent_config=parent_config, context=context)
             return ToolExecutionResult(
                 tool_call_id="",
                 content=result.final_output or "",

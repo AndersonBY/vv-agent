@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from support import ModelMapProvider
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
@@ -18,6 +18,7 @@ from vv_agent.events import (
 from vv_agent.llm import LLMClient, ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.prompt import build_raw_system_prompt_bundle
+from vv_agent.session.delegation import build_sub_agent_task
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, SubTaskRequest, ToolCall
 
@@ -78,7 +79,7 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
     sub_llm = ScriptedLLM(steps=[LLMResponse(content="sub-result")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=_parent_client(provider),
         model_provider=provider,
         tool_registry=build_default_registry(),
@@ -137,7 +138,7 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
     sub_llm = ScriptedLLM(steps=[LLMResponse(content=answer) for answer in ("sub-A", "sub-B")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=_parent_client(provider),
         model_provider=provider,
         tool_registry=build_default_registry(),
@@ -171,11 +172,6 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
 
 
 def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[]),
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-    )
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
@@ -199,7 +195,7 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
         },
     )
 
-    sub_task = runtime._build_sub_agent_task(
+    sub_task = build_sub_agent_task(
         parent_task=parent_task,
         sub_task_id="sub-task-1",
         sub_session_id="sub-session-1",
@@ -221,11 +217,6 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
 
 
 def test_sub_task_uses_prompt_bundle_instead_of_prompt_section_metadata(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[]),
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-    )
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
@@ -241,7 +232,7 @@ def test_sub_task_uses_prompt_bundle_instead_of_prompt_section_metadata(tmp_path
         metadata={"anthropic_prompt_cache_enabled": True},
     )
 
-    sub_task = runtime._build_sub_agent_task(
+    sub_task = build_sub_agent_task(
         parent_task=parent_task,
         sub_task_id="sub-task-cache",
         sub_session_id="sub-session-cache",
@@ -263,11 +254,6 @@ def test_sub_task_uses_prompt_bundle_instead_of_prompt_section_metadata(tmp_path
 
 
 def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[]),
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-    )
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
@@ -282,7 +268,7 @@ def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tm
         description="collect facts",
     )
 
-    sub_task = runtime._build_sub_agent_task(
+    sub_task = build_sub_agent_task(
         parent_task=parent_task,
         sub_task_id="sub-task-cache-default",
         sub_session_id="sub-session-cache-default",
@@ -329,7 +315,7 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
     sub_llm = ScriptedLLM(steps=[LLMResponse(content="sub done")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=_parent_client(provider),
         model_provider=provider,
         tool_registry=build_default_registry(),

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vv_agent.run_config import RunConfig
+
 import json
 import time
 import uuid
@@ -71,3 +76,15 @@ class JsonlTraceExporter:
     def flush(self) -> None:
         with self._lock:
             self._file.flush()
+
+
+def trace_processors(run_config: RunConfig) -> list[TraceProcessor]:
+    tracing = run_config.tracing or {}
+    raw_processors = tracing.get("processors") if isinstance(tracing, dict) else None
+    if not isinstance(raw_processors, list):
+        return []
+    processors: list[TraceProcessor] = []
+    for processor in raw_processors:
+        if callable(getattr(processor, "on_span_start", None)) and callable(getattr(processor, "on_span_end", None)):
+            processors.append(processor)
+    return processors

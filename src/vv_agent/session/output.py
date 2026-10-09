@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.output_validation import OutputValidationContext
+from vv_agent.output_validation import OutputValidationContext, output_validation_error, postprocess_output, run_output_validator
 from vv_agent.result import RunResult
-from vv_agent.runner import Runner
 from vv_agent.types import AgentResult, AgentStatus, CompletionReason
 
 if TYPE_CHECKING:
@@ -39,7 +38,7 @@ def prepare_output(driver: _Driver, value: Any) -> tuple[str, str | None, Any] |
             final_answer=value,
             completion_reason=CompletionReason.NO_TOOL_FINISH,
         )
-        value, error = Runner._postprocess_output(
+        value, error = postprocess_output(
             agent=agent,
             run_context=driver.runtime.run_context(tid),
             raw_result=raw,
@@ -97,7 +96,7 @@ def prepare_output(driver: _Driver, value: Any) -> tuple[str, str | None, Any] |
             )
             return outcome
     assert agent.output_validator is not None
-    value, validation, repairable = Runner._run_output_validator(
+    value, validation, repairable = run_output_validator(
         agent=agent,
         validator=agent.output_validator,
         validation_context=OutputValidationContext(tid, agent.name, agent.output_type),
@@ -140,7 +139,7 @@ def prepare_output(driver: _Driver, value: Any) -> tuple[str, str | None, Any] |
     outcome = (
         ("completed", None, value)
         if validation.valid
-        else ("failed", "output_validation_failed", Runner._output_validation_error(validation))
+        else ("failed", "output_validation_failed", output_validation_error(validation))
     )
     driver.commit(
         [

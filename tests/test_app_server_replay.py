@@ -157,7 +157,7 @@ def test_resume_subscription_and_reopen_are_installed_before_snapshot() -> None:
 
     def snapshot() -> str:
         assert state_manager.subscribers("thread_1") == {"new_connection"}
-        assert state_manager.status("thread_1") == "idle"
+        assert state_manager.load("thread_1").status == "idle"
         return "snapshot"
 
     assert state_manager.subscribe_and_snapshot("thread_1", "new_connection", snapshot) == "snapshot"
@@ -176,7 +176,7 @@ def test_resume_snapshot_runtime_error_rolls_back_new_subscription_and_closed_st
         state_manager.subscribe_and_snapshot("thread_1", "new_connection", fail_snapshot)
 
     assert state_manager.subscribers("thread_1") == set()
-    assert state_manager.status("thread_1") == "closed"
+    assert state_manager.load("thread_1").status == "closed"
 
 
 def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTransport]:

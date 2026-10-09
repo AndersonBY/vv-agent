@@ -42,7 +42,7 @@ def _completed_child(driver, workspace, continuation):
         shared_state={},
         cycle_index=1,
         workspace_backend=LocalWorkspaceBackend(workspace),
-        sub_task_manager=manager.tool_manager(),
+        sub_task_manager=manager,
         idempotency_key="status",
     )
     return parent, child, manager, context

@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.events import AssistantDeltaEvent, DiagnosticEvent, RunEvent
@@ -30,30 +31,31 @@ def build_event_handler(*, verbose: bool) -> Callable[[RunEvent], None]:
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    with TemporaryDirectory(prefix="vv-agent-example-") as temporary_workspace:
+        settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+        backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+        model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+        workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", temporary_workspace)).resolve()
+        verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
 
-    workspace.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
 
-    agent = Agent("stream-demo", "Answer concisely.", model=model)
-    config = RunConfig(
-        model_provider=VvLlmModelProvider(settings_file=settings_file, default_backend=backend),
-        workspace=workspace,
-        stream=build_event_handler(verbose=verbose),
-        max_cycles=5,
-    )
+        agent = Agent("stream-demo", "Answer concisely.", model=model)
+        config = RunConfig(
+            model_provider=VvLlmModelProvider(settings_file=settings_file, default_backend=backend),
+            workspace=workspace,
+            stream=build_event_handler(verbose=verbose),
+            max_cycles=5,
+        )
 
-    print("[demo] 流式输出开始:\n")
-    try:
-        result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "用三句话介绍 Python 语言"), run_config=config)
-        print(f"\n\n[demo] 状态: {result.status.value}")
-        print(f"[demo] 共收到 {len(collected_tokens)} 个 token 片段")
-    except Exception as e:
-        print(f"\nError: {e}", file=sys.stderr)
-        sys.exit(1)
+        print("[demo] 流式输出开始:\n")
+        try:
+            result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "用三句话介绍 Python 语言"), run_config=config)
+            print(f"\n\n[demo] 状态: {result.status.value}")
+            print(f"[demo] 共收到 {len(collected_tokens)} 个 token 片段")
+        except Exception as e:
+            print(f"\nError: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

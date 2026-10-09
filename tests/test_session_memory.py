@@ -227,7 +227,7 @@ def test_session_memory_storage_scope_isolates_new_tasks(tmp_path) -> None:
 def test_session_memory_rejects_storage_dir_path_traversal(tmp_path) -> None:
     memory = SessionMemory(SessionMemoryConfig(storage_dir="../../outside"), workspace=tmp_path)
 
-    assert memory._storage_path() is None
+    assert memory.storage_path() is None
 
 
 def test_session_memory_parse_handles_non_array_and_greedy_noise() -> None:

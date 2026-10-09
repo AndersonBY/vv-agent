@@ -189,8 +189,6 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                 cycle = int(plan["dependencies"][0].rsplit("/", 1)[1])
                 event = HostInteractionResponseConsumedEvent(
                     **common,
-                    checkpoint_key=r.session_id,
-                    resume_attempt=1,
                     interaction_id=p["target_wait_id"],
                     logical_cycle=cycle,
                     operation_id=p["target_operation_id"],
@@ -198,7 +196,6 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     request_digest=str(interactions[(p["target_operation_id"], 1)].request_digest),
                     command_id=item["input_id"],
                     response_digest=p["input_digest"],
-                    consumed_revision=stored.seq,
                     cycle_index=cycle,
                 )
         elif r.kind.startswith("op_"):
@@ -278,7 +275,6 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     common["event_id"] = f"sk/{identity_digest}/duplicate-risk"
                     event = ModelRetryDuplicateRiskEvent(
                         **common,
-                        checkpoint_key=r.session_id,
                         operation_id=r.operation_id,
                         operation_kind="model",
                         risk="duplicate_model_request_and_cost",
@@ -337,12 +333,10 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         duration_ms=None,
                         operation_id=r.operation_id,
                         attempt=r.attempt,
-                        checkpoint_key=r.session_id,
                     )
                 elif r.kind == "op_unknown":
                     event = OperationAmbiguousEvent(
                         **common,
-                        checkpoint_key=r.session_id,
                         operation_id=r.operation_id,
                         operation_kind="tool",
                         risk="tool_outcome_unknown",
@@ -364,8 +358,6 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         interactions[key] = interaction
                         event = HostInteractionRequestedEvent(
                             **common,
-                            checkpoint_key=r.session_id,
-                            resume_attempt=r.attempt,
                             interaction_id=h["interaction_id"],
                             logical_cycle=cycle,
                             operation_id=r.operation_id,

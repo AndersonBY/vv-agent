@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.model import VvLlmModelProvider
@@ -37,7 +37,7 @@ def test_live_agent_waits_for_background_sub_task_completion(tmp_path: Path) -> 
         default_backend=backend,
         timeout_seconds=90.0,
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         model_provider=provider,
         tool_registry=build_default_registry(),

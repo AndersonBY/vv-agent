@@ -13,6 +13,7 @@ from weakref import WeakValueDictionary
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
 from vv_agent.memory import MemoryManager
+from vv_agent.model import resolve_run_model
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
 from vv_agent.run_handle import RunHandle
@@ -60,9 +61,8 @@ class SessionDriver:
             tx.create(SessionSpec(sid, "local", workspace, attributes=attributes), consumers=("events", "app_server", "traces"))
 
     def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
-        from vv_agent.runner import Runner
 
-        llm, resolved = Runner._resolve_model(agent=agent, run_config=config)
+        llm, resolved = resolve_run_model(agent=agent, run_config=config)
         metadata = dict(agent.metadata) | config.metadata
         settings = config.model_provider.default_settings(resolved) if config.model_provider else agent.model_settings
         settings = settings.resolve(agent.model_settings).resolve(config.model_settings) if settings else config.model_settings

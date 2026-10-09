@@ -3,27 +3,24 @@ from __future__ import annotations
 import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from vv_agent.agent import Agent, RunContext
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
-from vv_agent.constants import WORKSPACE_TOOLS
 from vv_agent.context_providers import (
     ContextFragment,
     ContextRequest,
     collect_context_fragments,
 )
 from vv_agent.memory.session_memory import load_session_memory_context
-from vv_agent.microcompaction import normalize_microcompaction_policy
 from vv_agent.prompt import PromptBundle, PromptSection
-from vv_agent.prompt.builder import _trim_text, inject_session_memory_section
+from vv_agent.prompt.builder import inject_session_memory_section
 from vv_agent.prompt.templates import render_sub_agents
 from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.metadata import ToolSideEffect
-from vv_agent.types import AgentTask, Message, NoToolPolicy
+from vv_agent.types import AgentTask
 
 _TASK_TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_allowed_tools",
@@ -238,157 +235,12 @@ class AgentCompiler:
             )
         return PromptBundle(sections=tuple(sections)), omitted_section_ids
 
-    def compile_frozen_checkpoint(
-        self,
-        *,
-        agent: Agent,
-        run_config: RunConfig,
-        resolved: ResolvedModelConfig,
-        checkpoint: Any,
-        trace_id: str,
-    ) -> AgentTask:
-        definition = getattr(checkpoint, "run_definition", None)
-        if not isinstance(definition, dict):
-            raise CheckpointError(
-                "checkpoint is missing its embedded run definition",
-                code="checkpoint_definition_invalid",
-            )
-        controls = definition.get("runtime_controls")
-        model = definition.get("model")
-        agent_definition = definition.get("agent")
-        if not isinstance(controls, dict) or not isinstance(model, dict) or not isinstance(agent_definition, dict):
-            raise CheckpointError(
-                "checkpoint run definition has invalid runtime fields",
-                code="checkpoint_definition_invalid",
-            )
-        try:
-            prompt_bundle = PromptBundle.from_dict(cast(dict[str, Any], definition["prompt_bundle"]))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise CheckpointError(
-                "checkpoint run definition has an invalid prompt bundle",
-                code="checkpoint_definition_invalid",
-            ) from exc
-        self._validate_frozen_static_prompt(agent, prompt_bundle)
-        self._validate_frozen_checkpoint_messages(getattr(checkpoint, "messages", None), prompt_bundle)
 
-        metadata: dict[str, Any] = {}
-        run_metadata = definition.get("run_metadata")
-        if isinstance(run_metadata, dict):
-            metadata.update(deepcopy(run_metadata))
-        try:
-            microcompaction_policy = normalize_microcompaction_policy(controls["microcompaction_policy"])
-        except (TypeError, ValueError) as exc:
-            raise CheckpointError(
-                "checkpoint run definition has an invalid microcompaction policy",
-                code="checkpoint_definition_invalid",
-            ) from exc
-        metadata["trace_id"] = trace_id
-        project_resolved_model_limits(
-            metadata,
-            context_length=resolved.context_length,
-            max_output_tokens=resolved.max_output_tokens,
+def tool_is_enabled(*, tool: FunctionTool, agent: Agent, run_config: RunConfig) -> bool:
+    if callable(tool.is_enabled):
+        run_context = RunContext(
+            context=run_config.context,
+            metadata={**agent.metadata, **run_config.metadata},
         )
-        metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
-        metadata["session_memory_enabled"] = controls["session_memory_enabled"]
-        if controls["stop_at_tool_names"]:
-            metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])
-        _apply_tool_policy_metadata(metadata, run_config.tool_policy)
-
-        initial_messages = [Message.from_dict(item) for item in definition["initial_messages"]]
-        stored_tool_names = [
-            str(function["name"])
-            for item in definition["tools"]
-            if isinstance(item, dict)
-            and isinstance(item.get("schema"), dict)
-            and isinstance((function := item["schema"].get("function")), dict)
-            and isinstance(function.get("name"), str)
-        ]
-        handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]
-        return AgentTask(
-            task_id=str(checkpoint.task_id),
-            model=str(model["model_id"]),
-            prompt_bundle=prompt_bundle,
-            user_prompt=str(definition["root_input"]),
-            max_cycles=int(controls["max_cycles"]),
-            memory_compact_threshold=int(controls["memory_compact_threshold"]),
-            memory_threshold_percentage=int(controls["memory_threshold_percentage"]),
-            microcompaction_policy=microcompaction_policy,
-            no_tool_policy=cast(NoToolPolicy, controls["no_tool_policy"]),
-            allow_interruption=bool(controls["allow_interruption"]),
-            use_workspace=any(name in WORKSPACE_TOOLS for name in stored_tool_names),
-            sub_agents=deepcopy(agent.sub_agents),
-            agent_type=agent_definition.get("type"),
-            native_multimodal=bool(controls["native_multimodal"]),
-            extra_tool_names=list(
-                dict.fromkeys(
-                    [
-                        *stored_tool_names,
-                        *[
-                            tool.name
-                            for tool in agent.tools
-                            if isinstance(tool, FunctionTool) and tool.exposure == ToolExposure.DIRECT
-                        ],
-                        *handoff_tool_names,
-                    ]
-                )
-            ),
-            model_settings=run_config.model_settings,
-            initial_messages=initial_messages,
-            initial_shared_state=deepcopy(definition["initial_shared_state"]),
-            metadata=metadata,
-        )
-
-    @staticmethod
-    def _validate_frozen_static_prompt(
-        agent: Agent,
-        prompt_bundle: PromptBundle,
-    ) -> None:
-        section_map = {section.id: section.text for section in prompt_bundle.sections}
-        if isinstance(agent.instructions, str):
-            expected = _trim_text(agent.instructions)
-            observed = section_map.get("agent_instructions")
-            if observed != expected:
-                raise CheckpointError(
-                    "static agent instructions do not match the frozen checkpoint prompt",
-                    code="checkpoint_definition_mismatch",
-                )
-        elif isinstance(agent.instructions, PromptBundle):
-            expected_sections = agent.instructions.sections
-            observed_prefix = prompt_bundle.sections[: len(expected_sections)]
-            if observed_prefix != expected_sections:
-                raise CheckpointError(
-                    "static agent prompt bundle does not match the frozen checkpoint prompt",
-                    code="checkpoint_definition_mismatch",
-                )
-        if agent.sub_agents:
-            expected_sub_agents = render_sub_agents(
-                "en-US",
-                {name: config.description for name, config in agent.sub_agents.items()},
-            )
-            if _trim_text(section_map.get("configured_sub_agents", "")) != _trim_text(expected_sub_agents):
-                raise CheckpointError(
-                    "configured sub-agents do not match the frozen checkpoint prompt",
-                    code="checkpoint_definition_mismatch",
-                )
-
-    @staticmethod
-    def _validate_frozen_checkpoint_messages(
-        messages: Any,
-        prompt_bundle: PromptBundle,
-    ) -> None:
-        if not isinstance(messages, list) or not messages:
-            raise CheckpointError(
-                "checkpoint is missing its frozen system message",
-                code="checkpoint_definition_mismatch",
-            )
-        first = messages[0]
-        if not isinstance(first, Message) or first.role != "system" or first.content != prompt_bundle.flatten():
-            raise CheckpointError(
-                "checkpoint system message does not match the frozen prompt bundle",
-                code="checkpoint_definition_mismatch",
-            )
-        if any(isinstance(message, Message) and message.role == "system" for message in messages[1:]):
-            raise CheckpointError(
-                "checkpoint contains a non-canonical system message",
-                code="checkpoint_definition_mismatch",
-            )
+        return bool(tool.is_enabled(run_context, agent))
+    return bool(tool.is_enabled)

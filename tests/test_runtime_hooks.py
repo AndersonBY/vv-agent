@@ -4,7 +4,7 @@ from functools import partial
 from pathlib import Path
 
 from support.compaction import run_model_turn
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent import constants as constants_module
 from vv_agent.constants import READ_FILE_TOOL_NAME
@@ -50,7 +50,7 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
         assert any(message.role == "user" and message.content == "HOOK_CONTEXT" for message in messages)
         return LLMResponse(content="ok")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[assert_hook_message]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -160,7 +160,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
         ]
     )
     lifecycle_events = []
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -209,7 +209,7 @@ def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> N
             )
 
     lifecycle_events = []
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -282,7 +282,7 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
             )
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -323,7 +323,7 @@ def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path
             LLMResponse(content="done"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -348,7 +348,7 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
             del event
             return LLMResponse(content="hook-finish")
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="plain")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -404,7 +404,7 @@ def test_runtime_cycle_injection_preserves_admitted_tool_batch(tmp_path: Path) -
         queued["used"] = True
         return [Message(role="user", content="STEER_NOW")]
 
-    runtime = AgentRuntime(
+    runtime = KernelRuntime(
         llm_client=llm,
         tool_registry=registry,
         default_workspace=tmp_path,

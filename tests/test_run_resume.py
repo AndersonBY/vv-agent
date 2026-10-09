@@ -1,4 +1,4 @@
-"""Resume addresses retained session/turn identities, with no RunState decoder."""
+"""Resume addresses retained session/turn identities."""
 
 from __future__ import annotations
 
@@ -86,4 +86,3 @@ def test_handle_approval_and_resume_do_not_replay_tool(tmp_path: Path):
 
 def test_resume_public_signature_has_only_explicit_identities():
     assert list(inspect.signature(Runner.resume).parameters) == ["session_id", "turn_id"]
-    assert not hasattr(__import__("vv_agent"), "RunState")

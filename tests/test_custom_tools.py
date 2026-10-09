@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from support.kernel_runtime import KernelRuntime as AgentRuntime
+from support.kernel_runtime import KernelRuntime
 
 from vv_agent.llm import ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
@@ -124,7 +124,7 @@ def test_runtime_executes_custom_workflow_tool(tmp_path: Path) -> None:
             LLMResponse(content="done"),
         ]
     )
-    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     task = AgentTask(
         task_id="custom_runtime",
         model="m",
