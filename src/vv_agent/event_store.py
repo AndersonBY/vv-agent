@@ -62,8 +62,9 @@ class IdempotentRunEventStore(RunEventStore, Protocol):
 
 
 class JsonlRunEventStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, _kernel: bool = False) -> None:
         self.path = Path(path)
+        self._kernel = _kernel
 
     def append(self, event: RunEvent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +88,7 @@ class JsonlRunEventStore:
                     payload = json.loads(line)
                     if not isinstance(payload, dict):
                         raise TypeError("Run event line must contain a JSON object")
-                    event = event_from_dict(payload)
+                    event = event_from_dict(payload, _kernel=self._kernel)
                 except (KeyError, TypeError, ValueError) as error:
                     raise EventStoreError.corrupt_line(line_number) from error
 

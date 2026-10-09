@@ -30,6 +30,7 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory import MemoryManager
+from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.run_config import RunConfig, ToolPolicy, merge_tool_policies
@@ -103,6 +104,14 @@ class Runtime:
         self._definition_suffix = b""
         self._schema_key: tuple | None = None
         self._schemas: list[dict[str, Any]] = []
+        self._memory_clients: dict[tuple[str | None, str], tuple[LLMClient, ResolvedModelConfig]] = {}
+        self._memory_routes: dict[str, tuple[LLMClient, ResolvedModelConfig]] = {}
+        self._memory_binding_key: tuple | None = None
+        self._memory_binding: dict[str, Any] = {}
+
+    @cached_property
+    def workspace_backend(self):
+        return self.config.workspace_backend or LocalWorkspaceBackend(Path(self.config.workspace or "."))
 
     @cached_property
     def registry(self) -> ToolRegistry:
@@ -197,8 +206,45 @@ class Runtime:
             metadata={**self.agent.metadata, **self.config.metadata},
         )
 
+    def model_route(self, purpose: str) -> tuple[LLMClient, ResolvedModelConfig]:
+        return self._memory_routes.get(purpose, (self.llm, self.resolved))
+
+    def _memory_bindings(self, task: AgentTask) -> dict[str, Any]:
+        meta = task.metadata
+        summary_backend = meta.get("memory_summary_backend") or self.memory_manager.summary_backend
+        summary_model = meta.get("memory_summary_model") or self.memory_manager.summary_model or task.model
+        extraction_backend = meta.get("session_memory_extraction_backend") or summary_backend
+        extraction_model = meta.get("session_memory_extraction_model") or summary_model
+        key = (task.model, summary_backend, summary_model, extraction_backend, extraction_model)
+        if key == self._memory_binding_key and not self._memory_routes:
+            return self._memory_binding
+        routes = {
+            "compaction": (summary_backend, summary_model),
+            "session_memory": (extraction_backend, extraction_model),
+        }
+        self._memory_routes = {}
+        bindings = {}
+        for purpose, (backend, model) in routes.items():
+            if model == task.model and (backend is None or backend == self.resolved.backend):
+                continue
+            client_key = (backend, model)
+            if client_key not in self._memory_clients:
+                provider = self.config.model_provider
+                if provider is None:
+                    raise ValueError("RunConfig.model_provider is required.")
+                resolved = provider.resolve(ModelRef.backend(backend, model) if backend else ModelRef.named(model))
+                self._memory_clients[client_key] = (provider.client(resolved), resolved)
+            client, resolved = self._memory_routes[purpose] = self._memory_clients[client_key]
+            bindings[purpose] = {
+                "backend": resolved.backend,
+                "model": resolved.model_id,
+                "endpoints": [t.endpoint_id for t in client.endpoint_targets] if isinstance(client, VvLlmClient) else [],
+            }
+        self._memory_binding_key, self._memory_binding = key, bindings
+        return bindings
+
     def complete(self, request: LlmRequest, attempt: int, stream_callback=None) -> LLMResponse:
-        client = self.llm
+        client, _ = self.model_route(request.metadata.get("purpose", "primary"))
         if isinstance(client, VvLlmClient):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
             targets = client.endpoint_targets
@@ -259,7 +305,7 @@ class Runtime:
                 tool_policy=policy,
                 **(
                     {
-                        "initial_messages": [Message.from_dict(copy_json(m)) for m in seed["messages"]],
+                        "initial_messages": [Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]],
                         "shared_state": copy_json(seed["shared_state"]),
                     }
                     if seed is not None
@@ -270,6 +316,7 @@ class Runtime:
             trace_id=tid,
             run_id=tid,
         )
+        task.task_id = tid
         task.metadata["_vv_agent_tool_policy_approval"] = policy.approval if policy else "default"
 
         defaults = self.config.model_provider.default_settings(self.resolved) if self.config.model_provider else ModelSettings()
@@ -311,29 +358,29 @@ class Runtime:
         session_id: str | None = None,
     ) -> ToolContext:
         metadata = dict(task.metadata)
-        frozen = ToolPolicy(
-            allowed_tools=metadata.get("_vv_agent_allowed_tools"),
-            disallowed_tools=metadata.get("_vv_agent_disallowed_tools", []),
-            denied_side_effects=metadata.get("_vv_agent_denied_side_effects", []),
-            denied_capability_tags=metadata.get("_vv_agent_denied_capability_tags", []),
-            denied_cost_dimensions=metadata.get("_vv_agent_denied_cost_dimensions", []),
-            deny_terminal_tools=metadata.get("_vv_agent_deny_terminal_tools", False),
-            approval=metadata.get("_vv_agent_tool_policy_approval", "default"),
-        )
-        current = merge_tool_policies(self.agent.tool_policy, self.config.tool_policy)
-        policy = merge_tool_policies(frozen, current)
-        assert policy is not None
-        if frozen.allowed_tools is not None and policy.allowed_tools is not None:
-            policy.allowed_tools = [n for n in frozen.allowed_tools if n in policy.allowed_tools]
-        if frozen.approval == "always":
-            policy.approval = "always"
-        from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
+        if plan._payload["op_kind"] != "model":
+            frozen = ToolPolicy(
+                allowed_tools=metadata.get("_vv_agent_allowed_tools"),
+                disallowed_tools=metadata.get("_vv_agent_disallowed_tools", []),
+                denied_side_effects=metadata.get("_vv_agent_denied_side_effects", []),
+                denied_capability_tags=metadata.get("_vv_agent_denied_capability_tags", []),
+                denied_cost_dimensions=metadata.get("_vv_agent_denied_cost_dimensions", []),
+                deny_terminal_tools=metadata.get("_vv_agent_deny_terminal_tools", False),
+                approval=metadata.get("_vv_agent_tool_policy_approval", "default"),
+            )
+            current = merge_tool_policies(self.agent.tool_policy, self.config.tool_policy)
+            policy = merge_tool_policies(frozen, current)
+            assert policy is not None
+            if frozen.allowed_tools is not None and policy.allowed_tools is not None:
+                policy.allowed_tools = [n for n in frozen.allowed_tools if n in policy.allowed_tools]
+            if frozen.approval == "always":
+                policy.approval = "always"
+            from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
 
-        policy.disallowed_tools = list(
-            dict.fromkeys([*policy.disallowed_tools, *read_after_cycle_disallowed_tools(shared_state or {})])
-        )
-        _apply_tool_policy_metadata(metadata, policy)
-        if policy is not None:
+            policy.disallowed_tools = list(
+                dict.fromkeys([*policy.disallowed_tools, *read_after_cycle_disallowed_tools(shared_state or {})])
+            )
+            _apply_tool_policy_metadata(metadata, policy)
             metadata["_vv_agent_tool_policy_approval"] = policy.approval
             metadata["_vv_agent_tool_policy_can_use_tool"] = policy.can_use_tool
         ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
@@ -352,7 +399,7 @@ class Runtime:
                 and "cycle_index" in plan._payload["request"].get("metadata", {}).get("vv_session", {})
                 else int(source.rsplit("/", 1)[1])
             ),
-            workspace_backend=self.config.workspace_backend or LocalWorkspaceBackend(workspace),
+            workspace_backend=self.workspace_backend,
             task_id=plan.turn_id or task.task_id,
             ctx=ctx,
             task_metadata=metadata,
@@ -405,15 +452,19 @@ class Runtime:
             }
         }
         memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
+        model_binding: dict[str, Any] = {
+            "backend": self.resolved.backend,
+            "model": self.resolved.model_id,
+            "endpoints": [t.endpoint_id for t in self.llm.endpoint_targets] if isinstance(self.llm, VvLlmClient) else [],
+        }
+        memory_bindings = self._memory_bindings(task)
+        if memory_bindings:
+            model_binding["internal"] = memory_bindings
         value: dict[str, Any] = {
             "agent_name": self.agent.name,
             "memory_settings": memory_settings,
             "child_tools": sorted(self.children),
-            "model_binding": {
-                "backend": self.resolved.backend,
-                "model": self.resolved.model_id,
-                "endpoints": [t.endpoint_id for t in self.llm.endpoint_targets] if isinstance(self.llm, VvLlmClient) else [],
-            },
+            "model_binding": model_binding,
         }
         signature = self.registry.planning_signature()
         # JSON fingerprints distinguish True from 1 and detach mutable cache inputs.
@@ -477,7 +528,7 @@ class Runtime:
 def request_from_dict(value: dict[str, Any]) -> LlmRequest:
     return LlmRequest(
         model=value["model"],
-        messages=[Message.from_dict(m) for m in value["messages"]],
+        messages=[Message.from_dict(m, _kernel=True) for m in value["messages"]],
         tools=value["tools"],
         metadata=value["metadata"],
         prompt_bundle=PromptBundle.from_dict(value["prompt_bundle"]) if value["prompt_bundle"] else None,

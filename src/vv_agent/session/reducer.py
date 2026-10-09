@@ -278,13 +278,15 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt.unknown_consumed = True
     order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
     if order is not None:
+        binding = turn.start._payload["definition"].get("model_binding", {})
+        binding = binding.get("internal", {}).get(p["purpose"], binding)
         require(
             op.kind == "model"
             and isinstance(order, list)
             and bool(order)
             and all(isinstance(e, str) and bool(e) for e in order)
             and len(set(order)) == len(order)
-            and set(order) == set(turn.start._payload["definition"].get("model_binding", {}).get("endpoints", [])),
+            and set(order) == set(binding.get("endpoints", [])),
             "invalid frozen endpoint order",
         )
     op.attempts[number] = Attempt(record, prepared=previous.prepared if number > 1 else None)
@@ -500,7 +502,7 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
     source = project_context(tuple(history), state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
-    replacement = [Message.from_dict(m) for m in p["replacement"]]
+    replacement = [Message.from_dict(m, _kernel=True) for m in p["replacement"]]
     ids = message_ids(source)
     definition = state.turns[tid].start._payload["definition"]
     manager = MemoryManager(**definition["memory_settings"])
@@ -801,7 +803,7 @@ class Fold:
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
                     for message in p["data"]["messages"]:
-                        Message.from_dict(message)
+                        Message.from_dict(message, _kernel=True)
                 elif p["stage"] == "session_memory_saved" and oid is not None:
                     require(
                         state.operations[oid].kind == "model"

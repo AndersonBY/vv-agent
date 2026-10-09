@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vv_agent.llm.errors import MAX_PTL_RETRIES
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
-from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .context import message_ids, project_context
 from .memory import extract_memory, finish_compact, start_compact
@@ -22,14 +20,16 @@ if TYPE_CHECKING:
 
 
 def manager_for(driver: _Driver) -> MemoryManager:
-    task = driver.task()
-    definition = driver.state.turns[task.task_id].start._payload["definition"]
+    assert driver.state.active_turn_id is not None
+    start = driver.state.turns[driver.state.active_turn_id].start
+    task = start._task()
+    definition = start._payload["definition"]
     return MemoryManager(
         **(definition["memory_settings"] | {"artifact_scope": f"session/{driver.sid}/{task.task_id}"}),
         workspace_backend=(
             driver.runtime.memory_manager.workspace_backend
             or driver.runtime.config.workspace_backend
-            or (LocalWorkspaceBackend(Path(driver.runtime.config.workspace or ".")) if task.use_workspace else None)
+            or (driver.runtime.workspace_backend if task.use_workspace else None)
         ),
         recovery_tool_available=any(t["function"]["name"] == "read_file" for t in definition["tools"]),
         session_memory=None,
@@ -225,8 +225,9 @@ def compact_context(driver: _Driver) -> bool:
     if oid in driver.state.operations:
         return finish_compact(driver, manager, source, mode="none", changed=False)
     task = driver.task()
+    _, resolved = driver.runtime.model_route("compaction")
     request = {
-        "model": task.model,
+        "model": resolved.model_id,
         "messages": [Message("user", plan.prompt).to_dict()],
         "tools": [],
         "metadata": {

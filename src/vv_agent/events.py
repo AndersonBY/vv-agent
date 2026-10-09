@@ -3149,6 +3149,7 @@ def _validate_event_wire(payload: dict[str, Any], *, _kernel: bool = False) -> N
         "reconciliation_resolved",
         "tool_call_deferred",
         "operation_replayed",
+        "session_persisted",
     }:
         raise ValueError("Retired kernel event type")
     retired = {"checkpoint_key", "resume_attempt", "consumed_revision"} if _kernel else set()

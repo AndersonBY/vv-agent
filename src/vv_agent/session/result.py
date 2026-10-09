@@ -12,7 +12,6 @@ from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
-    AgentTask,
     CompletionReason,
     CycleRecord,
     ModelCallOperation,
@@ -39,7 +38,7 @@ def project_result(
 ) -> RunResult:
     state, records, _ = snapshot if snapshot is not None else store.read_state(session_id)
     turn = state.turns[turn_id]
-    task = AgentTask.from_dict(turn.start.payload["definition"]["task"])
+    task = turn.start._task()
     terminal = next((r.record for r in reversed(records) if r.record.kind == "turn_ended" and r.record.turn_id == turn_id), None)
     through = next((i + 1 for i, r in enumerate(records) if r.record == terminal), len(records))
     records = records[:through]
@@ -65,7 +64,7 @@ def project_result(
         for number, attempt in op.attempts.items():
             if not attempt.started:
                 continue
-            purpose = attempt.plan.payload["purpose"]
+            purpose = attempt.plan._payload["purpose"]
             cycle = (
                 attempt.plan._payload["request"]["metadata"]
                 .get("vv_session", {})
@@ -96,7 +95,9 @@ def project_result(
                         "output_repair": ModelCallOperation.OUTPUT_REPAIR,
                     }.get(purpose, ModelCallOperation.AGENT_CYCLE),
                     cycle_index=cycle,
-                    backend=turn.start._payload["definition"]["model_binding"]["backend"],
+                    backend=turn.start._payload["definition"]["model_binding"]
+                    .get("internal", {})
+                    .get(purpose, turn.start._payload["definition"]["model_binding"])["backend"],
                     model=attempt.plan._payload["request"]["model"],
                     status=ModelCallStatus.FAILED
                     if attempt.result and error_code
@@ -179,7 +180,7 @@ def project_result(
             reason = CompletionReason.WAIT_USER
         elif waits:
             handle = waits[0]["handle"]
-            wait_reason = handle.get("question", "approval" if handle["kind"] == "approval" else "deferred_pending")
+            wait_reason = handle.get("question", "approval" if handle["kind"] == "approval" else f"{handle['kind']}_pending")
             output = wait_reason
             reason = CompletionReason.WAIT_USER
             completion_tool_name = next((c.name for c in cycles[-1].tool_calls if c.name == "ask_user"), None) if cycles else None
@@ -224,6 +225,8 @@ def project_result(
             else json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         ) or partial
     raw = AgentResult(
+        _kernel_session_id=session_id,
+        _kernel_turn_id=turn_id,
         status=status,
         messages=messages,
         cycles=cycles,

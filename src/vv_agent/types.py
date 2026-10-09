@@ -193,7 +193,14 @@ class Message:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Message:
+    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> Message:
+        if _kernel:
+            # Reuse the strict value codec, without the old transcript storage authority.
+            from vv_agent.sessions.base import _decode_canonical_message
+
+            if not isinstance(data, dict):
+                raise TypeError("Message payload must be a dict")
+            return _decode_canonical_message(data)
         if not isinstance(data, dict):
             raise TypeError("Message payload must be a dict")
         _reject_unknown_fields(data, _MESSAGE_FIELDS, "Message")
@@ -1458,6 +1465,8 @@ class AgentResult:
     checkpoint_key: str | None = None
     resume_observations: list[ResumeObservation] = field(default_factory=list)
     error_code: str | None = None
+    _kernel_session_id: str | None = field(default=None, repr=False, compare=False)
+    _kernel_turn_id: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.error is not None:
@@ -1517,6 +1526,12 @@ class AgentResult:
             "checkpoint_key": self.checkpoint_key,
             "resume_observations": [observation.to_dict() for observation in self.resume_observations],
         }
+        if self._kernel_session_id is not None:
+            payload.pop("checkpoint_key")
+            payload.pop("resume_observations")
+            payload["session_id"] = _required_non_empty_string(self._kernel_session_id, "session_id")
+            payload["turn_id"] = _required_non_empty_string(self._kernel_turn_id, "turn_id")
+            canonical_json_bytes(self.shared_state)
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
         if self.budget_exhaustion is not None:
@@ -1526,7 +1541,7 @@ class AgentResult:
         return payload
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentResult:
+    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> AgentResult:
         required_fields = {
             "status",
             "completion_reason",
@@ -1543,6 +1558,9 @@ class AgentResult:
             "resume_observations",
         }
         optional_fields = {"budget_usage", "budget_exhaustion", "error_code"}
+        if _kernel:
+            required_fields -= {"checkpoint_key", "resume_observations"}
+            required_fields |= {"session_id", "turn_id"}
         if not isinstance(data, dict):
             raise TypeError("AgentResult must be an object")
         actual_fields = set(data)
@@ -1559,7 +1577,7 @@ class AgentResult:
         token_usage_raw = data["token_usage"]
         if not isinstance(token_usage_raw, dict):
             raise TypeError("AgentResult field 'token_usage' must be an object")
-        token_usage = TaskTokenUsage.from_dict(token_usage_raw)
+        token_usage = TaskTokenUsage.from_dict(token_usage_raw, _kernel=_kernel)
         completion_reason_raw = data["completion_reason"]
         if completion_reason_raw is not None and not isinstance(completion_reason_raw, str):
             raise TypeError("AgentResult field 'completion_reason' must be a string or None")
@@ -1575,10 +1593,10 @@ class AgentResult:
         budget_exhaustion_raw = data.get("budget_exhaustion")
         if "budget_exhaustion" in data and not isinstance(budget_exhaustion_raw, dict):
             raise TypeError("AgentResult field 'budget_exhaustion' must be an object")
-        checkpoint_key = data["checkpoint_key"]
+        checkpoint_key = None if _kernel else data["checkpoint_key"]
         if checkpoint_key is not None and not isinstance(checkpoint_key, str):
             raise TypeError("AgentResult field 'checkpoint_key' must be a string or None")
-        resume_observations_raw = data["resume_observations"]
+        resume_observations_raw = [] if _kernel else data["resume_observations"]
         if not isinstance(resume_observations_raw, list):
             raise TypeError("AgentResult field 'resume_observations' must be a list")
         error_code = data.get("error_code")
@@ -1607,8 +1625,14 @@ class AgentResult:
             raise TypeError("AgentResult field 'cycles' must be a list")
         if not isinstance(data["shared_state"], dict):
             raise TypeError("AgentResult field 'shared_state' must be an object")
+        if _kernel:
+            if data["status"] not in {"pending", "running", "suspended", "wait_user", "completed", "failed", "max_cycles"}:
+                raise ValueError("invalid kernel AgentResult status")
+            canonical_json_bytes(data["shared_state"])
 
         result = cls(
+            _kernel_session_id=_required_non_empty_string(data["session_id"], "session_id") if _kernel else None,
+            _kernel_turn_id=_required_non_empty_string(data["turn_id"], "turn_id") if _kernel else None,
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
             completion_tool_name=completion_tool_name,

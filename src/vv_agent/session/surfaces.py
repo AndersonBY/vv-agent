@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Iterator
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import replace
 from pathlib import Path
 from threading import Condition, RLock, Thread
@@ -231,8 +230,9 @@ class _KernelHandle:
     def __init__(self, kernel: _SessionKernel, sid: str, tid: str, runtime: Runtime, consumer: str | None) -> None:
         self.kernel, self.session_id, self.run_id, self.runtime, self.consumer = kernel, sid, tid, runtime, consumer
         self._condition = Condition()
-        self._events: deque[RunEvent] = deque()
+        self._events: list[RunEvent] = []
         self._done = False
+        self._cancel_bound = False
         self._error: BaseException | None = None
         self._deliver_to_parent = False
         self._thread = Thread(target=self._run, name="session-surface-driver")
@@ -241,10 +241,25 @@ class _KernelHandle:
         def hook(point, record):
             original_hook(point, record)
             if point == "after_commit":
+                self._bind_cancel()
                 self._publish()
                 self._schedule_background()
 
         runtime.hook = hook
+
+    def _bind_cancel(self) -> None:
+        token = self.runtime.config.cancellation_token
+        if self._cancel_bound or token is None:
+            return
+        state, _, _ = self.kernel.store.read_state(self.session_id)
+        if self.run_id not in state.turns:
+            return
+        self._cancel_bound = True
+        token.on_cancel(
+            lambda: self.kernel.push(
+                self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id)
+            )
+        )
 
     def start(self) -> None:
         self._thread.start()
@@ -259,7 +274,8 @@ class _KernelHandle:
 
         def sink(event):
             if self.runtime.config.stream:
-                self.runtime.config.stream(event)
+                with suppress(Exception):
+                    self.runtime.config.stream(event)
             with self._condition:
                 self._events.append(event)
                 self._condition.notify_all()
@@ -317,6 +333,7 @@ class _KernelHandle:
 
     def _run(self) -> None:
         try:
+            self._bind_cancel()
             self._publish()
             self._schedule_background()
             self._drive_tree(self.session_id, self.runtime, self.run_id)
@@ -332,11 +349,13 @@ class _KernelHandle:
                 self._condition.notify_all()
 
     def events(self) -> Iterator[RunEvent]:
+        position = 0
         while True:
             with self._condition:
-                self._condition.wait_for(lambda: self._events or self._done)
-                if self._events:
-                    event = self._events.popleft()
+                self._condition.wait_for(lambda position=position: position < len(self._events) or self._done)
+                if position < len(self._events):
+                    event = self._events[position]
+                    position += 1
                 else:
                     return
             yield event
@@ -362,7 +381,9 @@ class _KernelHandle:
     def cancel(self, reason: str = "") -> bool:
         del reason
         state, _, _ = self.kernel.store.read_state(self.session_id)
-        if state.active_turn_id is None:
+        if state.active_turn_id != self.run_id:
             return False
-        self.kernel.control(self.session_id, "cancel", uuid4().hex)
-        return True
+        receipt = self.kernel.push(
+            self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id)
+        )
+        return not receipt.replayed

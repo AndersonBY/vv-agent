@@ -192,6 +192,11 @@ class RunResult:
         }
         if self.error_code is not None:
             payload["error_code"] = self.error_code
+        if self.raw_result._kernel_session_id is not None:
+            payload.pop("checkpoint_key")
+            payload.pop("resume_observations")
+            payload["session_id"] = self.raw_result._kernel_session_id
+            payload["turn_id"] = self.raw_result._kernel_turn_id
         return payload
 
     def _resolved_model_dict(self) -> dict[str, Any] | None:
