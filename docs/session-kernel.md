@@ -794,6 +794,19 @@ rejected wire inputs are encoded and replayed through current decoders. The JSON
 replay corpus contains no deliberately invalid line. Seven Keep fixtures are
 checked without writing them. The entrypoint writes the case disposition report
 to `/tmp/c1c1b-fixture-diff.md`, including per-file coverage keys.
+The final authoring self-check resolves every fixture reference and RFC 6901
+pointer against the forty-five outputs and the seven Keep files. It rejects
+deleted fixture names and superseded discriminators, including embedded schema
+and TypeScript text, and checks optional-field inventories against their current
+closed producer schemas/codecs. Deliberately unsupported version mutations in
+negative cases are reported separately; they do not carry obsolete version names.
+Host-interaction value codecs supply the public API's wire references in
+`app_server_protocol.json`. The terminal optional inventory comes from the
+kernel `TurnCompletedParams` schema, including `waitReason`. Transcript set cover
+preserves closed-thread execution rejection for both explicit and default
+subscription, alongside the nonexecuting snapshot. Accounting references retain
+their real projection source records after curation. Prompt descriptors identify
+`turn_started.definition` and `task.prompt_bundle` without changing prompt bytes.
 Memory-model bindings cache unchanged primary-only route selections. Alternate
 routes reuse resolved clients and recheck their endpoint bindings on each read;
 route-key changes still resolve and freeze the matching client/endpoints. Continuation hints use the

@@ -769,6 +769,11 @@ class Author:
                 sha256=sha256(raw).hexdigest(),
             )
         d["run_scope"].pop("checkpoint_resume", None)
+        d["run_scope"]["run_definition"] = {
+            "carrier": "turn_started.definition",
+            "field": "task.prompt_bundle",
+            "validation_owner": "opaque J in turn_started.definition",
+        }
         d["run_scope"]["session_resume"] = "reuse_frozen_definition_without_reinvoking_producers"
         d["run_scope"]["conformance_cases"] = [
             c for c in d["run_scope"]["conformance_cases"] if "checkpoint" not in json.dumps(c)
@@ -813,6 +818,9 @@ class Author:
                 cap.pop("rust", None)
                 cap.pop("adaptation", None)
                 cap.pop("deferred_representation", None)
+                if name in {"vv_agent.runtime.HostInteractionRequest", "vv_agent.runtime.HostInteractionOutcome"}:
+                    value = "request" if name.endswith("Request") else "outcome"
+                    cap["wire"] = f"fixtures/app_server_protocol.json#/host_interaction_values/{value}"
                 if name.rsplit(".", 1)[-1] == "JsonlRunEventStore":
                     cap["behavior"] = "JSONL projection sink; never an execution ledger"
                 caps.append(cap)
@@ -922,8 +930,18 @@ class Author:
             assert expected == c["expected"]
             c["expected"] = expected
         for c in d["invalid_wire_cases"]:
+            if c["name"] == "unsupported_schema_version":
+                c["replace"]["schema_version"] = "unsupported"
+                reject(TokenUsage.from_dict, TokenUsage().to_dict() | c["replace"])
             if "input" in c:
                 reject(TokenUsage.from_dict, c["input"])
+        for c in d["invalid_task_wire_cases"]:
+            if c["name"] == "unsupported_schema_version":
+                c["mutation"]["replace"]["schema_version"] = "unsupported"
+                reject(
+                    lambda value: TaskTokenUsage.from_dict(value, _kernel=True),
+                    TaskTokenUsage(_kernel=True).to_dict() | c["mutation"]["replace"],
+                )
         from vv_agent.types import CacheUsage
 
         for c in d["aggregation_cases"]:
@@ -965,7 +983,7 @@ class Author:
             case["input"] = {
                 "session_id": sid,
                 "action": "reuse_summary_receipt" if replay else "drive",
-                "transcript_ref": f"session_projection.json#sessions/{sid}",
+                "transcript_ref": f"session_projection.json#/source_records/{sid}",
             }
             case["expected"] = {
                 "model_calls": calls,
@@ -1108,9 +1126,9 @@ class Author:
             for c in d["terminal"]["agentStatusProjection"]
             if "deferred" not in json.dumps(c) and "reconciliation" not in json.dumps(c)
         ]
-        d["terminal"]["optionalFieldsOmittedWhenAbsent"] = [
-            key for key in d["terminal"]["optionalFieldsOmittedWhenAbsent"] if key != "checkpoint"
-        ]
+        terminal = json.loads(app["schemas"]["jsonSchema"]["ServerNotification"])["$defs"]["TurnCompletedParams"]
+        assert terminal["additionalProperties"] is False
+        d["terminal"]["optionalFieldsOmittedWhenAbsent"] = sorted(set(terminal["properties"]) - set(terminal["required"]))
         d["terminal"]["threadStatusValues"] = ["idle", "running", "interrupted", "archived", "closed"]
         d["liveReplay"]["item"] = next(m["params"] for m in named("item/completed"))
         started = [m for m in named("item/started") if m["params"]["type"] == "toolCall"]
@@ -2578,6 +2596,10 @@ class Author:
         self.terminal()
         self.events_traces()
         self.invalid_events()
+        self.outputs["session_codec.json"]["message_contract"]["reserved_metadata"]["_vv_agent_compaction"] = (
+            "memory_local.json#/evidence_manifest"
+        )
+        self.outputs["memory_lifecycle.json"]["summary_pipeline"]["case_fixture"] = "memory_local.json#/summary_compaction"
         return self.outputs
 
 
@@ -2708,7 +2730,7 @@ def validate_replacements(values, independent):
 def generate_replacements(fixtures, app, output, independent, facts, write_json):
     reference = BASE.parents[3] / "wt-c1-contract" / "fixtures"
     if reference.is_dir():
-        for name in (*REPLACE, *KEEP):
+        for name in KEEP:
             assert (reference / name).read_bytes() == (BASE / name).read_bytes(), name
     keep_hashes = {name: sha256((BASE / name).read_bytes()).hexdigest() for name in KEEP}
     author = Author(fixtures, independent, facts)

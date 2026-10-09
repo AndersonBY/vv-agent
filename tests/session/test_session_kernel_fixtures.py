@@ -7,6 +7,7 @@ import runpy
 import subprocess
 import sys
 from collections import defaultdict
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -31,6 +32,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session_kernel_fixtu
 AUTHOR = runpy.run_path(str(SCRIPT))
 REPLACEMENTS = runpy.run_path(str(SCRIPT.with_name("_session_kernel_replacements.py")))
 CURATION = runpy.run_path(str(SCRIPT.with_name("_session_kernel_curation.py")))
+CHECKS = runpy.run_path(str(SCRIPT.with_name("_session_kernel_checks.py")))
 FILES = {
     "session_record.schema.json",
     "session_inbox.schema.json",
@@ -53,16 +55,21 @@ def checked_bytes(vector):
     return raw
 
 
-def test_session_kernel_fixtures_deterministic_and_revalidated(tmp_path):
-    directories = [tmp_path / "first", tmp_path / "second"]
+@pytest.fixture(scope="module")
+def generated_fixtures(tmp_path_factory):
+    root = tmp_path_factory.mktemp("kernel-fixtures")
+    directories = [root / "first", root / "second"]
     coverage_runs = []
+    reports = []
     for output in directories:
         generated = subprocess.run(
             [sys.executable, str(SCRIPT), "--output", str(output)], capture_output=True, text=True, timeout=600
         )
         assert generated.returncode == 0, generated.stderr
         assert {p.name for p in output.iterdir()} == FILES
-        coverage_runs.append(json.loads(generated.stdout)["coverage"])
+        report = json.loads(generated.stdout)
+        reports.append(report)
+        coverage_runs.append(report["coverage"])
         assert sum(p.stat().st_size for p in output.iterdir()) <= 3_000_000
         assert all(p.stat().st_size <= 512_000 for p in output.iterdir())
     assert coverage_runs[0] == coverage_runs[1]
@@ -70,6 +77,21 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(tmp_path):
     first, second = directories
     for name in FILES:
         assert (first / name).read_bytes() == (second / name).read_bytes(), name
+    values = {}
+    for name in FILES:
+        raw = (first / name).read_text()
+        values[name] = [json.loads(line) for line in raw.splitlines()] if name.endswith(".jsonl") else json.loads(raw)
+    assert reports[0]["self_checks"] == reports[1]["self_checks"]
+    return directories, coverage_runs, values, reports[0]["self_checks"]
+
+
+def validate_outputs(values):
+    return CHECKS["validate_outputs"](values, REPLACEMENTS["BASE"], REPLACEMENTS["KEEP"], REPLACEMENTS["REPLACE"])
+
+
+def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixtures):
+    directories, coverage_runs, _, _ = generated_fixtures
+    first, _second = directories
 
     def read(name):
         return json.loads((first / name).read_text())
@@ -262,6 +284,161 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(tmp_path):
         for notification in entry.get("notifications", []):
             envelope.validate(notification)
     assert app["facts"]["observer_cannot_approve"] and app["facts"]["timeout_at_absolute_deadline"]
+
+
+def test_host_interaction_wire_references_use_current_owner(generated_fixtures):
+    from vv_agent.interaction import HostInteractionRequest
+    from vv_agent.runtime.controller import HostInteractionOutcome
+
+    _, _, values, _ = generated_fixtures
+    capabilities = {c["python"]: c for domain in values["public_api.json"]["domains"] for c in domain["capabilities"]}
+    app = values["app_server_protocol.json"]
+    for name, decoder, field in (
+        ("HostInteractionRequest", HostInteractionRequest, "request"),
+        ("HostInteractionOutcome", HostInteractionOutcome, "outcome"),
+    ):
+        reference = capabilities["vv_agent.runtime." + name]["wire"]
+        assert reference == "fixtures/app_server_protocol.json#/host_interaction_values/" + field
+        wire = CHECKS["resolve_pointer"](app, reference.split("#", 1)[1])
+        assert decoder.from_dict(wire).to_dict() == wire
+
+
+def test_terminal_optional_fields_come_from_kernel_schema(generated_fixtures):
+    from vv_agent.app_server.schema import export_schema_bundles
+
+    _, _, values, _ = generated_fixtures
+    schema = json.loads(export_schema_bundles(_kernel=True)["jsonSchema"]["ServerNotification"])["$defs"]["TurnCompletedParams"]
+    optional = values["app_server_observable.json"]["terminal"]["optionalFieldsOmittedWhenAbsent"]
+    assert schema["additionalProperties"] is False
+    assert set(optional) == set(schema["properties"]) - set(schema["required"])
+    assert "waitReason" in optional and "interruption" not in optional
+
+
+def test_closed_thread_resume_transcripts_cover_execution_and_snapshot(generated_fixtures):
+    _, _, values, _ = generated_fixtures
+    app = values["app_server_protocol.json"]
+    rejected = []
+    snapshots = []
+    for row in app["transcripts"]:
+        request = row.get("request", {})
+        if request.get("method") != "thread/resume" or request["params"]["threadId"] != "thread_1":
+            continue
+        response = row["responses"][0]
+        if "error" in response:
+            assert response["error"] == {"code": -32602, "message": "Thread is closed"}
+            rejected.append(request["params"].get("subscribe", "default"))
+        else:
+            assert request["params"]["subscribe"] is False
+            assert response["result"]["thread"]["status"] == "closed"
+            snapshots.append(row)
+    assert rejected == [True, "default"]
+    assert len(snapshots) == 1
+
+
+def test_prompt_definition_descriptor_preserves_rendered_bytes(generated_fixtures):
+    _, _, values, _ = generated_fixtures
+    prompt = values["prompt_bundle.json"]
+    descriptor = prompt["run_scope"]["run_definition"]
+    assert descriptor == {
+        "carrier": "turn_started.definition",
+        "field": "task.prompt_bundle",
+        "validation_owner": values["run_definition.json"]["top_level_field_policy"]["validation_owner"],
+    }
+    original = REPLACEMENTS["load"]("prompt_bundle.json")
+    assert prompt["scenarios"] == original["scenarios"]
+    assert prompt["stable_hash_vectors"] == original["stable_hash_vectors"]
+
+
+def test_generated_output_self_checks_revalidate_all_files(generated_fixtures):
+    _, _, values, report = generated_fixtures
+    assert validate_outputs(values) == report
+    assert report["references"] > 0 and report["optional_lists"] == 10
+    assert {v["value"] for v in report["rejected_versions"]} == {"unsupported"}
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "fixtures/missing.json",
+        "fixtures/MISSING.json",
+        "fixtures/../model_ref.json",
+        "fixtures/controller_command.json",
+        "memory_local.json#/missing",
+        "memory_local.json#summary_compaction",
+        "session_records.jsonl#/999999",
+        "session_records.jsonl#/01",
+        "session_records.jsonl#/0/~2",
+    ],
+)
+def test_generated_output_self_checks_reject_broken_references(generated_fixtures, reference):
+    values = deepcopy(generated_fixtures[2])
+    values["public_api.json"]["check_reference"] = reference
+    with pytest.raises(AssertionError):
+        validate_outputs(values)
+
+
+def test_generated_output_self_checks_resolve_keep_and_escaped_pointers(generated_fixtures):
+    values = deepcopy(generated_fixtures[2])
+    values["public_api.json"]["a/b~c"] = "fixture-value"
+    values["public_api.json"]["check_references"] = [
+        "fixtures/model_ref.json#/valid/0",
+        "public_api.json#/a~1b~0c",
+        "public_api.json#%2Fa~1b~0c",
+    ]
+    assert validate_outputs(values)["references"] == generated_fixtures[3]["references"] + 3
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "vv-agent.run-definition.v5",
+        "vv-agent.model-call.v1",
+        "vv-agent.task-token-usage.v2",
+        "vv-agent-public-api-v7",
+        "vv-agent.checkpoint.v12",
+        "vv-agent.model-call.v999",
+        "v2",
+    ],
+)
+def test_generated_output_self_checks_reject_superseded_versions(generated_fixtures, version):
+    values = deepcopy(generated_fixtures[2])
+    values["prompt_bundle.json"]["run_scope"]["run_definition"]["schema_version"] = version
+    with pytest.raises(AssertionError, match="discriminator"):
+        validate_outputs(values)
+
+
+@pytest.mark.parametrize("field,value", [("protocolVersion", "v1"), ("wire_version", "v5"), ("schema_version", 7)])
+def test_generated_output_self_checks_reject_stale_protocol_event_inventory(generated_fixtures, field, value):
+    values = deepcopy(generated_fixtures[2])
+    values["public_api.json"][field] = value
+    with pytest.raises(AssertionError, match="discriminator"):
+        validate_outputs(values)
+
+
+@pytest.mark.parametrize(
+    "name,pointer",
+    [
+        ("app_server_observable.json", "/terminal/optionalFieldsOmittedWhenAbsent"),
+        ("session_codec.json", "/message_contract/optional_fields"),
+        ("bounded_tool_result.json", "/result_contract/optional_fields"),
+        ("bounded_tool_result.json", "/result_contract/canonical_writer_normalization/omit_empty_optional_fields"),
+        ("prompt_bundle.json", "/section_contract/optional_fields"),
+        ("result_public.json", "/agent_result_wire/optional_fields"),
+        ("llm_stream_projection.json", "/mappings/assistant_delta/optional_source_fields"),
+    ],
+)
+def test_generated_output_self_checks_reject_unknown_optional_fields(generated_fixtures, name, pointer):
+    values = deepcopy(generated_fixtures[2])
+    CHECKS["resolve_pointer"](values[name], pointer).append("interruption")
+    with pytest.raises(AssertionError, match="unknown optional fields"):
+        validate_outputs(values)
+
+
+def test_generated_output_self_checks_reject_unknown_omission_flag(generated_fixtures):
+    values = deepcopy(generated_fixtures[2])
+    values["session_codec.json"]["message_contract"]["interruption_omitted_when_absent"] = True
+    with pytest.raises(AssertionError, match="unknown omitted field"):
+        validate_outputs(values)
 
 
 def test_private_runner_subscribers_and_observer_failure_keep_committed_result():

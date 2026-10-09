@@ -25,11 +25,13 @@ from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import RunBudgetLimits, UnavailableMetricPolicy
 from vv_agent.events import event_from_dict
 from vv_agent.guardrails import GuardrailResult
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.output_validation import OutputValidationResult
+from vv_agent.runtime.controller import HostInteractionOutcome
 from vv_agent.runtime.hooks import BaseRuntimeHook
 from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.context import project_context
@@ -992,6 +994,7 @@ class Fixtures:
             (7, "turn/resume", {"threadId": "thread_1", "turnId": "thread_1/turn/turn_1"}),
             (8, "turn/start", {"threadId": "thread_1", "input": []}),
             (9, "thread/resume", {"threadId": "thread_1", "subscribe": True}),
+            (15, "thread/resume", {"threadId": "thread_1"}),
         ):
             error = request(i, method, params)["error"]
             assert error == {"code": -32602, "message": "Thread is closed"}
@@ -1138,8 +1141,25 @@ class Fixtures:
         assert any(m.get("method") == "approval/resolved" and m["params"]["decision"] == "timeout" for m in resolved)
         assert self.state(sid).active_turn_id is None
         assert len(APPROVED_EFFECTS) == effects_before
+        host_request = HostInteractionRequest("interaction", 1, "operation", "tool", "Choose.")
+        request_value = host_request.to_dict()
+        outcome_value = HostInteractionOutcome(
+            interaction_id=host_request.interaction_id,
+            logical_cycle=host_request.logical_cycle,
+            checkpoint_revision=0,
+            status="admitted",
+            outbox_state="pending",
+            record_id="interaction-record",
+            notification_id="interaction-notification",
+            notification_payload_digest=sha256(independent_bytes([request_value])[0]).hexdigest(),
+            notification_outbox_action="host_interaction_notification",
+            notification_outbox_destination="host_interaction_observer",
+        ).to_dict()
+        assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
+        assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
         return {
             "protocol_version": "v2",
+            "host_interaction_values": {"request": request_value, "outcome": outcome_value},
             "transcripts": transcript,
             "schemas": exported,
             "facts": {
@@ -1594,6 +1614,13 @@ def generate(output: Path):
                 spec.loader.exec_module(curation)
                 values, curated_coverage = curation.curate(output, streams, fixtures.semantics, independent_bytes, facts)
                 replacements.validate_replacements({name: values[name] for name in replacements.REPLACE}, independent_bytes)
+                spec = importlib.util.spec_from_file_location(
+                    "_session_kernel_checks", Path(__file__).with_name("_session_kernel_checks.py")
+                )
+                assert spec is not None and spec.loader is not None
+                checks = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(checks)
+                self_checks = checks.validate_outputs(values, replacements.BASE, replacements.KEEP, replacements.REPLACE)
                 replacement_report["replaced"] = {
                     name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE
                 }
@@ -1611,7 +1638,7 @@ def generate(output: Path):
                         report.write("; ".join(keys["after"]) + "\n")
             finally:
                 fixtures.kernel.close()
-    return {"inventory": inventory, "coverage": curated_coverage}
+    return {"inventory": inventory, "coverage": curated_coverage, "self_checks": self_checks}
 
 
 if __name__ == "__main__":
