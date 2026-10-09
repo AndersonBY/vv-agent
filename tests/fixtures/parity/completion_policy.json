@@ -1,16 +1,451 @@
 {
-  "version": 2,
-  "policy_values": [
-    "continue",
-    "wait_user",
-    "finish"
-  ],
-  "framework_default": "finish",
-  "precedence": [
-    "run_config",
-    "runner_default_run_config",
-    "agent",
-    "framework_default"
+  "cases": [
+    {
+      "agent_policy": null,
+      "expected": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": "done",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 2,
+      "name": "framework_default_finishes_with_assistant_output",
+      "producer": {
+        "records": [
+          "session/c1c/framework_default_finishes_with_assistant_output/created",
+          "input/initial/applied",
+          "turn/c1c/framework_default_finishes_with_assistant_output/turn/initial/started",
+          "usage/active/c1c/framework_default_finishes_with_assistant_output/turn/initial/1/1",
+          "op/c1c/framework_default_finishes_with_assistant_output/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/framework_default_finishes_with_assistant_output/turn/initial/1/2",
+          "op/c1c/framework_default_finishes_with_assistant_output/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/framework_default_finishes_with_assistant_output/turn/initial/1/3",
+          "op/c1c/framework_default_finishes_with_assistant_output/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/framework_default_finishes_with_assistant_output/turn/initial/1/4",
+          "turn/c1c/framework_default_finishes_with_assistant_output/turn/initial/ended"
+        ],
+        "session_id": "c1c/framework_default_finishes_with_assistant_output"
+      },
+      "run_policy": null,
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "done",
+          "tool_calls": []
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": "finish",
+      "expected": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": "natural answer",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 3,
+      "name": "agent_natural_finish",
+      "producer": {
+        "records": [
+          "session/c1c/agent_natural_finish/created",
+          "input/initial/applied",
+          "turn/c1c/agent_natural_finish/turn/initial/started",
+          "usage/active/c1c/agent_natural_finish/turn/initial/1/1",
+          "op/c1c/agent_natural_finish/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/agent_natural_finish/turn/initial/1/2",
+          "op/c1c/agent_natural_finish/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/agent_natural_finish/turn/initial/1/3",
+          "op/c1c/agent_natural_finish/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/agent_natural_finish/turn/initial/1/4",
+          "turn/c1c/agent_natural_finish/turn/initial/ended"
+        ],
+        "session_id": "c1c/agent_natural_finish"
+      },
+      "run_policy": null,
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "natural answer",
+          "tool_calls": []
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": "finish",
+      "expected": {
+        "completion_reason": "wait_user",
+        "completion_tool_name": null,
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "wait_user",
+        "final_answer": null,
+        "partial_output": "need clarification",
+        "status": "wait_user",
+        "wait_reason": "need clarification"
+      },
+      "max_cycles": 3,
+      "name": "run_wait_overrides_agent_finish",
+      "producer": {
+        "records": [
+          "session/c1c/run_wait_overrides_agent_finish/created",
+          "input/initial/applied",
+          "turn/c1c/run_wait_overrides_agent_finish/turn/initial/started",
+          "usage/active/c1c/run_wait_overrides_agent_finish/turn/initial/1/1",
+          "op/c1c/run_wait_overrides_agent_finish/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/run_wait_overrides_agent_finish/turn/initial/1/2",
+          "op/c1c/run_wait_overrides_agent_finish/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/run_wait_overrides_agent_finish/turn/initial/1/3",
+          "op/c1c/run_wait_overrides_agent_finish/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/run_wait_overrides_agent_finish/turn/initial/1/4",
+          "turn/c1c/run_wait_overrides_agent_finish/turn/initial/wait/interaction/c1c/run_wait_overrides_agent_finish/turn/initial/model/primary/1/1"
+        ],
+        "session_id": "c1c/run_wait_overrides_agent_finish"
+      },
+      "run_policy": "wait_user",
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "need clarification",
+          "tool_calls": []
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": null,
+      "expected": {
+        "completion_reason": "tool_finish",
+        "completion_tool_name": "handoff_result",
+        "continuation_hint_emitted": true,
+        "cycles": 2,
+        "effective_policy": "continue",
+        "final_answer": "override done",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 2,
+      "name": "run_continue_overrides_runner_finish",
+      "producer": {
+        "records": [
+          "session/c1c/run_continue_overrides_runner_finish/created",
+          "input/initial/applied",
+          "turn/c1c/run_continue_overrides_runner_finish/turn/initial/started",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/1",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/2",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/3",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/4",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/5",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/6",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/1/result",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/7",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/attempt/1/tool/0/1/started",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/8",
+          "op/c1c/run_continue_overrides_runner_finish/turn/initial/model/primary/2/attempt/1/tool/0/1/result",
+          "usage/active/c1c/run_continue_overrides_runner_finish/turn/initial/1/9",
+          "turn/c1c/run_continue_overrides_runner_finish/turn/initial/ended"
+        ],
+        "session_id": "c1c/run_continue_overrides_runner_finish"
+      },
+      "run_policy": "continue",
+      "runner_default_policy": "finish",
+      "steps": [
+        {
+          "assistant_output": "keep going",
+          "tool_calls": []
+        },
+        {
+          "assistant_output": "",
+          "tool_calls": [
+            {
+              "arguments": {},
+              "id": "handoff-override",
+              "name": "handoff_result"
+            }
+          ],
+          "tool_results": [
+            {
+              "content": "override done",
+              "directive": "finish",
+              "tool_call_id": "handoff-override"
+            }
+          ]
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": "wait_user",
+      "expected": {
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": "runner wins",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 2,
+      "name": "runner_finish_overrides_agent_wait",
+      "producer": {
+        "records": [
+          "session/c1c/runner_finish_overrides_agent_wait/created",
+          "input/initial/applied",
+          "turn/c1c/runner_finish_overrides_agent_wait/turn/initial/started",
+          "usage/active/c1c/runner_finish_overrides_agent_wait/turn/initial/1/1",
+          "op/c1c/runner_finish_overrides_agent_wait/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/runner_finish_overrides_agent_wait/turn/initial/1/2",
+          "op/c1c/runner_finish_overrides_agent_wait/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/runner_finish_overrides_agent_wait/turn/initial/1/3",
+          "op/c1c/runner_finish_overrides_agent_wait/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/runner_finish_overrides_agent_wait/turn/initial/1/4",
+          "turn/c1c/runner_finish_overrides_agent_wait/turn/initial/ended"
+        ],
+        "session_id": "c1c/runner_finish_overrides_agent_wait"
+      },
+      "run_policy": null,
+      "runner_default_policy": "finish",
+      "steps": [
+        {
+          "assistant_output": "runner wins",
+          "tool_calls": []
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": null,
+      "expected": {
+        "completion_reason": "stop_on_first_tool",
+        "completion_tool_name": "lookup",
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": "found",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 2,
+      "name": "stop_on_first_tool",
+      "producer": {
+        "records": [
+          "session/c1c/stop_on_first_tool/created",
+          "input/initial/applied",
+          "turn/c1c/stop_on_first_tool/turn/initial/started",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/1",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/2",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/3",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/1/result",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/4",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/5",
+          "op/c1c/stop_on_first_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/stop_on_first_tool/turn/initial/1/6",
+          "turn/c1c/stop_on_first_tool/turn/initial/ended"
+        ],
+        "session_id": "c1c/stop_on_first_tool"
+      },
+      "run_policy": null,
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "using lookup",
+          "tool_calls": [
+            {
+              "arguments": {},
+              "id": "lookup-first",
+              "name": "lookup"
+            }
+          ],
+          "tool_results": [
+            {
+              "content": "found",
+              "directive": "continue",
+              "tool_call_id": "lookup-first"
+            }
+          ]
+        }
+      ],
+      "tool_use_behavior": "stop_on_first_tool"
+    },
+    {
+      "agent_policy": null,
+      "expected": {
+        "completion_reason": "stop_at_tool_name",
+        "completion_tool_name": "lookup",
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": "named result",
+        "partial_output": null,
+        "status": "completed",
+        "wait_reason": null
+      },
+      "max_cycles": 2,
+      "name": "stop_at_named_tool",
+      "producer": {
+        "records": [
+          "session/c1c/stop_at_named_tool/created",
+          "input/initial/applied",
+          "turn/c1c/stop_at_named_tool/turn/initial/started",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/1",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/2",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/3",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/1/result",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/4",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/5",
+          "op/c1c/stop_at_named_tool/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/stop_at_named_tool/turn/initial/1/6",
+          "turn/c1c/stop_at_named_tool/turn/initial/ended"
+        ],
+        "session_id": "c1c/stop_at_named_tool"
+      },
+      "run_policy": null,
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "using lookup",
+          "tool_calls": [
+            {
+              "arguments": {},
+              "id": "lookup-named",
+              "name": "lookup"
+            }
+          ],
+          "tool_results": [
+            {
+              "content": "named result",
+              "directive": "continue",
+              "tool_call_id": "lookup-named"
+            }
+          ]
+        }
+      ],
+      "stop_at_tool_names": [
+        "lookup"
+      ],
+      "tool_use_behavior": "stop_at_tool_names"
+    },
+    {
+      "agent_policy": "finish",
+      "expected": {
+        "completion_reason": "wait_user",
+        "completion_tool_name": "ask_user",
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "finish",
+        "final_answer": null,
+        "partial_output": "asking",
+        "status": "wait_user",
+        "wait_reason": "Choose one"
+      },
+      "max_cycles": 2,
+      "name": "explicit_wait_tool_precedes_finish_policy",
+      "producer": {
+        "records": [
+          "session/c1c/explicit_wait_tool_precedes_finish_policy/created",
+          "input/initial/applied",
+          "turn/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/started",
+          "usage/active/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/1/1",
+          "op/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/1/2",
+          "op/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/1/3",
+          "op/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/model/primary/1/1/result",
+          "op/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/1/4",
+          "op/c1c/explicit_wait_tool_precedes_finish_policy/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch"
+        ],
+        "session_id": "c1c/explicit_wait_tool_precedes_finish_policy"
+      },
+      "run_policy": null,
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "asking",
+          "tool_calls": [
+            {
+              "arguments": {
+                "question": "Choose one"
+              },
+              "id": "ask-1",
+              "name": "ask_user"
+            }
+          ]
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    },
+    {
+      "agent_policy": null,
+      "expected": {
+        "completion_reason": "max_cycles",
+        "completion_tool_name": null,
+        "continuation_hint_emitted": false,
+        "cycles": 1,
+        "effective_policy": "continue",
+        "final_answer": null,
+        "partial_output": "unfinished draft",
+        "status": "max_cycles",
+        "wait_reason": null
+      },
+      "max_cycles": 1,
+      "name": "max_cycles_preserves_last_assistant_output",
+      "producer": {
+        "records": [
+          "session/c1c/max_cycles_preserves_last_assistant_output/created",
+          "input/initial/applied",
+          "turn/c1c/max_cycles_preserves_last_assistant_output/turn/initial/started",
+          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/1",
+          "op/c1c/max_cycles_preserves_last_assistant_output/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/2",
+          "op/c1c/max_cycles_preserves_last_assistant_output/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/3",
+          "op/c1c/max_cycles_preserves_last_assistant_output/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/4",
+          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/5",
+          "turn/c1c/max_cycles_preserves_last_assistant_output/turn/initial/ended"
+        ],
+        "session_id": "c1c/max_cycles_preserves_last_assistant_output"
+      },
+      "run_policy": "continue",
+      "runner_default_policy": null,
+      "steps": [
+        {
+          "assistant_output": "unfinished draft",
+          "tool_calls": []
+        }
+      ],
+      "tool_use_behavior": "run_llm_again"
+    }
   ],
   "completion_reason_values": [
     "tool_finish",
@@ -23,454 +458,192 @@
     "failed",
     "budget_exhausted"
   ],
-  "rules": {
-    "assistant_text_is_not_classified": true,
-    "completion_policy_does_not_change_tool_availability": true,
-    "explicit_tool_directive_precedes_no_tool_policy": true,
-    "output_guardrail_failure_precedes_success_reason": true,
-    "cancellation_precedes_generic_failure": true,
-    "partial_output_only_for_non_completed_status": true,
-    "budget_exhausted_is_defined_by_run_budget": true,
-    "approval_resume_uses_fresh_cycle_budget": true,
-    "approval_resume_preserves_resource_budget": true,
-    "approved_resume_rejects_input_before_claim": true,
-    "pre_cancelled_approval_resume_skips_side_effects": true,
-    "guardrail_allow_preserves_completion_observation": true,
-    "ordinary_llm_failure_is_typed_terminal": true
-  },
-  "cases": [
-    {
-      "name": "framework_default_finishes_with_assistant_output",
-      "agent_policy": null,
-      "runner_default_policy": null,
-      "run_policy": null,
-      "max_cycles": 2,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "done",
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "completion_tool_name": null,
-        "final_answer": "done",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "agent_natural_finish",
-      "agent_policy": "finish",
-      "runner_default_policy": null,
-      "run_policy": null,
-      "max_cycles": 3,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "natural answer",
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "completion_tool_name": null,
-        "final_answer": "natural answer",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "run_wait_overrides_agent_finish",
-      "agent_policy": "finish",
-      "runner_default_policy": null,
-      "run_policy": "wait_user",
-      "max_cycles": 3,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "need clarification",
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "effective_policy": "wait_user",
-        "status": "wait_user",
-        "completion_reason": "wait_user",
-        "completion_tool_name": null,
-        "final_answer": null,
-        "wait_reason": "need clarification",
-        "partial_output": "need clarification",
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "run_continue_overrides_runner_finish",
-      "agent_policy": null,
-      "runner_default_policy": "finish",
-      "run_policy": "continue",
-      "max_cycles": 2,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "keep going",
-          "tool_calls": []
-        },
-        {
-          "assistant_output": "",
-          "tool_calls": [
-            {
-              "id": "handoff-override",
-              "name": "handoff_result",
-              "arguments": {}
-            }
-          ],
-          "tool_results": [
-            {
-              "tool_call_id": "handoff-override",
-              "content": "override done",
-              "directive": "finish"
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "effective_policy": "continue",
-        "status": "completed",
-        "completion_reason": "tool_finish",
-        "completion_tool_name": "handoff_result",
-        "final_answer": "override done",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 2,
-        "continuation_hint_emitted": true
-      }
-    },
-    {
-      "name": "runner_finish_overrides_agent_wait",
-      "agent_policy": "wait_user",
-      "runner_default_policy": "finish",
-      "run_policy": null,
-      "max_cycles": 2,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "runner wins",
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "completion_tool_name": null,
-        "final_answer": "runner wins",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "stop_on_first_tool",
-      "agent_policy": null,
-      "runner_default_policy": null,
-      "run_policy": null,
-      "max_cycles": 2,
-      "tool_use_behavior": "stop_on_first_tool",
-      "steps": [
-        {
-          "assistant_output": "using lookup",
-          "tool_calls": [
-            {
-              "id": "lookup-first",
-              "name": "lookup",
-              "arguments": {}
-            }
-          ],
-          "tool_results": [
-            {
-              "tool_call_id": "lookup-first",
-              "content": "found",
-              "directive": "continue"
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "completed",
-        "completion_reason": "stop_on_first_tool",
-        "completion_tool_name": "lookup",
-        "final_answer": "found",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "stop_at_named_tool",
-      "agent_policy": null,
-      "runner_default_policy": null,
-      "run_policy": null,
-      "max_cycles": 2,
-      "tool_use_behavior": "stop_at_tool_names",
-      "stop_at_tool_names": [
-        "lookup"
-      ],
-      "steps": [
-        {
-          "assistant_output": "using lookup",
-          "tool_calls": [
-            {
-              "id": "lookup-named",
-              "name": "lookup",
-              "arguments": {}
-            }
-          ],
-          "tool_results": [
-            {
-              "tool_call_id": "lookup-named",
-              "content": "named result",
-              "directive": "continue"
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "completed",
-        "completion_reason": "stop_at_tool_name",
-        "completion_tool_name": "lookup",
-        "final_answer": "named result",
-        "wait_reason": null,
-        "partial_output": null,
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "explicit_wait_tool_precedes_finish_policy",
-      "agent_policy": "finish",
-      "runner_default_policy": null,
-      "run_policy": null,
-      "max_cycles": 2,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "asking",
-          "tool_calls": [
-            {
-              "id": "ask-1",
-              "name": "ask_user",
-              "arguments": {
-                "question": "Choose one"
-              }
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "effective_policy": "finish",
-        "status": "wait_user",
-        "completion_reason": "wait_user",
-        "completion_tool_name": "ask_user",
-        "final_answer": null,
-        "wait_reason": "Choose one",
-        "partial_output": "asking",
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    },
-    {
-      "name": "max_cycles_preserves_last_assistant_output",
-      "agent_policy": null,
-      "runner_default_policy": null,
-      "run_policy": "continue",
-      "max_cycles": 1,
-      "tool_use_behavior": "run_llm_again",
-      "steps": [
-        {
-          "assistant_output": "unfinished draft",
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "effective_policy": "continue",
-        "status": "max_cycles",
-        "completion_reason": "max_cycles",
-        "completion_tool_name": null,
-        "final_answer": "Reached max cycles without finish signal.",
-        "wait_reason": null,
-        "partial_output": "unfinished draft",
-        "cycles": 1,
-        "continuation_hint_emitted": false
-      }
-    }
-  ],
-  "terminal_precedence_cases": [
-    {
-      "name": "output_guardrail_overrides_natural_finish",
-      "candidate_reason": "no_tool_finish",
-      "candidate_output": "unsafe answer",
-      "terminal_condition": "output_guardrail_block",
-      "expected_status": "failed",
-      "expected_reason": "failed",
-      "expected_partial_output": "unsafe answer"
-    },
-    {
-      "name": "cancellation_overrides_generic_failure",
-      "candidate_reason": "failed",
-      "candidate_output": "last safe draft",
-      "terminal_condition": "cancellation_token_cancelled",
-      "expected_status": "failed",
-      "expected_reason": "cancelled",
-      "expected_partial_output": "last safe draft"
-    },
-    {
-      "name": "input_guardrail_fails_before_llm",
-      "candidate_reason": null,
-      "candidate_output": null,
-      "terminal_condition": "input_guardrail_block",
-      "expected_status": "failed",
-      "expected_reason": "failed",
-      "expected_partial_output": null
-    }
-  ],
-  "approval_resume": {
-    "rules": {
-      "run_identity": "fresh",
-      "trace_id_relation": "same_as_source",
-      "cycle_budget": "full_configured_max_cycles",
-      "prior_interrupted_cycles_reduce_resume_budget": false,
-      "new_input": "reject_before_claim",
-      "admission_precedence": [
-        "reject_new_input",
-        "observe_cancellation",
-        "claim_approval"
-      ],
-      "pre_cancelled_order": [
-        "observe_cancellation",
-        "emit_fresh_terminal"
-      ],
-      "pre_cancelled_forbidden_actions": [
-        "claim_approval",
-        "execute_tool",
-        "run_output_guardrail"
-      ],
-      "typed_output_validation": "after_terminal_persistence"
-    },
-    "cases": [
-      {
-        "name": "approved_continue_uses_full_fresh_cycle_budget",
-        "configured_max_cycles": 1,
-        "source_cycles": 1,
-        "approved_tool_directive": "continue",
-        "resumed_model_cycles": 1,
-        "expected": {
-          "fresh_run_id": true,
-          "trace_id_relation": "same_as_source",
-          "status": "completed",
-          "completion_reason": "no_tool_finish",
-          "cycles": 1
-        }
-      },
-      {
-        "name": "approved_resume_rejects_input_before_claim",
-        "resume_input": "replacement input",
-        "expected": {
-          "error": "input cannot be provided when resuming an approved tool call",
-          "approval_claim_consumed": false,
-          "tool_execution_count": 0
-        }
-      },
-      {
-        "name": "pre_cancelled_approved_resume_with_input_rejects_before_cancellation",
-        "resume_input": "replacement input",
-        "cancellation_reason": "cancel before approved tool",
-        "expected": {
-          "error": "input cannot be provided when resuming an approved tool call",
-          "approval_claim_consumed": false,
-          "tool_execution_count": 0,
-          "output_guardrail_count": 0,
-          "terminal_count": 0
-        }
-      },
-      {
-        "name": "pre_cancelled_approved_resume_has_no_side_effects",
-        "candidate_output": "assistant draft before approval",
-        "cancellation_reason": "cancel before approved tool",
-        "expected": {
-          "fresh_run_id": true,
-          "status": "failed",
-          "completion_reason": "cancelled",
-          "completion_tool_name": null,
-          "partial_output": "assistant draft before approval",
-          "final_output": "cancel before approved tool",
-          "approval_claim_consumed": false,
-          "tool_execution_count": 0,
-          "output_guardrail_count": 0,
-          "terminal_event": "run_cancelled",
-          "terminal_count": 1
-        }
-      },
-      {
-        "name": "approval_typed_output_error_follows_fresh_terminal",
-        "expected": {
-          "runner_outcome": "error",
-          "error_contains": "failed to validate final output",
-          "fresh_run_id": true,
-          "terminal_persisted_before_error": true,
-          "approval_claim_consumed": true
-        }
-      }
-    ]
+  "framework_default": "finish",
+  "ordinary_llm_failure": {
+    "completion_reason": "failed",
+    "completion_tool_name": null,
+    "partial_output": null,
+    "runner_outcome": "typed_result",
+    "status": "failed",
+    "terminal_count": 1,
+    "terminal_event": "run_failed"
   },
   "output_guardrail_allow": {
+    "case": {
+      "candidate_observation": {
+        "completion_reason": "wait_user",
+        "completion_tool_name": "ask_user",
+        "partial_output": "assistant wait candidate",
+        "status": "wait_user"
+      },
+      "candidate_output": "Approved question",
+      "expected_observation": {
+        "completion_reason": "wait_user",
+        "completion_tool_name": "ask_user",
+        "partial_output": "assistant wait candidate",
+        "status": "wait_user"
+      },
+      "expected_output": "Redacted question",
+      "guardrail_rewrite_output": "Redacted question",
+      "name": "allow_rewrites_wait_output_but_preserves_completion_observation"
+    },
     "output_rewrite_is_applied": true,
     "preserved_fields": [
       "status",
       "completion_reason",
       "completion_tool_name",
       "partial_output"
-    ],
-    "case": {
-      "name": "allow_rewrites_wait_output_but_preserves_completion_observation",
-      "candidate_output": "Approved question",
-      "guardrail_rewrite_output": "Redacted question",
-      "candidate_observation": {
-        "status": "wait_user",
-        "completion_reason": "wait_user",
-        "completion_tool_name": "ask_user",
-        "partial_output": "assistant wait candidate"
-      },
-      "expected_output": "Redacted question",
-      "expected_observation": {
-        "status": "wait_user",
-        "completion_reason": "wait_user",
-        "completion_tool_name": "ask_user",
-        "partial_output": "assistant wait candidate"
-      }
-    }
+    ]
   },
-  "ordinary_llm_failure": {
-    "runner_outcome": "typed_result",
-    "status": "failed",
-    "completion_reason": "failed",
-    "completion_tool_name": null,
-    "partial_output": null,
-    "terminal_event": "run_failed",
-    "terminal_count": 1
-  }
+  "policy_values": [
+    "continue",
+    "wait_user",
+    "finish"
+  ],
+  "precedence": [
+    "run_config",
+    "runner_default_run_config",
+    "agent",
+    "framework_default"
+  ],
+  "rules": {
+    "approval_resume_preserves_resource_budget": true,
+    "assistant_text_is_not_classified": true,
+    "budget_exhausted_is_defined_by_run_budget": true,
+    "cancellation_precedes_generic_failure": true,
+    "completion_policy_does_not_change_tool_availability": true,
+    "explicit_tool_directive_precedes_no_tool_policy": true,
+    "guardrail_allow_preserves_completion_observation": true,
+    "ordinary_llm_failure_is_typed_terminal": true,
+    "output_guardrail_failure_precedes_success_reason": true,
+    "partial_output_only_for_non_completed_status": true
+  },
+  "same_turn": [
+    {
+      "records": [
+        "session/user_wait/created",
+        "input/initial/applied",
+        "turn/user_wait/turn/initial/started",
+        "usage/active/user_wait/turn/initial/1/1",
+        "op/user_wait/turn/initial/model/primary/1/1/planned",
+        "usage/active/user_wait/turn/initial/1/2",
+        "op/user_wait/turn/initial/model/primary/1/1/started",
+        "usage/active/user_wait/turn/initial/1/3",
+        "op/user_wait/turn/initial/model/primary/1/1/result",
+        "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/user_wait/turn/initial/1/4",
+        "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+        "usage/active/user_wait/turn/initial/2/1",
+        "input/reply/applied",
+        "op/user_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/user_wait/turn/initial/2/2",
+        "op/user_wait/turn/initial/model/primary/2/1/planned",
+        "usage/active/user_wait/turn/initial/2/3",
+        "op/user_wait/turn/initial/model/primary/2/1/started",
+        "usage/active/user_wait/turn/initial/2/4",
+        "op/user_wait/turn/initial/model/primary/2/1/result",
+        "usage/active/user_wait/turn/initial/2/5",
+        "turn/user_wait/turn/initial/ended"
+      ],
+      "session_id": "user_wait"
+    },
+    {
+      "records": [
+        "session/turn_wait/created",
+        "input/initial/applied",
+        "turn/turn_wait/turn/initial/started",
+        "usage/active/turn_wait/turn/initial/1/1",
+        "op/turn_wait/turn/initial/model/primary/1/1/planned",
+        "usage/active/turn_wait/turn/initial/1/2",
+        "op/turn_wait/turn/initial/model/primary/1/1/started",
+        "usage/active/turn_wait/turn/initial/1/3",
+        "op/turn_wait/turn/initial/model/primary/1/1/result",
+        "op/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/turn_wait/turn/initial/1/4",
+        "op/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/turn_wait/turn/initial/1/5",
+        "op/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/turn_wait/turn/initial/1/6",
+        "turn/turn_wait/turn/initial/wait/interaction/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1",
+        "usage/active/turn_wait/turn/initial/2/1",
+        "input/reply/applied",
+        "usage/active/turn_wait/turn/initial/2/2",
+        "op/turn_wait/turn/initial/model/primary/2/1/planned",
+        "usage/active/turn_wait/turn/initial/2/3",
+        "op/turn_wait/turn/initial/model/primary/2/1/started",
+        "usage/active/turn_wait/turn/initial/2/4",
+        "op/turn_wait/turn/initial/model/primary/2/1/result",
+        "usage/active/turn_wait/turn/initial/2/5",
+        "turn/turn_wait/turn/initial/ended"
+      ],
+      "session_id": "turn_wait"
+    },
+    {
+      "records": [
+        "session/approval/created",
+        "input/initial/applied",
+        "turn/approval/turn/initial/started",
+        "usage/active/approval/turn/initial/1/1",
+        "turn/approval/turn/initial/boundary/before_memory/1",
+        "usage/active/approval/turn/initial/1/2",
+        "op/approval/turn/initial/model/primary/1/1/planned",
+        "usage/active/approval/turn/initial/1/3",
+        "op/approval/turn/initial/model/primary/1/1/started",
+        "usage/active/approval/turn/initial/1/4",
+        "op/approval/turn/initial/model/primary/1/1/result",
+        "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/approval/turn/initial/1/5",
+        "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+        "usage/active/approval/turn/initial/1/6",
+        "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+        "usage/active/approval/turn/initial/2/1",
+        "input/answer/applied",
+        "usage/active/approval/turn/initial/2/2",
+        "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/approval/turn/initial/2/3",
+        "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/approval/turn/initial/2/4",
+        "turn/approval/turn/initial/boundary/before_memory/2",
+        "usage/active/approval/turn/initial/2/5",
+        "op/approval/turn/initial/model/primary/2/1/planned",
+        "usage/active/approval/turn/initial/2/6",
+        "op/approval/turn/initial/model/primary/2/1/started",
+        "usage/active/approval/turn/initial/2/7",
+        "op/approval/turn/initial/model/primary/2/1/result",
+        "usage/active/approval/turn/initial/2/8",
+        "turn/approval/turn/initial/ended"
+      ],
+      "session_id": "approval"
+    }
+  ],
+  "terminal_precedence_cases": [
+    {
+      "candidate_output": "unsafe answer",
+      "candidate_reason": "no_tool_finish",
+      "expected_partial_output": "unsafe answer",
+      "expected_reason": "failed",
+      "expected_status": "failed",
+      "name": "output_guardrail_overrides_natural_finish",
+      "terminal_condition": "output_guardrail_block"
+    },
+    {
+      "candidate_output": "last safe draft",
+      "candidate_reason": "failed",
+      "expected_partial_output": "last safe draft",
+      "expected_reason": "cancelled",
+      "expected_status": "failed",
+      "name": "cancellation_overrides_generic_failure",
+      "terminal_condition": "cancellation_token_cancelled"
+    },
+    {
+      "candidate_output": null,
+      "candidate_reason": null,
+      "expected_partial_output": null,
+      "expected_reason": "failed",
+      "expected_status": "failed",
+      "name": "input_guardrail_fails_before_llm",
+      "terminal_condition": "input_guardrail_block"
+    }
+  ],
+  "version": 2
 }

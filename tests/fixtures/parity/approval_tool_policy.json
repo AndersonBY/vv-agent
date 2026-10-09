@@ -1,106 +1,385 @@
 {
-  "contract": "approval_tool_policy",
-  "request_id": {
-    "regex": "^approval_[0-9a-f]{32}$",
-    "same_value_at": [
-      "provider_request.request_id",
-      "broker_pending.request_id",
-      "approval_requested_event.request_id",
-      "approval_resolved_event.request_id",
-      "tool_result.metadata.request_id"
-    ]
-  },
-  "tool_call": {
-    "id": "call-danger",
-    "name": "dangerous",
-    "arguments": {
-      "path": "tmp.txt"
-    }
-  },
   "approval": {
-    "required_message": "Approval required for tool dangerous.",
+    "absolute_deadline": true,
+    "decisions": [
+      {
+        "action": "deny",
+        "error_code": "tool_approval_denied",
+        "message": "Approval denied for tool dangerous.",
+        "metadata": {
+          "attempt": 1,
+          "source": "contract"
+        },
+        "producer": {
+          "records": [
+            "session/c1c/approval_deny/created",
+            "input/initial/applied",
+            "turn/c1c/approval_deny/turn/initial/started",
+            "usage/active/c1c/approval_deny/turn/initial/1/1",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/1/planned",
+            "usage/active/c1c/approval_deny/turn/initial/1/2",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/1/started",
+            "usage/active/c1c/approval_deny/turn/initial/1/3",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/1/result",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+            "usage/active/c1c/approval_deny/turn/initial/1/4",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+            "usage/active/c1c/approval_deny/turn/initial/1/5",
+            "input/approval/c1c/approval_deny/turn/initial/model/primary/1/attempt/1/tool/0/1/answer/6bc3f71e93e3bb8c97f00ccab284d16265455b9b5a670e6ca544aca58d0970c1/applied",
+            "usage/active/c1c/approval_deny/turn/initial/1/6",
+            "op/c1c/approval_deny/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+            "usage/active/c1c/approval_deny/turn/initial/1/7",
+            "op/c1c/approval_deny/turn/initial/model/primary/2/1/planned",
+            "usage/active/c1c/approval_deny/turn/initial/1/8",
+            "op/c1c/approval_deny/turn/initial/model/primary/2/1/started",
+            "usage/active/c1c/approval_deny/turn/initial/1/9",
+            "op/c1c/approval_deny/turn/initial/model/primary/2/1/result",
+            "usage/active/c1c/approval_deny/turn/initial/1/10",
+            "turn/c1c/approval_deny/turn/initial/ended"
+          ],
+          "session_id": "c1c/approval_deny"
+        },
+        "reason": "",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Approval denied for tool dangerous.\", \"error_code\": \"tool_approval_denied\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_approval_denied",
+          "metadata": {
+            "action": "deny",
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Approval denied for tool dangerous.",
+            "mode": "approval_resolved",
+            "request_id": "approval/c1c/approval_deny/turn/initial/model/primary/1/attempt/1/tool/0/1",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      },
+      {
+        "action": "timeout",
+        "error_code": "tool_approval_timeout",
+        "message": "Approval request timed out.",
+        "metadata": {
+          "attempt": 2,
+          "source": "contract"
+        },
+        "producer": {
+          "records": [
+            "session/c1c/approval_timeout/created",
+            "input/initial/applied",
+            "turn/c1c/approval_timeout/turn/initial/started",
+            "usage/active/c1c/approval_timeout/turn/initial/1/1",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/1/planned",
+            "usage/active/c1c/approval_timeout/turn/initial/1/2",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/1/started",
+            "usage/active/c1c/approval_timeout/turn/initial/1/3",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/1/result",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+            "usage/active/c1c/approval_timeout/turn/initial/1/4",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+            "usage/active/c1c/approval_timeout/turn/initial/1/5",
+            "input/approval/c1c/approval_timeout/turn/initial/model/primary/1/attempt/1/tool/0/1/answer/ca1ca2cdccecd27c1ae75e1d1451b3d10a8be37717ddde68fc6c1a271f3c0392/applied",
+            "usage/active/c1c/approval_timeout/turn/initial/1/6",
+            "op/c1c/approval_timeout/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+            "usage/active/c1c/approval_timeout/turn/initial/1/7",
+            "op/c1c/approval_timeout/turn/initial/model/primary/2/1/planned",
+            "usage/active/c1c/approval_timeout/turn/initial/1/8",
+            "op/c1c/approval_timeout/turn/initial/model/primary/2/1/started",
+            "usage/active/c1c/approval_timeout/turn/initial/1/9",
+            "op/c1c/approval_timeout/turn/initial/model/primary/2/1/result",
+            "usage/active/c1c/approval_timeout/turn/initial/1/10",
+            "turn/c1c/approval_timeout/turn/initial/ended"
+          ],
+          "session_id": "c1c/approval_timeout"
+        },
+        "reason": "",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Approval request timed out.\", \"error_code\": \"tool_approval_timeout\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_approval_timeout",
+          "metadata": {
+            "action": "timeout",
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Approval request timed out.",
+            "mode": "approval_resolved",
+            "request_id": "approval/c1c/approval_timeout/turn/initial/model/primary/1/attempt/1/tool/0/1",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      }
+    ],
     "events": [
       "approval_requested",
       "approval_resolved"
     ],
-    "result_shape": {
-      "status_code": "ERROR",
-      "directive": "continue",
-      "content_keys": [
-        "ok",
-        "error",
-        "error_code",
-        "tool_name"
-      ],
-      "metadata_keys": [
-        "mode",
-        "request_id",
-        "tool_name",
-        "arguments",
-        "action",
-        "message"
-      ],
-      "mode": "approval_resolved"
-    },
-    "decisions": [
+    "owner_retained": true,
+    "producer_cases": [
       {
-        "action": "deny",
-        "reason": "",
-        "metadata": {
-          "source": "contract",
-          "attempt": 1
-        },
-        "message": "Approval denied for tool dangerous.",
-        "error_code": "tool_approval_denied"
+        "records": [
+          "session/approval/created",
+          "input/initial/applied",
+          "turn/approval/turn/initial/started",
+          "usage/active/approval/turn/initial/1/1",
+          "turn/approval/turn/initial/boundary/before_memory/1",
+          "usage/active/approval/turn/initial/1/2",
+          "op/approval/turn/initial/model/primary/1/1/planned",
+          "usage/active/approval/turn/initial/1/3",
+          "op/approval/turn/initial/model/primary/1/1/started",
+          "usage/active/approval/turn/initial/1/4",
+          "op/approval/turn/initial/model/primary/1/1/result",
+          "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/approval/turn/initial/1/5",
+          "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+          "usage/active/approval/turn/initial/1/6",
+          "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+          "usage/active/approval/turn/initial/2/1",
+          "input/answer/applied",
+          "usage/active/approval/turn/initial/2/2",
+          "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+          "usage/active/approval/turn/initial/2/3",
+          "op/approval/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/approval/turn/initial/2/4",
+          "turn/approval/turn/initial/boundary/before_memory/2",
+          "usage/active/approval/turn/initial/2/5",
+          "op/approval/turn/initial/model/primary/2/1/planned",
+          "usage/active/approval/turn/initial/2/6",
+          "op/approval/turn/initial/model/primary/2/1/started",
+          "usage/active/approval/turn/initial/2/7",
+          "op/approval/turn/initial/model/primary/2/1/result",
+          "usage/active/approval/turn/initial/2/8",
+          "turn/approval/turn/initial/ended"
+        ],
+        "session_id": "approval"
       },
       {
-        "action": "timeout",
-        "reason": "",
-        "metadata": {
-          "source": "contract",
-          "attempt": 2
-        },
-        "message": "Approval request timed out.",
-        "error_code": "tool_approval_timeout"
+        "records": [
+          "session/deadline/created",
+          "input/initial/applied",
+          "turn/deadline/turn/initial/started",
+          "usage/active/deadline/turn/initial/1/1",
+          "turn/deadline/turn/initial/boundary/before_memory/1",
+          "usage/active/deadline/turn/initial/1/2",
+          "op/deadline/turn/initial/model/primary/1/1/planned",
+          "usage/active/deadline/turn/initial/1/3",
+          "op/deadline/turn/initial/model/primary/1/1/started",
+          "usage/active/deadline/turn/initial/1/4",
+          "op/deadline/turn/initial/model/primary/1/1/result",
+          "op/deadline/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/deadline/turn/initial/1/5",
+          "op/deadline/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+          "usage/active/deadline/turn/initial/1/6",
+          "op/deadline/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+          "usage/active/deadline/turn/initial/2/1",
+          "input/approval/deadline/turn/initial/model/primary/1/attempt/1/tool/0/1/answer/3734702e9cb7fb4f9f0cc131430c2039556e516e2babc2beeecd69f86b33a293/applied",
+          "usage/active/deadline/turn/initial/2/2",
+          "op/deadline/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/deadline/turn/initial/2/3",
+          "turn/deadline/turn/initial/boundary/before_memory/2",
+          "usage/active/deadline/turn/initial/2/4",
+          "op/deadline/turn/initial/model/primary/2/1/planned",
+          "usage/active/deadline/turn/initial/2/5",
+          "op/deadline/turn/initial/model/primary/2/1/started",
+          "usage/active/deadline/turn/initial/2/6",
+          "op/deadline/turn/initial/model/primary/2/1/result",
+          "usage/active/deadline/turn/initial/2/7",
+          "turn/deadline/turn/initial/ended"
+        ],
+        "session_id": "deadline"
       }
     ],
-    "requested_event_metadata_keys": [
-      "arguments",
-      "tool_name"
-    ],
-    "resolved_event_metadata_keys": [
-      "reason",
-      "decision_metadata"
-    ],
     "provider_failure": {
-      "message": "approval provider unavailable",
-      "status": "failed",
+      "broker_retains_request": false,
       "events": [
         "approval_requested",
         "run_failed"
       ],
-      "tool_executes": false,
-      "broker_retains_request": false
+      "message": "approval provider unavailable",
+      "producer": {
+        "records": [
+          "session/c1c/approval_provider_failure/created",
+          "input/initial/applied",
+          "turn/c1c/approval_provider_failure/turn/initial/started",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/1",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/2",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/3",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/1/result",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/4",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/before_dispatch",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/5",
+          "op/c1c/approval_provider_failure/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/approval_provider_failure/turn/initial/1/6",
+          "turn/c1c/approval_provider_failure/turn/initial/ended"
+        ],
+        "session_id": "c1c/approval_provider_failure"
+      },
+      "status": "failed",
+      "tool_executes": false
+    },
+    "requested_event_metadata_keys": [
+      "session_seq"
+    ],
+    "required_message": "Approval required for tool dangerous.",
+    "resolved_event_metadata_keys": [
+      "decision_metadata",
+      "reason",
+      "session_seq"
+    ],
+    "result_shape": {
+      "content_keys": [
+        "error",
+        "error_code",
+        "ok",
+        "tool_name"
+      ],
+      "directive": "continue",
+      "metadata_keys": [
+        "action",
+        "arguments",
+        "message",
+        "mode",
+        "request_id",
+        "tool_name"
+      ],
+      "mode": "approval_resolved",
+      "status_code": "ERROR"
     }
   },
+  "contract": "approval_tool_policy",
   "policy": {
+    "cases": [
+      {
+        "allowed_tools": [],
+        "can_use_tool": false,
+        "disallowed_tools": [
+          "dangerous"
+        ],
+        "id": "allowed_tools_precedes_all_other_checks",
+        "planned_tools": [],
+        "policy_source": "allowed_tools",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Tool dangerous is not allowed for these arguments.\", \"error_code\": \"tool_not_allowed\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_not_allowed",
+          "metadata": {
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Tool dangerous is not allowed for these arguments.",
+            "mode": "permission_denied",
+            "policy_source": "allowed_tools",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      },
+      {
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "can_use_tool": false,
+        "disallowed_tools": [
+          "dangerous"
+        ],
+        "id": "disallowed_tools_precedes_predicate_and_plan",
+        "planned_tools": [],
+        "policy_source": "disallowed_tools",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Tool dangerous is not allowed for these arguments.\", \"error_code\": \"tool_not_allowed\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_not_allowed",
+          "metadata": {
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Tool dangerous is not allowed for these arguments.",
+            "mode": "permission_denied",
+            "policy_source": "disallowed_tools",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      },
+      {
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "can_use_tool": false,
+        "disallowed_tools": [],
+        "id": "predicate_precedes_plan",
+        "planned_tools": [],
+        "policy_source": "can_use_tool",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Tool dangerous is not allowed for these arguments.\", \"error_code\": \"tool_not_allowed\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_not_allowed",
+          "metadata": {
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Tool dangerous is not allowed for these arguments.",
+            "mode": "permission_denied",
+            "policy_source": "can_use_tool",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      },
+      {
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "can_use_tool": true,
+        "disallowed_tools": [],
+        "id": "planned_name_is_the_fallback_check",
+        "planned_tools": [],
+        "policy_source": "planned_name",
+        "result": {
+          "content": "{\"ok\": false, \"error\": \"Tool dangerous is not allowed for these arguments.\", \"error_code\": \"tool_not_allowed\", \"tool_name\": \"dangerous\"}",
+          "directive": "continue",
+          "error_code": "tool_not_allowed",
+          "metadata": {
+            "arguments": {
+              "path": "tmp.txt"
+            },
+            "message": "Tool dangerous is not allowed for these arguments.",
+            "mode": "permission_denied",
+            "policy_source": "planned_name",
+            "tool_name": "dangerous"
+          },
+          "status_code": "ERROR",
+          "tool_call_id": "call-danger"
+        }
+      }
+    ],
+    "error_code": "tool_not_allowed",
+    "message": "Tool dangerous is not allowed for these arguments.",
     "precedence": [
       "allowed_tools",
       "disallowed_tools",
       "can_use_tool",
       "planned_name"
     ],
-    "message": "Tool dangerous is not allowed for these arguments.",
-    "error_code": "tool_not_allowed",
     "result_shape": {
-      "status_code": "ERROR",
-      "directive": "continue",
       "content_keys": [
         "ok",
         "error",
         "error_code",
         "tool_name"
       ],
+      "directive": "continue",
       "metadata_keys": [
         "mode",
         "policy_source",
@@ -108,51 +387,23 @@
         "arguments",
         "message"
       ],
-      "mode": "permission_denied"
+      "mode": "permission_denied",
+      "status_code": "ERROR"
+    }
+  },
+  "request_id": {
+    "same_value_at": [
+      "op_parked.handle.request_id",
+      "approval_requested.request_id",
+      "approval_answer.request_id"
+    ],
+    "source": "retained_approval_handle.request_id"
+  },
+  "tool_call": {
+    "arguments": {
+      "path": "tmp.txt"
     },
-    "cases": [
-      {
-        "id": "allowed_tools_precedes_all_other_checks",
-        "allowed_tools": [],
-        "disallowed_tools": [
-          "dangerous"
-        ],
-        "can_use_tool": false,
-        "planned_tools": [],
-        "policy_source": "allowed_tools"
-      },
-      {
-        "id": "disallowed_tools_precedes_predicate_and_plan",
-        "allowed_tools": [
-          "dangerous"
-        ],
-        "disallowed_tools": [
-          "dangerous"
-        ],
-        "can_use_tool": false,
-        "planned_tools": [],
-        "policy_source": "disallowed_tools"
-      },
-      {
-        "id": "predicate_precedes_plan",
-        "allowed_tools": [
-          "dangerous"
-        ],
-        "disallowed_tools": [],
-        "can_use_tool": false,
-        "planned_tools": [],
-        "policy_source": "can_use_tool"
-      },
-      {
-        "id": "planned_name_is_the_fallback_check",
-        "allowed_tools": [
-          "dangerous"
-        ],
-        "disallowed_tools": [],
-        "can_use_tool": true,
-        "planned_tools": [],
-        "policy_source": "planned_name"
-      }
-    ]
+    "id": "call-danger",
+    "name": "dangerous"
   }
 }

@@ -1,21 +1,41 @@
 {
-  "version": "v1",
-  "topology": {
-    "start_order": ["run", "agent", "tool"],
-    "end_order": ["tool", "agent", "run"],
-    "parents": {
-      "run": null,
-      "agent": "run",
-      "tool": "agent"
-    }
+  "delivery": {
+    "ack_first": true,
+    "at_most_once": true,
+    "replay_deliveries": 0,
+    "telemetry_loss_possible": true
   },
   "failure_cleanup": {
-    "started": ["run", "agent"],
-    "ended": ["agent", "run"],
-    "run_status": "failed"
+    "ended": [
+      "agent",
+      "run"
+    ],
+    "run_status": "failed",
+    "started": [
+      "run",
+      "agent"
+    ]
   },
   "sink_failure": {
     "isolated": true,
     "run_status": "completed"
-  }
+  },
+  "topology": {
+    "end_order": [
+      "tool",
+      "agent",
+      "run"
+    ],
+    "parents": {
+      "agent": "run",
+      "run": null,
+      "tool": "agent"
+    },
+    "start_order": [
+      "run",
+      "agent",
+      "tool"
+    ]
+  },
+  "version": "v2"
 }

@@ -1,1538 +1,492 @@
 {
   "contract": "run_events_invalid",
-  "rules": {
-    "version": "v5",
-    "unknown_top_level_fields": "reject",
-    "unknown_event_types": "reject",
-    "completion_fields": {
-      "completion_reason": {
-        "type": "string_or_null",
-        "values": [
-          "tool_finish",
-          "no_tool_finish",
-          "stop_on_first_tool",
-          "stop_at_tool_name",
-          "wait_user",
-          "max_cycles",
-          "cancelled",
-          "failed",
-          "budget_exhausted"
-        ],
-        "unknown_values": "reject"
-      },
-      "completion_tool_name": {
-        "type": "string_or_null"
-      },
-      "partial_output": {
-        "type": "string_or_null"
-      }
-    },
-    "budget_fields": {
-      "budget_usage": "object_or_null",
-      "budget_exhaustion": "object_or_null",
-      "enforcement_boundary_values": [
-        "run_start",
-        "cycle_start",
-        "model_call_complete",
-        "tool_batch_preflight",
-        "tool_batch_complete",
-        "terminal"
-      ],
-      "wire_integer_maximum": 9007199254740991
-    },
-    "stream_fields": {
-      "delta": "string",
-      "tool_call_id": "non_empty_string",
-      "tool_name": "non_empty_string",
-      "optional_counters": "non_negative_json_safe_integer"
-    },
-    "model_call_fields": {
-      "event_types": [
-        "model_call_started",
-        "model_call_completed",
-        "model_call_failed"
-      ],
-      "operations": [
-        "agent_cycle",
-        "session_memory",
-        "memory_compaction"
-      ],
-      "failure_outcomes": [
-        "definitive",
-        "ambiguous"
-      ],
-      "record_status_mapping": {
-        "model_call_completed": "completed",
-        "model_call_failed:definitive": "failed",
-        "model_call_failed:ambiguous": "ambiguous"
-      },
-      "call_id_and_operation_id": "non_empty_string",
-      "attempt": "positive_json_safe_integer",
-      "cycle_index": "positive_json_safe_integer",
-      "backend_and_model": "non_empty_string",
-      "terminal_usage": "closed_vv-agent.token-usage.v1",
-      "failed_error_code": "non_empty_string",
-      "prompts_outputs_and_error_bodies": "forbidden"
-    },
-    "compaction_fields": {
-      "started_trigger_values": [
-        "micro_threshold",
-        "full_threshold",
-        "prompt_too_long"
-      ],
-      "completed_mode_values": [
-        "none",
-        "micro",
-        "structural",
-        "summary",
-        "emergency"
-      ],
-      "reserved_output_source_values": [
-        "model_settings",
-        "task_metadata",
-        "framework_fallback",
-        "framework_fallback_capped_by_model_capability"
-      ],
-      "capacity_counters": "non_negative_json_safe_integer_or_null",
-      "microcompact_plan_counters": [
-        "microcompact_target",
-        "candidate_count",
-        "estimated_reclaimable_tokens"
-      ],
-      "microcompact_result_counters": [
-        "archived_count",
-        "reclaimed_tokens",
-        "artifact_failure_count"
-      ],
-      "changed": "boolean",
-      "missing_required_fields": "reject"
-    },
-    "tool_lifecycle_fields": {
-      "event_types": [
-        "tool_call_planned",
-        "tool_call_started",
-        "tool_call_deferred",
-        "tool_call_completed"
-      ],
-      "tool_call_id": "non_empty_string",
-      "tool_name": "non_empty_string",
-      "planned_and_started_arguments": "object",
-      "tool_metadata": "omitted_or_closed_tool_metadata_object",
-      "completed_status_values": [
-        "success",
-        "error",
-        "wait_response",
-        "running",
-        "pending_compress"
-      ],
-      "completed_directive_values": [
-        "continue",
-        "finish",
-        "wait_user"
-      ],
-      "completed_error_code": "string_or_null",
-      "completed_execution_started": "boolean",
-      "completed_duration_ms": "non_negative_json_safe_integer_or_null",
-      "deferred_fields": [
-        "handle",
-        "operation_id",
-        "attempt",
-        "execution_started",
-        "duration_ms"
-      ],
-      "deferred_has_no_tool_result": true,
-      "missing_required_completed_fields": "reject"
-    },
-    "run_state_changed_fields": {
-      "event_type": "run_state_changed",
-      "state_values": [
-        "pending",
-        "running",
-        "host_interaction",
-        "suspended",
-        "deferred",
-        "reconciliation_required",
-        "wait_user",
-        "completed",
-        "failed",
-        "max_cycles"
-      ],
-      "cancel_requested": {
-        "placement": "top_level",
-        "required_fields": ["from", "to"],
-        "transition": {"from": false, "to": true},
-        "unknown_fields": "reject"
-      },
-      "cancel_requested_carrier": "top-level typed field only; metadata.cancel_requested is rejected",
-      "missing_cancel_requested_for_live_claim_cancel": "reject",
-      "unknown_fields": "reject"
-    },
-    "cycle_aborted_fields": {
-      "event_type": "cycle_aborted",
-      "required_fields": [
-        "version",
-        "type",
-        "event_id",
-        "run_id",
-        "trace_id",
-        "created_at",
-        "cycle_index",
-        "logical_cycle",
-        "reason"
-      ],
-      "reason_values": [
-        "cancelled",
-        "lease_lost",
-        "operator_abort"
-      ],
-    "logical_cycle": "positive_json_safe_integer",
-    "logical_cycle_relation": "logical_cycle = cycle_index + 1",
-    "cycle_index_semantics": "last committed cycle index",
-      "closes_unclosed_tools_with": "tool_cancelled",
-      "unknown_fields": "reject"
-    },
-    "host_interaction_fields": {
-      "event_types": [
-        "host_interaction_requested",
-        "host_interaction_response_consumed"
-      ],
-      "version": "v5",
-      "required_identity": [
-        "event_id",
-        "run_id",
-        "trace_id",
-        "cycle_index",
-        "checkpoint_key",
-        "resume_attempt",
-        "interaction_id",
-        "logical_cycle",
-        "operation_id",
-        "tool_call_id",
-        "request_digest"
-      ],
-      "identity_max_utf8_bytes": 512,
-      "identity_fields": [
-        "event_id",
-        "run_id",
-        "trace_id",
-        "checkpoint_key",
-        "interaction_id",
-        "operation_id",
-        "tool_call_id",
-        "command_id"
-      ],
-      "request_digest_max_utf8_bytes": 64,
-      "requested_required": ["prompt"],
-      "response_consumed_required": ["command_id", "response_digest", "consumed_revision"],
-      "response_consumed": {
-        "version": "v5",
-        "consumed_revision": "positive_json_safe_integer",
-        "response_digest": "lowercase_sha256",
-        "event_outbox_entry_must_be_complete": true
-      },
-      "prompt_and_response_digest": "opaque UTF-8 content; max 65536 bytes",
-      "unknown_fields": "reject"
-    },
-    "event_outbox": {
-      "registered_types_source": "fixtures/run_events.jsonl",
-      "entry_shape": "complete RunEvent v5 object, not a marker string",
-      "unknown_type": "reject"
-    }
-  },
   "reject": [
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJydW5fc3RhcnRlZCJ9",
       "id": "missing_version",
-      "input": {
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "8fa9c690812504e340a6203ef46b5e32e37f0844249bd3ef21e4fcead485989d"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2NSJ9",
       "id": "stale_version",
-      "input": {
-        "version": "v4",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "c322887e5a624bcb8ef15608cb034c82bdbc66c0edab69f6141e1009b3c1f377"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2OTkifQ==",
       "id": "unknown_version",
-      "input": {
-        "version": "v6",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "327f54610ce5baf69a5890d200a254689fba5681503d105969643c486569bf85"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOjZ9",
+      "id": "malformed_version",
+      "record_id": null,
+      "sha256": "2636d4c369ad1463917bcaceff750aee24ea812ac24ecd3920b76989bf499070"
+    },
+    {
+      "bytes_base64": "eyJjaGVja3BvaW50X2tleSI6Im9sZCIsImNyZWF0ZWRfYXQiOjEwMDAsImV2ZW50X2lkIjoic2svZWZiN2Q4ZjgzMTBkNjgwYmZlOGFjMTVhYTNlYWFkOGYyZDZiYTYwZDMzNTYwMTRlMTVmZjlmYzc3YzY2MjNmMi9ldmVudCIsImlucHV0IjoiZ28iLCJtZXRhZGF0YSI6eyJzZXNzaW9uX3NlcSI6M30sInJ1bl9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInNlc3Npb25faWQiOiJ0b29scyIsInRyYWNlX2lkIjoidG9vbHMvdHVybi9pbml0aWFsIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
+      "id": "rejected_field_4",
+      "record_id": null,
+      "sha256": "cfd94ce86b82d6ffacc72d4e69f13a6e94d562d3ed427f069a916528f9420de3"
+    },
+    {
+      "bytes_base64": "eyJjb25zdW1lZF9yZXZpc2lvbiI6Im9sZCIsImNyZWF0ZWRfYXQiOjEwMDAsImV2ZW50X2lkIjoic2svZWZiN2Q4ZjgzMTBkNjgwYmZlOGFjMTVhYTNlYWFkOGYyZDZiYTYwZDMzNTYwMTRlMTVmZjlmYzc3YzY2MjNmMi9ldmVudCIsImlucHV0IjoiZ28iLCJtZXRhZGF0YSI6eyJzZXNzaW9uX3NlcSI6M30sInJ1bl9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInNlc3Npb25faWQiOiJ0b29scyIsInRyYWNlX2lkIjoidG9vbHMvdHVybi9pbml0aWFsIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
+      "id": "rejected_field_5",
+      "record_id": null,
+      "sha256": "840d813caff9b01cee0c21b437c2e75a17118e40a014627db9cca328a996414c"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJyZXN1bWVfYXR0ZW1wdCI6Im9sZCIsInJ1bl9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInNlc3Npb25faWQiOiJ0b29scyIsInRyYWNlX2lkIjoidG9vbHMvdHVybi9pbml0aWFsIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
+      "id": "rejected_field_6",
+      "record_id": null,
+      "sha256": "0507baca058d7f026a60f90dae59e4c1ebe1c6ae432b04e5e0759fb8e423d7b2"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJjaGVja3BvaW50X2NyZWF0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
+      "id": "rejected_kind_7",
+      "record_id": null,
+      "sha256": "747a2890ed1035d0b635ce323bab5c87be8c873cdec57fbba7c9895dad91b22c"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJjaGVja3BvaW50X3Jlc3VtZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
+      "id": "rejected_kind_8",
+      "record_id": null,
+      "sha256": "ce0f1059152fb7a2e77976bcc95782487d1d09a7a0e1165004b52505ad8a04af"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJkZWZlcnJlZF9yZXN1bHQiLCJ2ZXJzaW9uIjoidjYifQ==",
+      "id": "rejected_kind_9",
+      "record_id": null,
+      "sha256": "bb004f6a6c791cc4ba4d8e6c13f0b8b5ca53bc85efafeb77fafd67711c4d495e"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJvcGVyYXRpb25fcmVwbGF5ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
+      "id": "rejected_kind_10",
+      "record_id": null,
+      "sha256": "15610ad317ddaab4b8db2646bc81c28a5693bca676f29587b607980c8fe7430d"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJyZWNvbmNpbGlhdGlvbl9yZXF1aXJlZCIsInZlcnNpb24iOiJ2NiJ9",
+      "id": "rejected_kind_11",
+      "record_id": null,
+      "sha256": "e0b101f50be308c98a9bb8b3aead7bafc050d12950d54d46b562301791dfc6ce"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJyZWNvbmNpbGlhdGlvbl9yZXNvbHZlZCIsInZlcnNpb24iOiJ2NiJ9",
+      "id": "rejected_kind_12",
+      "record_id": null,
+      "sha256": "2e8b889cf19fc0886dbf7562aaf40ce207ab5c28c3dcb799eb408045e505aca1"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJzZXNzaW9uX3BlcnNpc3RlZCIsInZlcnNpb24iOiJ2NiJ9",
+      "id": "rejected_kind_13",
+      "record_id": null,
+      "sha256": "f92a7968ddcf53d0de36e6847b198e3b8779b623d41718cfad186de89eae6a55"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJzZXNzaW9uX2lkIjoidG9vbHMiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJ0b29sX2NhbGxfZGVmZXJyZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
+      "id": "rejected_kind_14",
+      "record_id": null,
+      "sha256": "2dc7a14d03d4780911dc964e18c9d5d63aa9593a1746c7488951563b89b7149e"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxMDAwLCJldmVudF9pZCI6InNrL2VmYjdkOGY4MzEwZDY4MGJmZThhYzE1YWEzZWFhZDhmMmQ2YmE2MGQzMzU2MDE0ZTE1ZmY5ZmM3N2M2NjIzZjIvZXZlbnQiLCJpbnB1dCI6ImdvIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjN9LCJydW5faWQiOiJ0b29scy90dXJuL2luaXRpYWwiLCJ0cmFjZV9pZCI6InRvb2xzL3R1cm4vaW5pdGlhbCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
+      "id": "session_id_required",
+      "record_id": null,
+      "sha256": "25a06556284251da4f362f768eb5020cd0f0101fc305cbbdeb047e7bd8af208c"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fc3RhcnRlZCJ9",
+      "id": "missing_version",
+      "record_id": null,
+      "sha256": "cb4ae4c09449544c15cf02ecc108152a41ec58341146327ccdd9d90efbc6f273"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2NCJ9",
+      "id": "stale_version",
+      "record_id": null,
+      "sha256": "3a7b0d3073f3301ef67610b05796579b76c794b2df4f821d7e20c59c0cfc5a56"
+    },
+    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6Im15c3RlcnkiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "unknown_event_type",
-      "input": {
-        "version": "v5",
-        "type": "mystery",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1
-      }
+      "record_id": null,
+      "sha256": "e68a629f031320c8cb6275f12da7f874718a18a6ea6ad1dbf3375b7e7ee9fb14"
     },
     {
-      "id": "future_version",
-      "input": {
-        "version": "v6",
-        "type": "run_started",
-        "event_id": "evt_invalid_future",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
-    },
-    {
+      "bytes_base64": "eyJiYWNrZW5kIjoidGVzdCIsImNyZWF0ZWRfYXQiOjEsImN5Y2xlX2luZGV4IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwibW9kZWwiOiJ0ZXN0LW1vZGVsIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6ImxsbV9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "legacy_llm_started_is_rejected",
-      "input": {
-        "version": "v5",
-        "type": "llm_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "backend": "test",
-        "model": "test-model"
-      }
+      "record_id": null,
+      "sha256": "190554de7e9b15af1e3f9261be47d0df9268bc50045b290a94db0263a4ca4fab"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiZnV0dXJlX2ZpZWxkIjp0cnVlLCJpbnB1dCI6ImhlbGxvIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "unknown_top_level_field",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello",
-        "future_field": true
-      }
+      "record_id": null,
+      "sha256": "1c81529724a216f6b84b727b02a8c006eaa139575e1e8644fcc9f98d67d84df8"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJpbnB1dCI6ImhlbGxvIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "missing_event_id",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "e5379df10a253819955e8a78ef1adc6fe8ef24cf6f0c88e90d0b559c777043dc"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6IiIsImlucHV0IjoiaGVsbG8iLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoicnVuX3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "empty_event_id",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "47982d69182ce0a780b1670ae93241c91806a62ea4f5e631b74090de1e624135"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsInJ1bl9pZCI6Nywic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "non_string_run_id",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": 7,
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "bf15107d51384722f2a8284564fca3dddee1c6c4f0c6dcc35f6fab2bb47ebf45"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoiIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "empty_trace_id",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "",
-        "created_at": 1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "103688c7c15e9c285993d01c518ad9c0c8664070f917c67e9a9b459ef83e92cd"
     },
     {
+      "bytes_base64": "eyJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "missing_created_at",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "0595b004d51a50fbd709975420299d81f17ab37b3c7e810afac4a384d0c58ef0"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjotMSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZCIsImlucHV0IjoiaGVsbG8iLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoicnVuX3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "negative_created_at",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": -1,
-        "input": "hello"
-      }
+      "record_id": null,
+      "sha256": "7bdbe719ac618242171e1aea3adea3bc8c857584c78a71dd9d7b8417dc23b36a"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJjeWNsZV9pbmRleCI6dHJ1ZSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZCIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJjeWNsZV9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "boolean_cycle_index",
-      "input": {
-        "version": "v5",
-        "type": "cycle_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": true
-      }
+      "record_id": null,
+      "sha256": "93050ea36792c97e0bd9bc67e92e29eb73203a9ce502116f5541eacd1c83e2ac"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJjeWNsZV9pbmRleCI6LTEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoiY3ljbGVfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "negative_cycle_index",
-      "input": {
-        "version": "v5",
-        "type": "cycle_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": -1
-      }
+      "record_id": null,
+      "sha256": "4d6c36f6aa1a9be31168023a74ed9132f795244c0ad2151bcb025b1d857fa29a"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwiaW5wdXQiOiJoZWxsbyIsIm1ldGFkYXRhIjpbXSwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InJ1bl9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "metadata_is_not_an_object",
-      "input": {
-        "version": "v5",
-        "type": "run_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "input": "hello",
-        "metadata": []
-      }
+      "record_id": null,
+      "sha256": "a803497e6deb7a105f4d0b924408cfb7ce7b92422159da3bdd03bf674d2a8df5"
     },
     {
+      "bytes_base64": "eyJhcmd1bWVudHMiOjcsImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzZWFyY2giLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoidG9vbF9jYWxsX3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "tool_arguments_are_not_an_object",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_started",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_name": "search",
-        "tool_call_id": "call_invalid",
-        "arguments": 7
-      }
+      "record_id": null,
+      "sha256": "920e5be05d8e90254f74ec2290e55945bd2c8d1c77e747bdca56a3e31b1d00d3"
     },
     {
+      "bytes_base64": "eyJhY3Rpb24iOiJhbGxvdyIsImFwcHJvdmVkIjp0cnVlLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwicmVxdWVzdF9pZCI6ImFwcHJvdmFsX2ludmFsaWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzaGVsbCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJhcHByb3ZhbF9yZXNvbHZlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "approval_approved_field_is_rejected",
-      "input": {
-        "version": "v5",
-        "type": "approval_resolved",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "request_id": "approval_invalid",
-        "tool_name": "shell",
-        "tool_call_id": "call_invalid",
-        "action": "allow",
-        "approved": true
-      }
+      "record_id": null,
+      "sha256": "784c0378c929f9edb706b4c21119ec278419fd05db9fcfeee7b3c6beb54214d8"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwibWVzc2FnZSI6IkFsbG93IGNvbW1hbmQ/IiwicHJldmlldyI6IkFsbG93IGNvbW1hbmQ/IiwicmVxdWVzdF9pZCI6ImFwcHJvdmFsX2ludmFsaWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzaGVsbCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJhcHByb3ZhbF9yZXF1ZXN0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "approval_preview_field_is_rejected",
-      "input": {
-        "version": "v5",
-        "type": "approval_requested",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "request_id": "approval_invalid",
-        "tool_name": "shell",
-        "tool_call_id": "call_invalid",
-        "message": "Allow command?",
-        "preview": "Allow command?"
-      }
+      "record_id": null,
+      "sha256": "921e098f8bf7420ca280d03cc321c268356bc082b2e020a4cfb750ed1fdaa1f7"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkIiwicmVxdWVzdF9pZCI6ImFwcHJvdmFsX2ludmFsaWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzaGVsbCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJhcHByb3ZhbF9yZXNvbHZlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "approval_action_is_missing",
-      "input": {
-        "version": "v5",
-        "type": "approval_resolved",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "request_id": "approval_invalid",
-        "tool_name": "shell",
-        "tool_call_id": "call_invalid"
-      }
+      "record_id": null,
+      "sha256": "de81d3287335f9c055d5f8e8a23b5ddeb3d61c70e5994edb86187d80f27aacc4"
     },
     {
+      "bytes_base64": "eyJhY3Rpb24iOiJtYXliZSIsImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWQiLCJyZXF1ZXN0X2lkIjoiYXBwcm92YWxfaW52YWxpZCIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRvb2xfY2FsbF9pZCI6ImNhbGxfaW52YWxpZCIsInRvb2xfbmFtZSI6InNoZWxsIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6ImFwcHJvdmFsX3Jlc29sdmVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "approval_action_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "approval_resolved",
-        "event_id": "evt_invalid",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "request_id": "approval_invalid",
-        "tool_name": "shell",
-        "tool_call_id": "call_invalid",
-        "action": "maybe"
-      }
+      "record_id": null,
+      "sha256": "1890eebbfe08178832e52cbe3ff967ad657c6909e86be33e7fc2cd585df87a81"
     },
     {
+      "bytes_base64": "eyJjb21wbGV0aW9uX3JlYXNvbiI6ImZ1dHVyZV9yZWFzb24iLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX2NvbXBsZXRpb25fcmVhc29uIiwiZmluYWxfb3V0cHV0IjoiZG9uZSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fY29tcGxldGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "unknown_completion_reason",
-      "input": {
-        "version": "v5",
-        "type": "run_completed",
-        "event_id": "evt_invalid_completion_reason",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "status": "completed",
-        "final_output": "done",
-        "completion_reason": "future_reason"
-      }
+      "record_id": null,
+      "sha256": "ae262bde7cb53278b5e3886968c67f5433323ff41b71f09fa045e78be7c9396f"
     },
     {
+      "bytes_base64": "eyJjb21wbGV0aW9uX3JlYXNvbiI6NywiY3JlYXRlZF9hdCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9jb21wbGV0aW9uX3JlYXNvbl90eXBlIiwiZmluYWxfb3V0cHV0IjoiZG9uZSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fY29tcGxldGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "completion_reason_is_not_a_string_or_null",
-      "input": {
-        "version": "v5",
-        "type": "run_completed",
-        "event_id": "evt_invalid_completion_reason_type",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "status": "completed",
-        "final_output": "done",
-        "completion_reason": 7
-      }
+      "record_id": null,
+      "sha256": "4084311079dcdc122ed51d9a5f1829a2432ae0641bcf41c1af97782c8992178d"
     },
     {
+      "bytes_base64": "eyJjb21wbGV0aW9uX3Rvb2xfbmFtZSI6ZmFsc2UsImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfY29tcGxldGlvbl90b29sX25hbWVfdHlwZSIsImZpbmFsX291dHB1dCI6ImRvbmUiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoicnVuX2NvbXBsZXRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "completion_tool_name_is_not_a_string_or_null",
-      "input": {
-        "version": "v5",
-        "type": "run_completed",
-        "event_id": "evt_invalid_completion_tool_name_type",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "status": "completed",
-        "final_output": "done",
-        "completion_tool_name": false
-      }
+      "record_id": null,
+      "sha256": "799428c69e9c413df5d7b32a9ec06e5f14c6ea4b0ab1327d8be26b3dcc13d5d1"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3BhcnRpYWxfb3V0cHV0X3R5cGUiLCJmaW5hbF9vdXRwdXQiOiJkb25lIiwicGFydGlhbF9vdXRwdXQiOnsidGV4dCI6ImRyYWZ0In0sInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJydW5fY29tcGxldGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "partial_output_is_not_a_string_or_null",
-      "input": {
-        "version": "v5",
-        "type": "run_completed",
-        "event_id": "evt_invalid_partial_output_type",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "status": "completed",
-        "final_output": "done",
-        "partial_output": {
-          "text": "draft"
-        }
-      }
+      "record_id": null,
+      "sha256": "d862f878f4770c091d7667affe9ec0bc33766e2ed09173b041ccb0815d160b36"
     },
     {
+      "bytes_base64": "eyJidWRnZXRfdXNhZ2UiOltdLCJjcmVhdGVkX2F0IjoxLCJlcnJvciI6ImZhaWxlZCIsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfYnVkZ2V0X3VzYWdlIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InJ1bl9mYWlsZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "budget_usage_is_not_an_object_or_null",
-      "input": {
-        "version": "v5",
-        "type": "run_failed",
-        "event_id": "evt_invalid_budget_usage",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "error": "failed",
-        "budget_usage": []
-      }
+      "record_id": null,
+      "sha256": "607171a464df9a86d6927f142c852a097f9113c4946dafa82493699c0d50aba8"
     },
     {
+      "bytes_base64": "eyJidWRnZXRfZXhoYXVzdGlvbiI6eyJhdHRlbXB0ZWRfaW5jcmVtZW50IjpudWxsLCJjdXJyZW5jeSI6bnVsbCwiZGltZW5zaW9uIjoiZnV0dXJlX2RpbWVuc2lvbiIsImVuZm9yY2VtZW50X2JvdW5kYXJ5IjoibW9kZWxfY2FsbF9jb21wbGV0ZSIsImxpbWl0IjoxMCwib2JzZXJ2ZWQiOjEyLCJvdmVyc2hvb3QiOjIsInJlYXNvbiI6ImxpbWl0X2V4Y2VlZGVkIiwidG9vbF9uYW1lIjpudWxsLCJ1bmF2YWlsYWJsZV9yZWFzb24iOm51bGwsInVuaXQiOiJ0b2tlbnMifSwiYnVkZ2V0X3VzYWdlIjp7ImN5Y2xlcyI6MSwiZWxhcHNlZF9tcyI6MSwiaG9zdF9jb3N0IjpudWxsLCJ0b29sX2NhbGxzIjowLCJ0b29sX2NhbGxzX2J5X25hbWUiOnt9LCJ0b3RhbF90b2tlbnMiOjEyLCJ1bmF2YWlsYWJsZV9kaW1lbnNpb25zIjpbXSwidW5jYWNoZWRfaW5wdXRfdG9rZW5zIjoxMn0sImNyZWF0ZWRfYXQiOjEsImVuZm9yY2VtZW50X2JvdW5kYXJ5IjoibW9kZWxfY2FsbF9jb21wbGV0ZSIsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfYnVkZ2V0X2RpbWVuc2lvbiIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJidWRnZXRfZXhoYXVzdGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "budget_exhaustion_unknown_dimension",
-      "input": {
-        "version": "v5",
-        "type": "budget_exhausted",
-        "event_id": "evt_invalid_budget_dimension",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "enforcement_boundary": "model_call_complete",
-        "budget_usage": {
-          "cycles": 1,
-          "total_tokens": 12,
-          "uncached_input_tokens": 12,
-          "tool_calls": 0,
-          "tool_calls_by_name": {},
-          "elapsed_ms": 1,
-          "host_cost": null,
-          "unavailable_dimensions": []
-        },
-        "budget_exhaustion": {
-          "dimension": "future_dimension",
-          "tool_name": null,
-          "reason": "limit_exceeded",
-          "limit": 10,
-          "observed": 12,
-          "attempted_increment": null,
-          "overshoot": 2,
-          "unit": "tokens",
-          "currency": null,
-          "enforcement_boundary": "model_call_complete",
-          "unavailable_reason": null
-        }
-      }
+      "record_id": null,
+      "sha256": "f69f2ef62f0ee8ca47db601c3bd72a47ec8a437fc5db8836e13b794cd0943f1a"
     },
     {
-      "id": "checkpoint_key_is_not_a_string",
-      "input": {
-        "version": "v5",
-        "event_id": "evt_invalid_resume",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "checkpoint_key": 7,
-        "operation_id": "op-1",
-        "operation_kind": "tool",
-        "type": "checkpoint_created",
-        "resume_attempt": 1
-      }
-    },
-    {
-      "id": "resume_attempt_is_not_positive",
-      "input": {
-        "version": "v5",
-        "event_id": "evt_invalid_resume",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "checkpoint_key": "key",
-        "operation_id": "op-1",
-        "operation_kind": "tool",
-        "type": "checkpoint_resumed",
-        "resume_attempt": 0
-      }
-    },
-    {
-      "id": "unknown_operation_kind",
-      "input": {
-        "version": "v5",
-        "event_id": "evt_invalid_resume",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "checkpoint_key": "key",
-        "operation_id": "op-1",
-        "operation_kind": "network",
-        "type": "operation_ambiguous",
-        "risk": "unknown_tool_side_effect",
-        "idempotency_support": "unknown"
-      }
-    },
-    {
-      "id": "invalid_resume_observation_state",
-      "input": {
-        "version": "v5",
-        "event_id": "evt_invalid_resume",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "checkpoint_key": "key",
-        "operation_id": "op-1",
-        "operation_kind": "tool",
-        "type": "reconciliation_required",
-        "interruption_reason": "resume_requires_reconciliation",
-        "resume_observation": {
-          "operation_id": "op-1",
-          "operation_kind": "tool",
-          "cycle_index": 1,
-          "state": "started",
-          "risk": "unknown_tool_side_effect",
-          "idempotency_support": "unknown"
-        }
-      }
-    },
-    {
+      "bytes_base64": "eyJhcmd1bWVudHMiOltdLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzZWFyY2giLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoidG9vbF9jYWxsX3BsYW5uZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "planned_arguments_are_not_an_object",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_planned",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "arguments": []
-      }
+      "record_id": null,
+      "sha256": "a81391cf0ee6416852c19c51ede00dec12c6263427f4a291380fee83f3eb8155"
     },
     {
+      "bytes_base64": "eyJhcmd1bWVudHMiOnt9LCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiIiLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoidG9vbF9jYWxsX3BsYW5uZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "planned_tool_name_is_empty",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_planned",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "",
-        "arguments": {}
-      }
+      "record_id": null,
+      "sha256": "fa475718706ff53c52b2d2f15224eb39145b7a7f4f8da057f19cc3448aeb3e30"
     },
     {
+      "bytes_base64": "eyJhcmd1bWVudHMiOnt9LCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX21ldGFkYXRhIjp7InRhc2tfdHlwZSI6InJlc2VhcmNoIn0sInRvb2xfbmFtZSI6InNlYXJjaCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJ0b29sX2NhbGxfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "tool_metadata_has_unknown_field",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_started",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "arguments": {},
-        "tool_metadata": {
-          "task_type": "research"
-        }
-      }
+      "record_id": null,
+      "sha256": "4818bd28616928dbaf9a4480b0790174add3e7287b3bcee9998b7c9bbcaa7f89"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJjb250aW51ZSIsImR1cmF0aW9uX21zIjoxLCJlcnJvcl9jb2RlIjpudWxsLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwic3RhdHVzIjoiZG9uZSIsInRvb2xfY2FsbF9pZCI6ImNhbGxfaW52YWxpZCIsInRvb2xfbmFtZSI6InNlYXJjaCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJ0b29sX2NhbGxfY29tcGxldGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "tool_completed_status_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "done",
-        "directive": "continue",
-        "error_code": null,
-        "execution_started": true,
-        "duration_ms": 1
-      }
+      "record_id": null,
+      "sha256": "12afbe3c8596a5690dc0953fdca98d81f5a5b10940f89f316ad48fd85d2ec220"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJzdG9wIiwiZHVyYXRpb25fbXMiOjEsImVycm9yX2NvZGUiOm51bGwsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfdG9vbCIsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJzdGF0dXMiOiJzdWNjZXNzIiwidG9vbF9jYWxsX2lkIjoiY2FsbF9pbnZhbGlkIiwidG9vbF9uYW1lIjoic2VhcmNoIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InRvb2xfY2FsbF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "tool_completed_directive_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "success",
-        "directive": "stop",
-        "error_code": null,
-        "execution_started": true,
-        "duration_ms": 1
-      }
+      "record_id": null,
+      "sha256": "ac03eca5ce2cf5f7f88a06eb847790f22692691cc2351c49951f2e2bf28ed942"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJjb250aW51ZSIsImR1cmF0aW9uX21zIjoxLCJlcnJvcl9jb2RlIjpudWxsLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJleGVjdXRpb25fc3RhcnRlZCI6MSwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwic3RhdHVzIjoic3VjY2VzcyIsInRvb2xfY2FsbF9pZCI6ImNhbGxfaW52YWxpZCIsInRvb2xfbmFtZSI6InNlYXJjaCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJ0b29sX2NhbGxfY29tcGxldGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "tool_completed_execution_started_is_not_boolean",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "success",
-        "directive": "continue",
-        "error_code": null,
-        "execution_started": 1,
-        "duration_ms": 1
-      }
+      "record_id": null,
+      "sha256": "fbc9b12baf425d51fa2b7902126193bf29c7473d2da02c33b40cdafcc3190ca7"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJjb250aW51ZSIsImR1cmF0aW9uX21zIjotMSwiZXJyb3JfY29kZSI6bnVsbCwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF90b29sIiwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN0YXR1cyI6InN1Y2Nlc3MiLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzZWFyY2giLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoidG9vbF9jYWxsX2NvbXBsZXRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "tool_completed_duration_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "success",
-        "directive": "continue",
-        "error_code": null,
-        "execution_started": true,
-        "duration_ms": -1
-      }
+      "record_id": null,
+      "sha256": "58104a328b21524c393319454f8ed722e6fdcf6d7a8aaf0e17f0a0c518d9526f"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJjb250aW51ZSIsImR1cmF0aW9uX21zIjoxLCJlcnJvcl9jb2RlIjoidG9vbF9ub3RfYWxsb3dlZCIsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfdG9vbCIsImV4ZWN1dGlvbl9zdGFydGVkIjpmYWxzZSwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwic3RhdHVzIjoiZXJyb3IiLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2ludmFsaWQiLCJ0b29sX25hbWUiOiJzZWFyY2giLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoidG9vbF9jYWxsX2NvbXBsZXRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "tool_completed_not_started_cannot_have_duration",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "error",
-        "directive": "continue",
-        "error_code": "tool_not_allowed",
-        "execution_started": false,
-        "duration_ms": 1
-      }
+      "record_id": null,
+      "sha256": "88615a604f5a579ab79373782002a503a12505bb935d35540462a97990c912d0"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkaXJlY3RpdmUiOiJjb250aW51ZSIsImR1cmF0aW9uX21zIjpudWxsLCJlcnJvcl9jb2RlIjo3LCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3Rvb2wiLCJleGVjdXRpb25fc3RhcnRlZCI6ZmFsc2UsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN0YXR1cyI6ImVycm9yIiwidG9vbF9jYWxsX2lkIjoiY2FsbF9pbnZhbGlkIiwidG9vbF9uYW1lIjoic2VhcmNoIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6InRvb2xfY2FsbF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "tool_completed_error_code_is_not_string_or_null",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_completed",
-        "event_id": "evt_invalid_tool",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "status": "error",
-        "directive": "continue",
-        "error_code": 7,
-        "execution_started": false,
-        "duration_ms": null
-      }
+      "record_id": null,
+      "sha256": "55c323cf2f2b5f1b7c1aa598c3cb5648404d4c826027c8bb425cafc4c0bb1f91"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJkZWx0YSI6NywiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9zdHJlYW0iLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoicmVhc29uaW5nX2RlbHRhIiwidmVyc2lvbiI6InY2In0=",
       "id": "reasoning_delta_is_not_a_string",
-      "input": {
-        "version": "v5",
-        "type": "reasoning_delta",
-        "event_id": "evt_invalid_stream",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "delta": 7
-      }
+      "record_id": null,
+      "sha256": "7a8fbd22c696de389fe916be2ea1a4c94c6853ca9edf263d4c9a99553c5e96b8"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3N0cmVhbSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRvb2xfY2FsbF9pZCI6IiIsInRvb2xfbmFtZSI6InNlYXJjaCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF90b29sX2NhbGxfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "model_tool_call_id_is_empty",
-      "input": {
-        "version": "v5",
-        "type": "model_tool_call_started",
-        "event_id": "evt_invalid_stream",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "",
-        "tool_name": "search"
-      }
+      "record_id": null,
+      "sha256": "2a3ff53f12510471ea9aa004785239941b5dbf9870a259008efdc97fe5a85267"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3N0cmVhbSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRvb2xfY2FsbF9pZCI6ImNhbGxfaW52YWxpZCIsInRvb2xfbmFtZSI6IiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF90b29sX2NhbGxfcHJvZ3Jlc3MiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "model_tool_name_is_empty",
-      "input": {
-        "version": "v5",
-        "type": "model_tool_call_progress",
-        "event_id": "evt_invalid_stream",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": ""
-      }
+      "record_id": null,
+      "sha256": "0dd3a4aaf44c8c7adb63b252d3a5e6dfbd315a2ad281db905e53447e46e8be92"
     },
     {
+      "bytes_base64": "eyJhcmd1bWVudHNfY2hhcnMiOi0xLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3N0cmVhbSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRvb2xfY2FsbF9pZCI6ImNhbGxfaW52YWxpZCIsInRvb2xfbmFtZSI6InNlYXJjaCIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF90b29sX2NhbGxfcHJvZ3Jlc3MiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "stream_counter_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "model_tool_call_progress",
-        "event_id": "evt_invalid_stream",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "tool_call_id": "call_invalid",
-        "tool_name": "search",
-        "arguments_chars": -1
-      }
+      "record_id": null,
+      "sha256": "8f5a18a2a58af4cba7be872be01b177776f50ff9565407de7aed6f733931e0b6"
     },
     {
+      "bytes_base64": "eyJjb250ZW50X2NoYXJzIjo5MDA3MTk5MjU0NzQwOTkyLCJjcmVhdGVkX2F0IjoxLCJkZWx0YSI6IngiLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX3N0cmVhbSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJhc3Npc3RhbnRfZGVsdGEiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "stream_counter_exceeds_json_safe_maximum",
-      "input": {
-        "version": "v5",
-        "type": "assistant_delta",
-        "event_id": "evt_invalid_stream",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "delta": "x",
-        "content_chars": 9007199254740992
-      }
+      "record_id": null,
+      "sha256": "028acfbef06bad9eb1ce6e19e7579403b4642d2ebb3f9f787c7d050f540226eb"
     },
     {
+      "bytes_base64": "eyJjb2RlIjoiY3ljbGVfb2JzZXJ2YXRpb24iLCJjcmVhdGVkX2F0IjoxLCJkZXRhaWxzIjp7fSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9kaWFnbm9zdGljIiwibGV2ZWwiOiJub3RpY2UiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoiZGlhZ25vc3RpYyIsInZlcnNpb24iOiJ2NiJ9",
       "id": "diagnostic_level_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "diagnostic",
-        "event_id": "evt_invalid_diagnostic",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "level": "notice",
-        "code": "cycle_observation",
-        "details": {}
-      }
+      "record_id": null,
+      "sha256": "efb733d46fa8dd794c82b82e59be63661c66a52ca49157cfbb0aaf366e574a79"
     },
     {
+      "bytes_base64": "eyJjb2RlIjoiIiwiY3JlYXRlZF9hdCI6MSwiZGV0YWlscyI6e30sImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfZGlhZ25vc3RpYyIsImxldmVsIjoiaW5mbyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJkaWFnbm9zdGljIiwidmVyc2lvbiI6InY2In0=",
       "id": "diagnostic_code_is_empty",
-      "input": {
-        "version": "v5",
-        "type": "diagnostic",
-        "event_id": "evt_invalid_diagnostic",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "level": "info",
-        "code": "",
-        "details": {}
-      }
+      "record_id": null,
+      "sha256": "2d250f7ead7a87ddf8ee231e79188b571db2a428152ab68a10abe93abe867596"
     },
     {
+      "bytes_base64": "eyJjb2RlIjoiY3ljbGVfb2JzZXJ2YXRpb24iLCJjcmVhdGVkX2F0IjoxLCJkZXRhaWxzIjpbXSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9kaWFnbm9zdGljIiwibGV2ZWwiOiJpbmZvIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6ImRpYWdub3N0aWMiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "diagnostic_details_is_not_an_object",
-      "input": {
-        "version": "v5",
-        "type": "diagnostic",
-        "event_id": "evt_invalid_diagnostic",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "level": "info",
-        "code": "cycle_observation",
-        "details": []
-      }
+      "record_id": null,
+      "sha256": "69cd9e662f1efa9f98ae4bcf8d931441a0ea809eb339cd5278bd50b8a521850b"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX21lbW9yeSIsIm1lc3NhZ2VfY291bnQiOjMsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInRyaWdnZXIiOiJzZW1hbnRpY19wcm9ncmVzcyIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "memory_compact_trigger_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "trigger": "semantic_progress"
-      }
+      "record_id": null,
+      "sha256": "2573f5c8aec3e60e108ab91e0cb660f4250540e4c991b423fe372baee861350a"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJlZmZlY3RpdmVfdGhyZXNob2xkIjotMSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9tZW1vcnkiLCJtZXNzYWdlX2NvdW50IjozLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoibWVtb3J5X2NvbXBhY3Rfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "memory_compact_capacity_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "effective_threshold": -1
-      }
+      "record_id": null,
+      "sha256": "7676766750f409c43dce54758ab05c5bea8ed59c0b8b87654bb90e3e8ff72a65"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX21lbW9yeSIsIm1lc3NhZ2VfY291bnQiOjMsInJlc2VydmVkX291dHB1dF9zb3VyY2UiOiJtb2RlbF9jYXBhYmlsaXR5IiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6Im1lbW9yeV9jb21wYWN0X3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_reserved_output_source_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "reserved_output_source": "model_capability"
-      }
+      "record_id": null,
+      "sha256": "1cc5ddd76f0eaa70b65e10e0361a00981314d42a7865624345d39b0084f9afb7"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MiwiYmVmb3JlX2NvdW50IjozLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX21lbW9yeSIsIm1vZGUiOiJkb21haW5fc3VtbWFyeSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_mode_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 2,
-        "mode": "domain_summary"
-      }
+      "record_id": null,
+      "sha256": "64d143a5d39f77c551fedc6866565d144e53db72ea641ac68a335710f013b704"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MiwiYmVmb3JlX2NvdW50IjozLCJjaGFuZ2VkIjoxLCJjcmVhdGVkX2F0IjoxLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX21lbW9yeSIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_changed_is_not_boolean",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 2,
-        "changed": 1
-      }
+      "record_id": null,
+      "sha256": "2b7d32c174b536b828ac254a6bb3d1f68ade22aa1934dc2f2fe669637fd4f7c6"
     },
     {
+      "bytes_base64": "eyJhdXRvY29tcGFjdF9idWZmZXJfdG9rZW5zIjoxMzAwMCwiY2FuZGlkYXRlX2NvdW50IjoxLCJjb25maWd1cmVkX3RocmVzaG9sZCI6MjUwMDAwLCJjcmVhdGVkX2F0IjoxLCJlZmZlY3RpdmVfdGhyZXNob2xkIjoyNTAwMDAsImVzdGltYXRlZF9yZWNsYWltYWJsZV90b2tlbnMiOjUwMDAwLCJlc3RpbWF0ZWRfdG9rZW5zIjoyMDAwMDAsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbWVtb3J5IiwibWVzc2FnZV9jb3VudCI6MywibWljcm9jb21wYWN0X3RhcmdldCI6LTEsIm1pY3JvY29tcGFjdF90aHJlc2hvbGQiOjE4NzUwMCwibW9kZWxfY29udGV4dF93aW5kb3ciOjEwMDAwMDAsIm1vZGVsX21heF9vdXRwdXRfdG9rZW5zIjozODQwMDAsInJlc2VydmVkX291dHB1dF9zb3VyY2UiOiJmcmFtZXdvcmtfZmFsbGJhY2siLCJyZXNlcnZlZF9vdXRwdXRfdG9rZW5zIjoxNjAwMCwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHJpZ2dlciI6Im1pY3JvX3RocmVzaG9sZCIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9zdGFydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "memory_compact_target_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "estimated_tokens": 200000,
-        "trigger": "micro_threshold",
-        "configured_threshold": 250000,
-        "effective_threshold": 250000,
-        "microcompact_threshold": 187500,
-        "microcompact_target": -1,
-        "candidate_count": 1,
-        "estimated_reclaimable_tokens": 50000,
-        "model_context_window": 1000000,
-        "model_max_output_tokens": 384000,
-        "reserved_output_tokens": 16000,
-        "reserved_output_source": "framework_fallback",
-        "autocompact_buffer_tokens": 13000
-      }
+      "record_id": null,
+      "sha256": "a3adcc09b1a93b0e781798c0b2463285cf86a97a6d8c1316f6ecee93648ec663"
     },
     {
+      "bytes_base64": "eyJhdXRvY29tcGFjdF9idWZmZXJfdG9rZW5zIjoxMzAwMCwiY2FuZGlkYXRlX2NvdW50IjotMSwiY29uZmlndXJlZF90aHJlc2hvbGQiOjI1MDAwMCwiY3JlYXRlZF9hdCI6MSwiZWZmZWN0aXZlX3RocmVzaG9sZCI6MjUwMDAwLCJlc3RpbWF0ZWRfcmVjbGFpbWFibGVfdG9rZW5zIjo1MDAwMCwiZXN0aW1hdGVkX3Rva2VucyI6MjAwMDAwLCJldmVudF9pZCI6ImV2dF9pbnZhbGlkX21lbW9yeSIsIm1lc3NhZ2VfY291bnQiOjMsIm1pY3JvY29tcGFjdF90YXJnZXQiOjE1MDAwMCwibWljcm9jb21wYWN0X3RocmVzaG9sZCI6MTg3NTAwLCJtb2RlbF9jb250ZXh0X3dpbmRvdyI6MTAwMDAwMCwibW9kZWxfbWF4X291dHB1dF90b2tlbnMiOjM4NDAwMCwicmVzZXJ2ZWRfb3V0cHV0X3NvdXJjZSI6ImZyYW1ld29ya19mYWxsYmFjayIsInJlc2VydmVkX291dHB1dF90b2tlbnMiOjE2MDAwLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0cmlnZ2VyIjoibWljcm9fdGhyZXNob2xkIiwidHlwZSI6Im1lbW9yeV9jb21wYWN0X3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_candidate_count_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "estimated_tokens": 200000,
-        "trigger": "micro_threshold",
-        "configured_threshold": 250000,
-        "effective_threshold": 250000,
-        "microcompact_threshold": 187500,
-        "microcompact_target": 150000,
-        "candidate_count": -1,
-        "estimated_reclaimable_tokens": 50000,
-        "model_context_window": 1000000,
-        "model_max_output_tokens": 384000,
-        "reserved_output_tokens": 16000,
-        "reserved_output_source": "framework_fallback",
-        "autocompact_buffer_tokens": 13000
-      }
+      "record_id": null,
+      "sha256": "59e65544ea8244f084d6b874d917f7df2c86d105567b2ea1f995ac3c3a4a2a91"
     },
     {
+      "bytes_base64": "eyJhdXRvY29tcGFjdF9idWZmZXJfdG9rZW5zIjoxMzAwMCwiY2FuZGlkYXRlX2NvdW50IjoxLCJjb25maWd1cmVkX3RocmVzaG9sZCI6MjUwMDAwLCJjcmVhdGVkX2F0IjoxLCJlZmZlY3RpdmVfdGhyZXNob2xkIjoyNTAwMDAsImVzdGltYXRlZF9yZWNsYWltYWJsZV90b2tlbnMiOi0xLCJlc3RpbWF0ZWRfdG9rZW5zIjoyMDAwMDAsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbWVtb3J5IiwibWVzc2FnZV9jb3VudCI6MywibWljcm9jb21wYWN0X3RhcmdldCI6MTUwMDAwLCJtaWNyb2NvbXBhY3RfdGhyZXNob2xkIjoxODc1MDAsIm1vZGVsX2NvbnRleHRfd2luZG93IjoxMDAwMDAwLCJtb2RlbF9tYXhfb3V0cHV0X3Rva2VucyI6Mzg0MDAwLCJyZXNlcnZlZF9vdXRwdXRfc291cmNlIjoiZnJhbWV3b3JrX2ZhbGxiYWNrIiwicmVzZXJ2ZWRfb3V0cHV0X3Rva2VucyI6MTYwMDAsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInRyaWdnZXIiOiJtaWNyb190aHJlc2hvbGQiLCJ0eXBlIjoibWVtb3J5X2NvbXBhY3Rfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "memory_compact_estimated_reclaimable_tokens_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "estimated_tokens": 200000,
-        "trigger": "micro_threshold",
-        "configured_threshold": 250000,
-        "effective_threshold": 250000,
-        "microcompact_threshold": 187500,
-        "microcompact_target": 150000,
-        "candidate_count": 1,
-        "estimated_reclaimable_tokens": -1,
-        "model_context_window": 1000000,
-        "model_max_output_tokens": 384000,
-        "reserved_output_tokens": 16000,
-        "reserved_output_source": "framework_fallback",
-        "autocompact_buffer_tokens": 13000
-      }
+      "record_id": null,
+      "sha256": "81b33518ed30dec0fa6a22d222aaca4e8a717f7da0e06a69e72b9a9b45ec4480"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MywiYXJjaGl2ZWRfY291bnQiOi0xLCJhcnRpZmFjdF9mYWlsdXJlX2NvdW50IjowLCJiZWZvcmVfY291bnQiOjMsImNoYW5nZWQiOnRydWUsImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbWVtb3J5IiwibW9kZSI6Im1pY3JvIiwicmVjbGFpbWVkX3Rva2VucyI6NTAwMDAsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN1bW1hcnlfdG9rZW5zIjoxMDAsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_archived_count_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 3,
-        "summary_tokens": 100,
-        "mode": "micro",
-        "changed": true,
-        "archived_count": -1,
-        "reclaimed_tokens": 50000,
-        "artifact_failure_count": 0
-      }
+      "record_id": null,
+      "sha256": "424d7f3d0ed8b84bcaf0ce7f32749873ac8dbe73eb9917bb57edfdf70c9a14b4"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MywiYXJjaGl2ZWRfY291bnQiOjEsImFydGlmYWN0X2ZhaWx1cmVfY291bnQiOjAsImJlZm9yZV9jb3VudCI6MywiY2hhbmdlZCI6dHJ1ZSwiY3JlYXRlZF9hdCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9tZW1vcnkiLCJtb2RlIjoibWljcm8iLCJyZWNsYWltZWRfdG9rZW5zIjotMSwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwic3VtbWFyeV90b2tlbnMiOjEwMCwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6Im1lbW9yeV9jb21wYWN0X2NvbXBsZXRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "memory_compact_reclaimed_tokens_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 3,
-        "summary_tokens": 100,
-        "mode": "micro",
-        "changed": true,
-        "archived_count": 1,
-        "reclaimed_tokens": -1,
-        "artifact_failure_count": 0
-      }
+      "record_id": null,
+      "sha256": "173dff949e6073253ef81c539d9f0dea5279c11db1caf24f82f6321a088c03e8"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MywiYXJjaGl2ZWRfY291bnQiOjEsImFydGlmYWN0X2ZhaWx1cmVfY291bnQiOi0xLCJiZWZvcmVfY291bnQiOjMsImNoYW5nZWQiOnRydWUsImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbWVtb3J5IiwibW9kZSI6Im1pY3JvIiwicmVjbGFpbWVkX3Rva2VucyI6NTAwMDAsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInN1bW1hcnlfdG9rZW5zIjoxMDAsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtZW1vcnlfY29tcGFjdF9jb21wbGV0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_artifact_failure_count_is_negative",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 3,
-        "summary_tokens": 100,
-        "mode": "micro",
-        "changed": true,
-        "archived_count": 1,
-        "reclaimed_tokens": 50000,
-        "artifact_failure_count": -1
-      }
+      "record_id": null,
+      "sha256": "5f603c01602fcb70f5a5c2bcd9668577a2141037efe1cd8799c04a4f257491b1"
     },
     {
+      "bytes_base64": "eyJhdXRvY29tcGFjdF9idWZmZXJfdG9rZW5zIjoxMzAwMCwiY2FuZGlkYXRlX2NvdW50IjoxLCJjb25maWd1cmVkX3RocmVzaG9sZCI6MjUwMDAwLCJjcmVhdGVkX2F0IjoxLCJlZmZlY3RpdmVfdGhyZXNob2xkIjoyNTAwMDAsImVzdGltYXRlZF9yZWNsYWltYWJsZV90b2tlbnMiOjUwMDAwLCJlc3RpbWF0ZWRfdG9rZW5zIjoyMDAwMDAsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbWVtb3J5IiwibWVzc2FnZV9jb3VudCI6MywibWljcm9jb21wYWN0X3RocmVzaG9sZCI6MTg3NTAwLCJtb2RlbF9jb250ZXh0X3dpbmRvdyI6MTAwMDAwMCwibW9kZWxfbWF4X291dHB1dF90b2tlbnMiOjM4NDAwMCwicmVzZXJ2ZWRfb3V0cHV0X3NvdXJjZSI6ImZyYW1ld29ya19mYWxsYmFjayIsInJlc2VydmVkX291dHB1dF90b2tlbnMiOjE2MDAwLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0cmlnZ2VyIjoibWljcm9fdGhyZXNob2xkIiwidHlwZSI6Im1lbW9yeV9jb21wYWN0X3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "memory_compact_started_missing_plan_counter",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_started",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "message_count": 3,
-        "estimated_tokens": 200000,
-        "trigger": "micro_threshold",
-        "configured_threshold": 250000,
-        "effective_threshold": 250000,
-        "microcompact_threshold": 187500,
-        "candidate_count": 1,
-        "estimated_reclaimable_tokens": 50000,
-        "model_context_window": 1000000,
-        "model_max_output_tokens": 384000,
-        "reserved_output_tokens": 16000,
-        "reserved_output_source": "framework_fallback",
-        "autocompact_buffer_tokens": 13000
-      }
+      "record_id": null,
+      "sha256": "6a613729ac319325b4beb311c5b5561297e05100f50a0fa0bb2244ebffcca2d5"
     },
     {
+      "bytes_base64": "eyJhZnRlcl9jb3VudCI6MywiYXJjaGl2ZWRfY291bnQiOjEsImJlZm9yZV9jb3VudCI6MywiY2hhbmdlZCI6dHJ1ZSwiY3JlYXRlZF9hdCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9tZW1vcnkiLCJtb2RlIjoibWljcm8iLCJyZWNsYWltZWRfdG9rZW5zIjo1MDAwMCwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwic3VtbWFyeV90b2tlbnMiOjEwMCwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6Im1lbW9yeV9jb21wYWN0X2NvbXBsZXRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "memory_compact_completed_missing_result_counter",
-      "input": {
-        "version": "v5",
-        "type": "memory_compact_completed",
-        "event_id": "evt_invalid_memory",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "before_count": 3,
-        "after_count": 3,
-        "summary_tokens": 100,
-        "mode": "micro",
-        "changed": true,
-        "archived_count": 1,
-        "reclaimed_tokens": 50000
-      }
+      "record_id": null,
+      "sha256": "53f4631acd864761b54f5a5c05178e741aeafec8600dd0b1b7b548a9d0b086d3"
     },
     {
+      "bytes_base64": "eyJhdHRlbXB0IjoxLCJiYWNrZW5kIjoidGVzdCIsImNhbGxfaWQiOiJvcF9tb2RlbF9jeWNsZV8xX21haW46YXR0ZW1wdDoxIiwiY3JlYXRlZF9hdCI6MSwiY3ljbGVfaW5kZXgiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbW9kZWwiLCJtb2RlbCI6InRlc3QtbW9kZWwiLCJvcGVyYXRpb24iOiJyZXNlYXJjaF90YXNrIiwib3BlcmF0aW9uX2lkIjoib3BfbW9kZWxfY3ljbGVfMV9tYWluIiwicnVuX2lkIjoicnVuX2ludmFsaWQiLCJzZXNzaW9uX2lkIjoiaW52YWxpZC1zZXNzaW9uIiwidHJhY2VfaWQiOiJ0cmFjZV9pbnZhbGlkIiwidHlwZSI6Im1vZGVsX2NhbGxfc3RhcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "model_call_operation_is_unknown",
-      "input": {
-        "version": "v5",
-        "type": "model_call_started",
-        "event_id": "evt_invalid_model",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "call_id": "op_model_cycle_1_main:attempt:1",
-        "operation_id": "op_model_cycle_1_main",
-        "attempt": 1,
-        "operation": "research_task",
-        "backend": "test",
-        "model": "test-model"
-      }
+      "record_id": null,
+      "sha256": "604f72e0161c01e1dcf136f4b19fcca76fcdefb59f3b0291400f5f6965c14df5"
     },
     {
+      "bytes_base64": "eyJhdHRlbXB0IjowLCJiYWNrZW5kIjoidGVzdCIsImNhbGxfaWQiOiJvcF9tb2RlbF9jeWNsZV8xX21haW46YXR0ZW1wdDowIiwiY3JlYXRlZF9hdCI6MSwiY3ljbGVfaW5kZXgiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbW9kZWwiLCJtb2RlbCI6InRlc3QtbW9kZWwiLCJvcGVyYXRpb24iOiJhZ2VudF9jeWNsZSIsIm9wZXJhdGlvbl9pZCI6Im9wX21vZGVsX2N5Y2xlXzFfbWFpbiIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF9jYWxsX3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "model_call_attempt_is_zero",
-      "input": {
-        "version": "v5",
-        "type": "model_call_started",
-        "event_id": "evt_invalid_model",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "call_id": "op_model_cycle_1_main:attempt:0",
-        "operation_id": "op_model_cycle_1_main",
-        "attempt": 0,
-        "operation": "agent_cycle",
-        "backend": "test",
-        "model": "test-model"
-      }
+      "record_id": null,
+      "sha256": "481664367294848b25d0b62d424a39df09d6687d6dee32547dae4b522b1557fb"
     },
     {
+      "bytes_base64": "eyJhdHRlbXB0IjoxLCJiYWNrZW5kIjoidGVzdCIsImNhbGxfaWQiOiJvcF9tb2RlbF9jeWNsZV8xX21haW46YXR0ZW1wdDoxIiwiY3JlYXRlZF9hdCI6MSwiY3ljbGVfaW5kZXgiOjEsImVycm9yX2NvZGUiOiJvcGVyYXRpb25fb3V0Y29tZV91bmtub3duIiwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9tb2RlbCIsIm1vZGVsIjoidGVzdC1tb2RlbCIsIm9wZXJhdGlvbiI6ImFnZW50X2N5Y2xlIiwib3BlcmF0aW9uX2lkIjoib3BfbW9kZWxfY3ljbGVfMV9tYWluIiwib3V0Y29tZSI6ImFtYmlndW91cyIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF9jYWxsX2ZhaWxlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "model_call_failed_missing_usage",
-      "input": {
-        "version": "v5",
-        "type": "model_call_failed",
-        "event_id": "evt_invalid_model",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "call_id": "op_model_cycle_1_main:attempt:1",
-        "operation_id": "op_model_cycle_1_main",
-        "attempt": 1,
-        "operation": "agent_cycle",
-        "backend": "test",
-        "model": "test-model",
-        "outcome": "ambiguous",
-        "error_code": "operation_outcome_unknown"
-      }
+      "record_id": null,
+      "sha256": "0a0838f810c0c73813c5c6b8503eee8bd90c972428119c9c4d11cd0213657bdd"
     },
     {
+      "bytes_base64": "eyJhdHRlbXB0IjoxLCJiYWNrZW5kIjoidGVzdCIsImNhbGxfaWQiOiJvcF9tb2RlbF9jeWNsZV8xX21haW46YXR0ZW1wdDoxIiwiY3JlYXRlZF9hdCI6MSwiY3ljbGVfaW5kZXgiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbW9kZWwiLCJtb2RlbCI6InRlc3QtbW9kZWwiLCJvcGVyYXRpb24iOiJhZ2VudF9jeWNsZSIsIm9wZXJhdGlvbl9pZCI6Im9wX21vZGVsX2N5Y2xlXzFfbWFpbiIsInByb21wdCI6ImZvcmJpZGRlbiIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJtb2RlbF9jYWxsX3N0YXJ0ZWQiLCJ2ZXJzaW9uIjoidjYifQ==",
       "id": "model_call_event_contains_prompt",
-      "input": {
-        "version": "v5",
-        "type": "model_call_started",
-        "event_id": "evt_invalid_model",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "call_id": "op_model_cycle_1_main:attempt:1",
-        "operation_id": "op_model_cycle_1_main",
-        "attempt": 1,
-        "operation": "agent_cycle",
-        "backend": "test",
-        "model": "test-model",
-        "prompt": "forbidden"
-      }
+      "record_id": null,
+      "sha256": "f2b99916ce1bd7220b954094da3cad102f9f7b77ea4e00ee29867715cd84549b"
     },
     {
-      "id": "deferred_event_missing_handle",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_deferred",
-        "event_id": "evt_invalid_deferred",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 2,
-        "tool_call_id": "call_deferred",
-        "tool_name": "remote_write",
-        "operation_id": "op_tool_cycle_2_call_deferred",
-        "attempt": 1
-      }
-    },
-    {
-      "id": "deferred_event_contains_tool_result",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_deferred",
-        "event_id": "evt_invalid_deferred",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 2,
-        "tool_call_id": "call_deferred",
-        "tool_name": "remote_write",
-        "operation_id": "op_tool_cycle_2_call_deferred",
-        "attempt": 1,
-        "handle": {
-          "schema_version": "vv-agent.deferred-tool-handle.v2",
-          "checkpoint_key": "tenant-7/run-42",
-          "operation_id": "op_tool_cycle_2_call_deferred",
-          "attempt": 1,
-          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
-        },
-        "result": {
-          "tool_call_id": "call_deferred",
-          "content": "forbidden",
-          "status_code": "SUCCESS",
-          "directive": "continue"
-        }
-      }
-    },
-    {
-      "id": "deferred_event_handle_missing_discriminator",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_deferred",
-        "event_id": "evt_invalid_deferred_schema",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 2,
-        "tool_call_id": "call_deferred",
-        "tool_name": "remote_write",
-        "operation_id": "op_tool_cycle_2_call_deferred",
-        "attempt": 1,
-        "handle": {
-          "checkpoint_key": "tenant-7/run-42",
-          "operation_id": "op_tool_cycle_2_call_deferred",
-          "attempt": 1,
-          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
-        },
-        "execution_started": true,
-        "duration_ms": null
-      }
-    },
-    {
-      "id": "deferred_event_handle_unknown_field",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_deferred",
-        "event_id": "evt_invalid_deferred_unknown",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 2,
-        "tool_call_id": "call_deferred",
-        "tool_name": "remote_write",
-        "operation_id": "op_tool_cycle_2_call_deferred",
-        "attempt": 1,
-        "handle": {
-          "schema_version": "vv-agent.deferred-tool-handle.v2",
-          "checkpoint_key": "tenant-7/run-42",
-          "operation_id": "op_tool_cycle_2_call_deferred",
-          "attempt": 1,
-          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978",
-          "provider_id": "forbidden"
-        },
-        "execution_started": true,
-        "duration_ms": null
-      }
-    },
-    {
-      "id": "deferred_event_cross_process_duration_must_be_null",
-      "input": {
-        "version": "v5",
-        "type": "tool_call_deferred",
-        "event_id": "evt_invalid_deferred_duration",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 2,
-        "tool_call_id": "call_deferred",
-        "tool_name": "remote_write",
-        "operation_id": "op_tool_cycle_2_call_deferred",
-        "attempt": 1,
-        "handle": {
-          "schema_version": "vv-agent.deferred-tool-handle.v2",
-          "checkpoint_key": "tenant-7/run-42",
-          "operation_id": "op_tool_cycle_2_call_deferred",
-          "attempt": 1,
-          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
-        },
-        "execution_started": true,
-        "duration_ms": 4
-      }
-    },
-    {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJjeWNsZV9pbmRleCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9jeWNsZV9hYm9ydCIsImxvZ2ljYWxfY3ljbGUiOjIsInJlYXNvbiI6InRpbWVvdXQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoiY3ljbGVfYWJvcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "cycle_aborted_unknown_reason",
-      "input": {
-        "version": "v5",
-        "type": "cycle_aborted",
-        "event_id": "evt_invalid_cycle_abort",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "logical_cycle": 2,
-        "reason": "timeout"
-      }
+      "record_id": null,
+      "sha256": "b869f3e2a2518d065618f7b484594e125ef9c861e350fb2cdee24051e9717cab"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJjeWNsZV9pbmRleCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9jeWNsZV9hYm9ydCIsInJlYXNvbiI6ImNhbmNlbGxlZCIsInJ1bl9pZCI6InJ1bl9pbnZhbGlkIiwic2Vzc2lvbl9pZCI6ImludmFsaWQtc2Vzc2lvbiIsInRyYWNlX2lkIjoidHJhY2VfaW52YWxpZCIsInR5cGUiOiJjeWNsZV9hYm9ydGVkIiwidmVyc2lvbiI6InY2In0=",
       "id": "cycle_aborted_missing_logical_cycle",
-      "input": {
-        "version": "v5",
-        "type": "cycle_aborted",
-        "event_id": "evt_invalid_cycle_abort",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "reason": "cancelled"
-      }
+      "record_id": null,
+      "sha256": "21fa5bf4eb50557f6f28f444253bea145739548d9ed21875fa89629e5d696be6"
     },
     {
+      "bytes_base64": "eyJjcmVhdGVkX2F0IjoxLCJjeWNsZV9pbmRleCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9jeWNsZV9hYm9ydCIsImxvZ2ljYWxfY3ljbGUiOjIsIm9wZXJhdG9yX25vdGUiOiJmb3JiaWRkZW4iLCJyZWFzb24iOiJjYW5jZWxsZWQiLCJydW5faWQiOiJydW5faW52YWxpZCIsInNlc3Npb25faWQiOiJpbnZhbGlkLXNlc3Npb24iLCJ0cmFjZV9pZCI6InRyYWNlX2ludmFsaWQiLCJ0eXBlIjoiY3ljbGVfYWJvcnRlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "cycle_aborted_unknown_field",
-      "input": {
-        "version": "v5",
-        "type": "cycle_aborted",
-        "event_id": "evt_invalid_cycle_abort",
-        "run_id": "run_invalid",
-        "trace_id": "trace_invalid",
-        "created_at": 1,
-        "cycle_index": 1,
-        "logical_cycle": 2,
-        "reason": "cancelled",
-        "operator_note": "forbidden"
-      }
+      "record_id": null,
+      "sha256": "ee508a4aee6991ae5a4107021c876ef6818fbead4e6adff71d604601241cfe35"
     },
     {
-      "id": "host_interaction_requested_prompt_over_utf8_limit",
-      "input": {
-        "version": "v5",
-        "type": "host_interaction_requested",
-        "event_id": "evt_invalid_host_prompt",
-        "run_id": "run-invalid-host",
-        "trace_id": "trace-invalid-host",
-        "created_at": 1,
-        "cycle_index": 3,
-        "checkpoint_key": "checkpoint/controller-42",
-        "resume_attempt": 2,
-        "interaction_id": "interaction-42",
-        "logical_cycle": 4,
-        "operation_id": "op_host_cycle_4",
-        "tool_call_id": "call_host_4",
-        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
-        "prompt": "65537 UTF-8 bytes"
-      },
-      "mutation": "host_interaction_requested.prompt encodes to 65537 UTF-8 bytes",
-      "error": "host_interaction_content_too_large"
-    },
-    {
-      "id": "host_interaction_consumed_unknown_field",
-      "input": {
-        "version": "v5",
-        "type": "host_interaction_response_consumed",
-        "event_id": "evt_invalid_host_consumed",
-        "run_id": "run-invalid-host",
-        "trace_id": "trace-invalid-host",
-        "created_at": 1,
-        "cycle_index": 3,
-        "checkpoint_key": "checkpoint/controller-42",
-        "resume_attempt": 2,
-        "interaction_id": "interaction-42",
-        "logical_cycle": 4,
-        "operation_id": "op_host_cycle_4",
-        "tool_call_id": "call_host_4",
-        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
-        "command_id": "cmd-invalid",
-        "response_digest": "aa15b8660e1f22fcd9c4237b4283b15346500262ab73916645b3aa1d6d9df6b7",
-        "consumed_revision": 10,
-        "internal_command": "forbidden"
-      },
-      "mutation": "host_interaction_response_consumed.internal_command",
-      "error": "event_fields_invalid"
-    },
-    {
-      "id": "run_state_changed_live_cancel_missing_cancel_requested",
-      "context": "live_claim_cancel",
-      "input": {
-        "version": "v5",
-        "type": "run_state_changed",
-        "event_id": "evt_invalid_live_cancel_missing",
-        "run_id": "run-live-cancel-invalid",
-        "trace_id": "trace-live-cancel-invalid",
-        "created_at": 1,
-        "session_id": "session-live-cancel-invalid",
-        "agent_name": "assistant",
-        "state": "running"
-      },
-      "error": "event_fields_invalid"
-    },
-    {
+      "bytes_base64": "eyJhZ2VudF9uYW1lIjoiYXNzaXN0YW50IiwiY2FuY2VsX3JlcXVlc3RlZCI6eyJmcm9tIjpmYWxzZX0sImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbGl2ZV9jYW5jZWxfbWFsZm9ybWVkIiwicnVuX2lkIjoicnVuLWxpdmUtY2FuY2VsLWludmFsaWQiLCJzZXNzaW9uX2lkIjoic2Vzc2lvbi1saXZlLWNhbmNlbC1pbnZhbGlkIiwic3RhdGUiOiJydW5uaW5nIiwidHJhY2VfaWQiOiJ0cmFjZS1saXZlLWNhbmNlbC1pbnZhbGlkIiwidHlwZSI6InJ1bl9zdGF0ZV9jaGFuZ2VkIiwidmVyc2lvbiI6InY2In0=",
       "id": "run_state_changed_live_cancel_malformed_cancel_requested",
-      "context": "live_claim_cancel",
-      "input": {
-        "version": "v5",
-        "type": "run_state_changed",
-        "event_id": "evt_invalid_live_cancel_malformed",
-        "run_id": "run-live-cancel-invalid",
-        "trace_id": "trace-live-cancel-invalid",
-        "created_at": 1,
-        "session_id": "session-live-cancel-invalid",
-        "agent_name": "assistant",
-        "state": "running",
-        "cancel_requested": {"from": false}
-      },
-      "error": "event_fields_invalid"
+      "record_id": null,
+      "sha256": "d9a90c94e063068cbd72c893aea3ce3cc15df5a0c5584a88f49be53c8dd789dd"
     },
     {
+      "bytes_base64": "eyJhZ2VudF9uYW1lIjoiYXNzaXN0YW50IiwiY3JlYXRlZF9hdCI6MSwiZXZlbnRfaWQiOiJldnRfaW52YWxpZF9saXZlX2NhbmNlbF9tZXRhZGF0YSIsIm1ldGFkYXRhIjp7ImNhbmNlbF9yZXF1ZXN0ZWQiOnsiZnJvbSI6ZmFsc2UsInRvIjp0cnVlfX0sInJ1bl9pZCI6InJ1bi1saXZlLWNhbmNlbC1pbnZhbGlkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tbGl2ZS1jYW5jZWwtaW52YWxpZCIsInN0YXRlIjoicnVubmluZyIsInRyYWNlX2lkIjoidHJhY2UtbGl2ZS1jYW5jZWwtaW52YWxpZCIsInR5cGUiOiJydW5fc3RhdGVfY2hhbmdlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "run_state_changed_live_cancel_metadata_carrier",
-      "context": "live_claim_cancel",
-      "input": {
-        "version": "v5",
-        "type": "run_state_changed",
-        "event_id": "evt_invalid_live_cancel_metadata",
-        "run_id": "run-live-cancel-invalid",
-        "trace_id": "trace-live-cancel-invalid",
-        "created_at": 1,
-        "session_id": "session-live-cancel-invalid",
-        "agent_name": "assistant",
-        "state": "running",
-        "metadata": {"cancel_requested": {"from": false, "to": true}}
-      },
-      "error": "event_fields_invalid"
+      "record_id": null,
+      "sha256": "8cf714af5f2b9222e3e59011f8375107c4c5545867c4575e889c43bf34e9360e"
     },
     {
+      "bytes_base64": "eyJhZ2VudF9uYW1lIjoiYXNzaXN0YW50IiwiY2FuY2VsX3JlcXVlc3RlZCI6eyJmcm9tIjpmYWxzZSwic291cmNlIjoib3BlcmF0b3IiLCJ0byI6dHJ1ZX0sImNyZWF0ZWRfYXQiOjEsImV2ZW50X2lkIjoiZXZ0X2ludmFsaWRfbGl2ZV9jYW5jZWxfdW5rbm93biIsInJ1bl9pZCI6InJ1bi1saXZlLWNhbmNlbC1pbnZhbGlkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tbGl2ZS1jYW5jZWwtaW52YWxpZCIsInN0YXRlIjoicnVubmluZyIsInRyYWNlX2lkIjoidHJhY2UtbGl2ZS1jYW5jZWwtaW52YWxpZCIsInR5cGUiOiJydW5fc3RhdGVfY2hhbmdlZCIsInZlcnNpb24iOiJ2NiJ9",
       "id": "run_state_changed_live_cancel_unknown_cancel_requested_field",
-      "context": "live_claim_cancel",
-      "input": {
-        "version": "v5",
-        "type": "run_state_changed",
-        "event_id": "evt_invalid_live_cancel_unknown",
-        "run_id": "run-live-cancel-invalid",
-        "trace_id": "trace-live-cancel-invalid",
-        "created_at": 1,
-        "session_id": "session-live-cancel-invalid",
-        "agent_name": "assistant",
-        "state": "running",
-        "cancel_requested": {"from": false, "to": true, "source": "operator"}
-      },
-      "error": "event_fields_invalid"
+      "record_id": null,
+      "sha256": "604ba7553bcf89e80b6caf9615f7ff306de29a322fe64c1371dcee55f62d22f6"
     }
-  ]
+  ],
+  "wire_version": "v6"
 }

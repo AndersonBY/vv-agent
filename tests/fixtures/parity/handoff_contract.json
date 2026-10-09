@@ -1,48 +1,35 @@
 {
-  "version": "v1",
+  "admitted_max_handoffs": 10,
   "default_max_handoffs": 10,
-  "tool_schema": {
-    "type": "function",
-    "function": {
-      "name": "transfer_to_writer",
-      "description": "Use for writing.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "input": {
-            "type": "string",
-            "description": "Input or handoff summary for the target agent.",
-            "minLength": 1
-          }
-        },
-        "required": [
-          "input"
-        ],
-        "additionalProperties": false
-      }
-    }
-  },
-  "tool_result": {
-    "content": {
-      "ok": true,
-      "handoff": true,
-      "from_agent": "triage",
-      "to_agent": "writer",
-      "input": "write this"
-    },
-    "metadata": {
-      "routing_group": "writing",
-      "mode": "handoff",
-      "handoff_from": "triage",
-      "handoff_to": "writer",
-      "handoff_input": "write this",
-      "handoff_tool_name": "transfer_to_writer"
-    }
+  "lifecycle_order": [
+    "run_completed"
+  ],
+  "producer": {
+    "records": [
+      "session/handoff/created",
+      "input/initial/applied",
+      "turn/handoff/turn/initial/started",
+      "usage/active/handoff/turn/initial/1/1",
+      "op/handoff/turn/initial/model/primary/1/1/planned",
+      "usage/active/handoff/turn/initial/1/2",
+      "op/handoff/turn/initial/model/primary/1/1/started",
+      "usage/active/handoff/turn/initial/1/3",
+      "op/handoff/turn/initial/model/primary/1/1/result",
+      "op/handoff/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+      "usage/active/handoff/turn/initial/1/4",
+      "op/handoff/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+      "usage/active/handoff/turn/initial/1/5",
+      "op/handoff/turn/initial/model/primary/2/1/planned",
+      "usage/active/handoff/turn/initial/1/6",
+      "op/handoff/turn/initial/model/primary/2/1/started",
+      "usage/active/handoff/turn/initial/1/7",
+      "op/handoff/turn/initial/model/primary/2/1/result",
+      "usage/active/handoff/turn/initial/1/8",
+      "turn/handoff/turn/initial/ended"
+    ],
+    "session_id": "handoff"
   },
   "tool_policy_projection": {
-    "target_inherits_source_effective_metadata_denials": true,
-    "target_policy_may_only_add_denials": true,
-    "list_merge": "set_union_then_utf16_sort",
     "boolean_merge": "logical_or",
     "enforced_at": [
       "schema_planner",
@@ -50,45 +37,80 @@
     ],
     "example": {
       "source_effective": {
+        "denied_capability_tags": [],
+        "denied_cost_dimensions": [
+          "gpu.second"
+        ],
         "denied_side_effects": [
           "execute"
         ],
-        "denied_capability_tags": [],
-        "deny_terminal_tools": false,
-        "denied_cost_dimensions": [
-          "gpu.second"
-        ]
+        "deny_terminal_tools": false
       },
       "target_declared": {
-        "denied_side_effects": [
-          "network"
-        ],
         "denied_capability_tags": [
           "filesystem.delete"
         ],
-        "deny_terminal_tools": true,
-        "denied_cost_dimensions": []
+        "denied_cost_dimensions": [],
+        "denied_side_effects": [
+          "network"
+        ],
+        "deny_terminal_tools": true
       },
       "target_effective": {
+        "denied_capability_tags": [
+          "filesystem.delete"
+        ],
+        "denied_cost_dimensions": [
+          "gpu.second"
+        ],
         "denied_side_effects": [
           "execute",
           "network"
         ],
-        "denied_capability_tags": [
-          "filesystem.delete"
-        ],
-        "deny_terminal_tools": true,
-        "denied_cost_dimensions": [
-          "gpu.second"
-        ]
+        "deny_terminal_tools": true
       }
+    },
+    "list_merge": "set_union_then_utf16_sort",
+    "target_inherits_source_effective_metadata_denials": true,
+    "target_policy_may_only_add_denials": true
+  },
+  "tool_result": {
+    "content": {
+      "from_agent": "triage",
+      "handoff": true,
+      "input": "write this",
+      "ok": true,
+      "to_agent": "writer"
+    },
+    "metadata": {
+      "handoff_from": "triage",
+      "handoff_input": "write this",
+      "handoff_to": "writer",
+      "handoff_tool_name": "transfer_to_writer",
+      "mode": "handoff",
+      "routing_group": "writing"
     }
   },
-  "lifecycle_order": [
-    "source_run_terminal",
-    "handoff_started",
-    "target_run_started",
-    "target_run_terminal",
-    "handoff_completed"
-  ]
+  "tool_schema": {
+    "function": {
+      "description": "Use for writing.",
+      "name": "transfer_to_writer",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "input": {
+            "description": "Input or handoff summary for the target agent.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  "version": "v1"
 }

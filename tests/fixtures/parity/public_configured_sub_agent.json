@@ -1,113 +1,112 @@
 {
   "contract": "public_configured_sub_agent",
   "normalization": {
+    "collision_error": "duplicate sub-agent id after normalization: researcher",
+    "copy_on_agent_construction": true,
+    "empty_id_error": "sub-agent id cannot be empty",
+    "normalized_ids": [
+      "researcher",
+      "writer"
+    ],
     "raw_entries": [
       {
-        "id": " \u001cresearcher\u001f ",
         "config": {
-          "model": "shared-model",
-          "description": "Research source-backed facts.",
           "backend": "test",
-          "system_prompt": "Research carefully.",
-          "max_cycles": 4,
-          "session_memory_enabled": true,
+          "denied_capability_tags": [
+            "network.unrestricted"
+          ],
+          "denied_cost_dimensions": [
+            "workflow.credit"
+          ],
+          "denied_side_effects": [
+            "network"
+          ],
+          "deny_terminal_tools": true,
+          "description": "Research source-backed facts.",
           "exclude_tools": [
             "bash"
           ],
+          "max_cycles": 4,
           "metadata": {
             "nested": {
               "scope": "sources"
             }
           },
-          "denied_side_effects": [
-            "network"
-          ],
-          "denied_capability_tags": [
-            "network.unrestricted"
-          ],
-          "deny_terminal_tools": true,
-          "denied_cost_dimensions": [
-            "workflow.credit"
-          ]
-        }
+          "model": "shared-model",
+          "session_memory_enabled": true,
+          "system_prompt": "Research carefully."
+        },
+        "id": " \u001cresearcher\u001f "
       },
       {
-        "id": "writer",
         "config": {
-          "model": "shared-model",
-          "description": "Draft the final response.",
           "backend": null,
-          "system_prompt": null,
-          "max_cycles": 8,
-          "session_memory_enabled": false,
-          "exclude_tools": [],
-          "metadata": {},
-          "denied_side_effects": [],
           "denied_capability_tags": [],
+          "denied_cost_dimensions": [],
+          "denied_side_effects": [],
           "deny_terminal_tools": false,
-          "denied_cost_dimensions": []
-        }
+          "description": "Draft the final response.",
+          "exclude_tools": [],
+          "max_cycles": 8,
+          "metadata": {},
+          "model": "shared-model",
+          "session_memory_enabled": false,
+          "system_prompt": null
+        },
+        "id": "writer"
       }
     ],
-    "normalized_ids": [
-      "researcher",
-      "writer"
-    ],
-    "empty_id_error": "sub-agent id cannot be empty",
-    "collision_error": "duplicate sub-agent id after normalization: researcher",
-    "copy_on_agent_construction": true,
     "retained_researcher_config": {
-      "model": "shared-model",
-      "description": "Research source-backed facts.",
       "backend": "test",
-      "system_prompt": "Research carefully.",
-      "max_cycles": 4,
-      "session_memory_enabled": true,
+      "denied_capability_tags": [
+        "network.unrestricted"
+      ],
+      "denied_cost_dimensions": [
+        "workflow.credit"
+      ],
+      "denied_side_effects": [
+        "network"
+      ],
+      "deny_terminal_tools": true,
+      "description": "Research source-backed facts.",
       "exclude_tools": [
         "bash"
       ],
+      "max_cycles": 4,
       "metadata": {
         "nested": {
           "scope": "sources"
         }
       },
-      "denied_side_effects": [
-        "network"
-      ],
-      "denied_capability_tags": [
-        "network.unrestricted"
-      ],
-      "deny_terminal_tools": true,
-      "denied_cost_dimensions": [
-        "workflow.credit"
-      ]
+      "model": "shared-model",
+      "session_memory_enabled": true,
+      "system_prompt": "Research carefully."
     }
   },
   "projection": {
-    "sub_agents_enabled": true,
     "configured_tool_names": [
       "create_sub_task",
       "sub_task_status"
     ],
     "fragment": {
       "id": "configured_sub_agents",
-      "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+      "source": "agent.sub_agents",
       "stable": true,
-      "source": "agent.sub_agents"
+      "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response."
     },
     "prompt": "Coordinate the work carefully.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
     "sections": [
       {
         "id": "agent_instructions",
-        "text": "Coordinate the work carefully.",
+        "source": "agent.instructions",
         "stable": true,
-        "source": "agent.instructions"
+        "text": "Coordinate the work carefully."
       },
       {
         "id": "configured_sub_agents",
-        "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+        "source": "agent.sub_agents",
         "stable": true,
-        "source": "agent.sub_agents"
+        "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response."
       }
     ],
     "sources": {
@@ -115,15 +114,45 @@
       "configured_sub_agents": "agent.sub_agents"
     },
     "stable_hash": "ee7aed024cd8c5da695981624bb88aa43a635a96beee8a58609cca4bde206625",
+    "sub_agents_enabled": true,
     "total_chars": 156
   },
   "public_runner": {
-    "constructs_agent_task": false,
-    "parent_model": "shared-model",
-    "child_model": "shared-model",
-    "delegated_agent_id": "researcher",
     "child_final_output": "child done",
+    "child_model": "shared-model",
+    "constructs_agent_task": false,
+    "delegated_agent_id": "researcher",
     "parent_final_output": "parent done",
+    "parent_model": "shared-model",
+    "producer": {
+      "records": [
+        "session/c1c/public_configured_sub_agent/created",
+        "input/initial/applied",
+        "turn/c1c/public_configured_sub_agent/turn/initial/started",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/1/1",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/1/planned",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/1/2",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/1/started",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/1/3",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/1/result",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/1/4",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/2/1",
+        "input/child/c1c/public_configured_sub_agent/child/8acc8fae1f55a7fcd4764f77/turn/c1c/public_configured_sub_agent/child/8acc8fae1f55a7fcd4764f77/turn/start/ended/applied",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/2/2",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/2/1/planned",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/2/3",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/2/1/started",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/2/4",
+        "op/c1c/public_configured_sub_agent/turn/initial/model/primary/2/1/result",
+        "usage/active/c1c/public_configured_sub_agent/turn/initial/2/5",
+        "turn/c1c/public_configured_sub_agent/turn/initial/ended"
+      ],
+      "session_id": "c1c/public_configured_sub_agent"
+    },
     "terminal_status": "completed"
   }
 }
