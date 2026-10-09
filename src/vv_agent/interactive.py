@@ -881,8 +881,15 @@ class InteractiveAgentClient:
         if self._kernel is not None:
             from vv_agent.session.interactive import _KernelAgentSession
 
+            seed_session = session or self.options.session
+
             return _KernelAgentSession(
-                client=self, agent=agent, workspace=effective_workspace, shared_state=shared_state, session_id=session_id
+                client=self,
+                agent=agent,
+                workspace=effective_workspace,
+                shared_state=shared_state,
+                session_id=session_id,
+                seed_messages=seed_session.get_items() if seed_session is not None else [],
             )
         session_sub_task_manager = SubTaskManager(
             register_session=register_sub_agent_session,

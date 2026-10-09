@@ -136,7 +136,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
     if tid is not None:
         require(tid == record.turn_id, "input targets another turn")
     session_control = item.kind == "control" and item.payload["action"] in {"close", "archive"}
-    evidence_input = item.kind in {"deferred_result", "provider_evidence", "child_result"}
+    evidence_input = item.kind in {"provider_result", "provider_evidence", "child_result"}
     if evidence_input:
         require(tid in state.turns, "evidence targets an unknown turn")
         op = state.operations.get(item.payload["operation_id"])
@@ -165,7 +165,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             require(number in op.attempts, "evidence attempt mismatch")
             plan = op.attempts[number].execution_plan._payload
             require(item.payload["request_digest"] == plan["request_digest"], "evidence request mismatch")
-            if item.kind == "deferred_result":
+            if item.kind == "provider_result":
                 require(item.payload["provider_binding"] == plan["provider_binding"], "evidence provider mismatch")
     if item.kind == "child_result":
         key = (item.payload["operation_id"], item.payload["attempt"], item.payload["session_id"])
@@ -262,7 +262,7 @@ def _plan(state: ExecutionState, record: Record) -> None:
             "retry changed request, context, purpose or provider",
         )
         if op.kind == "model":
-            order = p["request"].get("metadata", {}).get("session_endpoint_order", [])
+            order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
             require(number <= max(2, len(order)), "model retry limit exceeded")
         due = previous.unknown._payload["retry_at_ms"] if previous.unknown else None
         require(due is None or (p["not_before_ms"] or 0) >= due, "retry before not-before")
@@ -276,7 +276,7 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt = source.attempts[ref["attempt"]]
         require(source.turn_id == tid and source_attempt.state == "unknown", "request did not consume an unknown")
         source_attempt.unknown_consumed = True
-    order = p["request"].get("metadata", {}).get("session_endpoint_order")
+    order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
     if order is not None:
         require(
             op.kind == "model"
@@ -325,7 +325,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
             all(state.operations[dep].state == "completed" for dep in attempt.plan._payload["dependencies"]),
             "unfinished dependency",
         )
-        order = attempt.plan._payload["request"].get("metadata", {}).get("session_endpoint_order", [])
+        order = attempt.plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
         endpoint = p.get("endpoint_id")
         require(
             (op.kind == "model" and bool(order) and endpoint == order[(number - 1) % len(order)])
@@ -850,7 +850,7 @@ class Fold:
                 elif p["stage"] in {"memory_started", "memory_completed"}:
                     from vv_agent.events import event_from_dict
 
-                    event = event_from_dict(p["data"]["event"])
+                    event = event_from_dict(p["data"]["event"], _kernel=True)
                     require(
                         event.type
                         == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),

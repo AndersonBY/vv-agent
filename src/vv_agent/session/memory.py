@@ -34,7 +34,7 @@ def session_memory(task, workspace=None) -> SessionMemory:
         workspace=workspace,
         storage_scope=meta.get("session_id") or task.task_id,
     )
-    memory.state = SessionMemoryState.from_dict(meta.get("_vv_agent_session_memory_initial_state", {}))
+    memory.state = SessionMemoryState.from_dict(meta.get("vv_session", {}).get("memory_initial_state", {}))
     return memory
 
 
@@ -116,7 +116,7 @@ def extract_memory(driver: _Driver, source: list[Message], current_tokens: int, 
         "tools": [],
         "prompt_bundle": None,
         "model_settings": task.model_settings.to_dict() if task.model_settings else None,
-        "metadata": {"purpose": "session_memory", "cycle_index": cycle},
+        "metadata": {"purpose": "session_memory", "vv_session": {"cycle_index": cycle}},
     }
     driver.commit([driver.plan(oid, request, "model", purpose="session_memory")], guarded=True)
     return True
@@ -161,8 +161,10 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     )
     from vv_agent.events import event_from_dict
 
-    provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}})
+    object.__setattr__(event, "version", "v6")
+    provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}}, _kernel=True)
     metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
+    object.__setattr__(event, "version", "v6")
     payload = event.to_dict() | {"metadata": metadata}
     driver.commit([driver.boundary_record("memory_started", key, {"event": payload})], guarded=True)
     return True
@@ -208,6 +210,7 @@ def finish_compact(
         reclaimed_tokens=reclaimed_tokens,
         artifact_failure_count=artifact_failure_count,
     )
+    object.__setattr__(event, "version", "v6")
     metadata = call_after_memory_providers(driver.runtime.config.memory_providers, event)
     records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
     if changed and mode in {"summary", "emergency"} and driver.task().metadata.get("session_memory_enabled"):

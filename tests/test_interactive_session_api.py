@@ -330,6 +330,32 @@ def test_interactive_client_create_session_preserves_caller_session_id(surface, 
     assert session.session_id == "caller-session-id"
 
 
+def test_kernel_session_creation_seed_is_durable_and_read_only(surface, tmp_path):
+    if surface is None:
+        pytest.skip("kernel creation seed")
+    from vv_agent.sessions import MemorySession
+
+    history = MemorySession("history")
+    history.add_items([Message("user", "retained history")])
+    provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(
+        agent=Agent("assistant", "Work.", model="m"),
+        session_id="seeded",
+        session=history,
+        shared_state={"nested": {"value": 2}},
+    )
+    assert session.messages == history.get_items()
+    assert session.shared_state == {"nested": {"value": 2}}
+    session.shared_state["nested"]["value"] = 99
+    assert session.shared_state == {"nested": {"value": 2}}
+    for name in ("replace_messages", "replace_shared_state", "clear_queues", "session"):
+        assert name not in dir(session) and not hasattr(session, name)
+    run = session.prompt("go")
+    assert run.result.shared_state == {"nested": {"value": 2}}
+    assert [m.content for m in session.messages if m.role == "user"] == ["retained history", "go"]
+
+
 def test_interactive_client_preserves_complete_public_agent(surface, tmp_path: Path) -> None:
     dynamic_contexts: list[tuple[str, str, Path, dict[str, Any]]] = []
     hook_calls: list[str] = []

@@ -314,6 +314,7 @@ def test_kernel_file_facade_rebuild_resume_and_control_identity(tmp_path):
     first_facade = first.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent")
     waiting = first_facade.prompt("go", auto_follow_up=False)
     assert waiting.status == AgentStatus.WAIT_USER
+    retained_messages = first_facade.messages
     first_kernel.close()
     kernel = _SessionKernel(path)
     try:
@@ -321,7 +322,7 @@ def test_kernel_file_facade_rebuild_resume_and_control_identity(tmp_path):
         facade = cast(_KernelAgentSession, rebuilt.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent"))
         latest = facade.latest_run
         assert latest is not None and latest.run_id == waiting.run_id
-        assert facade.messages == first_facade.messages
+        assert facade.messages == retained_messages
         final = facade.continue_run("answer")
         assert final.run_id == waiting.run_id and final.final_output == "done"
         assert facade.archive(input_id="archive").replayed is False

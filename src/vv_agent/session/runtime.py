@@ -149,7 +149,7 @@ class Runtime:
         return durable_shared_state(state, self.host_bindings) if self.host_bindings else state
 
     def bind_state(self, state: dict[str, Any], task: AgentTask) -> dict[str, Any]:
-        required = task.metadata.get("session_host_binding_names", [])
+        required = task.metadata.get("vv_session", {}).get("host_binding_names", [])
         return bind_shared_state(state, self.host_bindings, required) if required or self.host_bindings else state
 
     def for_agent(self, agent: Agent, config: RunConfig) -> Runtime:
@@ -205,7 +205,7 @@ class Runtime:
             if not targets:
                 raise ValueError("No endpoint targets configured")
             client = copy(client)
-            endpoint_id = request.metadata.get("session_endpoint_id")
+            endpoint_id = request.metadata.get("vv_session", {}).get("endpoint_id")
             client.endpoint_targets = (
                 [next(t for t in targets if t.endpoint_id == endpoint_id)]
                 if endpoint_id
@@ -217,9 +217,11 @@ class Runtime:
             return client.complete_with_stream(request, stream_callback)
         return client.complete(request)
 
-    def compile(self, content: str, tid: str) -> AgentTask:
+    def compile(self, content: str, tid: str, *, seed: dict[str, Any] | None = None) -> AgentTask:
         from vv_agent.runner import Runner
 
+        if "vv_session" in self.agent.metadata or "vv_session" in self.config.metadata:
+            raise ValueError("vv_session is reserved for kernel metadata")
         if self.frozen_task is not None:
             task = deepcopy(self.frozen_task)
             task.task_id = tid
@@ -246,13 +248,24 @@ class Runtime:
                 prompt_bundle=PromptBundle((PromptSection(id="blocked", text="Input blocked", stable=True),)),
                 user_prompt=content,
                 use_workspace=False,
-                metadata={"session_input_blocked": guardrail.message or "Input blocked by guardrail."},
+                metadata={"vv_session": {"input_blocked": guardrail.message or "Input blocked by guardrail."}},
             )
         policy = merge_tool_policies(self.agent.tool_policy, self.config.tool_policy)
         task = AgentCompiler().compile(
             agent=self.agent,
             input=content,
-            run_config=replace(self.config, tool_policy=policy),
+            run_config=replace(
+                self.config,
+                tool_policy=policy,
+                **(
+                    {
+                        "initial_messages": [Message.from_dict(copy_json(m)) for m in seed["messages"]],
+                        "shared_state": copy_json(seed["shared_state"]),
+                    }
+                    if seed is not None
+                    else {}
+                ),
+            ),
             resolved=self.resolved,
             trace_id=tid,
             run_id=tid,
@@ -268,14 +281,16 @@ class Runtime:
 
             memory = session_memory(task, Path(self.config.workspace or ".") if task.use_workspace else None)
             memory.load()
-            task.metadata["_vv_agent_session_memory_initial_state"] = memory.state.to_dict()
+            task.metadata.setdefault("vv_session", {})["memory_initial_state"] = memory.state.to_dict()
         if self.agent.handoffs:
-            task.metadata["session_max_handoffs"] = self.config.max_handoffs
-            task.metadata["session_handoff_targets"] = {t.tool_name: t.agent.name for t in self.agent.handoffs}
+            task.metadata.setdefault("vv_session", {})["max_handoffs"] = self.config.max_handoffs
+            task.metadata.setdefault("vv_session", {})["handoff_targets"] = {
+                t.tool_name: t.agent.name for t in self.agent.handoffs
+            }
         if self.host_bindings:
             if any(not isinstance(name, str) or not name for name in self.host_bindings):
                 raise ValueError("host binding names must be non-empty strings")
-            task.metadata["session_host_binding_names"] = sorted(self.host_bindings)
+            task.metadata.setdefault("vv_session", {})["host_binding_names"] = sorted(self.host_bindings)
             self.bind_state(task.initial_shared_state, task)
         task.initial_shared_state.setdefault("todo_list", [])
         for key in ("available_skills", "active_skills"):
@@ -332,8 +347,9 @@ class Runtime:
             shared_state=shared_state if shared_state is not None else dict(task.initial_shared_state),
             run_context=self.run_context(task.task_id),
             cycle_index=(
-                plan._payload["request"]["metadata"]["cycle_index"]
-                if plan._payload["op_kind"] == "model" and "cycle_index" in plan._payload["request"].get("metadata", {})
+                plan._payload["request"]["metadata"]["vv_session"]["cycle_index"]
+                if plan._payload["op_kind"] == "model"
+                and "cycle_index" in plan._payload["request"].get("metadata", {}).get("vv_session", {})
                 else int(source.rsplit("/", 1)[1])
             ),
             workspace_backend=self.config.workspace_backend or LocalWorkspaceBackend(workspace),

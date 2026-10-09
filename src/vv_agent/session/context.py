@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 
 def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) -> list[Message]:
-    messages: list[Message] = []
+    seed = records[0].record._payload["attributes"].get("seed", {}) if records else {}
+    messages: list[Message] = [Message.from_dict(copy_json(m)) for m in seed.get("messages", [])]
     for stored in records:
         r = stored.record
         if r.kind not in {"context_compacted", "boundary_recorded", "turn_started", "input_applied", "op_completed"}:
@@ -37,7 +38,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                 Message("system", task.prompt_bundle.flatten(), metadata=copy_json(task.metadata)),
                 *[m for m in history if m.role != "system"],
             ]
-            initial_input = task.metadata.get("session_input_messages")
+            initial_input = task.metadata.get("vv_session", {}).get("input_messages")
             messages.extend(
                 [Message.from_dict(m) for m in initial_input] if initial_input else [Message("user", task.user_prompt)]
             )

@@ -73,6 +73,7 @@ def record(kind: str, *, sid: str = "s", tid: str = "t", oid: str = "o", attempt
             "result": {"ok": True},
             "result_digest": digest({"ok": True}),
             "usage": {},
+            "shared_state": None,
             "evidence": ["accepted"],
             "execution_started": True,
             "context": "normal",

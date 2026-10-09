@@ -475,7 +475,7 @@ def test_recovered_completion_does_not_construct_a_second_receipt(store, databas
 def test_preferred_endpoint_is_folded_from_successful_dispatch_and_survives_recovery(context):
     baseline = Fold()
     definition = {"model_binding": {"endpoints": ["a", "b"]}}
-    request = {"messages": [], "metadata": {"session_endpoint_order": ["b", "a"]}}
+    request = {"messages": [], "metadata": {"vv_session": {"endpoint_order": ["b", "a"]}}}
     rows = [
         record("session_created"),
         record("turn_started", definition=definition, definition_digest=digest(definition)),
@@ -505,7 +505,7 @@ def test_preferred_endpoint_is_folded_from_successful_dispatch_and_survives_reco
 @pytest.mark.parametrize("result", [None, True, 7, "opaque", [], {"error_code": "failed"}])
 def test_fold_keeps_opaque_receipts_and_does_not_prefer_failed_endpoints(result):
     definition = {"model_binding": {"endpoints": ["a"]}}
-    request = {"messages": [], "metadata": {"session_endpoint_order": ["a"]}}
+    request = {"messages": [], "metadata": {"vv_session": {"endpoint_order": ["a"]}}}
     baseline = Fold()
     baseline.extend(
         [

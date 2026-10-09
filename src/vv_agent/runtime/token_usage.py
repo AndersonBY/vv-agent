@@ -128,7 +128,10 @@ def summarize_task_token_usage(model_calls: list[ModelCallRecord]) -> TaskTokenU
             value = getattr(record.usage, name)
             totals[name] = None if total is None or value is None else total + value
     return TaskTokenUsage(
-        **totals,
+        input_tokens=totals["input_tokens"],
+        output_tokens=totals["output_tokens"],
+        total_tokens=totals["total_tokens"],
+        reasoning_tokens=totals["reasoning_tokens"],
         cache_usage=_aggregate_cache_usage([record.usage.cache_usage for record in model_calls]),
         model_calls=list(model_calls),
     )

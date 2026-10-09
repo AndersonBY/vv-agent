@@ -289,13 +289,20 @@ class _Driver:
         capability: dict[str, Any] | None = None,
         purpose: str = "primary",
     ) -> Record:
-        if kind == "model" and isinstance(self.runtime.llm, VvLlmClient) and "session_endpoint_order" not in request["metadata"]:
+        if (
+            kind == "model"
+            and isinstance(self.runtime.llm, VvLlmClient)
+            and "endpoint_order" not in request["metadata"].get("vv_session", {})
+        ):
             request = request | {
                 "metadata": request["metadata"]
                 | {
-                    "session_endpoint_order": [
-                        t.endpoint_id for t in self.runtime.llm.ordered_targets(self.state.preferred_endpoint_id)
-                    ]
+                    "vv_session": request["metadata"].get("vv_session", {})
+                    | {
+                        "endpoint_order": [
+                            t.endpoint_id for t in self.runtime.llm.ordered_targets(self.state.preferred_endpoint_id)
+                        ]
+                    }
                 }
             }
         if kind == "model" and self.state.active_turn_id is not None:
@@ -350,6 +357,7 @@ class _Driver:
                 "result": outcome.result,
                 "result_digest": digest(outcome.result),
                 "usage": outcome.usage,
+                "shared_state": outcome.shared_state,
                 "evidence": list(outcome.evidence),
                 "execution_started": attempt.started,
                 "context": context,
@@ -416,7 +424,8 @@ class _Driver:
         is_model = plan._payload["op_kind"] == "model"
         retry = (
             plan._payload["purpose"] != "output_repair"
-            and plan.attempt < max(2, len(plan._payload["request"].get("metadata", {}).get("session_endpoint_order", [])))
+            and plan.attempt
+            < max(2, len(plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])))
             and (is_model or (plan._payload["tool"] or {}).get("idempotency") == "supported")
         )
         retry = (
@@ -477,7 +486,7 @@ class _Driver:
             item, extra, disposition, reason, target, wait = stored.item, [], "applied", None, None, None
             tid = self.state.active_turn_id
             target_tid = item.target_turn_id
-            evidence = item.kind in {"deferred_result", "provider_evidence", "child_result"}
+            evidence = item.kind in {"provider_result", "provider_evidence", "child_result"}
             retained_reply = item.kind in {"user", "approval_answer"} and any(
                 r._payload["disposition"] == "applied"
                 and r._payload["input"]["kind"] == item.kind
@@ -530,7 +539,7 @@ class _Driver:
                     or not self.provider(attempt.execution_plan).authenticate(item, attempt.execution_plan)
                 ):
                     disposition, reason = "rejected", "untrusted or mismatched provider evidence"
-                elif item.kind == "deferred_result":
+                elif item.kind == "provider_result":
                     if item.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
                         disposition, reason = "rejected", "provider binding mismatch"
                     elif attempt.result is not None:
@@ -745,11 +754,18 @@ class _Driver:
             tid = item["target_turn_id"] or f"{self.sid}/turn/{input_id}"
             content = item["payload"]["content"]
             task = self.runtime.compile(
-                content["text"] if isinstance(content, dict) and "messages" in content else str(content), tid
+                content["text"] if isinstance(content, dict) and "messages" in content else str(content),
+                tid,
+                seed=self.records[0].record._payload["attributes"].get("seed") if not self.state.turns else None,
             )
             if isinstance(content, dict) and "messages" in content:
-                task.metadata["session_input_messages"] = content["messages"]
+                task.metadata.setdefault("vv_session", {})["input_messages"] = content["messages"]
             task.task_id = tid
+            if not self.state.turns:
+                seed = self.records[0].record._payload["attributes"].get("seed")
+                if seed is not None:
+                    task.initial_messages = [Message.from_dict(copy_json(m)) for m in seed["messages"]]
+                    task.initial_shared_state = copy_json(seed["shared_state"])
             definition = self.runtime._definition(task)
             prior = self.runtime._retained_task_key
             if prior is not None:
@@ -800,7 +816,7 @@ class _Driver:
             if r.kind == "op_prepared":
                 return copy_json(r._payload["shared_state"])
             if r.kind == "op_completed" and r._payload["context"] == "normal":
-                snapshot = r._payload["usage"].get("session_shared_state")
+                snapshot = r._payload["shared_state"]
                 if snapshot is not None:
                     return copy_json(snapshot)
         return deepcopy(self.task().initial_shared_state)
@@ -842,7 +858,8 @@ class _Driver:
             "model": task.model,
             "messages": [m.to_dict() for m in messages],
             "tools": schemas,
-            "metadata": dict(task.metadata) | {"session_shared_state": self.runtime.durable_state(shared), "cycle_index": cycle},
+            "metadata": dict(task.metadata)
+            | {"vv_session": {"shared_state": self.runtime.durable_state(shared), "cycle_index": cycle}},
             "prompt_bundle": task.prompt_bundle.to_dict(),
             "model_settings": task.model_settings.to_dict() if task.model_settings else None,
         }
@@ -985,7 +1002,9 @@ class _Driver:
             parent = self.state.operations[plan._payload["dependencies"][0]]
             source = parent.attempts[parent.selected_attempt or max(parent.attempts)].plan
             context.metadata["session_tool_names"] = [s["function"]["name"] for s in source._payload["request"]["tools"]]
-            context.cycle_index = source._payload["request"].get("metadata", {}).get("cycle_index", context.cycle_index)
+            context.cycle_index = (
+                source._payload["request"].get("metadata", {}).get("vv_session", {}).get("cycle_index", context.cycle_index)
+            )
         if kind != "model" and self.runtime.hooks.has_hooks() and attempt.prepared is None:
             patched, short = self.runtime.hooks.apply_before_tool_call(
                 task=task, cycle_index=context.cycle_index, call=ToolCall.from_dict(plan.payload["request"]), context=context
@@ -1132,8 +1151,8 @@ class _Driver:
             },
             plan,
         )
-        if kind == "model" and plan._payload["request"]["metadata"].get("session_endpoint_order"):
-            order = plan._payload["request"]["metadata"]["session_endpoint_order"]
+        if kind == "model" and plan._payload["request"]["metadata"].get("vv_session", {}).get("endpoint_order"):
+            order = plan._payload["request"]["metadata"]["vv_session"]["endpoint_order"]
             started = replace(started, payload=started._payload | {"endpoint_id": order[((plan.attempt or 1) - 1) % len(order)]})
         name = plan._payload["request"].get("name")
         if kind != "model" and (name in self.runtime.children or name in self.runtime.delegated_tools):
@@ -1193,7 +1212,7 @@ class _Driver:
             )
             request.metadata["purpose"] = plan._payload["purpose"]
             if started._payload.get("endpoint_id"):
-                request.metadata["session_endpoint_id"] = started._payload["endpoint_id"]
+                request.metadata.setdefault("vv_session", {})["endpoint_id"] = started._payload["endpoint_id"]
             if plan._payload["purpose"] == "output_repair":
                 repair = self.runtime.agent.output_repair
                 assert repair is not None
@@ -1212,9 +1231,9 @@ class _Driver:
                 if isinstance(repaired, LLMResponse):
                     return Definitive({"content": repaired.content, "tool_calls": []}, usage=repaired.raw.get("usage") or {})
                 return Definitive({"content": serializable_output(repaired), "tool_calls": []})
-            if "session_shared_state" in request.metadata:
+            if "shared_state" in request.metadata.get("vv_session", {}):
                 context.shared_state.clear()
-                context.shared_state.update(self.runtime.bind_state(request.metadata.pop("session_shared_state"), task))
+                context.shared_state.update(self.runtime.bind_state(request.metadata["vv_session"]["shared_state"], task))
             try:
                 callback = None
                 stream = self.runtime.config.stream
@@ -1230,6 +1249,7 @@ class _Driver:
                             parent_run_id=None,
                         )
                         if event is not None and not self.scope.token.cancelled:
+                            object.__setattr__(event, "version", "v6")
                             with suppress(Exception):
                                 stream(event)
 
@@ -1267,7 +1287,7 @@ class _Driver:
         if isinstance(outcome, Definitive):
             if kind != "model":
                 outcome = self.finalize_tool(plan, context, outcome)
-            outcome.usage["session_shared_state"] = self.runtime.durable_state(context.shared_state)
+            outcome = replace(outcome, shared_state=self.runtime.durable_state(context.shared_state))
             self.commit(self.completed(plan, outcome))
         elif isinstance(outcome, Accepted):
             self.commit([self.parked(plan, outcome.handle, after=True)])
@@ -1286,10 +1306,9 @@ class _Driver:
         if not result.tool_call_id:
             result.tool_call_id = call.id
         stop = ToolCallRunner._apply_tool_use_behavior(task=self.task(), call=call, result=result)
-        usage = outcome.usage | {"session_shared_state": self.runtime.durable_state(context.shared_state)}
         if stop is not None:
-            usage["session_completion_reason"] = stop.value
-        return replace(outcome, result=result.to_dict(), usage=usage)
+            result.metadata["completion_reason"] = stop.value
+        return replace(outcome, result=result.to_dict(), shared_state=self.runtime.durable_state(context.shared_state))
 
     def step(self) -> bool:
         self.refresh()
@@ -1331,10 +1350,10 @@ class _Driver:
             self.close("failed", "handler_version_mismatch")
             return True
         task = turn.start._task()
-        if task.metadata.get("session_host_binding_names"):
+        if task.metadata.get("vv_session", {}).get("host_binding_names"):
             self.runtime.bind_state({}, task)
-        if task.metadata.get("session_input_blocked"):
-            self.close("failed", "agent_failed", task.metadata["session_input_blocked"])
+        if task.metadata.get("vv_session", {}).get("input_blocked"):
+            self.close("failed", "agent_failed", task.metadata.setdefault("vv_session", {})["input_blocked"])
             return True
         if self.runtime.definition_digest(turn.start) != turn.start._payload["definition_digest"]:
             self.close("failed", "handler_schema_or_capability_mismatch")
@@ -1373,7 +1392,7 @@ class _Driver:
                     "failed" if transfer_failed else "completed",
                     result._payload["result"].get("error_code")
                     if transfer_failed
-                    else result._payload["usage"].get("session_completion_reason", "tool_finish"),
+                    else result._payload["result"].get("metadata", {}).get("completion_reason", "tool_finish"),
                     result._payload["result"]["content"],
                     transferred=result._payload["result"].get("metadata", {}).get("mode") == "handoff",
                 )

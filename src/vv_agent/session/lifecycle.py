@@ -90,7 +90,9 @@ def after_cycle(driver: _Driver) -> bool:
     if any(op.state != "completed" and not any(a.wait in waits for a in op.attempts.values()) for op in children):
         return False
     task = driver.task()
-    index = op.attempts[1].plan._payload["request"]["metadata"].get("cycle_index", int(oid.rsplit("/", 1)[1]))
+    index = (
+        op.attempts[1].plan._payload["request"]["metadata"].get("vv_session", {}).get("cycle_index", int(oid.rsplit("/", 1)[1]))
+    )
     if waits:
         native = NativeCycleOutcome(NativeCycleOutcomeKind.WAIT_USER, CompletionReason.WAIT_USER, "ask_user", steer_allowed=False)
     elif finish:

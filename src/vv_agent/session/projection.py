@@ -65,7 +65,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         if r.kind == "turn_started":
             turns[r.turn_id] = p
             common["agent_name"] = p["definition"]["task"].get("metadata", {}).get("agent_name")
-            if p["definition"]["task"].get("metadata", {}).get("session_input_blocked"):
+            if p["definition"]["task"].get("metadata", {}).get("vv_session", {}).get("input_blocked"):
                 continue
             event = RunStartedEvent(**common, input=p["definition"]["task"]["user_prompt"])
             events.append(event)
@@ -90,7 +90,9 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         elif r.kind == "boundary_recorded":
             data, stage = p["data"], p["stage"]
             if stage in {"memory_started", "memory_completed"}:
-                event = event_from_dict(data["event"] | {"metadata": data["event"].get("metadata", {}) | common["metadata"]})
+                event = event_from_dict(
+                    data["event"] | {"metadata": data["event"].get("metadata", {}) | common["metadata"]}, _kernel=True
+                )
             elif stage == "after_cycle":
                 code = (
                     "after_cycle_failed"
@@ -209,11 +211,15 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             plan = plans[key]
             kind, request = plan["op_kind"], plan["request"]
             source = r.operation_id if kind == "model" else plan["dependencies"][0]
-            cycle = request.get("metadata", {}).get(
-                "cycle_index", int(source.rsplit("/", 1)[1]) if plan["purpose"] not in {"compaction", "session_memory"} else 1
+            cycle = (
+                request.get("metadata", {})
+                .get("vv_session", {})
+                .get(
+                    "cycle_index", int(source.rsplit("/", 1)[1]) if plan["purpose"] not in {"compaction", "session_memory"} else 1
+                )
             )
             if kind != "model":
-                cycle = plans[(source, 1)]["request"]["metadata"].get("cycle_index", cycle)
+                cycle = plans[(source, 1)]["request"]["metadata"].get("vv_session", {}).get("cycle_index", cycle)
             if r.kind == "op_planned" and kind == "model" and plan["purpose"] == "primary" and r.attempt == 1:
                 cycle_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/cycle"}
                 events.append(CycleStartedEvent(**cycle_common, cycle_index=cycle))
@@ -240,6 +246,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     "operation": {
                         "compaction": ModelCallOperation.MEMORY_COMPACTION,
                         "session_memory": ModelCallOperation.SESSION_MEMORY,
+                        "output_repair": ModelCallOperation.OUTPUT_REPAIR,
                     }.get(plan["purpose"], ModelCallOperation.AGENT_CYCLE),
                     "metadata": common["metadata"] | {"purpose": plan["purpose"]},
                     "cycle_index": cycle,
@@ -275,6 +282,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         operation_id=r.operation_id,
                         operation_kind="model",
                         risk="duplicate_model_request_and_cost",
+                        cycle_index=cycle,
                     )
             else:
                 tool: dict[str, Any] = {"tool_name": request["name"], "tool_call_id": request["id"], "cycle_index": cycle}
@@ -338,6 +346,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         operation_id=r.operation_id,
                         operation_kind="tool",
                         risk="tool_outcome_unknown",
+                        cycle_index=cycle,
                         idempotency_support=(plan["tool"] or {}).get("idempotency", "unknown"),
                     )
                 elif r.kind == "op_parked":
@@ -393,4 +402,6 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         event = RunStateChangedEvent(**common, state="parked")
         if event is not None:
             events.append(event)
+    for projected in events:
+        object.__setattr__(projected, "version", "v6")
     return events

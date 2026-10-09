@@ -496,7 +496,7 @@ def test_tool_hooks_state_approval_restart_parity(store, database, tmp_path, sho
     ]
     assert tool_results == old["tools"]
     assert records(store, kind="turn_ended")[0].payload["result"] == old["output"]
-    assert records(store, kind="op_completed")[-1].payload["usage"]["session_shared_state"] == old["shared"]
+    assert records(store, kind="op_completed")[-1].payload["shared_state"] == old["shared"]
 
 
 @pytest.mark.parametrize("behavior", ["run_llm_again", "stop_on_first_tool", "stop_at_tool_names"])

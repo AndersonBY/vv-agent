@@ -164,9 +164,13 @@ def test_thread_resume_reopens_closed_thread(surface, subscribe: bool) -> None:
     )
     response = transport.receive_outbound(timeout=1)
 
-    assert response["result"]["thread"]["status"] == ("closed" if surface else "idle")
-    assert state_manager.status("thread_1") == "idle"
-    assert state_manager.is_subscribed("thread_1", "conn_1") is subscribe
+    if surface and subscribe:
+        assert response["error"] == {"code": -32602, "message": "Thread is closed"}
+        assert not state_manager.is_subscribed("thread_1", "conn_1")
+    else:
+        assert response["result"]["thread"]["status"] == ("closed" if surface else "idle")
+        assert state_manager.status("thread_1") == "idle"
+        assert state_manager.is_subscribed("thread_1", "conn_1") is subscribe
 
 
 @pytest.mark.parametrize("subscribe", [True, False])

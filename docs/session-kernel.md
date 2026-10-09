@@ -373,10 +373,9 @@ counts or substitute a stale host meter value for a missing current observation.
 types with stable session-scoped IDs, original database timestamps and
 `metadata.session_seq`. Host-interaction event digests reuse the existing
 `HostInteractionRequest` value type; no controller instance is constructed. It is pure; it never dispatches or acknowledges.
-Consumers can filter the prefix by their durable cursor. Existing event fields
-named `checkpoint_key` carry the experimental session identity; this does not
-create or read an old checkpoint. Provider waits use a typed parked run-state
-projection because the public deferred event requires the old checkpoint handle.
+Consumers can filter the prefix by their durable cursor. Kernel v6 events use
+`session_id` and omit retired checkpoint/revision carriers. Provider waits use a
+typed parked run-state projection.
 The formal App Server/product adapter belongs to the later default cut-over.
 
 `supervisor.tick` pages through `list_runnable`, calling drive or the supplied
@@ -436,7 +435,7 @@ See the F2d-3 report for the pending C1 decisions on these internal semantics.
 
 Durable shared_state remains JSON-only. A host supplies arbitrary Python objects
 explicitly through `Runtime.host_bindings`; only their sorted required names in
-`task.metadata.session_host_binding_names` are frozen. Tools and runtime hooks
+`task.metadata.vv_session.host_binding_names` are frozen. Tools and runtime hooks
 receive the original references; records, model-visible metadata and result
 projections retain only JSON state. Bound references cannot shadow durable keys,
 be replaced or be deleted. Reconstructing without a required binding raises
@@ -699,9 +698,9 @@ and result ledgers, and an uncertain repair is never retried automatically.
 Candidate/partial output and final decisions survive recovery. Completed results
 use their terminal prefix, so later turns cannot change an older result. Per-cycle
 compaction flags, waits, errors, budget exhaustion and typed JSON output are
-reconstructed from records. The v23 public model-operation enum has no repair
-variant: adapters expose its existing agent_cycle enum and retain the precise
-purpose in event metadata and `RunResult.metadata.session_model_calls`.
+reconstructed from records. Kernel accounting exposes `output_repair` directly,
+with model-call v2 and task-token-usage v3; TokenUsage remains v1. Kernel events
+use v6. The default entrypoints retain their v23 versions until F3.
 
 ## F2d-2 events, streams and tracing
 
@@ -729,6 +728,50 @@ at most once and may be lost after acknowledgement; processor failures remain
 isolated. Span output is detached before delivery so processors cannot mutate
 retained result data. Host assembly supplies processors explicitly; no default
 wiring changed.
+
+## C1b reviewer decisions and v24 authoring
+
+Kernel task metadata reserves one closed `vv_session` object containing optional
+`host_binding_names`, `max_handoffs`, `handoff_targets`, `input_messages`,
+`memory_initial_state` and `input_blocked`. User-supplied `vv_session` is rejected
+at compile time. Kernel request metadata has a separate closed `vv_session`
+object containing optional `endpoint_order`, `endpoint_id`, `shared_state` and
+`cycle_index`. All other metadata keys remain opaque JSON, including names
+previously used by the kernel. Completion state lives in required-nullable
+`op_completed.shared_state`; usage contains measurements. `output_repair` is a
+kernel model-call v2 operation; non-kernel model-call v1 rejects it.
+Other extension content remains opaque JSON. Hashes require exactly 64 lowercase
+hex characters, including at nested inbox/handle boundaries; a newline fails.
+Compaction identity has no summary segment when `summary_operation_id` is null.
+
+Creation may carry closed `attributes.seed = {messages, shared_state}`, with both
+members required. History projects immediately, and the first turn receives the
+seed before context compilation. Kernel AgentSession exposes detached message
+and state projections; it has no history/state replacement, queue clearing or
+writable session access. Seed cannot be changed after creation.
+
+| Behavior change | Host migration / adoption boundary |
+| --- | --- |
+| v-claw history hydration and retry reset | Pass host history and shared state when creating a new SDK session; create a new durable session for a reset. Stop calling `replace_messages` / `replace_shared_state`. |
+| Thread status | One projection and enum (`idle`, `running`, `interrupted`, `archived`, `closed`) supplies snapshot, status response and status notifications. |
+| Closed execution | `turn/start`, `turn/resume` and execution-subscribing `thread/resume` reject with -32602 `Thread is closed`; read/list and nonexecuting resume remain available. |
+| Lost approval owner | Retain the original owner; observers cannot approve or take over. A configured absolute deadline resolves unanswered approval using timeoutDecision, including after owner loss/restart; recovery never resets it. Hosts configure finite `approval_timeout_seconds` for bounded waits. |
+| Provider completion | Inbox discriminator is `provider_result`; the retired discriminator is rejected. |
+| Q4 public execution API | F3 switches Runner.resume to explicit session/turn IDs or AgentSession and removes RunState wrappers and public AgentRuntime/ToolCallRunner execution surfaces. SessionRunEventStore and JSONL remain projection/sink capabilities; the old RunEventStore protocol and IdempotentRunEventStore ledger are removed. C1b retains default public wiring. |
+| Q8 public versions | Private App Server and both schema exporters emit protocol v2 now. Public API fixture v8 and default adoption belong to F3; bundle names stay unchanged. |
+
+`scripts/session_kernel_fixtures.py --output DIR` authors eleven new v24 files
+from real kernel/store/surface/App Server/schema producers using scripted doubles,
+fixed database/elapsed/prompt clocks and deterministic semantic identities. It
+never writes the vendored v23 fixtures. Node supplies an independent RFC8785 JCS
+path, including ECMAScript number encoding and UTF-16 key order; base64 bytes,
+hashes, embedded digests and record identities are checked independently.
+The generator asserts complete kind/stage/handle/optional-field coverage and
+separates codec, constructor, fold and authenticated admission rejection cases.
+The fixture test generates twice, compares all eleven files, validates schemas,
+reparses every vector, refolds all streams and prefixes, and recomputes event/span
+projections. Recovery vectors record actual barrier cuts and effect/callback
+counts; they complement the durable-store process-kill suites.
 
 Record encoding reuses the exact nested JCS bytes already checked for an embedded
 digest when composing the closed ASCII-key record envelope. Other payload fields

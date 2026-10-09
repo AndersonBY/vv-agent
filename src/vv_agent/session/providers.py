@@ -19,6 +19,7 @@ class Definitive:
     result: dict[str, Any]
     evidence: tuple[str, ...] = ("synchronous-return",)
     usage: dict[str, Any] = field(default_factory=dict)
+    shared_state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

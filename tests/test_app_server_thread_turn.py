@@ -423,9 +423,12 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         assert cast(dict[str, Any], first[-1]["params"])["finalOutput"] == "child done"
         return
     cast(Any, server.run_adapter).join()
-    interrupted = transport.receive_outbound(timeout=5)
-    assert interrupted["method"] == "thread/status/changed"
-    wait = interrupted["params"]["interactions"][0]
+    interrupted = next(
+        m
+        for m in first
+        if m.get("method") == "thread/status/changed" and cast(dict[str, Any], m["params"])["status"] == "interrupted"
+    )
+    wait = cast(dict[str, Any], interrupted["params"])["interactions"][0]
     assert wait["prompt"] == "child needs answer" and wait["sessionId"] != "thread_1"
     assert set(wait) == {"sessionId", "turnId", "prompt", "interactionId"}
     parent = surface.store.read_state("thread_1")[0]

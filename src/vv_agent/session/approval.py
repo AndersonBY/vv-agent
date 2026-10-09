@@ -44,7 +44,13 @@ def resolve_approval(driver: _Driver, attempt: Attempt) -> bool:
             trace_id=plan.turn_id or "",
             agent_name=runtime.agent.name,
             cycle_index=int(plan._payload["dependencies"][0].rsplit("/", 1)[1]),
-            metadata={"tool_metadata": dict(executor.metadata), "session_id": driver.sid},
+            metadata={
+                "tool_metadata": dict(executor.metadata),
+                "session_id": driver.sid,
+                "timeout_seconds": max(0, (deadline - driver.scope.poll(driver.store).db_now_ms) / 1000)
+                if deadline is not None
+                else None,
+            },
         )
         if not provider.should_request(request):
             decision = ApprovalDecision.allow()

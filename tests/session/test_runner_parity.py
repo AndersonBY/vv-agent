@@ -14,7 +14,7 @@ from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.session.context import project_context
 from vv_agent.session.kernel import Runtime, drive, read_state
 from vv_agent.session.projection import project_records
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem, Record, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
@@ -54,7 +54,7 @@ def observe(agent, steps, config, *, kernel, provider_settings=None):
         drive(store, "parity", runtime=rt)
         state, records, _ = read_state(store, "parity")
         terminal = next(r.record.payload for r in reversed(records) if r.record.kind == "turn_ended")
-        snapshots = [r.record.payload["usage"].get("session_shared_state") for r in records if r.record.kind == "op_completed"]
+        snapshots = [r.record.payload["shared_state"] for r in records if r.record.kind == "op_completed"]
         return {
             "output": terminal["result"],
             "tools": [(m.tool_call_id, m.content) for m in project_context(records, state) if m.role == "tool"],
@@ -609,3 +609,83 @@ def test_disabled_tool_never_executes(tmp_path):
     config = RunConfig(workspace=tmp_path)
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
     assert effects == []
+
+
+def test_creation_seed_projects_before_first_turn(store, database):
+    from vv_agent.session.result import project_result
+    from vv_agent.types import Message
+
+    from .conftest import open_store
+
+    seed = {"messages": [Message("user", "retained history").to_dict()], "shared_state": {"retry": 2}}
+    with store.atomic() as tx:
+        tx.create(SessionSpec("seed", "test", ".", attributes={"seed": seed}), consumers=())
+        tx.push("seed", InboxItem("first", "user", {"content": "go"}))
+    state, rows, _ = store.read_state("seed")
+    assert [m.content for m in project_context(rows, state)] == ["retained history"]
+    seen = []
+
+    def check(request):
+        seen.append(request)
+        assert [m.content for m in request.messages if m.role == "user"] == ["retained history", "go"]
+        assert request.metadata["vv_session"]["shared_state"] == {"retry": 2}
+        assert set(request.metadata["vv_session"]) == {"shared_state", "cycle_index"}
+        return LLMResponse("done")
+
+    rt = Runtime(Agent("seed", "Be precise."), RunConfig(), RESOLVED, ScriptedLLM([check]), lambda: open_store(database))
+    drive(store, "seed", runtime=rt)
+    assert len(seen) == 1
+    assert project_result(store, "seed", "seed/turn/first", runtime=rt).raw_result.shared_state == seed["shared_state"]
+
+
+@pytest.mark.parametrize("location", ["agent", "config"])
+def test_user_metadata_with_legacy_kernel_names_stays_opaque(store, database, location):
+    from .conftest import open_store
+
+    metadata = {
+        "cycle_index": 3,
+        "session_shared_state": {"user": [1, None, "opaque"]},
+        "session_input_blocked": "user annotation",
+        "session_max_handoffs": {"user": "limit"},
+        "session_host_binding_names": ["user-host"],
+        "session_handoff_targets": {"user": "target"},
+        "session_input_messages": [{"user": "message"}],
+        "_vv_agent_session_memory_initial_state": {"user": "memory"},
+        "session_endpoint_order": ["user-endpoint"],
+        "session_endpoint_id": "user-endpoint",
+    }
+    shared_state = {"kernel": True, "todo_list": []}
+    agent = Agent("opaque", "Be precise.", metadata=metadata if location == "agent" else {})
+    config = RunConfig(metadata=metadata if location == "config" else {}, shared_state=shared_state)
+
+    def check(request):
+        assert {key: request.metadata[key] for key in metadata} == metadata
+        assert request.metadata["vv_session"] == {"shared_state": shared_state, "cycle_index": 1}
+        return LLMResponse("done")
+
+    with store.atomic() as tx:
+        tx.create(SessionSpec("opaque", "test", "."), consumers=())
+        tx.push("opaque", InboxItem("input", "user", {"content": "go"}))
+    rt = Runtime(agent, config, RESOLVED, ScriptedLLM([check]), lambda: open_store(database))
+    drive(store, "opaque", runtime=rt)
+    _, rows, _ = store.read_state("opaque")
+    records = [Record.parse(row.record.encode()) for row in rows]
+    assert [record.to_dict() for record in records] == [row.record.to_dict() for row in rows]
+    terminal = next(record.payload for record in records if record.kind == "turn_ended")
+    assert terminal["status"] == "completed", terminal
+    assert terminal["result"] == "done"
+    definition = next(record.payload["definition"] for record in records if record.kind == "turn_started")
+    assert {key: definition["task"]["metadata"][key] for key in metadata} == metadata
+    request = next(record.payload["request"] for record in records if record.kind == "op_planned")
+    assert {key: request["metadata"][key] for key in metadata} == metadata
+    assert request["metadata"]["vv_session"] == {"shared_state": shared_state, "cycle_index": 1}
+
+
+@pytest.mark.parametrize("location", ["agent", "config"])
+def test_user_vv_session_metadata_is_rejected(location):
+    with SQLiteStore.standalone(":memory:") as store:
+        agent = Agent("test", "Be precise.", metadata={"vv_session": {}} if location == "agent" else {})
+        config = RunConfig(metadata={"vv_session": {}} if location == "config" else {})
+        rt = Runtime(agent, config, RESOLVED, ScriptedLLM([]), lambda: nullcontext(store))
+        with pytest.raises(ValueError, match="vv_session is reserved"):
+            rt.compile("go", "turn")

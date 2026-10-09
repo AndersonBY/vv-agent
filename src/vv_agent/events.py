@@ -570,6 +570,13 @@ class RunEvent:
         return payload
 
 
+def _kernel_event_payload(event: RunEvent, payload: dict[str, Any]) -> dict[str, Any]:
+    if event.version == "v6":
+        for name in ("checkpoint_key", "resume_attempt", "consumed_revision"):
+            payload.pop(name, None)
+    return payload
+
+
 def _set_run_event_fields(
     event: RunEvent,
     *,
@@ -1064,7 +1071,7 @@ class HostInteractionRequestedEvent(RunEvent):
                 "prompt": self.prompt,
             }
         )
-        return payload
+        return _kernel_event_payload(self, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1147,7 +1154,7 @@ class HostInteractionResponseConsumedEvent(RunEvent):
                 "consumed_revision": self.consumed_revision,
             }
         )
-        return payload
+        return _kernel_event_payload(self, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1881,7 +1888,7 @@ class ToolCallCompletedEvent(RunEvent):
             payload["checkpoint_key"] = self.checkpoint_key
         if self.tool_metadata is not None:
             payload["tool_metadata"] = self.tool_metadata.to_dict()
-        return payload
+        return _kernel_event_payload(self, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2889,7 +2896,7 @@ class OperationAmbiguousEvent(RunEvent):
             risk=self.risk,
             idempotency_support=(self.idempotency_support.value if self.idempotency_support is not None else None),
         )
-        return payload
+        return _kernel_event_payload(self, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3016,7 +3023,7 @@ class ModelRetryDuplicateRiskEvent(RunEvent):
             operation_kind=self.operation_kind.value,
             risk=self.risk,
         )
-        return payload
+        return _kernel_event_payload(self, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3126,16 +3133,26 @@ def _with_cycle_and_agent(payload: dict[str, Any], common: dict[str, Any]) -> di
     }
 
 
-def _validate_event_wire(payload: dict[str, Any]) -> None:
+def _validate_event_wire(payload: dict[str, Any], *, _kernel: bool = False) -> None:
     if not isinstance(payload, dict):
         raise ValueError("Run event payload must be an object")
-    if payload.get("version") != RUN_EVENT_VERSION:
+    if payload.get("version") != ("v6" if _kernel else RUN_EVENT_VERSION):
         raise ValueError(f"Unsupported run event version: {payload.get('version')!r}")
 
     event_type = payload.get("type")
     if not isinstance(event_type, str) or event_type not in _EVENT_FIELDS:
         raise ValueError(f"Unsupported run event type: {event_type!r}")
-    allowed_fields = _COMMON_EVENT_FIELDS | _EVENT_FIELDS[event_type]
+    if _kernel and event_type in {
+        "checkpoint_created",
+        "checkpoint_resumed",
+        "reconciliation_required",
+        "reconciliation_resolved",
+        "tool_call_deferred",
+        "operation_replayed",
+    }:
+        raise ValueError("Retired kernel event type")
+    retired = {"checkpoint_key", "resume_attempt", "consumed_revision"} if _kernel else set()
+    allowed_fields = (_COMMON_EVENT_FIELDS | _EVENT_FIELDS[event_type]) - retired
     unknown_fields = set(payload) - allowed_fields
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -3149,6 +3166,9 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         "created_at",
         *_EVENT_REQUIRED_FIELDS.get(event_type, ()),
     }
+    required_fields -= retired
+    if _kernel:
+        required_fields.add("session_id")
     missing_fields = required_fields - set(payload)
     if missing_fields:
         names = ", ".join(sorted(missing_fields))
@@ -3190,8 +3210,9 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _required_event_text(payload.get("code"), "code")
         _diagnostic_details(payload.get("details"))
     if payload["type"] == "host_interaction_requested":
-        _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
-        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
+        if not _kernel:
+            _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
+            _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
         _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
         _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
         _host_interaction_identity(payload.get("operation_id"), "operation_id")
@@ -3212,8 +3233,9 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         if request_digest != expected_digest:
             raise ValueError("Run event request_digest does not match host interaction request")
     if payload["type"] == "host_interaction_response_consumed":
-        _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
-        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
+        if not _kernel:
+            _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
+            _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
         _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
         _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
         _host_interaction_identity(payload.get("operation_id"), "operation_id")
@@ -3221,7 +3243,7 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _host_interaction_digest(payload.get("request_digest"), "request_digest")
         _host_interaction_identity(payload.get("command_id"), "command_id")
         _host_interaction_digest(payload.get("response_digest"), "response_digest")
-        if (
+        if not _kernel and (
             isinstance(payload.get("consumed_revision"), bool)
             or not isinstance(payload.get("consumed_revision"), int)
             or payload["consumed_revision"] < 0
@@ -3392,7 +3414,8 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         "reconciliation_resolved",
     }
     if payload["type"] in checkpoint_event_types:
-        _required_event_text(payload.get("checkpoint_key"), "checkpoint_key")
+        if not _kernel:
+            _required_event_text(payload.get("checkpoint_key"), "checkpoint_key")
         if not isinstance(payload.get("cycle_index"), int):
             raise ValueError("Run event cycle_index is required for checkpoint lifecycle events")
     if payload["type"] in {"checkpoint_created", "checkpoint_resumed"}:
@@ -3429,8 +3452,14 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         ReconciliationDecisionKind(payload.get("decision"))
 
 
-def event_from_dict(payload: dict[str, Any]) -> RunEvent:
-    _validate_event_wire(payload)
+def event_from_dict(payload: dict[str, Any], *, _kernel: bool = False) -> RunEvent:
+    _validate_event_wire(payload, _kernel=_kernel)
+    event = _event_from_dict(payload, _kernel=_kernel)
+    object.__setattr__(event, "version", "v6" if _kernel else RUN_EVENT_VERSION)
+    return event
+
+
+def _event_from_dict(payload: dict[str, Any], *, _kernel: bool) -> RunEvent:
 
     event_type = payload.get("type")
     common = _common_event_kwargs(payload)
@@ -3488,8 +3517,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "host_interaction_requested":
         return HostInteractionRequestedEvent(
-            checkpoint_key=payload["checkpoint_key"],
-            resume_attempt=payload["resume_attempt"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
+            resume_attempt=1 if _kernel else payload["resume_attempt"],
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
             operation_id=payload["operation_id"],
@@ -3500,8 +3529,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "host_interaction_response_consumed":
         return HostInteractionResponseConsumedEvent(
-            checkpoint_key=payload["checkpoint_key"],
-            resume_attempt=payload["resume_attempt"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
+            resume_attempt=1 if _kernel else payload["resume_attempt"],
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
             operation_id=payload["operation_id"],
@@ -3509,7 +3538,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_digest=payload["request_digest"],
             command_id=payload["command_id"],
             response_digest=payload["response_digest"],
-            consumed_revision=payload["consumed_revision"],
+            consumed_revision=payload["metadata"]["session_seq"] if _kernel else payload["consumed_revision"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "diagnostic":
@@ -3711,7 +3740,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     if event_type == "run_completed":
         final_output = payload.get("final_output")
         return RunCompletedEvent(
-            final_output=str(final_output) if final_output is not None else None,
+            final_output=final_output if _kernel else str(final_output) if final_output is not None else None,
             status=str(payload.get("status") or ""),
             completion_reason=_completion_reason(payload.get("completion_reason")),
             completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
@@ -3742,19 +3771,19 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "checkpoint_created":
         return CheckpointCreatedEvent(
-            checkpoint_key=payload["checkpoint_key"],
-            resume_attempt=payload["resume_attempt"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
+            resume_attempt=1 if _kernel else payload["resume_attempt"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "checkpoint_resumed":
         return CheckpointResumedEvent(
-            checkpoint_key=payload["checkpoint_key"],
-            resume_attempt=payload["resume_attempt"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
+            resume_attempt=1 if _kernel else payload["resume_attempt"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "operation_replayed":
         return OperationReplayedEvent(
-            checkpoint_key=payload["checkpoint_key"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             receipt_state=payload["receipt_state"],
@@ -3762,7 +3791,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "operation_ambiguous":
         return OperationAmbiguousEvent(
-            checkpoint_key=payload["checkpoint_key"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             risk=payload["risk"],
@@ -3771,7 +3800,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "reconciliation_required":
         return ReconciliationRequiredEvent(
-            checkpoint_key=payload["checkpoint_key"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             interruption_reason=payload["interruption_reason"],
@@ -3780,7 +3809,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "model_retry_duplicate_risk":
         return ModelRetryDuplicateRiskEvent(
-            checkpoint_key=payload["checkpoint_key"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             risk=payload["risk"],
@@ -3788,7 +3817,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "reconciliation_resolved":
         return ReconciliationResolvedEvent(
-            checkpoint_key=payload["checkpoint_key"],
+            checkpoint_key=payload["session_id"] if _kernel else payload["checkpoint_key"],
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             decision=payload["decision"],

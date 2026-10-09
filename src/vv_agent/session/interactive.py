@@ -7,10 +7,10 @@ from uuid import uuid4
 from vv_agent.agent import Agent
 from vv_agent.interactive import AgentSession, AgentSessionRun, InteractiveAgentDefinition
 from vv_agent.run_config import RunConfig
-from vv_agent.types import AgentStatus
+from vv_agent.types import AgentStatus, Message
 
 from .kernel import drive
-from .records import InboxItem
+from .records import InboxItem, copy_json
 from .result import project_result
 
 
@@ -24,11 +24,13 @@ class _Transcript:
 
 
 class _KernelAgentSession(AgentSession):
-    def __init__(self, *, client, agent, workspace, shared_state, session_id):
+    def __init__(self, *, client, agent, workspace, shared_state, session_id, seed_messages: list[Message]):
         self._client = client
         self._kernel = client._kernel
         sid = session_id or uuid4().hex[:12]
-        self._kernel.create(sid, str(workspace))
+        self._kernel.create(
+            sid, str(workspace), {"seed": {"messages": [m.to_dict() for m in seed_messages], "shared_state": shared_state or {}}}
+        )
         definition = client._apply_startup_shell_defaults(agent) if isinstance(agent, InteractiveAgentDefinition) else None
         super().__init__(
             execute_run=client._execute,
@@ -49,6 +51,31 @@ class _KernelAgentSession(AgentSession):
             result = project_result(self._kernel.store, sid, next(reversed(state.turns)), runtime=self._runtime())
             self._shared_state = result.raw_result.shared_state
             self._latest_run = AgentSessionRun.from_run_result(result)
+
+    def __getattribute__(self, name):
+        if name in {"replace_messages", "replace_shared_state", "clear_queues", "session"}:
+            raise AttributeError(f"Kernel AgentSession has no {name}")
+        return super().__getattribute__(name)
+
+    def __dir__(self):
+        return [
+            name
+            for name in super().__dir__()
+            if name not in {"replace_messages", "replace_shared_state", "clear_queues", "session"}
+        ]
+
+    @property
+    def messages(self):
+        return self._kernel.messages(self.session_id)
+
+    @property
+    def shared_state(self):
+        state, rows, _ = self._kernel.store.read_state(self.session_id)
+        if state.turns:
+            return copy_json(
+                project_result(self._kernel.store, self.session_id, next(reversed(state.turns))).raw_result.shared_state
+            )
+        return copy_json(rows[0].record.payload["attributes"].get("seed", {}).get("shared_state", {}))
 
     def _runtime(self):
         handle = self._active_run_handle
@@ -165,6 +192,7 @@ class _KernelAgentSession(AgentSession):
         return replace(
             super().state(),
             messages=self._kernel.messages(self.session_id),
+            shared_state=self.shared_state,
             pending_steering=self._pending("steer"),
             pending_follow_ups=self._pending("follow_up"),
         )

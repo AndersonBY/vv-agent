@@ -470,7 +470,7 @@ def test_late_callback_after_generation_replaced_is_consumed_as_audit(store):
     )
     callback = InboxItem(
         "callback",
-        "deferred_result",
+        "provider_result",
         {
             "operation_id": "o",
             "attempt": 1,
