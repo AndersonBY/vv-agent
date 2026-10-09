@@ -1728,6 +1728,7 @@ def _signature_projection(value: Any) -> dict[str, Any]:
                 and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD),
             }
             for parameter in signature.parameters.values()
+            if not parameter.name.startswith("_")
         ],
     }
     # The contract names the closed framework variant explicitly even though

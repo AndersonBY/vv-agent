@@ -248,11 +248,21 @@ class _RunTrace:
 
 class Runner:
     @classmethod
-    def configured(cls, default_run_config: RunConfig | None = None) -> ConfiguredRunner:
-        return ConfiguredRunner(default_run_config=default_run_config or RunConfig())
+    def configured(cls, default_run_config: RunConfig | None = None, *, _kernel: Any = None) -> ConfiguredRunner:
+        return ConfiguredRunner(default_run_config=default_run_config or RunConfig(), _kernel=_kernel)
 
     @classmethod
-    def run_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunResult:
+    def run_sync(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig | None = None,
+        _kernel: Any = None,
+        _session_id: str | None = None,
+    ) -> RunResult:
+        if _kernel is not None:
+            return cls.start(agent, input, run_config=run_config, _kernel=_kernel, _session_id=_session_id).result()
         return cls._run(agent, input, run_config=run_config or RunConfig())
 
     @classmethod
@@ -371,13 +381,35 @@ class Runner:
         return result
 
     @classmethod
-    def stream_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> Iterator[RunEvent]:
-        handle = cls.start(agent, input, run_config=run_config)
+    def stream_sync(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig | None = None,
+        _kernel: Any = None,
+        _session_id: str | None = None,
+    ) -> Iterator[RunEvent]:
+        handle = cls.start(agent, input, run_config=run_config, _kernel=_kernel, _session_id=_session_id)
         yield from handle.events()
         handle.result()
 
     @classmethod
-    def start(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunHandle:
+    def start(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig | None = None,
+        _kernel: Any = None,
+        _session_id: str | None = None,
+    ) -> RunHandle:
+        if _kernel is not None:
+            config = cls._effective_run_config(agent, run_config or RunConfig())
+            sid = _session_id or uuid.uuid4().hex
+            seed = {"messages": [m.to_dict() for m in config.initial_messages or []], "shared_state": config.shared_state or {}}
+            _kernel.create(sid, str(config.workspace or Path.cwd()), {"seed": seed})
+            return _kernel.start(sid, agent, config, input, input_id="initial")
         return RunHandle._start_worker(
             agent=agent,
             input=input,
@@ -419,7 +451,35 @@ class Runner:
         )
 
     @classmethod
-    def resume(cls, state: RunState, *, input: str | None = None) -> RunResult:
+    def resume(
+        cls,
+        state: RunState | str,
+        *,
+        input: str | None = None,
+        _kernel: Any = None,
+        _turn_id: str | None = None,
+    ) -> RunResult:
+        if _kernel is not None:
+            if not isinstance(state, str) or _turn_id is None or input is not None:
+                raise ValueError("kernel resume requires session_id and turn_id, without new input")
+            projected, _, _ = _kernel.store.read_state(state)
+            if projected.closed or projected.archived:
+                raise ValueError("session is closed or archived")
+            if _turn_id not in projected.turns or projected.active_turn_id not in {None, _turn_id}:
+                raise ValueError("turn_id does not identify the resumable turn")
+            retained = next((h for h in reversed(_kernel.handles) if h.session_id == state and h.run_id == _turn_id), None)
+            if retained is None:
+                from vv_agent.session.bindings import MissingHostBinding
+
+                raise MissingHostBinding("resume requires the original host runtime")
+            if projected.turns[_turn_id].ended:
+                from vv_agent.session.result import project_result
+
+                return project_result(_kernel.store, state, _turn_id, runtime=retained.runtime)
+            handle = _kernel.start(state, retained.runtime.agent, retained.runtime.config, None)
+            return handle.result()
+        if not isinstance(state, RunState) or _turn_id is not None:
+            raise TypeError("resume requires RunState")
         return cls._resume_state(state, input=input)
 
     @classmethod
@@ -3165,8 +3225,18 @@ class Runner:
 @dataclass(frozen=True, slots=True)
 class ConfiguredRunner:
     default_run_config: RunConfig = field(default_factory=RunConfig)
+    _kernel: Any = field(default=None, repr=False, compare=False)
 
-    def run_sync(self, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunResult:
+    def run_sync(
+        self,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig | None = None,
+        _session_id: str | None = None,
+    ) -> RunResult:
+        if self._kernel is not None:
+            return self.start(agent, input, run_config=run_config, _session_id=_session_id).result()
         return Runner._run(
             agent,
             input,
@@ -3180,7 +3250,17 @@ class ConfiguredRunner:
         yield from handle.events()
         handle.result()
 
-    def start(self, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunHandle:
+    def start(
+        self,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig | None = None,
+        _session_id: str | None = None,
+    ) -> RunHandle:
+        if self._kernel is not None:
+            config = Runner._effective_run_config(agent, run_config or RunConfig(), runner_defaults=self.default_run_config)
+            return Runner.start(agent, input, run_config=config, _kernel=self._kernel, _session_id=_session_id)
         config = run_config or RunConfig()
         control_config = replace(
             config,
@@ -3189,7 +3269,11 @@ class ConfiguredRunner:
         )
         return RunHandle._start_worker(agent=agent, input=input, run_config=control_config, runner=self)
 
-    def resume(self, state: RunState, *, input: str | None = None) -> RunResult:
+    def resume(self, state: RunState | str, *, input: str | None = None, _turn_id: str | None = None) -> RunResult:
+        if self._kernel is not None:
+            return Runner.resume(state, input=input, _kernel=self._kernel, _turn_id=_turn_id)
+        if not isinstance(state, RunState) or _turn_id is not None:
+            raise TypeError("resume requires RunState")
         return Runner._resume_state(
             state,
             input=input,

@@ -58,9 +58,10 @@ def resolve_approval(driver: _Driver, attempt: Attempt) -> bool:
             broker.register(request)
             try:
                 decision = provider.decide(request)
-            except Exception:
+            except Exception as exc:
                 broker.discard(request.request_id)
-                raise
+                driver.close("failed", "agent_failed", str(exc))
+                return True
             if decision is not None:
                 broker.resolve(request.request_id, decision)
                 decision = broker.wait(request.request_id, timeout=0)

@@ -6,7 +6,6 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -289,20 +288,17 @@ class _Driver:
         capability: dict[str, Any] | None = None,
         purpose: str = "primary",
     ) -> Record:
+        client = self.runtime.model_route(purpose)[0] if kind == "model" else None
         if (
             kind == "model"
-            and isinstance(self.runtime.llm, VvLlmClient)
+            and isinstance(client, VvLlmClient)
             and "endpoint_order" not in request["metadata"].get("vv_session", {})
         ):
             request = request | {
                 "metadata": request["metadata"]
                 | {
                     "vv_session": request["metadata"].get("vv_session", {})
-                    | {
-                        "endpoint_order": [
-                            t.endpoint_id for t in self.runtime.llm.ordered_targets(self.state.preferred_endpoint_id)
-                        ]
-                    }
+                    | {"endpoint_order": [t.endpoint_id for t in client.ordered_targets(self.state.preferred_endpoint_id)]}
                 }
             }
         if kind == "model" and self.state.active_turn_id is not None:
@@ -764,7 +760,7 @@ class _Driver:
             if not self.state.turns:
                 seed = self.records[0].record._payload["attributes"].get("seed")
                 if seed is not None:
-                    task.initial_messages = [Message.from_dict(copy_json(m)) for m in seed["messages"]]
+                    task.initial_messages = [Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]]
                     task.initial_shared_state = copy_json(seed["shared_state"])
             definition = self.runtime._definition(task)
             prior = self.runtime._retained_task_key
@@ -819,17 +815,20 @@ class _Driver:
                 snapshot = r._payload["shared_state"]
                 if snapshot is not None:
                     return copy_json(snapshot)
-        return deepcopy(self.task().initial_shared_state)
+        assert self.state.active_turn_id is not None
+        return copy_json(self.state.turns[self.state.active_turn_id].start._task().initial_shared_state)
 
     def shared_state(self) -> dict[str, Any]:
-        return self.runtime.bind_state(self.durable_shared_state(), self.task())
+        assert self.state.active_turn_id is not None
+        return self.runtime.bind_state(self.durable_shared_state(), self.state.turns[self.state.active_turn_id].start._task())
 
     def model_plan(self) -> Record:
-        task = self.task()
         messages = self.transcript()
         tid = self.state.active_turn_id
         assert tid is not None
-        definition = self.state.turns[tid].start._payload["definition"]
+        start = self.state.turns[tid].start
+        task = start.task() if self.runtime.hooks.has_hooks() else start._task()
+        definition = start._payload["definition"]
         cycle = 1 + sum(
             op.turn_id == tid
             and op.kind == "model"
@@ -986,8 +985,13 @@ class _Driver:
 
     def dispatch(self, attempt: Attempt) -> None:
         plan = attempt.execution_plan
-        task = self.task()
         kind = plan._payload["op_kind"]
+        assert self.state.active_turn_id is not None
+        task = (
+            self.state.turns[self.state.active_turn_id].start._task()
+            if kind == "model" and not self.runtime.hooks.has_hooks()
+            else self.task()
+        )
         context = self.runtime.context(
             task,
             plan,

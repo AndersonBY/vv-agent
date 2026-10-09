@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.util
 import json
 import subprocess
 from collections import Counter
@@ -11,6 +12,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,8 +58,10 @@ from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict, LeaseLost
 from vv_agent.session.surfaces import _SessionKernel
 from vv_agent.session.tracing import project_spans
+from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.function import function_tool
 from vv_agent.tools.outputs import ToolOutputText
+from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import LLMResponse, Message, SubAgentConfig, ToolCall, ToolDirective, ToolExecutionResult
 from vv_agent.workspace.memory import MemoryWorkspaceBackend
 
@@ -223,6 +227,22 @@ class Fixtures:
         self.recovery = []
         self.invalid = []
 
+    @staticmethod
+    def registry(names=()):
+        registry = ToolRegistry()
+        if names:
+            builtins = build_default_registry()
+            for name in names:
+                if builtins.has_executor(name):
+                    registry.register_executor(builtins.get_executor(name))
+        return registry
+
+    @classmethod
+    def config(cls, config=None, steps=()):
+        config = config or RunConfig()
+        names = tuple(sorted({call.name for step in steps if isinstance(step, LLMResponse) for call in step.tool_calls}))
+        return replace(config, tool_registry_factory=config.tool_registry_factory or partial(cls.registry, names))
+
     def push(self, sid, item):
         self.inbox[(sid, item.input_id)] = item
         return self.kernel.push(sid, item)
@@ -230,7 +250,7 @@ class Fixtures:
     def admit(self, sid, steps, *, agent=None, config=None, attributes=None, memory=None, content="go", **kwargs):
         agent = agent or Agent("fixture", "Be precise.", model="m", tools=[echo])
         provider = ScriptedModelProvider("scripted", "m", ScriptedLLM(steps), context_length=None, max_output_tokens=None)
-        config = replace(config or RunConfig(), model_provider=provider, workspace="/fixture")
+        config = replace(self.config(config, steps), model_provider=provider, workspace="/fixture")
         rt = self.kernel.runtime(agent, config)
         rt.__dict__.update(kwargs)
         if memory is not None:
@@ -379,7 +399,7 @@ class Fixtures:
         self.drain_children("children", self.runtimes["children"])
         assert self.result("children").final_output == "parent done"
 
-        history = [Message("user", "request"), Message("assistant", "old facts " * 4000)]
+        history = [Message("user", "request"), Message("assistant", "old " * 1200)]
         for sid, summary in (("summary", SUMMARY), ("rejected_summary", "bad")):
             self.admit(
                 sid,
@@ -398,16 +418,20 @@ class Fixtures:
                     {"id": "old", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"old.txt"}'}}
                 ],
             ),
-            Message("tool", "durable old facts " * 5000, tool_call_id="old"),
+            Message("tool", "old " * 600, tool_call_id="old"),
             Message("assistant", "recent reply"),
         ]
         manager = MemoryManager(
-            compact_threshold=1000, keep_recent_messages=1, microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=1)
+            compact_threshold=500, keep_recent_messages=1, microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=1)
         )
         self.admit(
             "micro",
             [LLMResponse("done")],
-            config=RunConfig(initial_messages=tool_history, workspace_backend=backend),
+            config=RunConfig(
+                initial_messages=tool_history,
+                workspace_backend=backend,
+                tool_registry_factory=partial(self.registry, ("read_file",)),
+            ),
             memory=manager,
         )
         self.run("micro")
@@ -486,7 +510,7 @@ class Fixtures:
     def compaction_cases(self, history, backend):
         @function_tool
         def more() -> ToolOutputText:
-            return ToolOutputText("new facts " * 5000)
+            return ToolOutputText("new " * 1200)
 
         rt = self.admit(
             "second_summary",
@@ -918,7 +942,8 @@ class Fixtures:
             transport=transport,
             _kernel=self.kernel,
             host=DefaultAppServerHost(
-                agent=Agent("app", "Be precise.", model="m"), run_config=RunConfig(model_provider=provider, workspace="/fixture")
+                agent=Agent("app", "Be precise.", model="m"),
+                run_config=RunConfig(model_provider=provider, workspace="/fixture", tool_registry_factory=ToolRegistry),
             ),
         )
         transcript = []
@@ -1000,7 +1025,11 @@ class Fixtures:
                     tools=[wait_turn],
                     sub_agents={"worker": SubAgentConfig(model="m", description="Work.")},
                 ),
-                run_config=RunConfig(model_provider=provider, workspace="/fixture"),
+                run_config=RunConfig(
+                    model_provider=provider,
+                    workspace="/fixture",
+                    tool_registry_factory=partial(self.registry, ("create_sub_task",)),
+                ),
             ),
         )
         request(20, "initialize", {"clientInfo": {"name": "child-owner"}})
@@ -1056,6 +1085,7 @@ class Fixtures:
                 ),
                 workspace="/fixture",
                 approval_timeout_seconds=60,
+                tool_registry_factory=ToolRegistry,
             ),
         )
         server = AppServer(transport=transport, _kernel=self.kernel, host=approval_host)
@@ -1474,6 +1504,15 @@ def generate(output: Path):
             try:
                 fixtures.produce()
                 app = fixtures.app_server()
+                spec = importlib.util.spec_from_file_location(
+                    "_session_kernel_replacements", Path(__file__).with_name("_session_kernel_replacements.py")
+                )
+                assert spec is not None and spec.loader is not None
+                replacements = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(replacements)
+                replacement_report = replacements.generate_replacements(
+                    fixtures, app, output, independent_bytes, facts, write_json
+                )
                 streams = fixtures.collect()
                 vectors = valid_vectors(streams, fixtures.inbox)
                 inventory = coverage(vectors, fixtures.semantics)
@@ -1547,9 +1586,32 @@ def generate(output: Path):
                 write_json(output, "session_projection.json", {"sessions": projections})
                 write_json(output, "session_compaction.json", {"vectors": compactions})
                 write_json(output, "app_server_protocol.json", app)
+                spec = importlib.util.spec_from_file_location(
+                    "_session_kernel_curation", Path(__file__).with_name("_session_kernel_curation.py")
+                )
+                assert spec is not None and spec.loader is not None
+                curation = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(curation)
+                values, curated_coverage = curation.curate(output, streams, fixtures.semantics, independent_bytes, facts)
+                replacements.validate_replacements({name: values[name] for name in replacements.REPLACE}, independent_bytes)
+                replacement_report["replaced"] = {
+                    name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE
+                }
+                replacements.write_report(replacement_report, Path("/tmp/c1c1b-fixture-diff.md"))
+                with Path("/tmp/c1c1b-fixture-diff.md").open("a") as report:
+                    report.write("\n## Coverage counts (full producer = curated)\n\n")
+                    report.write("| File | Full | Curated |\n| --- | ---: | ---: |\n")
+                    for name, keys in curated_coverage.items():
+                        report.write(f"| {name} | {len(keys['before'])} | {len(keys['after'])} |\n")
+                    report.write("\n## New-file coverage keys\n")
+                    for name, keys in curated_coverage.items():
+                        if name in replacements.REPLACE:
+                            continue
+                        report.write(f"\n### {name} ({len(keys['before'])} = {len(keys['after'])})\n\n")
+                        report.write("; ".join(keys["after"]) + "\n")
             finally:
                 fixtures.kernel.close()
-    return inventory
+    return {"inventory": inventory, "coverage": curated_coverage}
 
 
 if __name__ == "__main__":

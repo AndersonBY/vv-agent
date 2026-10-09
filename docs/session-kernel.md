@@ -760,7 +760,7 @@ writable session access. Seed cannot be changed after creation.
 | Q4 public execution API | F3 switches Runner.resume to explicit session/turn IDs or AgentSession and removes RunState wrappers and public AgentRuntime/ToolCallRunner execution surfaces. SessionRunEventStore and JSONL remain projection/sink capabilities; the old RunEventStore protocol and IdempotentRunEventStore ledger are removed. C1b retains default public wiring. |
 | Q8 public versions | Private App Server and both schema exporters emit protocol v2 now. Public API fixture v8 and default adoption belong to F3; bundle names stay unchanged. |
 
-`scripts/session_kernel_fixtures.py --output DIR` authors eleven new v24 files
+`scripts/session_kernel_fixtures.py --output DIR` authors forty-five v24 files
 from real kernel/store/surface/App Server/schema producers using scripted doubles,
 fixed database/elapsed/prompt clocks and deterministic semantic identities. It
 never writes the vendored v23 fixtures. Node supplies an independent RFC8785 JCS
@@ -768,10 +768,76 @@ path, including ECMAScript number encoding and UTF-16 key order; base64 bytes,
 hashes, embedded digests and record identities are checked independently.
 The generator asserts complete kind/stage/handle/optional-field coverage and
 separates codec, constructor, fold and authenticated admission rejection cases.
-The fixture test generates twice, compares all eleven files, validates schemas,
-reparses every vector, refolds all streams and prefixes, and recomputes event/span
-projections. Recovery vectors record actual barrier cuts and effect/callback
+Ordinary producer agents register only the tools required by their scenario. The
+curation helper defines per-file coverage keys (closed fields, optional presence,
+nullability, enums, event/span variants and named scenarios), then performs
+deterministic greedy set cover with byte-size and producer-order tie breaks.
+Every file compares its full-producer and curated key sets. Semantic/recovery
+scenarios occur once; compaction keeps each named scenario and second-compaction
+receipt. Schema exports retain all bundle types with JSON whitespace compacted.
+Projection events include field/nullability and behavioral variants, not only
+event types. Events, spans and prefix states are selected across the full corpus;
+fold cases retain complete prefixes, while other projection cases retain their
+source records and planning context.
+The fixture test generates twice, compares all forty-five files, validates schemas,
+reparses every selected vector, refolds the retained negative and projection
+prefixes, and recomputes event/span projections from their real source records.
+The full streams are refolded before selection. Tests cap each file at 512,000
+bytes and all forty-five outputs at 3,000,000 bytes, and reconstruct each emitted
+coverage set to compare against the full producer set. Recovery vectors record actual barrier cuts and effect/callback
 counts; they complement the durable-store process-kill suites.
+
+The private authoring helper starts from the unchanged v23 snapshot and authors
+the 34 replacement fixtures. Retained prompt bytes and local memory vectors are
+checked against their shared real producers. Retired cases are removed explicitly;
+rejected wire inputs are encoded and replayed through current decoders. The JSONL
+replay corpus contains no deliberately invalid line. Seven Keep fixtures are
+checked without writing them. The entrypoint writes the case disposition report
+to `/tmp/c1c1b-fixture-diff.md`, including per-file coverage keys.
+Memory-model bindings cache unchanged primary-only route selections. Alternate
+routes reuse resolved clients and recheck their endpoint bindings on each read;
+route-key changes still resolve and freeze the matching client/endpoints. Continuation hints use the
+existing folded boundary index instead of rescanning the raw log for steering.
+Internal shared-state and compaction configuration readers borrow the retained
+task without copying unrelated metadata/messages. Shared-state values remain
+detached; host/provider callbacks still receive detached tasks. Disabled session
+memory checks its retained flag before making a task copy. Empty assistant
+messages are filtered when entering the context projection, instead of scanning
+the complete projected history again.
+Each runtime reuses its bound workspace backend for dispatch and compaction.
+Model contexts omit tool-policy assembly; actual tool dispatch retains the full
+policy checks. Model planning borrows its retained task when no host hooks can
+observe it, and still detaches the task before host callbacks.
+Result projection reads retained tasks and scalar plan fields without copying
+unrelated tool schemas; its returned messages and shared state remain detached.
+
+Runner and ConfiguredRunner accept the private `_kernel` selector for authoring.
+Private handles use committed records, support independent event iterators, isolate
+observer failures, and translate a configured cancellation token into durable
+control input after turn admission. Their resume selector takes an existing
+session and `_turn_id`, admits no new input, and rejects closed sessions before
+writing. Default v23 behavior and package exports remain unchanged. Kernel result
+serialization carries session/turn identity and the current usage ledger. Kernel
+Message decoding reuses the strict shared value codec, including seed admission;
+it does not use the retired transcript store as execution authority. The JSONL
+sink has a private decoder selector for v6 projected events.
+Compilation binds the supplied turn identity before freezing the definition.
+Cancellation requests share a retained inbox identity, so repeated requests do
+not create another control. Approval-provider failures retain a failed terminal
+and discard the outstanding broker request before projecting the result.
+Configured summary and session-extraction models resolve once per runtime binding.
+Their admitted definition retains the provider, model and endpoint set; planning,
+dispatch validation and usage projection select that same binding. Saved receipts
+reuse the result without another provider resolution or dispatch. Capacity vectors
+enter the kernel through the shared MemoryManager resolver and are rechecked from
+the admitted manager projection.
+Context projection uses the shared empty-assistant sanitizer, preserving reasoning
+and tool calls while excluding fully empty turns from model and resumable history.
+
+The public API v8 file is an authoring plan: actual Python exports minus the
+retired inventory plus accepted session names. Store and transaction capabilities
+have names and behavior only. F3 must wire the planned root exports and the
+public `Runner.resume(session_id, turn_id)` shape.
 
 Record encoding reuses the exact nested JCS bytes already checked for an embedded
 digest when composing the closed ASCII-key record envelope. Other payload fields

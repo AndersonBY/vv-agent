@@ -21,6 +21,7 @@ from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.handlers.sub_agents import create_sub_task
+from vv_agent.tools.handlers.sub_task_status import _error as status_error
 from vv_agent.tools.handlers.sub_task_status import sub_task_status
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import (
@@ -89,7 +90,7 @@ def status_with_store(context: ToolContext, arguments: dict[str, Any]) -> ToolEx
     target = result.metadata["tasks"][0]["task_id"]
     record = manager.get(target)
     if record is None:
-        return error("sub_task_not_found", f"Sub-task {target} not found.")
+        return status_error(f"Sub-task {target} not found.", error_code="sub_task_not_found", details={"task_id": target})
     if record.outcome.status == AgentStatus.MAX_CYCLES:
         return error("sub_task_max_cycles_reached", f"Sub-task {target} reached max cycles and cannot continue.")
     action = manager.message(target, f"message/{context.idempotency_key}", message.strip())

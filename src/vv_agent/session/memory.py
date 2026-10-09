@@ -80,9 +80,11 @@ def save_projection(driver: _Driver) -> None:
 
 
 def extract_memory(driver: _Driver, source: list[Message], current_tokens: int, cycle: int) -> bool:
-    task = driver.task()
+    assert driver.state.active_turn_id is not None
+    task = driver.state.turns[driver.state.active_turn_id].start._task()
     if not task.metadata.get("session_memory_enabled"):
         return False
+    task = driver.task()
     memory = restore_memory(driver)
     oid = f"{task.task_id}/model/session_memory/{digest([m.to_dict() for m in source])}"
     saved = driver.boundary("session_memory_saved", oid)
@@ -110,8 +112,9 @@ def extract_memory(driver: _Driver, source: list[Message], current_tokens: int, 
     new = [m for m in source[start:] if not memory._should_skip_message(m)]
     if not new:
         return False
+    _, resolved = driver.runtime.model_route("session_memory")
     request = {
-        "model": memory.config.extraction_model,
+        "model": resolved.model_id,
         "messages": [Message("user", memory._build_extraction_prompt(new)).to_dict()],
         "tools": [],
         "prompt_bundle": None,
