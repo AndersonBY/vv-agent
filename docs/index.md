@@ -8,6 +8,7 @@ history.
 
 | Document | Use it for |
 | --- | --- |
+| [releases/0.22.0.md](releases/0.22.0.md) | Breaking changes, supported extras and central release adoption requirements. |
 | `architecture.md` | Runtime structure, module boundaries, execution flow, and invariants. |
 | `parity-contract.md` | Python producer mapping and local adoption commands for the canonical `vv-agent-contract` release. |
 | `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |

@@ -20,6 +20,9 @@ python -m pip install -e .
 PostgreSQL SessionStore 按需安装 `postgres` extra，S3 工作区按需安装 `s3` extra。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
 
+同时使用两项扩展：`python -m pip install 'vv-agent[postgres,s3]'`。
+破坏性变更参见 [0.22.0 发布说明](docs/releases/0.22.0.md)。
+
 当前 HEAD 使用 contract v24、public API v8 和唯一 session kernel 执行路径。
 旧版本行为由 Git tags 保留。
 参见[云宿主集成指南](docs/host-integration.md)：PostgreSQL 同库事务、队列分发语义和宿主拥有的 Celery 示例。

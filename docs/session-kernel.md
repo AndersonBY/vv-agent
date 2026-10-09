@@ -332,8 +332,18 @@ The adapter owns evidence authenticity and actual provider idempotency; a job ID
 or model-produced value is insufficient. The store/reducer additionally checks
 operation, attempt, request digest, provider binding and retained evidence.
 Queries are bounded and performed at most once per handle per drive; query
-failure preserves the parked operation. The supervisor's polling cadence bounds
-subsequent queries after the immutable initial poll deadline.
+failure preserves the parked operation. `SessionStore.next_drive_delay_ms`
+reads the sole SQL `next_drive_ms` schedule under the held lease using database
+time. The first query occurs no earlier than `poll_at_ms`; later queries honor idle deferral,
+even on duplicate/reordered wakes or unrelated inbox admission. Input/usage-only
+commits preserve that schedule when the active turn and reducer due times are
+unchanged. Authenticated receipts and controls are applied immediately.
+Local handles return when the turn parks on a provider wait. When `poll_at_ms`
+is in the future, the in-process run returns parked without querying or leaving
+a thread waiting. A later host tick/supervisor drive, wake or `Runner.resume`
+at or after the due time performs the query; an authenticated `provider_result`
+can continue the turn before that time. Runner, interactive, App Server and
+local children use that same handle path.
 
 Ready receipts/controls are applied before repair. Steering stays in the inbox
 until the current model/tool batch, including any retry, closes; the next new
@@ -388,7 +398,7 @@ types with stable session-scoped IDs, original database timestamps and
 Consumers can filter the prefix by their durable cursor. Kernel v6 events use
 `session_id`. Provider waits use a
 typed parked run-state projection.
-The formal App Server/product adapter belongs to the later default cut-over.
+The App Server adapter projects the same log through protocol v2.
 
 `supervisor.tick` pages through `list_runnable`, calling drive or the supplied
 projection callback. It owns no claim mechanism. A host must schedule ticks and
@@ -402,8 +412,8 @@ The internal Runtime binds configured `create_sub_task`, `Agent.as_tool`,
 `BackgroundAgentTask` and handoff tools to the same child admission path.
 Adapters only assemble definitions and project results; they never execute a
 recursive Runner or a child driver under the parent lease. The host independently
-schedules each child and its completion consumer. No public SDK entry point is
-switched to these adapters.
+schedules each child and its completion consumer. Public SDK entrypoints use
+these adapters; local handles schedule child drives after releasing the parent lease.
 
 `session_created.attributes.child_admission` is closed: mode, selector, frozen
 definition/digest, budget, handler version, SubAgentConfig, discovery filter,
@@ -429,8 +439,8 @@ continuations, user replies and cancellation use stable inbox IDs; retries
 replay identical bytes and conflicting content fails. `handle.poll`, `snapshot`,
 `wait` and `cancel` survive Runtime reconstruction. The start operation is the
 background tool's atomic child admission; its initial snapshot is durably
-running, independent of the child's scheduling race. The public BackgroundAgentTask
-and its in-process handle registry continue to use Runner.
+running, independent of the child's scheduling race. Public BackgroundAgentTask
+handles project that admitted child and its retained operations.
 
 A blocking child waiting for a user keeps the parent operation parked until a
 terminal result, rather than returning Runner's intermediate waiting outcome.
@@ -515,7 +525,9 @@ invalidate a newer turn's completion candidate.
 `tests/session/test_children.py` exercises these rules against disposable PostgreSQL and SQLite
 databases, including process-kill barriers around push/ack, concurrent
 delivery and input replay, identity/evidence rejection, atomic admission,
-background safe points, cancellation, and late-generation audit. Central contract adoption remains pending; Rust stays frozen.
+background safe points, cancellation, and late-generation audit. Central contract
+24.0.1 adoption is verified at Python 53bdf32; the support matrix records the
+exact revision and CI run. Rust stays frozen at contract 23.0.0.
 
 
 ## Compaction through the log

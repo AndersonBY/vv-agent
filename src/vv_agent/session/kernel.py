@@ -1503,6 +1503,8 @@ class _Driver:
             if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "provider":
                 key = (oid, a.plan.attempt or 1)
                 if key not in self.polled:
+                    if self.store.next_drive_delay_ms(self.sid, lease=self.scope.lease) != 0:
+                        return False
                     self.polled.add(key)
                     handle = copy_json(a.wait["handle"])
                     outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).query(handle), 1)

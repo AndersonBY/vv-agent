@@ -19,7 +19,6 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
-CHECKPOINT_KEY = "tenant-7/run-42"
 TURN_INPUT = [{"type": "text", "text": "hello"}]
 
 

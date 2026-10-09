@@ -66,8 +66,9 @@ the holder's post-release check sees the committed input; if it arrives after
 that check, its own wake can acquire the released lease. Local RunHandle child
 scheduling uses explicit `after_drive`/`after_input` hooks, separate from wake.
 
-An idle parked provider job is polled at most once per `Runtime.poll_ms` interval
-through due-session dispatch. An `Accepted` query leaves the immutable
+Provider queries read SQL `next_drive_ms` under the held lease using database
+time, so even duplicate deliveries honor the first `poll_at_ms` and later
+deferral. Each operation is queried at most once per drive. An `Accepted` query leaves the immutable
 `poll_at_ms` and execution log unchanged. Before releasing its lease, an idle
 driver defers a stale SQL `next_drive_ms` to database now plus the poll interval,
 capped by the earliest future operation deadline, poll, not-before/retry time or
@@ -76,11 +77,13 @@ inbox availability. The reducer retains all operation due times in
 scheduling rules. `next_drive_ms` in the folded state remains its minimum.
 Deadline handling therefore remains due at its original
 time. New input is immediately runnable through the inbox predicate and does
-not wait for the deferred poll. A subsequent commit recomputes the schedule
-from the log. Completed `_one_turn` drives return without this idle deferral,
+not wait for the deferred poll. Input/usage-only commits that leave the turn
+and reducer due times unchanged preserve the existing SQL schedule; execution
+changes recompute it from the log. Completed `_one_turn` drives return without this idle deferral,
 so queued turns remain immediately runnable.
 
 Custom `SessionStore` implementations must implement the public, typed
+`next_drive_delay_ms(session_id, *, lease=None) -> int | None`,
 `defer_idle_drive(lease, *, poll_ms) -> bool` and
 `is_runnable(session_id) -> bool` methods. Deferral returns whether it changed
 the schedule, rejects stale/expired leases with `LeaseLost`, and leaves null or
@@ -88,6 +91,15 @@ future schedules untouched. Hold the session write lock, read database time
 after acquiring it, and fence the update by the lease; a concurrent commit's
 newer future schedule must survive. `is_runnable` uses the same lease/due/inbox
 predicate as `list_runnable`.
+
+The schedule reader returns null for no schedule, zero when due, or the remaining
+database milliseconds. Provider queries pass their lease and reject lost fences.
+Local RunHandle, Runner, interactive and App Server execution return when the
+turn parks on a provider wait. If `poll_at_ms` is in the future, they return
+without querying or leaving a thread waiting. The host tick/supervisor, a later
+wake or `Runner.resume` drives the query at or after the due time; an
+authenticated `provider_result` can continue the turn immediately. Broker
+workers return from an idle `drive` and rely on host wakes/ticks.
 
 Waiting for approval, a user reply or a child releases the lease and returns the
 worker. Route approval/user replies to that waiting session's inbox, with its
