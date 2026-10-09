@@ -280,6 +280,7 @@ class ModelCallOperation(StrEnum):
     AGENT_CYCLE = "agent_cycle"
     SESSION_MEMORY = "session_memory"
     MEMORY_COMPACTION = "memory_compaction"
+    OUTPUT_REPAIR = "output_repair"
 
 
 class ModelCallStatus(StrEnum):
@@ -481,6 +482,7 @@ class ModelCallRecord:
     status: ModelCallStatus
     usage: TokenUsage
     error_code: str | None = None
+    _kernel: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.call_id = _required_non_empty_string(self.call_id, "call_id")
@@ -489,6 +491,8 @@ class ModelCallRecord:
             raise ValueError("attempt must be between 1 and 4294967295")
         if not isinstance(self.operation, ModelCallOperation):
             self.operation = ModelCallOperation(self.operation)
+        if self.operation is ModelCallOperation.OUTPUT_REPAIR and not self._kernel:
+            raise ValueError("output_repair requires kernel model-call schema")
         if isinstance(self.cycle_index, bool) or not isinstance(self.cycle_index, int) or not 1 <= self.cycle_index <= _MAX_U32:
             raise ValueError("cycle_index must be between 1 and 4294967295")
         self.backend = _required_non_empty_string(self.backend, "backend")
@@ -505,6 +509,7 @@ class ModelCallRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"schema_version": "vv-agent.model-call.v2"} if self._kernel else {}),
             "call_id": self.call_id,
             "operation_id": self.operation_id,
             "attempt": self.attempt,
@@ -518,10 +523,11 @@ class ModelCallRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ModelCallRecord:
+    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> ModelCallRecord:
         _require_exact_keys(
             data,
             {
+                *({"schema_version"} if _kernel else set()),
                 "call_id",
                 "operation_id",
                 "attempt",
@@ -535,10 +541,13 @@ class ModelCallRecord:
             },
             "ModelCallRecord",
         )
+        if _kernel and data["schema_version"] != "vv-agent.model-call.v2":
+            raise ValueError("unsupported kernel model-call schema")
         nested = data["usage"]
         if not isinstance(nested, dict):
             raise TypeError("ModelCallRecord usage must be an object")
         return cls(
+            _kernel=_kernel,
             call_id=data["call_id"],
             operation_id=data["operation_id"],
             attempt=data["attempt"],
@@ -601,6 +610,7 @@ class TaskTokenUsage:
     reasoning_tokens: int | None = 0
     cache_usage: CacheUsage = field(default_factory=lambda: CacheUsage(source="aggregate"))
     model_calls: list[ModelCallRecord] = field(default_factory=list)
+    _kernel: bool = field(default=False, repr=False, compare=False)
 
     def add_model_call(self, model_call: ModelCallRecord) -> None:
         if not isinstance(model_call, ModelCallRecord):
@@ -624,7 +634,7 @@ class TaskTokenUsage:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": TASK_TOKEN_USAGE_SCHEMA_VERSION,
+            "schema_version": "vv-agent.task-token-usage.v3" if self._kernel else TASK_TOKEN_USAGE_SCHEMA_VERSION,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
@@ -634,7 +644,7 @@ class TaskTokenUsage:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsage:
+    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> TaskTokenUsage:
         _require_exact_keys(
             data,
             {
@@ -648,16 +658,16 @@ class TaskTokenUsage:
             },
             "TaskTokenUsage",
         )
-        if data["schema_version"] != TASK_TOKEN_USAGE_SCHEMA_VERSION:
+        if data["schema_version"] != ("vv-agent.task-token-usage.v3" if _kernel else TASK_TOKEN_USAGE_SCHEMA_VERSION):
             raise ValueError(f"unsupported TaskTokenUsage schema: {data['schema_version']!r}")
         model_calls = data["model_calls"]
         if not isinstance(model_calls, list):
             raise TypeError("TaskTokenUsage model_calls must be a list")
-        usage = cls()
+        usage = cls(_kernel=_kernel)
         for item in model_calls:
             if not isinstance(item, dict):
                 raise TypeError("TaskTokenUsage model call must be an object")
-            usage.add_model_call(ModelCallRecord.from_dict(item))
+            usage.add_model_call(ModelCallRecord.from_dict(item, _kernel=_kernel))
         expected = usage.to_dict()
         if data != expected:
             raise ValueError("TaskTokenUsage aggregate does not match model_calls")

@@ -27,7 +27,7 @@ def test_requests_before_initialize_are_rejected() -> None:
     }
 
 
-def test_initialize_enables_dispatch() -> None:
+def test_initialize_enables_dispatch(surface) -> None:
     processor, transport = _processor_with_transport()
 
     processor.process_message(
@@ -37,7 +37,7 @@ def test_initialize_enables_dispatch() -> None:
 
     initialize_response = transport.receive_outbound(timeout=1)
     model_response = transport.receive_outbound(timeout=1)
-    assert initialize_response["result"]["protocolVersion"] == "v1"
+    assert initialize_response["result"]["protocolVersion"] == ("v2" if surface else "v1")
     assert model_response == {"jsonrpc": "2.0", "id": 2, "result": {"models": []}}
 
 

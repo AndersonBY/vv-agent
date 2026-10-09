@@ -102,6 +102,28 @@ def test_duplicate_model_call_ids_and_superseded_task_wire_are_rejected() -> Non
         TaskTokenUsage.from_dict(superseded)
 
 
+def test_non_kernel_model_call_and_task_usage_reject_output_repair() -> None:
+    payload = _contract()["task_aggregation_cases"][1]["model_calls"][0]
+    invalid = payload | {"operation": "output_repair"}
+    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
+        ModelCallRecord(**(invalid | {"usage": TokenUsage.from_dict(payload["usage"])}))
+    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
+        ModelCallRecord.from_dict(invalid)
+
+    summary = TaskTokenUsage()
+    summary.add_model_call(ModelCallRecord.from_dict(payload))
+    wire = summary.to_dict()
+    wire["model_calls"][0]["operation"] = "output_repair"
+    with pytest.raises(ValueError, match="output_repair requires kernel model-call schema"):
+        TaskTokenUsage.from_dict(wire)
+
+    kernel = ModelCallRecord.from_dict(invalid | {"schema_version": "vv-agent.model-call.v2"}, _kernel=True)
+    assert kernel.operation is ModelCallOperation.OUTPUT_REPAIR
+    kernel_usage = TaskTokenUsage(_kernel=True)
+    kernel_usage.add_model_call(kernel)
+    assert TaskTokenUsage.from_dict(kernel_usage.to_dict(), _kernel=True) == kernel_usage
+
+
 def test_explicit_zero_usage_is_observable_and_superseded_wire_is_rejected() -> None:
     explicit_zero = normalize_token_usage(
         {

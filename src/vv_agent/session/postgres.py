@@ -44,7 +44,7 @@ CREATE INDEX sk_record_turn ON sk_record(session_id,turn_id,seq);
 CREATE TABLE sk_inbox (
     session_id text NOT NULL REFERENCES sk_session(session_id), input_id text NOT NULL,
     input_seq bigint NOT NULL CHECK (input_seq > 0),
-    kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','deferred_result','approval_answer','child_result',
+    kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
         'control','provider_evidence')),
     body bytea NOT NULL, digest text NOT NULL CHECK (length(digest)=64),
     available_ms bigint NOT NULL, received_ms bigint NOT NULL, consumed_seq bigint,

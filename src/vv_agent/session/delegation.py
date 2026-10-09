@@ -264,7 +264,9 @@ def assemble(
     created = store.read(plan.session_id, limit=1).records[0].record
     parent_admission = created._payload["attributes"].get("child_admission", {})
     count = parent_admission.get("handoff_count", 0)
-    maximum = parent_admission.get("max_handoffs", task.metadata.get("session_max_handoffs", runtime.config.max_handoffs))
+    maximum = parent_admission.get(
+        "max_handoffs", task.metadata.get("vv_session", {}).get("max_handoffs", runtime.config.max_handoffs)
+    )
     assert maximum is not None
     if mode == "handoff" and count >= maximum:
         result = error("maximum_handoffs_exceeded", "maximum handoff depth exceeded")
@@ -272,7 +274,7 @@ def assemble(
         result.metadata["mode"] = "handoff"
         return result
     agent = target_agent(runtime, selector, mode, sub.to_dict() if sub else None)
-    if mode == "handoff" and agent.name != task.metadata["session_handoff_targets"][selector]:
+    if mode == "handoff" and agent.name != task.metadata.setdefault("vv_session", {})["handoff_targets"][selector]:
         return error("handler_schema_or_capability_mismatch", "handoff target differs from frozen definition")
     result = []
     for index, request in enumerate(requests):

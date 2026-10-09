@@ -221,7 +221,7 @@ def test_memory_provider_logged_callbacks_restart_parity(store, database, tmp_pa
         for field in ("type", "cycle_index"):
             assert getattr(a, field) == getattr(b, field)
     for event in new.events:
-        assert event_from_dict(event.to_dict()).to_dict() == event.to_dict()
+        assert event_from_dict(event.to_dict(), _kernel=True).to_dict() == event.to_dict()
     lifecycle = [e for e in new.events if e.type.startswith("memory_compact_")]
     assert len(lifecycle) == 2
     for a, b in zip(lifecycle, [e for e in old.events if e.type.startswith("memory_compact_")], strict=True):
@@ -466,10 +466,25 @@ def test_typed_output_repair_ledger_restart_parity(store, database, tmp_path, ou
     else:
         assert new.final_output == Answer(1) and new.status == AgentStatus.COMPLETED
     ledger = new.metadata["session_model_calls"]
+    from vv_agent.types import ModelCallRecord, TaskTokenUsage
+
+    usage_wire = new.token_usage.to_dict()
+    assert usage_wire["schema_version"] == "vv-agent.task-token-usage.v3"
+    assert TaskTokenUsage.from_dict(usage_wire, _kernel=True).to_dict() == usage_wire
+    with pytest.raises(ValueError):
+        TaskTokenUsage.from_dict(usage_wire | {"schema_version": "vv-agent.task-token-usage.v2"}, _kernel=True)
+    for call in new.token_usage.model_calls:
+        wire = call.to_dict()
+        assert wire["schema_version"] == "vv-agent.model-call.v2"
+        assert wire["usage"]["schema_version"] == "vv-agent.token-usage.v1"
+        assert ModelCallRecord.from_dict(wire, _kernel=True).to_dict() == wire
+        with pytest.raises(ValueError):
+            ModelCallRecord.from_dict(wire | {"schema_version": "vv-agent.model-call.v1"}, _kernel=True)
     assert [call["purpose"] for call in ledger] == (["primary", "output_repair"] if repair else ["primary"])
     assert len(calls) == (2 if repair else 0)
     if repair:
         assert len(new.token_usage.model_calls) == 2
+        assert new.token_usage.model_calls[-1].operation.value == "output_repair"
         assert ledger[-1]["usage"]["usage_source"] == "accounting_missing"
 
 
@@ -545,7 +560,7 @@ def test_lifecycle_events_replay_ack_and_rollback_parity(store, database, tmp_pa
     assert len({e.event_id for e in replayed}) == len(replayed)
     bridge.append(replayed[0])
     with pytest.raises(ValueError):
-        bridge.append(event_from_dict(replayed[0].to_dict() | {"event_id": "external"}))
+        bridge.append(event_from_dict(replayed[0].to_dict() | {"event_id": "external"}, _kernel=True))
     with pytest.raises(Restart), store.atomic() as tx:
         result = bridge.batch(tx)
         assert result is not None
@@ -1014,7 +1029,7 @@ def test_delegation_events_and_child_replay_paired_producer(store, database, tmp
     replayed = list(bridge.replay(RunEventReplayQuery(new.run_id, include_children=True)))
     descendants = [e for e in replayed if e.run_id != new.run_id]
     assert descendants and all(e.parent_run_id == new.run_id for e in descendants)
-    assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in replayed)
+    assert all(event_from_dict(e.to_dict(), _kernel=True).to_dict() == e.to_dict() for e in replayed)
 
 
 def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):

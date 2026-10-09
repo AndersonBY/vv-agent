@@ -169,14 +169,36 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 2, "method": "schema/export", "params": {}})
 
     result = transport.receive_outbound(timeout=1)["result"]
-    assert result == {"jsonSchema": json_schema_bundle(), "typescript": typescript_schema_bundle()}
+    assert result == {
+        "jsonSchema": json_schema_bundle(_kernel=surface is not None),
+        "typescript": typescript_schema_bundle(_kernel=surface is not None),
+    }
+    if surface is not None:
+        definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
+        assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v2"}
+        assert definitions["AppThread"]["properties"]["status"]["enum"] == [
+            "idle",
+            "running",
+            "interrupted",
+            "archived",
+            "closed",
+        ]
+        assert definitions["ModelCallRecord"]["properties"]["schemaVersion"] == {"const": "vv-agent.model-call.v2"}
+        assert "output_repair" in definitions["ModelCallRecord"]["properties"]["operation"]["enum"]
+        assert definitions["TaskTokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.task-token-usage.v3"}
+        assert definitions["TokenUsage"]["properties"]["schemaVersion"] == {"const": "vv-agent.token-usage.v1"}
+        assert definitions["TurnResumeParams"]["required"] == ["threadId", "turnId"]
+        assert "CheckpointSummary" not in definitions
     assert json.loads(result["jsonSchema"]["ClientRequest"])["title"] == "ClientRequest"
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
     assert len(result["jsonSchema"]) == 19
     assert len(result["typescript"]) == 18
-    checkpoint_schema = json.loads(result["jsonSchema"]["ThreadResumeResponse"])
-    assert "deferred" in checkpoint_schema["$defs"]["CheckpointSummary"]["properties"]["status"]["enum"]
-    assert '"deferred"' in result["typescript"]["ThreadResumeResponse.ts"]
+    if surface is None:
+        checkpoint_schema = json.loads(result["jsonSchema"]["ThreadResumeResponse"])
+        assert "deferred" in checkpoint_schema["$defs"]["CheckpointSummary"]["properties"]["status"]["enum"]
+        assert '"deferred"' in result["typescript"]["ThreadResumeResponse.ts"]
+    else:
+        assert '"deferred"' not in result["typescript"]["ThreadResumeResponse.ts"]
 
     processor.process_message(
         "conn_1",

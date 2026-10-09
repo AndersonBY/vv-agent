@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from enum import StrEnum
 from typing import Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
@@ -17,9 +18,32 @@ from vv_agent.types import AgentStatus, Message
 
 from .projection import project_records
 from .records import InboxItem
+from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict
 from .surfaces import _SessionKernel
+
+
+class ThreadStatus(StrEnum):
+    IDLE = "idle"
+    RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    ARCHIVED = "archived"
+    CLOSED = "closed"
+
+
+def project_thread_status(state: ExecutionState, *, pending: bool = False) -> ThreadStatus:
+    if state.closed:
+        return ThreadStatus.CLOSED
+    if state.archived:
+        return ThreadStatus.ARCHIVED
+    if state.active_turn_id and (
+        state.turns[state.active_turn_id].suspended
+        or state.turns[state.active_turn_id].wait is not None
+        or any(state.operations[oid].turn_id == state.active_turn_id for oid, _ in state.waits)
+    ):
+        return ThreadStatus.INTERRUPTED
+    return ThreadStatus.RUNNING if state.active_turn_id or pending else ThreadStatus.IDLE
 
 
 def _content(adapter: RunAdapter, input: list[dict[str, Any]], metadata: dict[str, Any], owner: str) -> dict[str, Any]:
@@ -86,7 +110,7 @@ class _KernelThreadStore(ThreadStore):
                 if terminal and terminal.record._payload["status"] == "completed"
                 else "failed"
                 if terminal
-                else ("interrupted" if state.phase in {"parked", "suspended"} else "running")
+                else ("interrupted" if project_thread_status(state) == ThreadStatus.INTERRUPTED else "running")
             )
             projected = project_result(self.kernel.store, thread_id, tid, runtime=runtime)
             result = _result_fields(projected)
@@ -123,7 +147,7 @@ class _KernelThreadStore(ThreadStore):
             records[0].created_ms / 1000,
             records[-1].created_ms / 1000,
             archived,
-            "archived" if state.archived else "closed" if state.closed else "running" if active else "idle",
+            project_thread_status(state, pending=bool(pending)).value,
             active,
             attributes["metadata"],
         )
@@ -263,7 +287,7 @@ class _KernelRunAdapter(RunAdapter):
                     **({"runId": turn.turn_id} if content is None else {}),
                 },
             )
-        self._notify_subscribers(thread_id, "thread/status/changed", {"threadId": thread_id, "status": "running"})
+        self._notify_subscribers(thread_id, "thread/status/changed", self.public_thread_status(thread_id))
         self._notify_subscribers(thread_id, "turn/started", {"threadId": thread_id, "turnId": turn.turn_id})
         pump = threading.Thread(target=self._pump_events, args=(connection_id, started), name="session-app-server-pump")
         self._pumps.append(pump)
@@ -277,8 +301,7 @@ class _KernelRunAdapter(RunAdapter):
             state, _, _ = self.kernel.store.read_state(thread_id)
             if state.active_turn_id:
                 owner = self._owner(thread_id, state.active_turn_id)
-                if self._router.is_registered(owner):
-                    self._start(owner, thread_id, None)
+                self._start(owner, thread_id, None)
 
     def _pump_events(self, connection_id, started):
         result, error = None, None
@@ -293,6 +316,8 @@ class _KernelRunAdapter(RunAdapter):
     def resume_turn(self, *, connection_id, thread_id, turn_id, checkpoint_key=None, request_id=None):
         del checkpoint_key
         snapshot = self._store.read_thread(thread_id)
+        if snapshot.thread.status == ThreadStatus.CLOSED:
+            raise TurnResumeError("Thread is closed")
         turn = next((t for t in snapshot.turns if t.turn_id == turn_id), None)
         if turn is None:
             raise TurnResumeError("Turn does not belong to the requested thread")
@@ -323,7 +348,7 @@ class _KernelRunAdapter(RunAdapter):
         state, _, _ = self.kernel.store.read_state(thread_id)
         payload: dict[str, Any] = {
             "threadId": thread_id,
-            "status": "interrupted" if state.phase in {"parked", "suspended"} else thread.status,
+            "status": thread.status,
         }
         if state.phase == "suspended":
             return payload | {"waitReason": "suspended"}
@@ -431,18 +456,12 @@ class _KernelRunAdapter(RunAdapter):
             return
         if result is not None and result.status is AgentStatus.SUSPENDED:
             result = replace(result, raw_result=replace(result.raw_result, wait_reason="suspended", completion_reason=None))
-        super()._complete_turn(connection_id, started, result=result, error=error)
-        if result is not None and result.metadata.get("session_waits"):
-            self._notify_subscribers(
-                started.thread.thread_id,
-                "thread/status/changed",
-                {
-                    "threadId": started.thread.thread_id,
-                    "status": "interrupted",
-                    "waitReason": "suspended" if result.status is AgentStatus.SUSPENDED else "host_interaction",
-                    "interactions": self._public_waits(result.metadata["session_waits"]),
-                },
-            )
+        sid, tid = started.thread.thread_id, started.turn.turn_id
+        self._state_manager.clear_active_turn(sid, tid)
+        self._notify_subscribers(sid, "thread/status/changed", self.public_thread_status(sid))
+        snapshot = self._store.read_thread(sid)
+        turn = next(t for t in snapshot.turns if t.turn_id == tid)
+        self._notify_subscribers(sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": turn.status, **turn.result})
         if result is not None and result.status.value == "completed":
             state, _, _ = self.kernel.store.read_state(started.thread.thread_id)
             if any(

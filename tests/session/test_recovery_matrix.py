@@ -692,7 +692,7 @@ def test_run_events_are_stable_typed_projections_and_do_not_execute(store, datab
         "run_completed",
     ]
     assert len({e["event_id"] for e in first}) == len(first)
-    assert all(event_from_dict(e).to_dict() == e for e in first)
+    assert all(event_from_dict(e, _kernel=True).to_dict() == e for e in first)
 
 
 def test_client_retries_are_owned_by_kernel(store, database):
@@ -1081,7 +1081,7 @@ def test_real_context_and_event_projection_keep_logical_cycle_numbers(store, dat
     events = project_records(read_state(store, "s")[1])
     from vv_agent.events import event_from_dict
 
-    assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in events)
+    assert all(event_from_dict(e.to_dict(), _kernel=True).to_dict() == e.to_dict() for e in events)
     assert cycles == [1, 2]
     assert [e.cycle_index for e in events if e.type == "model_call_started"] == [1, 2, 3]
 
@@ -1091,7 +1091,7 @@ def assert_event_projection(store):
     from vv_agent.session.projection import project_records
 
     events = project_records(read_state(store, "s")[1])
-    assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in events)
+    assert all(event_from_dict(e.to_dict(), _kernel=True).to_dict() == e.to_dict() for e in events)
 
 
 def test_undispatched_model_closure_projects_failure(store, database):

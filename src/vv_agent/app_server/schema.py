@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,7 @@ def _array(item_schema: dict[str, Any]) -> dict[str, Any]:
     return {"type": "array", "items": item_schema}
 
 
-def _definitions() -> dict[str, dict[str, Any]]:
+def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
     approval_decisions = {"type": "string", "enum": [decision.value for decision in ApprovalDecision]}
     input_item = _object({}, additional_properties=True)
     thread_item = _object(
@@ -164,7 +165,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
         },
         required=["requestId", "threadId", "turnId", "decision"],
     )
-    definitions = {
+    definitions: dict[str, dict[str, Any]] = {
         "ApprovalDecision": approval_decisions,
         "EmptyParams": _object({}),
         "ClientInfo": _object(
@@ -370,6 +371,98 @@ def _definitions() -> dict[str, dict[str, Any]]:
         ),
     }
     definitions.update(_result_definitions())
+    if _kernel:
+        from vv_agent.session.app_server import ThreadStatus
+
+        status = {"type": "string", "enum": [value.value for value in ThreadStatus]}
+        for name in (
+            "AppThread",
+            "ThreadStatusChangedParams",
+            "ThreadStatusResponse",
+            "ThreadStartResponse",
+            "ThreadStartedParams",
+        ):
+            definitions[name]["properties"]["status"] = status
+        definitions["InitializeResponse"]["properties"]["protocolVersion"] = {"const": "v2"}
+        definitions["TurnResumeParams"] = _object(
+            {"threadId": {"type": "string"}, "turnId": {"type": "string"}}, required=["threadId", "turnId"]
+        )
+        definitions["ThreadResumeParams"]["properties"]["afterItemId"] = {"type": "string"}
+        definitions["Interaction"] = _object(
+            {
+                "sessionId": {"type": "string"},
+                "turnId": {"type": "string"},
+                "interactionId": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
+            required=["sessionId", "turnId"],
+        )
+        for name in ("ThreadStatusResponse", "ThreadStatusChangedParams"):
+            definitions[name]["properties"]["interactions"] = _array({"$ref": "#/$defs/Interaction"})
+        for name in ("TurnResumeResponse", "TurnCompletedParams"):
+            for field_name in ("checkpoint", "interruption"):
+                definitions[name]["properties"].pop(field_name, None)
+        for name in ("CheckpointSummary", "InterruptionSummary"):
+            definitions.pop(name)
+        definitions["CacheUsage"] = _object(
+            {
+                "status": {"type": "string", "enum": ["provider_reported", "accounting_missing", "unsupported"]},
+                **{
+                    key: {"type": ["integer", "null"], "minimum": 0}
+                    for key in ("readInputTokens", "writeInputTokens", "uncachedInputTokens")
+                },
+                "source": NULLABLE_STRING,
+            },
+            required=["status", "readInputTokens", "writeInputTokens", "uncachedInputTokens", "source"],
+        )
+        counts = {
+            key: {"type": ["integer", "null"], "minimum": 0}
+            for key in ("inputTokens", "outputTokens", "totalTokens", "reasoningTokens")
+        }
+        definitions["TokenUsage"] = _object(
+            {
+                "schemaVersion": {"const": "vv-agent.token-usage.v1"},
+                **counts,
+                "usageSource": {"type": "string", "enum": ["provider_reported", "estimated", "accounting_missing"]},
+                "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
+                "providerUsage": JSON_OBJECT,
+            },
+            required=["schemaVersion", *counts, "usageSource", "cacheUsage", "providerUsage"],
+        )
+        call_fields = {
+            "schemaVersion": {"const": "vv-agent.model-call.v2"},
+            **{key: {"type": "string", "minLength": 1} for key in ("callId", "operationId", "backend", "model")},
+            **{key: {"type": "integer", "minimum": 1} for key in ("attempt", "cycleIndex")},
+            "operation": {"type": "string", "enum": ["agent_cycle", "memory_compaction", "session_memory", "output_repair"]},
+            "status": {"type": "string", "enum": ["completed", "failed", "ambiguous"]},
+            "usage": {"$ref": "#/$defs/TokenUsage"},
+            "errorCode": NULLABLE_STRING,
+        }
+        definitions["ModelCallRecord"] = _object(call_fields, required=list(call_fields))
+        definitions["TaskTokenUsage"] = _object(
+            {
+                "schemaVersion": {"const": "vv-agent.task-token-usage.v3"},
+                **counts,
+                "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
+                "modelCalls": _array({"$ref": "#/$defs/ModelCallRecord"}),
+            },
+            required=["schemaVersion", *counts, "cacheUsage", "modelCalls"],
+        )
+        result = {
+            "finalOutput": {},
+            "waitReason": {"type": "string"},
+            "completionReason": {"type": "string"},
+            "completionToolName": {"type": "string"},
+            "partialOutput": {},
+            "error": {"type": "string"},
+            "tokenUsage": {"$ref": "#/$defs/TaskTokenUsage"},
+            "budgetUsage": JSON_OBJECT,
+            "budgetExhaustion": JSON_OBJECT,
+        }
+        definitions["AppTurn"]["properties"]["result"] = _object(result)
+        for name in ("TurnResumeResponse", "TurnCompletedParams"):
+            definitions[name]["properties"].update(result)
+
     return definitions
 
 
@@ -563,8 +656,8 @@ def _envelope_schema(title: str, variants: list[dict[str, Any]], definitions: di
     return {"$schema": SCHEMA_URI, "title": title, "oneOf": variants, "$defs": deepcopy(definitions)}
 
 
-def _schema_bundle() -> dict[str, Any]:
-    definitions = _definitions()
+def _schema_bundle(*, _kernel: bool = False) -> dict[str, Any]:
+    definitions = _definitions(_kernel=_kernel)
     if set(CLIENT_METHOD_SPECS) != set(CLIENT_METHODS):
         raise RuntimeError("Client method schema registry does not match processor methods")
     if set(SERVER_NOTIFICATION_SPECS) != set(SERVER_NOTIFICATION_METHODS):
@@ -666,11 +759,11 @@ def _contains_ref(value: Any) -> bool:
     return False
 
 
-def generate_json_schema(out_dir: str | Path) -> None:
+def generate_json_schema(out_dir: str | Path, *, _kernel: bool = False) -> None:
     root = Path(out_dir)
     json_dir = root / "json"
     json_dir.mkdir(parents=True, exist_ok=True)
-    schemas = _schema_bundle()
+    schemas = _schema_bundle(_kernel=_kernel)
     for name, schema in schemas.items():
         (json_dir / f"{name}.json").write_text(
             json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -682,26 +775,76 @@ def generate_json_schema(out_dir: str | Path) -> None:
     )
 
 
-def generate_typescript(out_dir: str | Path) -> None:
+def generate_typescript(out_dir: str | Path, *, _kernel: bool = False) -> None:
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
-    for name, source in typescript_schema_bundle().items():
+    for name, source in typescript_schema_bundle(_kernel=_kernel).items():
         (root / name).write_text(source, encoding="utf-8")
 
 
-def json_schema_bundle() -> dict[str, str]:
+def json_schema_bundle(*, _kernel: bool = False) -> dict[str, str]:
     return {
-        name: json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n" for name, schema in _schema_bundle().items()
+        name: json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        for name, schema in _schema_bundle(_kernel=_kernel).items()
     }
 
 
-def typescript_schema_bundle() -> dict[str, str]:
+def typescript_schema_bundle(*, _kernel: bool = False) -> dict[str, str]:
     source = _typescript_protocol_source()
+    if _kernel:
+        source = re.sub(r"export type CheckpointStatus =.*?;\n", "", source, flags=re.S)
+        source = re.sub(r"export interface (?:CheckpointSummary|InterruptionSummary) \{.*?\}\n", "", source, flags=re.S)
+        source = source.replace('protocolVersion: "v1"', 'protocolVersion: "v2"')
+        source = source.replace("; checkpointKey: string", "")
+        source = source.replace("  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary;", " ")
+        source = source.replace("subscribe?: boolean;", "subscribe?: boolean; afterItemId?: string;")
+        source += (
+            "\nexport interface Interaction { sessionId: string; turnId: string; interactionId?: string; prompt?: string; }\n"
+        )
+        source = source.replace(
+            "waitReason?: string; prompt?: string;", "waitReason?: string; prompt?: string; interactions?: Interaction[];"
+        )
+        source = source.replace("tokenUsage?: JsonObject", "tokenUsage?: TaskTokenUsage")
+        source = source.replace("result?: JsonObject", "result?: TurnResult")
+        source = source.replace(
+            "error?: string;",
+            "error?: string; tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;",
+            1,
+        )
+        source += """
+export interface CacheUsage {
+  status: "provider_reported" | "accounting_missing" | "unsupported";
+  readInputTokens: number | null; writeInputTokens: number | null;
+  uncachedInputTokens: number | null; source: string | null;
+}
+export interface TokenUsage {
+  schemaVersion: "vv-agent.token-usage.v1"; inputTokens: number | null;
+  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;
+  usageSource: "provider_reported" | "estimated" | "accounting_missing";
+  cacheUsage: CacheUsage; providerUsage: JsonObject;
+}
+export interface ModelCallRecord {
+  schemaVersion: "vv-agent.model-call.v2"; callId: string; operationId: string;
+  attempt: number; cycleIndex: number; backend: string; model: string;
+  operation: "agent_cycle" | "memory_compaction" | "session_memory" | "output_repair";
+  status: "completed" | "failed" | "ambiguous"; usage: TokenUsage; errorCode: string | null;
+}
+export interface TaskTokenUsage {
+  schemaVersion: "vv-agent.task-token-usage.v3"; inputTokens: number | null;
+  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;
+  cacheUsage: CacheUsage; modelCalls: ModelCallRecord[];
+}
+export interface TurnResult {
+  finalOutput?: JsonValue; waitReason?: string; completionReason?: string;
+  completionToolName?: string; partialOutput?: JsonValue; error?: string;
+  tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;
+}
+"""
     return {f"{name}.ts": source for name in TYPESCRIPT_SCHEMA_NAMES}
 
 
-def export_schema_bundles() -> dict[str, dict[str, str]]:
-    return {"jsonSchema": json_schema_bundle(), "typescript": typescript_schema_bundle()}
+def export_schema_bundles(*, _kernel: bool = False) -> dict[str, dict[str, str]]:
+    return {"jsonSchema": json_schema_bundle(_kernel=_kernel), "typescript": typescript_schema_bundle(_kernel=_kernel)}
 
 
 def _typescript_protocol_source() -> str:

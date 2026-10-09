@@ -57,8 +57,8 @@ def project_result(
             shared = r.payload["data"]["shared_state"]
         if r.kind != "op_completed":
             continue
-        if r.payload["context"] == "normal" and "session_shared_state" in r.payload["usage"]:
-            shared = deepcopy(r.payload["usage"]["session_shared_state"])
+        if r.payload["context"] == "normal" and r.payload["shared_state"] is not None:
+            shared = deepcopy(r.payload["shared_state"])
     for oid, op in state.operations.items():
         if op.turn_id != turn_id or op.kind != "model":
             continue
@@ -66,8 +66,10 @@ def project_result(
             if not attempt.started:
                 continue
             purpose = attempt.plan.payload["purpose"]
-            cycle = attempt.plan._payload["request"]["metadata"].get(
-                "cycle_index", int(oid.rsplit("/", 1)[1]) if purpose in {"primary", "output_repair"} else 1
+            cycle = (
+                attempt.plan._payload["request"]["metadata"]
+                .get("vv_session", {})
+                .get("cycle_index", int(oid.rsplit("/", 1)[1]) if purpose in {"primary", "output_repair"} else 1)
             )
             ledger.append(
                 {
@@ -91,6 +93,7 @@ def project_result(
                     operation={
                         "compaction": ModelCallOperation.MEMORY_COMPACTION,
                         "session_memory": ModelCallOperation.SESSION_MEMORY,
+                        "output_repair": ModelCallOperation.OUTPUT_REPAIR,
                     }.get(purpose, ModelCallOperation.AGENT_CYCLE),
                     cycle_index=cycle,
                     backend=turn.start._payload["definition"]["model_binding"]["backend"],
@@ -102,6 +105,7 @@ def project_result(
                     else ModelCallStatus.AMBIGUOUS,
                     usage=model_usage(attempt.result.payload["usage"] if attempt.result else None),
                     error_code=error_code,
+                    _kernel=True,
                 )
             )
             if purpose != "primary" or op.selected_attempt != number or not attempt.result or error_code:
@@ -128,6 +132,7 @@ def project_result(
             )
             previous_primary_seq = plan_seqs[attempt.plan.record_id]
     usage = summarize_task_token_usage(calls)
+    usage._kernel = True
     status, reason, output, error, budget_usage = AgentStatus.RUNNING, None, None, None, None
     completion_tool_name, wait_reason, exhaustion = None, None, None
     for (tid, stage, _), r in state.boundaries.items():

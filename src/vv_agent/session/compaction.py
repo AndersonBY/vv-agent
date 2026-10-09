@@ -234,7 +234,7 @@ def compact_context(driver: _Driver) -> bool:
             "source_digest": source_digest,
             "keep_recent": plan.keep_recent,
             "mode": mode,
-            "cycle_index": cycle,
+            "vv_session": {"cycle_index": cycle},
         },
         "prompt_bundle": None,
         "model_settings": task.model_settings.to_dict() if task.model_settings else None,

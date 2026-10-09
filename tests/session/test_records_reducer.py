@@ -177,7 +177,7 @@ def test_controls_require_consumed_input_and_matching_generation():
             },
         ),
         (
-            "deferred_result",
+            "provider_result",
             {
                 "operation_id": "o",
                 "attempt": 1,
@@ -363,3 +363,65 @@ def test_duplicate_consumed_input_identity_cannot_overwrite():
 def test_started_attempt_retains_dispatch_identity_for_repair():
     attempt = fold(base()).operations["o"].attempts[1]
     assert attempt.dispatch == record("op_started")
+
+
+@pytest.mark.parametrize("field", ["request_digest", "result_digest", "source_digest", "terminal_digest"])
+def test_hash_rejects_trailing_newline(field):
+    from vv_agent.session.records import INPUT_PAYLOADS, PAYLOADS, validate
+
+    if field == "terminal_digest":
+        schema = INPUT_PAYLOADS["child_result"]
+    else:
+        schema = PAYLOADS[
+            {"request_digest": "op_started", "result_digest": "op_completed", "source_digest": "context_compacted"}[field]
+        ]
+        if field == "request_digest":
+            schema = PAYLOADS["op_planned"]
+    hash_schema = schema["properties"][field]
+    from vv_agent.session.records import RecordError, _compile_check
+
+    assert not _compile_check(hash_schema)("a" * 64 + "\n")
+    # Exercise both fast and diagnostic validator paths on real envelopes.
+    if field == "request_digest":
+        original = record("op_planned")
+    elif field == "result_digest":
+        original = record("op_completed")
+    elif field == "source_digest":
+        original = record("context_compacted")
+    else:
+        from vv_agent.session.records import InboxItem
+
+        payload = {
+            "session_id": "child",
+            "turn_id": "turn",
+            "operation_id": "op",
+            "attempt": 1,
+            "result": {},
+            "status": "completed",
+            "terminal_seq": 1,
+            "terminal_digest": "a" * 64 + "\n",
+        }
+        with pytest.raises(RecordError):
+            InboxItem("result", "child_result", payload).encode()
+        return
+    value = original.to_dict()
+    value["payload"][field] += "\n"
+    with pytest.raises(RecordError):
+        Record(**value).encode()
+    with pytest.raises(RecordError):
+        validate(value["payload"], schema)
+
+
+def test_compaction_identity_omits_absent_summary_segment():
+    compact = record("context_compacted")
+    assert compact.record_id == f"compact/{compact.payload['source_digest']}/micro"
+    summary = record("context_compacted", mode="summary", summary_operation_id="summary/op")
+    assert summary.record_id == f"compact/{summary.payload['source_digest']}/summary/summary/op"
+
+
+@pytest.mark.parametrize("seed", [{"messages": []}, {"messages": [], "shared_state": {}, "extra": True}])
+def test_creation_seed_is_closed(seed):
+    from vv_agent.session.records import RecordError, SessionSpec
+
+    with pytest.raises(RecordError):
+        SessionSpec("seed", "test", ".", attributes={"seed": seed}).record()

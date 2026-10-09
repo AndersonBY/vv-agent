@@ -88,18 +88,22 @@ class AppServerApprovalProvider(ApprovalProvider):
         turn_id: str,
         router: OutgoingRouter,
         timeout_seconds: float | None,
+        _kernel: bool = False,
     ) -> None:
         self._connection_id = connection_id
         self._thread_id = thread_id
         self._turn_id = turn_id
         self._router = router
         self._timeout_seconds = timeout_seconds
+        self._kernel = _kernel
 
     def should_request(self, request: ApprovalRequest) -> bool:
         del request
         return True
 
     def decide(self, request: ApprovalRequest) -> RuntimeApprovalDecision | None:
+        if self._kernel and not self._router.is_registered(self._connection_id):
+            return None
         pending = self._router.send_server_request(
             self._connection_id,
             "approval/request",
@@ -115,7 +119,9 @@ class AppServerApprovalProvider(ApprovalProvider):
             request_id=RequestId(request.request_id),
         )
         try:
-            result = pending.result(timeout=self._timeout_seconds)
+            result = pending.result(
+                timeout=request.metadata.get("timeout_seconds", self._timeout_seconds) if self._kernel else self._timeout_seconds
+            )
         except TimeoutError:
             self._router.cancel_server_request(
                 pending.request_id,
@@ -123,6 +129,8 @@ class AppServerApprovalProvider(ApprovalProvider):
             )
             return RuntimeApprovalDecision.timeout("Approval request timed out.")
         except RuntimeError as exc:
+            if self._kernel and not self._router.is_registered(self._connection_id):
+                return None
             return RuntimeApprovalDecision.timeout(str(exc) or "client_disconnected")
 
         return self._decision_from_payload(result or {}, pending.request_id.require_wire())

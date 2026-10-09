@@ -900,6 +900,7 @@ class RunAdapter:
                 turn_id=turn_id,
                 router=self._router,
                 timeout_seconds=run_config.approval_timeout_seconds,
+                _kernel=hasattr(self, "kernel"),
             ),
         )
 

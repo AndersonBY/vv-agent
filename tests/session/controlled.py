@@ -81,7 +81,7 @@ class ControlledProvider:
             if item.kind == "provider_evidence" and item.payload["handle"] == handle:
                 return True
             if (
-                item.kind == "deferred_result"
+                item.kind == "provider_result"
                 and item.payload["result"] == result
                 and handle["evidence"] in item.payload["evidence"]
             ):
@@ -95,7 +95,7 @@ class ControlledProvider:
             assert calls is not None and effects is not None
             return calls[0], effects[0]
 
-    def callback(self, *, input_id="receipt", kind="deferred_result", target_turn_id=None) -> InboxItem:
+    def callback(self, *, input_id="receipt", kind="provider_result", target_turn_id=None) -> InboxItem:
         with open_store(self.database) as store:
             row = store._rows("SELECT handle,result FROM provider_jobs ORDER BY key LIMIT 1")[0]
             assert row is not None

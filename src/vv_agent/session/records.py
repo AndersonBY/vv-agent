@@ -60,7 +60,7 @@ JSON_VALUE: dict[str, Any] = {}
 NAT = {"type": "integer", "minimum": 0}
 POS = {"type": "integer", "minimum": 1}
 BOOL = {"type": "boolean"}
-HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64}
 STRINGS = array(TEXT)
 CONTROL = enum("close", "archive", "suspend", "resume", "cancel", "abort")
 RESULT_ID = closed(operation_id=TEXT, attempt=POS)
@@ -128,6 +128,19 @@ CHILD_ADMISSION = closed(
     handoff_metadata=JSON_OBJECT,
 )
 
+SEED = closed(messages=array(JSON_OBJECT), shared_state=JSON_OBJECT)
+TASK_SESSION_METADATA = closed(
+    host_binding_names=STRINGS,
+    max_handoffs=NAT,
+    handoff_targets=JSON_OBJECT,
+    input_messages=array(JSON_OBJECT),
+    memory_initial_state=JSON_OBJECT,
+    input_blocked=TEXT,
+)
+TASK_SESSION_METADATA["required"] = []
+REQUEST_SESSION_METADATA = closed(endpoint_order=STRINGS, endpoint_id=TEXT, shared_state=JSON_OBJECT, cycle_index=POS)
+REQUEST_SESSION_METADATA["required"] = []
+
 APP_SERVER_ATTRIBUTES = closed(agent_key={"type": "string"}, cwd=nullable({"type": "string"}), metadata=JSON_OBJECT)
 
 
@@ -165,7 +178,7 @@ INPUT_PAYLOADS = {
     "user": closed(content=JSON_VALUE),
     "steer": closed(content=JSON_VALUE),
     "follow_up": closed(content=JSON_VALUE),
-    "deferred_result": closed(
+    "provider_result": closed(
         operation_id=TEXT, attempt=POS, request_digest=HASH, provider_binding=nullable(TEXT), result=JSON_VALUE, evidence=STRINGS
     ),
     "approval_answer": closed(
@@ -260,6 +273,7 @@ PAYLOADS = {
         result=JSON_VALUE,
         result_digest=HASH,
         usage=JSON_OBJECT,
+        shared_state=nullable(JSON_OBJECT),
         evidence=STRINGS,
         execution_started=BOOL,
         context=enum("normal", "correction", "audit"),
@@ -333,6 +347,9 @@ _VALIDATORS = {
         INPUT_SCHEMA,
         CHILD_ADMISSION,
         APP_SERVER_ATTRIBUTES,
+        SEED,
+        TASK_SESSION_METADATA,
+        REQUEST_SESSION_METADATA,
         *PAYLOADS.values(),
         *INPUT_PAYLOADS.values(),
         *BOUNDARY_DATA.values(),
@@ -386,9 +403,9 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
         if set(schema) == {"type", "enum"}:
             values = frozenset(schema["enum"])
             return lambda v: isinstance(v, str) and v in values
-        if set(schema) == {"type", "pattern"}:
+        if set(schema) == {"type", "pattern", "maxLength"}:
             pattern = re.compile(schema["pattern"])
-            return lambda v: isinstance(v, str) and pattern.search(v) is not None
+            return lambda v: isinstance(v, str) and pattern.fullmatch(v) is not None
     if schema == {"type": "boolean"}:
         return lambda v: type(v) is bool
     if schema == {"type": "null"}:
@@ -547,7 +564,8 @@ def record_identity(
     if kind == "boundary_recorded":
         return f"turn/{turn_id}/boundary/{payload['stage']}/{payload['boundary_id']}"
     if kind == "context_compacted":
-        return f"compact/{payload['source_digest']}/{payload['mode']}/{payload['summary_operation_id']}"
+        identity = f"compact/{payload['source_digest']}/{payload['mode']}"
+        return identity if payload["summary_operation_id"] is None else f"{identity}/{payload['summary_operation_id']}"
     return f"usage/{payload['meter_id']}/{payload['observation']}"
 
 
@@ -645,6 +663,24 @@ class Record:
         if op != (self.operation_id is not None) or op != (self.attempt is not None):
             raise RecordError("operation and attempt required only for operation records")
         encoded_fields = {}
+        if self.kind == "session_created" and "seed" in self.payload["attributes"]:
+            validate(self.payload["attributes"]["seed"], SEED, canonical=False)
+            from vv_agent.types import Message
+
+            for message in self.payload["attributes"]["seed"]["messages"]:
+                try:
+                    Message.from_dict(message)
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise RecordError(str(exc)) from exc
+        for field_name, schema in (("definition", TASK_SESSION_METADATA), ("request", REQUEST_SESSION_METADATA)):
+            container = self.payload.get(field_name, {})
+            if field_name == "definition" and self.kind == "session_created":
+                container = self.payload["attributes"].get("child_admission", {}).get("definition", {})
+            metadata = (
+                container.get("task", {}).get("metadata", {}) if field_name == "definition" else container.get("metadata", {})
+            )
+            if "vv_session" in metadata:
+                validate(metadata["vv_session"], schema, canonical=False)
         if self.kind == "session_created" and "app_server" in self.payload["attributes"]:
             validate(self.payload["attributes"]["app_server"], APP_SERVER_ATTRIBUTES, canonical=False)
         if self.kind == "session_created" and "child_admission" in self.payload["attributes"]:

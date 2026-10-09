@@ -305,7 +305,7 @@ class MessageProcessor:
         state.ready_for_notifications = True
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
-            protocol_version="v1",
+            protocol_version="v2" if self._kernel is not None else "v1",
             capabilities=SERVER_CAPABILITIES,
         )
         self._router.send_response(connection_id, request.id, response.to_dict())
@@ -430,6 +430,9 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("subscribe must be a boolean"))
             return
         try:
+            if self._kernel is not None and subscribe and self._store.read_thread(thread_id).thread.status == "closed":
+                self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Thread is closed"))
+                return
             if subscribe:
                 snapshot = self._state_manager.subscribe_and_snapshot(
                     thread_id,
@@ -509,7 +512,9 @@ class MessageProcessor:
         self._router.send_notification(
             connection_id,
             "thread/status/changed",
-            {"threadId": thread_id, "status": "archived"},
+            self._run_adapter.public_thread_status(thread_id)
+            if self._kernel is not None
+            else {"threadId": thread_id, "status": "archived"},
         )
 
     def _handle_thread_unsubscribe(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -531,7 +536,13 @@ class MessageProcessor:
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
         if closed:
             self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
-            self._router.send_notification(connection_id, "thread/status/changed", {"threadId": thread_id, "status": "closed"})
+            self._router.send_notification(
+                connection_id,
+                "thread/status/changed",
+                self._run_adapter.public_thread_status(thread_id)
+                if self._kernel is not None
+                else {"threadId": thread_id, "status": "closed"},
+            )
 
     def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)
@@ -556,7 +567,7 @@ class MessageProcessor:
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
-        if snapshot.thread.archived_at is not None:
+        if snapshot.thread.archived_at is not None and (self._kernel is None or snapshot.thread.status != "closed"):
             self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
         if self._kernel is not None and snapshot.thread.status == "closed":
@@ -609,7 +620,7 @@ class MessageProcessor:
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
-        if snapshot.thread.archived_at is not None:
+        if snapshot.thread.archived_at is not None and (self._kernel is None or snapshot.thread.status != "closed"):
             self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
         try:
@@ -790,7 +801,7 @@ class MessageProcessor:
         if params:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("params must be empty"))
             return
-        self._router.send_response(connection_id, request.id, export_schema_bundles())
+        self._router.send_response(connection_id, request.id, export_schema_bundles(_kernel=self._kernel is not None))
 
     def _validated_active_turn(
         self,

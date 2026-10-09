@@ -28,6 +28,7 @@ def token_usage_to_wire(usage: TokenUsage) -> dict[str, Any]:
 
 def model_call_to_wire(model_call: ModelCallRecord) -> dict[str, Any]:
     return {
+        **({"schemaVersion": "vv-agent.model-call.v2"} if model_call._kernel else {}),
         "callId": model_call.call_id,
         "operationId": model_call.operation_id,
         "attempt": model_call.attempt,
