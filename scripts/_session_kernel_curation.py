@@ -218,6 +218,14 @@ def entry_keys(name, item):
         keys = {"request=" + request["method"]} if request else set()
         if request:
             keys.add("lifecycle=" + item["connection_id"] + ":" + request["method"])
+            if request["method"] == "thread/resume":
+                for response in item["responses"]:
+                    keys.add(
+                        "thread/resume:subscribe="
+                        + str(request["params"].get("subscribe", "default"))
+                        + ":outcome="
+                        + response.get("error", {}).get("message", "result")
+                    )
         for response in item.get("responses", []):
             if "error" in response:
                 keys.add("error=" + str(response["error"]["code"]) + ":" + response["error"]["message"])
@@ -345,7 +353,13 @@ def curate(output, streams, semantics, independent, facts):
     invalid["source_records"] = list(supporting.values())
 
     projections = values["session_projection.json"]["sessions"]
-    events = select("projection_events", [event for item in projections for event in item["events"]])
+    all_events = [event for item in projections for event in item["events"]]
+    referenced_sessions = {case["input"]["session_id"] for case in values["token_usage.json"]["compaction_cases"]}
+    # Accounting references must retain a real projection and its source records after set cover.
+    required_events = tuple(
+        next(i for i, event in enumerate(all_events) if event["session_id"] == sid) for sid in sorted(referenced_sessions)
+    )
+    events = select("projection_events", all_events, required=required_events)
     spans = select(
         "projection_spans", [span | {"session_id": item["session_id"]} for item in projections for span in item["spans"]]
     )
