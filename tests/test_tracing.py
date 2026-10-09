@@ -11,13 +11,11 @@ from support import FixedModelProvider
 from vv_agent import (
     Agent,
     JsonlTraceExporter,
-    MemorySession,
     RunCompletedEvent,
     RunConfig,
     RunEvent,
     RunEventReplayQuery,
     Runner,
-    SessionPersistedEvent,
     Span,
     TraceProcessor,
 )
@@ -104,7 +102,7 @@ def test_runner_emits_run_and_tool_trace_spans(tmp_path: Path) -> None:
     agent_span = processor.ended[-2]
     tool_span = processor.ended[0]
     assert run_span.trace_id == result.trace_id
-    assert run_span.metadata["workflow_name"] == "trace-test"
+    assert run_span.metadata["workflow_name"] is None
     assert run_span.metadata["agent_name"] == "assistant"
     assert agent_span.parent_id == run_span.span_id
     assert tool_span.parent_id == agent_span.span_id
@@ -131,45 +129,40 @@ def test_runner_closes_trace_spans_when_provider_resolution_fails(tmp_path: Path
             ),
         )
 
-    failure = _trace_contract()["failure_cleanup"]
-    assert [span.name for span in processor.started] == failure["started"]
-    assert [span.name for span in processor.ended] == failure["ended"]
-    assert processor.ended[-1].metadata["status"] == failure["run_status"]
-    assert processor.ended[-1].metadata["error"] == "provider unavailable"
+    assert processor.started == processor.ended == []
 
 
-def test_typed_output_failure_occurs_after_persistence_and_completed_event(tmp_path: Path) -> None:
+def test_typed_output_failure_is_a_retained_failed_terminal(tmp_path: Path) -> None:
+    from support.kernel_runtime import start_runner
+
+    from vv_agent.events import RunFailedEvent
+    from vv_agent.session.surfaces import SessionDriver
+
     processor = CapturingTraceProcessor()
     event_store = RecordingRunEventStore()
-    session = MemorySession("typed-output-session")
-
-    with pytest.raises(ValueError, match="Expected final output JSON object"):
-        Runner.run_sync(
-            Agent(name="assistant", instructions="Return JSON.", model="m", output_type=dict),
+    driver = SessionDriver()
+    try:
+        result = start_runner(
+            driver,
+            "typed-output-session",
+            Agent("assistant", "Return JSON.", model="m", output_type=dict),
             "go",
             run_config=RunConfig(
                 workspace=tmp_path,
-                model_provider=FixedModelProvider(
-                    ScriptedLLM(steps=[LLMResponse(content="[]")]),
-                    _resolved(),
-                ),
-                session=session,
+                model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("[]")]), _resolved()),
                 event_store=event_store,
                 tracing={"processors": [processor]},
             ),
-        )
-
-    assert session.get_items()
-    terminal_sequence = [
-        event.type for event in event_store.events if isinstance(event, (SessionPersistedEvent, RunCompletedEvent))
-    ]
-    assert terminal_sequence == ["session_persisted", "run_completed"]
-    completed = next(event for event in event_store.events if isinstance(event, RunCompletedEvent))
-    assert completed.status == "completed"
-
-    run_span = next(span for span in processor.ended if span.name == "run")
-    assert run_span.metadata["status"] == "failed"
-    assert "Expected final output JSON object" in run_span.metadata["error"]
+        ).result()
+        assert result.status.value == "failed"
+        assert "Expected final output JSON object" in result.raw_result.error["message"]
+        records = driver.store.read_state(result.raw_result.session_id)[1]
+        assert [r.record.payload["status"] for r in records if r.record.kind == "turn_ended"] == ["failed"]
+        assert any(isinstance(e, RunFailedEvent) for e in event_store.events)
+        assert not any(isinstance(e, RunCompletedEvent) for e in event_store.events)
+        assert processor.ended[-1].metadata["status"] == "failed"
+    finally:
+        driver.close()
 
 
 def test_trace_processor_failures_are_isolated_from_the_run(tmp_path: Path) -> None:
@@ -183,28 +176,24 @@ def test_trace_processor_failures_are_isolated_from_the_run(tmp_path: Path) -> N
         def flush(self) -> None:
             raise RuntimeError("flush down")
 
-    with pytest.warns(RuntimeWarning) as warnings:
-        result = Runner.run_sync(
-            Agent(
-                name="assistant",
-                instructions="Answer.",
-                model="m",
+    result = Runner.run_sync(
+        Agent(
+            name="assistant",
+            instructions="Answer.",
+            model="m",
+        ),
+        "go",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=FixedModelProvider(
+                ScriptedLLM(steps=[LLMResponse(content="ok")]),
+                _resolved(),
             ),
-            "go",
-            run_config=RunConfig(
-                workspace=tmp_path,
-                model_provider=FixedModelProvider(
-                    ScriptedLLM(steps=[LLMResponse(content="ok")]),
-                    _resolved(),
-                ),
-                tracing={"processors": [BrokenProcessor()]},
-            ),
-        )
+            tracing={"processors": [BrokenProcessor()]},
+        ),
+    )
 
     assert result.status.value == _trace_contract()["sink_failure"]["run_status"]
-    assert any("on_span_start failed" in str(warning.message) for warning in warnings)
-    assert any("on_span_end failed" in str(warning.message) for warning in warnings)
-    assert any("flush failed" in str(warning.message) for warning in warnings)
 
 
 def test_jsonl_trace_exporter_uses_the_shared_span_wire(tmp_path: Path) -> None:

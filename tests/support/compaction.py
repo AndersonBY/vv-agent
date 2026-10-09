@@ -11,7 +11,7 @@ import pytest
 
 from vv_agent.memory import MemoryManager
 from vv_agent.memory.manager import SummaryCallback
-from vv_agent.types import Message
+from vv_agent.types import LLMResponse, Message
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "parity"
@@ -122,3 +122,60 @@ def prune_case_manager(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) ->
         ),
     )
     return manager
+
+
+def run_model_turn(*, llm, tool_registry, task, messages, memory_manager, ctx=None, hook_manager=None):
+    """Drive the current producer with scripted internal-model responses and a seeded transcript."""
+    from dataclasses import replace
+
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider
+    from vv_agent.runtime.context import ExecutionContext
+    from vv_agent.session.surfaces import SessionDriver
+
+    ctx = ctx or ExecutionContext()
+    metadata = dict(task.metadata)
+    memory = memory_manager.session_memory
+    if memory is not None:
+        metadata.update(
+            session_memory_enabled=True,
+            session_memory_min_tokens=memory.config.min_tokens_before_extraction,
+            session_memory_min_text_messages=memory.config.min_text_messages,
+        )
+        metadata["vv_session"] = {"memory_initial_state": memory.state.to_dict()}
+    task = replace(task, metadata=metadata, no_tool_policy="finish")
+
+    def response(request):
+        purpose = request.metadata.get("purpose")
+        if purpose == "compaction":
+            callback = memory_manager.summary_callback
+            return LLMResponse(callback(request.messages[0].content, None, task.model) or "" if callback else "")
+        if purpose == "session_memory":
+            assert memory is not None and memory.config.extraction_callback is not None
+            return LLMResponse(memory.config.extraction_callback(request.messages[0].content, None, task.model) or "")
+        return llm.complete(request)
+
+    provider = ScriptedModelProvider.from_callback("test", task.model, response).with_token_limits(
+        memory_manager.model_context_window, memory_manager.model_max_output_tokens
+    )
+    config = RunConfig(
+        model_provider=provider,
+        tool_registry_factory=lambda: tool_registry,
+        hooks=list(hook_manager.hooks) if hook_manager else [],
+        memory_providers=ctx.metadata.get("_vv_agent_memory_providers", []),
+        stream=lambda event: ctx.event_handler(event) if ctx.event_handler and event.type.startswith("memory_compact_") else None,
+        workspace_backend=memory_manager.workspace_backend,
+    )
+    seed = list(messages)
+    content = seed.pop().content if seed and seed[-1].role == "user" else task.user_prompt
+    driver = SessionDriver()
+    try:
+        driver.create(task.task_id, ".", {"seed": {"messages": [m.to_dict() for m in seed], "shared_state": {}}})
+        handle = driver.start(
+            task.task_id, Agent("test", task.prompt_bundle, model=task.model), config, content, task=task, autostart=False
+        )
+        handle.runtime.memory_manager = memory_manager
+        handle.start()
+        result = handle.result().raw_result
+        return result
+    finally:
+        driver.close()

@@ -1,24 +1,19 @@
 {
   "contract": "run_budget",
-  "version": 2,
-  "integer_bounds": {
-    "minimum": 0,
-    "maximum": 9007199254740991
-  },
   "defaults": {
+    "empty_limits_are_unlimited": true,
     "limits": null,
-    "unavailable_metric_policy": "continue_and_mark",
-    "empty_limits_are_unlimited": true
+    "unavailable_metric_policy": "continue_and_mark"
   },
+  "dimension_precedence": [
+    "wall_time",
+    "total_tokens",
+    "uncached_input_tokens",
+    "host_cost",
+    "tool_calls",
+    "tool_calls_by_name"
+  ],
   "enums": {
-    "dimensions": [
-      "total_tokens",
-      "uncached_input_tokens",
-      "tool_calls",
-      "tool_calls_by_name",
-      "wall_time",
-      "host_cost"
-    ],
     "boundaries": [
       "run_start",
       "cycle_start",
@@ -27,10 +22,22 @@
       "tool_batch_complete",
       "terminal"
     ],
+    "dimensions": [
+      "total_tokens",
+      "uncached_input_tokens",
+      "tool_calls",
+      "tool_calls_by_name",
+      "wall_time",
+      "host_cost"
+    ],
     "exhaustion_reasons": [
       "limit_reached",
       "limit_exceeded",
       "metric_unavailable"
+    ],
+    "unavailable_metric_policies": [
+      "continue_and_mark",
+      "stop"
     ],
     "unavailable_reasons": [
       "usage_missing",
@@ -41,953 +48,1189 @@
       "currency_mismatch",
       "non_monotonic",
       "integer_overflow"
-    ],
-    "unavailable_metric_policies": [
-      "continue_and_mark",
-      "stop"
     ]
   },
-  "dimension_precedence": [
-    "wall_time",
-    "total_tokens",
-    "uncached_input_tokens",
-    "host_cost",
-    "tool_calls",
-    "tool_calls_by_name"
-  ],
-  "wire_examples": {
-    "limits": {
-      "max_total_tokens": 1200,
-      "max_uncached_input_tokens": 800,
-      "max_tool_calls": 6,
-      "max_tool_calls_by_name": {
-        "fetch": 2,
-        "search": 3
-      },
-      "max_wall_time_ms": 30000,
-      "max_host_cost": {
-        "unit": "currency",
-        "currency": "USD",
-        "amount_microunits": 250000
-      },
-      "unavailable_metric_policy": "continue_and_mark"
-    },
-    "snapshot": {
-      "cycles": 2,
-      "total_tokens": 1100,
-      "uncached_input_tokens": null,
-      "tool_calls": 3,
-      "tool_calls_by_name": {
-        "fetch": 1,
-        "search": 2
-      },
-      "elapsed_ms": 1250,
-      "host_cost": {
-        "unit": "currency",
-        "currency": "USD",
-        "amount_microunits": 200000
-      },
-      "unavailable_dimensions": [
-        {
-          "dimension": "uncached_input_tokens",
-          "reason": "usage_missing",
-          "expected_unit": "tokens",
-          "observed_unit": null,
-          "expected_currency": null,
-          "observed_currency": null
-        }
-      ]
-    },
-    "exhaustion": {
-      "dimension": "total_tokens",
-      "tool_name": null,
-      "reason": "limit_exceeded",
-      "limit": 1200,
-      "observed": 1250,
-      "attempted_increment": null,
-      "overshoot": 50,
-      "unit": "tokens",
-      "currency": null,
-      "enforcement_boundary": "model_call_complete",
-      "unavailable_reason": null
-    }
-  },
-  "model_call_accounting": {
-    "operations": [
-      "agent_cycle",
-      "session_memory",
-      "memory_compaction"
-    ],
-    "every_dispatched_attempt_is_observed": true,
-    "physical_attempt_is_observed_once": true,
-    "receipt_replay_increment": 0,
-    "missing_failed_or_ambiguous_usage_latches_unavailable": true,
-    "post_internal_call_check_precedes_next_model_dispatch": true,
-    "checkpoint_terminal_record_and_budget_snapshot_are_atomic": true,
-    "opaque_host_model_callbacks_are_not_fabricated": true,
-    "internal_call_exhaustion_case": {
-      "limit": 100,
-      "session_memory_total_tokens": 120,
-      "primary_agent_cycle_dispatch_count": 0,
-      "completion_reason": "budget_exhausted",
-      "enforcement_boundary": "model_call_complete",
-      "observed": 120,
-      "overshoot": 20
-    }
-  },
-  "runner_cases": [
-    {
-      "name": "no_limits_uses_normal_terminal_flow",
-      "limits": null,
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "done",
-          "usage": null,
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": null,
-        "budget_usage": null,
-        "budget_exhaustion": null,
-        "budget_event_types": []
-      }
-    },
-    {
-      "name": "total_tokens_equal_limit_can_finish",
-      "limits": {
-        "max_total_tokens": 10
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "exact",
-          "usage": {
-            "total_tokens": 10,
-            "uncached_input_tokens": 10
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": null,
-        "usage": {
-          "cycles": 1,
-          "total_tokens": 10,
-          "uncached_input_tokens": 10,
-          "tool_calls": 0,
-          "tool_calls_by_name": {},
-          "host_cost": null,
-          "unavailable_dimensions": []
-        },
-        "budget_exhaustion": null
-      }
-    },
-    {
-      "name": "total_tokens_atomic_overshoot",
-      "limits": {
-        "max_total_tokens": 10
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "draft over budget",
-          "usage": {
-            "total_tokens": 12,
-            "uncached_input_tokens": 12
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": "draft over budget",
-        "error": "Run budget exhausted.",
-        "usage": {
-          "cycles": 1,
-          "total_tokens": 12,
-          "uncached_input_tokens": 12,
-          "tool_calls": 0,
-          "tool_calls_by_name": {},
-          "host_cost": null,
-          "unavailable_dimensions": []
-        },
-        "budget_exhaustion": {
-          "dimension": "total_tokens",
-          "tool_name": null,
-          "reason": "limit_exceeded",
-          "limit": 10,
-          "observed": 12,
-          "attempted_increment": null,
-          "overshoot": 2,
-          "unit": "tokens",
-          "currency": null,
-          "enforcement_boundary": "model_call_complete",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "token_limit_reached_blocks_next_llm",
-      "limits": {
-        "max_total_tokens": 10
-      },
-      "no_tool_policy": "continue",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "need another cycle",
-          "usage": {
-            "total_tokens": 10,
-            "uncached_input_tokens": 10
-          },
-          "tool_calls": []
-        },
-        {
-          "assistant_output": "must not execute",
-          "usage": {
-            "total_tokens": 1,
-            "uncached_input_tokens": 1
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": "need another cycle",
-        "error": "Run budget exhausted.",
-        "budget_exhaustion": {
-          "dimension": "total_tokens",
-          "tool_name": null,
-          "reason": "limit_reached",
-          "limit": 10,
-          "observed": 10,
-          "attempted_increment": null,
-          "overshoot": 0,
-          "unit": "tokens",
-          "currency": null,
-          "enforcement_boundary": "cycle_start",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "uncached_usage_missing_continues_and_marks",
-      "limits": {
-        "max_uncached_input_tokens": 10,
-        "unavailable_metric_policy": "continue_and_mark"
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "missing is not zero",
-          "usage": {
-            "total_tokens": 4,
-            "uncached_input_tokens": null
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": null,
-        "unavailable_dimensions": [
-          {
-            "dimension": "uncached_input_tokens",
-            "reason": "usage_missing",
-            "expected_unit": "tokens",
-            "observed_unit": null,
-            "expected_currency": null,
-            "observed_currency": null
-          }
-        ],
-        "budget_exhaustion": null
-      }
-    },
-    {
-      "name": "uncached_usage_missing_strict_stops",
-      "limits": {
-        "max_uncached_input_tokens": 10,
-        "unavailable_metric_policy": "stop"
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "strict draft",
-          "usage": {
-            "total_tokens": 4,
-            "uncached_input_tokens": null
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": "strict draft",
-        "error": "Run budget exhausted.",
-        "budget_exhaustion": {
-          "dimension": "uncached_input_tokens",
-          "tool_name": null,
-          "reason": "metric_unavailable",
-          "limit": 10,
-          "observed": null,
-          "attempted_increment": null,
-          "overshoot": null,
-          "unit": "tokens",
-          "currency": null,
-          "enforcement_boundary": "model_call_complete",
-          "unavailable_reason": "usage_missing"
-        }
-      }
-    },
-    {
-      "name": "uncached_explicit_zero_is_available",
-      "limits": {
-        "max_uncached_input_tokens": 1
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "cached",
-          "usage": {
-            "total_tokens": 3,
-            "uncached_input_tokens": 0
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "completed",
-        "completion_reason": "no_tool_finish",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "uncached_input_tokens": 0,
-        "unavailable_dimensions": [],
-        "budget_exhaustion": null
-      }
-    },
-    {
-      "name": "tool_batch_total_preflight_is_all_or_none",
-      "limits": {
-        "max_tool_calls": 1
-      },
-      "no_tool_policy": "continue",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "two calls",
-          "usage": {
-            "total_tokens": 3,
-            "uncached_input_tokens": 3
-          },
-          "tool_calls": [
-            {
-              "id": "call-a",
-              "name": "alpha",
-              "arguments": {}
-            },
-            {
-              "id": "call-b",
-              "name": "beta",
-              "arguments": {}
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": "two calls",
-        "error": "Run budget exhausted.",
-        "tool_calls": 0,
-        "budget_exhaustion": {
-          "dimension": "tool_calls",
-          "tool_name": null,
-          "reason": "limit_reached",
-          "limit": 1,
-          "observed": 0,
-          "attempted_increment": 2,
-          "overshoot": 1,
-          "unit": "calls",
-          "currency": null,
-          "enforcement_boundary": "tool_batch_preflight",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "named_tool_preflight_matches_exact_name",
-      "limits": {
-        "max_tool_calls_by_name": {
-          "search": 1
-        }
-      },
-      "no_tool_policy": "continue",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "exact names",
-          "usage": {
-            "total_tokens": 3,
-            "uncached_input_tokens": 3
-          },
-          "tool_calls": [
-            {
-              "id": "call-search-1",
-              "name": "lookup_records",
-              "arguments": {}
-            },
-            {
-              "id": "call-search-2",
-              "name": "search",
-              "arguments": {}
-            },
-            {
-              "id": "call-search-v2",
-              "name": "search",
-              "arguments": {}
-            }
-          ]
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "tool_calls": 0,
-        "budget_exhaustion": {
-          "dimension": "tool_calls_by_name",
-          "tool_name": "search",
-          "reason": "limit_reached",
-          "limit": 1,
-          "observed": 0,
-          "attempted_increment": 2,
-          "overshoot": 1,
-          "unit": "calls",
-          "currency": null,
-          "enforcement_boundary": "tool_batch_preflight",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "zero_wall_time_stops_before_llm",
-      "limits": {
-        "max_wall_time_ms": 0
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "must not execute",
-          "usage": {
-            "total_tokens": 1,
-            "uncached_input_tokens": 1
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 0,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": "Run budget exhausted.",
-        "budget_exhaustion": {
-          "dimension": "wall_time",
-          "tool_name": null,
-          "reason": "limit_reached",
-          "limit": 0,
-          "observed": 0,
-          "attempted_increment": null,
-          "overshoot": 0,
-          "unit": "milliseconds",
-          "currency": null,
-          "enforcement_boundary": "run_start",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "host_cost_atomic_overshoot",
-      "limits": {
-        "max_host_cost": {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 100
-        }
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [
-        {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 0
-        },
-        {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 0
-        },
-        {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 120
-        }
-      ],
-      "steps": [
-        {
-          "assistant_output": "costly draft",
-          "usage": {
-            "total_tokens": 5,
-            "uncached_input_tokens": 5
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 1,
-        "tool_execution_count": 0,
-        "partial_output": "costly draft",
-        "error": "Run budget exhausted.",
-        "budget_exhaustion": {
-          "dimension": "host_cost",
-          "tool_name": null,
-          "reason": "limit_exceeded",
-          "limit": 100,
-          "observed": 120,
-          "attempted_increment": null,
-          "overshoot": 20,
-          "unit": "credits",
-          "currency": null,
-          "enforcement_boundary": "model_call_complete",
-          "unavailable_reason": null
-        }
-      }
-    },
-    {
-      "name": "host_cost_unit_mismatch_strict_stops",
-      "limits": {
-        "max_host_cost": {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 100
-        },
-        "unavailable_metric_policy": "stop"
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": false,
-      "host_cost_readings": [
-        {
-          "unit": "currency",
-          "currency": "USD",
-          "amount_microunits": 0
-        }
-      ],
-      "steps": [
-        {
-          "assistant_output": "must not execute",
-          "usage": {
-            "total_tokens": 1,
-            "uncached_input_tokens": 1
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "budget_exhausted",
-        "model_calls": 0,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": "Run budget exhausted.",
-        "budget_exhaustion": {
-          "dimension": "host_cost",
-          "tool_name": null,
-          "reason": "metric_unavailable",
-          "limit": 100,
-          "observed": null,
-          "attempted_increment": null,
-          "overshoot": null,
-          "unit": "credits",
-          "currency": null,
-          "enforcement_boundary": "run_start",
-          "unavailable_reason": "unit_mismatch"
-        }
-      }
-    },
-    {
-      "name": "pre_cancelled_run_precedes_zero_budget",
-      "limits": {
-        "max_wall_time_ms": 0,
-        "max_total_tokens": 0
-      },
-      "no_tool_policy": "finish",
-      "pre_cancelled": true,
-      "host_cost_readings": [],
-      "steps": [
-        {
-          "assistant_output": "must not execute",
-          "usage": {
-            "total_tokens": 1,
-            "uncached_input_tokens": 1
-          },
-          "tool_calls": []
-        }
-      ],
-      "expected": {
-        "status": "failed",
-        "completion_reason": "cancelled",
-        "model_calls": 0,
-        "tool_execution_count": 0,
-        "partial_output": null,
-        "error": "cancelled by fixture",
-        "budget_exhaustion": null
-      }
-    }
-  ],
-  "terminal_precedence_cases": [
-    {
-      "name": "pre_cancelled_admission_precedes_budget",
-      "conditions": [
-        "cancellation_visible",
-        "budget_limit_reached"
-      ],
-      "expected_completion_reason": "cancelled"
-    },
-    {
-      "name": "operation_error_is_not_hidden_by_post_operation_budget",
-      "conditions": [
-        "operation_failed",
-        "budget_limit_exceeded"
-      ],
-      "expected_completion_reason": "failed"
-    },
-    {
-      "name": "budget_precedes_task_terminal_projection",
-      "conditions": [
-        "budget_limit_exceeded",
-        "tool_finish"
-      ],
-      "expected_completion_reason": "budget_exhausted"
-    },
-    {
-      "name": "budget_precedes_max_cycles",
-      "conditions": [
-        "budget_limit_exceeded",
-        "max_cycles"
-      ],
-      "expected_completion_reason": "budget_exhausted"
-    }
-  ],
-  "invalid_cases": [
-    {
-      "name": "boolean_limit",
-      "limits": {
-        "max_total_tokens": true
-      }
-    },
-    {
-      "name": "negative_limit",
-      "limits": {
-        "max_tool_calls": -1
-      }
-    },
-    {
-      "name": "unsafe_integer_limit",
-      "limits": {
-        "max_wall_time_ms": 9007199254740992
-      }
-    },
-    {
-      "name": "fractional_limit",
-      "limits": {
-        "max_uncached_input_tokens": 1.5
-      }
-    },
-    {
-      "name": "blank_named_tool",
-      "limits": {
-        "max_tool_calls_by_name": {
-          "  ": 1
-        }
-      }
-    },
-    {
-      "name": "blank_host_unit",
-      "limits": {
-        "max_host_cost": {
-          "unit": "",
-          "currency": null,
-          "amount_microunits": 1
-        }
-      }
-    },
-    {
-      "name": "unknown_unavailable_policy",
-      "limits": {
-        "max_total_tokens": 1,
-        "unavailable_metric_policy": "guess"
-      }
-    }
-  ],
   "evaluator_cases": [
     {
-      "name": "non_monotonic_meter_continue_latches_unavailable",
+      "expected": {
+        "host_cost": null,
+        "terminal_exhaustion": null,
+        "unavailable_reason": "non_monotonic"
+      },
       "limits": {
         "max_host_cost": {
-          "unit": "credits",
+          "amount_microunits": 100,
           "currency": null,
-          "amount_microunits": 100
+          "unit": "credits"
         }
       },
+      "name": "non_monotonic_meter_continue_latches_unavailable",
       "observations": [
         {
           "boundary": "run_start",
           "elapsed_ms": 0,
           "host_cost": {
-            "unit": "credits",
+            "amount_microunits": 50,
             "currency": null,
-            "amount_microunits": 50
+            "unit": "credits"
           }
         },
         {
           "boundary": "model_call_complete",
           "elapsed_ms": 1,
           "host_cost": {
-            "unit": "credits",
+            "amount_microunits": 40,
             "currency": null,
-            "amount_microunits": 40
+            "unit": "credits"
           }
         },
         {
           "boundary": "terminal",
           "elapsed_ms": 2,
           "host_cost": {
-            "unit": "credits",
+            "amount_microunits": 60,
             "currency": null,
-            "amount_microunits": 60
+            "unit": "credits"
           }
         }
-      ],
-      "expected": {
-        "terminal_exhaustion": null,
-        "host_cost": null,
-        "unavailable_reason": "non_monotonic"
-      }
+      ]
     },
     {
-      "name": "tool_batch_dimension_precedence_is_total_before_named",
+      "batch_tool_names": [
+        "search"
+      ],
+      "existing_tool_calls": 1,
+      "existing_tool_calls_by_name": {
+        "search": 1
+      },
+      "expected": {
+        "dimension": "tool_calls",
+        "tool_name": null
+      },
       "limits": {
         "max_tool_calls": 1,
         "max_tool_calls_by_name": {
           "search": 1
         }
       },
-      "existing_tool_calls": 1,
-      "existing_tool_calls_by_name": {
-        "search": 1
-      },
-      "batch_tool_names": [
-        "search"
-      ],
-      "expected": {
-        "dimension": "tool_calls",
-        "tool_name": null
-      }
+      "name": "tool_batch_dimension_precedence_is_total_before_named"
     },
     {
-      "name": "missing_host_meter_strict_stops_at_run_start",
+      "expected": {
+        "enforcement_boundary": "run_start",
+        "reason": "metric_unavailable",
+        "unavailable_reason": "meter_missing"
+      },
+      "host_meter": null,
       "limits": {
         "max_host_cost": {
-          "unit": "credits",
+          "amount_microunits": 100,
           "currency": null,
-          "amount_microunits": 100
+          "unit": "credits"
         },
         "unavailable_metric_policy": "stop"
       },
-      "host_meter": null,
-      "expected": {
-        "reason": "metric_unavailable",
-        "unavailable_reason": "meter_missing",
-        "enforcement_boundary": "run_start"
-      }
+      "name": "missing_host_meter_strict_stops_at_run_start"
     },
     {
-      "name": "meter_error_continue_marks_unavailable",
-      "limits": {
-        "max_host_cost": {
-          "unit": "credits",
-          "currency": null,
-          "amount_microunits": 100
-        }
+      "expected": {
+        "host_cost": null,
+        "terminal_exhaustion": null,
+        "unavailable_reason": "meter_error"
       },
       "host_meter": {
         "error": "fixture meter failure"
       },
-      "expected": {
-        "terminal_exhaustion": null,
-        "host_cost": null,
-        "unavailable_reason": "meter_error"
-      }
-    },
-    {
-      "name": "host_cost_equal_limit_is_not_overshoot",
       "limits": {
         "max_host_cost": {
-          "unit": "currency",
-          "currency": "USD",
-          "amount_microunits": 100
+          "amount_microunits": 100,
+          "currency": null,
+          "unit": "credits"
         }
       },
+      "name": "meter_error_continue_marks_unavailable"
+    },
+    {
+      "expected": {
+        "host_cost": {
+          "amount_microunits": 100,
+          "currency": "USD",
+          "unit": "currency"
+        },
+        "terminal_exhaustion": null
+      },
+      "limits": {
+        "max_host_cost": {
+          "amount_microunits": 100,
+          "currency": "USD",
+          "unit": "currency"
+        }
+      },
+      "name": "host_cost_equal_limit_is_not_overshoot",
       "observations": [
         {
           "boundary": "run_start",
           "elapsed_ms": 0,
           "host_cost": {
-            "unit": "currency",
+            "amount_microunits": 0,
             "currency": "USD",
-            "amount_microunits": 0
+            "unit": "currency"
           }
         },
         {
           "boundary": "terminal",
           "elapsed_ms": 1,
           "host_cost": {
-            "unit": "currency",
+            "amount_microunits": 100,
             "currency": "USD",
-            "amount_microunits": 100
+            "unit": "currency"
           }
         }
-      ],
-      "expected": {
-        "terminal_exhaustion": null,
-        "host_cost": {
-          "unit": "currency",
-          "currency": "USD",
-          "amount_microunits": 100
-        }
-      }
+      ]
     },
     {
-      "name": "token_sum_wire_overflow_is_typed_unavailable",
-      "limits": {
-        "max_total_tokens": 9007199254740991,
-        "unavailable_metric_policy": "stop"
+      "expected": {
+        "enforcement_boundary": "model_call_complete",
+        "reason": "metric_unavailable",
+        "total_tokens": null,
+        "unavailable_reason": "integer_overflow"
       },
       "initial_usage": {
         "cycles": 1,
-        "total_tokens": 9007199254740991,
-        "uncached_input_tokens": 0,
-        "tool_calls": 0,
-        "tool_calls_by_name": {},
         "elapsed_ms": 0,
         "host_cost": null,
-        "unavailable_dimensions": []
+        "tool_calls": 0,
+        "tool_calls_by_name": {},
+        "total_tokens": 9007199254740991,
+        "unavailable_dimensions": [],
+        "uncached_input_tokens": 0
+      },
+      "limits": {
+        "max_total_tokens": 9007199254740991,
+        "unavailable_metric_policy": "stop"
       },
       "llm_usage": {
         "total_tokens": 1,
         "uncached_input_tokens": 0
       },
-      "expected": {
-        "reason": "metric_unavailable",
-        "unavailable_reason": "integer_overflow",
-        "total_tokens": null,
-        "enforcement_boundary": "model_call_complete"
-      }
+      "name": "token_sum_wire_overflow_is_typed_unavailable"
     },
     {
-      "name": "distributed_elapsed_accumulates_active_segments",
-      "initial_elapsed_ms": 120,
-      "worker_segment_elapsed_ms": 30,
-      "queue_elapsed_ms": 5000,
-      "expected_elapsed_ms": 150
-    },
-    {
-      "name": "approval_resume_preserves_usage_but_not_wait_time",
-      "source_usage": {
-        "cycles": 1,
-        "total_tokens": 8,
-        "uncached_input_tokens": 6,
-        "tool_calls": 1,
-        "tool_calls_by_name": {
-          "dangerous": 1
-        },
-        "elapsed_ms": 20,
-        "host_cost": null,
-        "unavailable_dimensions": []
-      },
       "approval_wait_ms": 5000,
-      "resumed_active_ms": 4,
       "expected_usage": {
         "cycles": 1,
-        "total_tokens": 8,
-        "uncached_input_tokens": 6,
+        "elapsed_ms": 24,
+        "host_cost": null,
         "tool_calls": 1,
         "tool_calls_by_name": {
           "dangerous": 1
         },
-        "elapsed_ms": 24,
+        "total_tokens": 8,
+        "unavailable_dimensions": [],
+        "uncached_input_tokens": 6
+      },
+      "name": "approval_resume_preserves_usage_but_not_wait_time",
+      "resumed_active_ms": 4,
+      "source_usage": {
+        "cycles": 1,
+        "elapsed_ms": 20,
         "host_cost": null,
-        "unavailable_dimensions": []
+        "tool_calls": 1,
+        "tool_calls_by_name": {
+          "dangerous": 1
+        },
+        "total_tokens": 8,
+        "unavailable_dimensions": [],
+        "uncached_input_tokens": 6
       }
     }
   ],
+  "integer_bounds": {
+    "maximum": 9007199254740991,
+    "minimum": 0
+  },
+  "invalid_cases": [
+    {
+      "limits": {
+        "max_total_tokens": true
+      },
+      "name": "boolean_limit"
+    },
+    {
+      "limits": {
+        "max_tool_calls": -1
+      },
+      "name": "negative_limit"
+    },
+    {
+      "limits": {
+        "max_wall_time_ms": 9007199254740992
+      },
+      "name": "unsafe_integer_limit"
+    },
+    {
+      "limits": {
+        "max_uncached_input_tokens": 1.5
+      },
+      "name": "fractional_limit"
+    },
+    {
+      "limits": {
+        "max_tool_calls_by_name": {
+          "  ": 1
+        }
+      },
+      "name": "blank_named_tool"
+    },
+    {
+      "limits": {
+        "max_host_cost": {
+          "amount_microunits": 1,
+          "currency": null,
+          "unit": ""
+        }
+      },
+      "name": "blank_host_unit"
+    },
+    {
+      "limits": {
+        "max_total_tokens": 1,
+        "unavailable_metric_policy": "guess"
+      },
+      "name": "unknown_unavailable_policy"
+    }
+  ],
+  "model_call_accounting": {
+    "every_dispatched_attempt_is_observed": true,
+    "internal_call_exhaustion_case": {
+      "completion_reason": "budget_exhausted",
+      "enforcement_boundary": "model_call_complete",
+      "limit": 100,
+      "observed": 120,
+      "overshoot": 20,
+      "primary_agent_cycle_dispatch_count": 0,
+      "session_memory_total_tokens": 120
+    },
+    "missing_failed_or_ambiguous_usage_latches_unavailable": true,
+    "opaque_host_model_callbacks_are_not_fabricated": true,
+    "operations": [
+      "agent_cycle",
+      "session_memory",
+      "memory_compaction",
+      "output_repair"
+    ],
+    "physical_attempt_is_observed_once": true,
+    "post_internal_call_check_precedes_next_model_dispatch": true,
+    "receipt_replay_increment": 0,
+    "terminal_record_and_budget_snapshot_are_atomic": true
+  },
+  "recovery_cases": [],
   "resume_semantics": {
-    "snapshot_persisted_at_operation_progress": true,
-    "cumulative_elapsed_ms_continues": true,
-    "process_downtime_ms_counted": false,
-    "queue_time_ms_counted": false,
-    "approval_wait_ms_counted": false,
-    "reconciliation_wait_ms_counted": false,
-    "unknown_crash_gap_ms_guessed": false,
-    "fixture": "checkpoint_resume.json"
+    "active_interval": "durable_usage_observations",
+    "downtime_guessed": false,
+    "lost_interval": "unavailable"
+  },
+  "runner_cases": [
+    {
+      "expected": {
+        "budget_event_types": [],
+        "budget_exhaustion": null,
+        "budget_usage": null,
+        "completion_reason": "no_tool_finish",
+        "error": null,
+        "model_calls": 1,
+        "partial_output": null,
+        "status": "completed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": null,
+      "name": "no_limits_uses_normal_terminal_flow",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/no_limits_uses_normal_terminal_flow/created",
+          "input/initial/applied",
+          "turn/c1c/no_limits_uses_normal_terminal_flow/turn/initial/started",
+          "usage/active/c1c/no_limits_uses_normal_terminal_flow/turn/initial/1/1",
+          "op/c1c/no_limits_uses_normal_terminal_flow/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/no_limits_uses_normal_terminal_flow/turn/initial/1/2",
+          "op/c1c/no_limits_uses_normal_terminal_flow/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/no_limits_uses_normal_terminal_flow/turn/initial/1/3",
+          "op/c1c/no_limits_uses_normal_terminal_flow/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/no_limits_uses_normal_terminal_flow/turn/initial/1/4",
+          "turn/c1c/no_limits_uses_normal_terminal_flow/turn/initial/ended"
+        ],
+        "session_id": "c1c/no_limits_uses_normal_terminal_flow"
+      },
+      "steps": [
+        {
+          "assistant_output": "done",
+          "tool_calls": [],
+          "usage": null
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": null,
+        "completion_reason": "no_tool_finish",
+        "error": null,
+        "model_calls": 1,
+        "partial_output": null,
+        "status": "completed",
+        "tool_execution_count": 0,
+        "usage": {
+          "cycles": 1,
+          "elapsed_ms": 0,
+          "host_cost": null,
+          "tool_calls": 0,
+          "tool_calls_by_name": {},
+          "total_tokens": 10,
+          "unavailable_dimensions": [],
+          "uncached_input_tokens": 10
+        }
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_total_tokens": 10
+      },
+      "name": "total_tokens_equal_limit_can_finish",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/total_tokens_equal_limit_can_finish/created",
+          "input/initial/applied",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/started",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/1",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/2",
+          "op/c1c/total_tokens_equal_limit_can_finish/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/3",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/boundary/budget/c1c/total_tokens_equal_limit_can_finish/turn/initial/model/primary/1/start/1",
+          "op/c1c/total_tokens_equal_limit_can_finish/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/4",
+          "op/c1c/total_tokens_equal_limit_can_finish/turn/initial/model/primary/1/1/result",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/boundary/budget/c1c/total_tokens_equal_limit_can_finish/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/5",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/boundary/budget/terminal",
+          "usage/active/c1c/total_tokens_equal_limit_can_finish/turn/initial/1/6",
+          "turn/c1c/total_tokens_equal_limit_can_finish/turn/initial/ended"
+        ],
+        "session_id": "c1c/total_tokens_equal_limit_can_finish"
+      },
+      "steps": [
+        {
+          "assistant_output": "exact",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 10,
+            "uncached_input_tokens": 10
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "total_tokens",
+          "enforcement_boundary": "model_call_complete",
+          "limit": 10,
+          "observed": 12,
+          "overshoot": 2,
+          "reason": "limit_exceeded",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "tokens"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 1,
+        "partial_output": "draft over budget",
+        "status": "failed",
+        "tool_execution_count": 0,
+        "usage": {
+          "cycles": 1,
+          "elapsed_ms": 0,
+          "host_cost": null,
+          "tool_calls": 0,
+          "tool_calls_by_name": {},
+          "total_tokens": 12,
+          "unavailable_dimensions": [],
+          "uncached_input_tokens": 12
+        }
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_total_tokens": 10
+      },
+      "name": "total_tokens_atomic_overshoot",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/total_tokens_atomic_overshoot/created",
+          "input/initial/applied",
+          "turn/c1c/total_tokens_atomic_overshoot/turn/initial/started",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/1",
+          "turn/c1c/total_tokens_atomic_overshoot/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/2",
+          "op/c1c/total_tokens_atomic_overshoot/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/3",
+          "turn/c1c/total_tokens_atomic_overshoot/turn/initial/boundary/budget/c1c/total_tokens_atomic_overshoot/turn/initial/model/primary/1/start/1",
+          "op/c1c/total_tokens_atomic_overshoot/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/4",
+          "op/c1c/total_tokens_atomic_overshoot/turn/initial/model/primary/1/1/result",
+          "turn/c1c/total_tokens_atomic_overshoot/turn/initial/boundary/budget/c1c/total_tokens_atomic_overshoot/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/5",
+          "usage/active/c1c/total_tokens_atomic_overshoot/turn/initial/1/6",
+          "turn/c1c/total_tokens_atomic_overshoot/turn/initial/ended"
+        ],
+        "session_id": "c1c/total_tokens_atomic_overshoot"
+      },
+      "steps": [
+        {
+          "assistant_output": "draft over budget",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 12,
+            "uncached_input_tokens": 12
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "total_tokens",
+          "enforcement_boundary": "cycle_start",
+          "limit": 10,
+          "observed": 10,
+          "overshoot": 0,
+          "reason": "limit_reached",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "tokens"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 1,
+        "partial_output": "need another cycle",
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_total_tokens": 10
+      },
+      "name": "token_limit_reached_blocks_next_llm",
+      "no_tool_policy": "continue",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/token_limit_reached_blocks_next_llm/created",
+          "input/initial/applied",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/started",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/1",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/2",
+          "op/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/3",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/boundary/budget/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/1/start/1",
+          "op/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/4",
+          "op/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/1/1/result",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/boundary/budget/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/5",
+          "op/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/6",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/boundary/budget/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/2/start/1",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/7",
+          "op/c1c/token_limit_reached_blocks_next_llm/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/token_limit_reached_blocks_next_llm/turn/initial/1/8",
+          "turn/c1c/token_limit_reached_blocks_next_llm/turn/initial/ended"
+        ],
+        "session_id": "c1c/token_limit_reached_blocks_next_llm"
+      },
+      "steps": [
+        {
+          "assistant_output": "need another cycle",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 10,
+            "uncached_input_tokens": 10
+          }
+        },
+        {
+          "assistant_output": "must not execute",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 1,
+            "uncached_input_tokens": 1
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": null,
+        "completion_reason": "no_tool_finish",
+        "error": null,
+        "model_calls": 1,
+        "partial_output": null,
+        "status": "completed",
+        "tool_execution_count": 0,
+        "unavailable_dimensions": [
+          {
+            "dimension": "uncached_input_tokens",
+            "expected_currency": null,
+            "expected_unit": "tokens",
+            "observed_currency": null,
+            "observed_unit": null,
+            "reason": "usage_missing"
+          }
+        ]
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_uncached_input_tokens": 10,
+        "unavailable_metric_policy": "continue_and_mark"
+      },
+      "name": "uncached_usage_missing_continues_and_marks",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/uncached_usage_missing_continues_and_marks/created",
+          "input/initial/applied",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/started",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/1",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/2",
+          "op/c1c/uncached_usage_missing_continues_and_marks/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/3",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/boundary/budget/c1c/uncached_usage_missing_continues_and_marks/turn/initial/model/primary/1/start/1",
+          "op/c1c/uncached_usage_missing_continues_and_marks/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/4",
+          "op/c1c/uncached_usage_missing_continues_and_marks/turn/initial/model/primary/1/1/result",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/boundary/budget/c1c/uncached_usage_missing_continues_and_marks/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/5",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/boundary/budget/terminal",
+          "usage/active/c1c/uncached_usage_missing_continues_and_marks/turn/initial/1/6",
+          "turn/c1c/uncached_usage_missing_continues_and_marks/turn/initial/ended"
+        ],
+        "session_id": "c1c/uncached_usage_missing_continues_and_marks"
+      },
+      "steps": [
+        {
+          "assistant_output": "missing is not zero",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 4,
+            "uncached_input_tokens": null
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "uncached_input_tokens",
+          "enforcement_boundary": "model_call_complete",
+          "limit": 10,
+          "observed": null,
+          "overshoot": null,
+          "reason": "metric_unavailable",
+          "tool_name": null,
+          "unavailable_reason": "usage_missing",
+          "unit": "tokens"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 1,
+        "partial_output": "strict draft",
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_uncached_input_tokens": 10,
+        "unavailable_metric_policy": "stop"
+      },
+      "name": "uncached_usage_missing_strict_stops",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/uncached_usage_missing_strict_stops/created",
+          "input/initial/applied",
+          "turn/c1c/uncached_usage_missing_strict_stops/turn/initial/started",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/1",
+          "turn/c1c/uncached_usage_missing_strict_stops/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/2",
+          "op/c1c/uncached_usage_missing_strict_stops/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/3",
+          "turn/c1c/uncached_usage_missing_strict_stops/turn/initial/boundary/budget/c1c/uncached_usage_missing_strict_stops/turn/initial/model/primary/1/start/1",
+          "op/c1c/uncached_usage_missing_strict_stops/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/4",
+          "op/c1c/uncached_usage_missing_strict_stops/turn/initial/model/primary/1/1/result",
+          "turn/c1c/uncached_usage_missing_strict_stops/turn/initial/boundary/budget/c1c/uncached_usage_missing_strict_stops/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/5",
+          "usage/active/c1c/uncached_usage_missing_strict_stops/turn/initial/1/6",
+          "turn/c1c/uncached_usage_missing_strict_stops/turn/initial/ended"
+        ],
+        "session_id": "c1c/uncached_usage_missing_strict_stops"
+      },
+      "steps": [
+        {
+          "assistant_output": "strict draft",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 4,
+            "uncached_input_tokens": null
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": null,
+        "completion_reason": "no_tool_finish",
+        "model_calls": 1,
+        "status": "completed",
+        "tool_execution_count": 0,
+        "unavailable_dimensions": [],
+        "uncached_input_tokens": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_uncached_input_tokens": 1
+      },
+      "name": "uncached_explicit_zero_is_available",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/uncached_explicit_zero_is_available/created",
+          "input/initial/applied",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/started",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/1",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/2",
+          "op/c1c/uncached_explicit_zero_is_available/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/3",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/boundary/budget/c1c/uncached_explicit_zero_is_available/turn/initial/model/primary/1/start/1",
+          "op/c1c/uncached_explicit_zero_is_available/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/4",
+          "op/c1c/uncached_explicit_zero_is_available/turn/initial/model/primary/1/1/result",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/boundary/budget/c1c/uncached_explicit_zero_is_available/turn/initial/model/primary/1/complete/1",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/5",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/boundary/budget/terminal",
+          "usage/active/c1c/uncached_explicit_zero_is_available/turn/initial/1/6",
+          "turn/c1c/uncached_explicit_zero_is_available/turn/initial/ended"
+        ],
+        "session_id": "c1c/uncached_explicit_zero_is_available"
+      },
+      "steps": [
+        {
+          "assistant_output": "cached",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 3,
+            "uncached_input_tokens": 0
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": 2,
+          "currency": null,
+          "dimension": "tool_calls",
+          "enforcement_boundary": "tool_batch_preflight",
+          "limit": 1,
+          "observed": 0,
+          "overshoot": 1,
+          "reason": "limit_reached",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "calls"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 1,
+        "partial_output": "two calls",
+        "status": "failed",
+        "tool_calls": 0,
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_tool_calls": 1
+      },
+      "name": "tool_batch_total_preflight_is_all_or_none",
+      "no_tool_policy": "continue",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/tool_batch_total_preflight_is_all_or_none/created",
+          "input/initial/applied",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/started",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/1",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/2",
+          "op/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/3",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/boundary/budget/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/start/1",
+          "op/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/4",
+          "op/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/1/result",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/boundary/budget/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/complete/1",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/boundary/budget/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/model/primary/1/tool_batch",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/5",
+          "usage/active/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/1/6",
+          "turn/c1c/tool_batch_total_preflight_is_all_or_none/turn/initial/ended"
+        ],
+        "session_id": "c1c/tool_batch_total_preflight_is_all_or_none"
+      },
+      "steps": [
+        {
+          "assistant_output": "two calls",
+          "tool_calls": [
+            {
+              "arguments": {},
+              "id": "call-a",
+              "name": "alpha"
+            },
+            {
+              "arguments": {},
+              "id": "call-b",
+              "name": "beta"
+            }
+          ],
+          "usage": {
+            "total_tokens": 3,
+            "uncached_input_tokens": 3
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": 2,
+          "currency": null,
+          "dimension": "tool_calls_by_name",
+          "enforcement_boundary": "tool_batch_preflight",
+          "limit": 1,
+          "observed": 0,
+          "overshoot": 1,
+          "reason": "limit_reached",
+          "tool_name": "search",
+          "unavailable_reason": null,
+          "unit": "calls"
+        },
+        "completion_reason": "budget_exhausted",
+        "model_calls": 1,
+        "status": "failed",
+        "tool_calls": 0,
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_tool_calls_by_name": {
+          "search": 1
+        }
+      },
+      "name": "named_tool_preflight_matches_exact_name",
+      "no_tool_policy": "continue",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/named_tool_preflight_matches_exact_name/created",
+          "input/initial/applied",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/started",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/1",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/2",
+          "op/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/3",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/boundary/budget/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/start/1",
+          "op/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/4",
+          "op/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/1/result",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/boundary/budget/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/complete/1",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/boundary/budget/c1c/named_tool_preflight_matches_exact_name/turn/initial/model/primary/1/tool_batch",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/5",
+          "usage/active/c1c/named_tool_preflight_matches_exact_name/turn/initial/1/6",
+          "turn/c1c/named_tool_preflight_matches_exact_name/turn/initial/ended"
+        ],
+        "session_id": "c1c/named_tool_preflight_matches_exact_name"
+      },
+      "steps": [
+        {
+          "assistant_output": "exact names",
+          "tool_calls": [
+            {
+              "arguments": {},
+              "id": "call-search-1",
+              "name": "lookup_records"
+            },
+            {
+              "arguments": {},
+              "id": "call-search-2",
+              "name": "search"
+            },
+            {
+              "arguments": {},
+              "id": "call-search-v2",
+              "name": "search"
+            }
+          ],
+          "usage": {
+            "total_tokens": 3,
+            "uncached_input_tokens": 3
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "wall_time",
+          "enforcement_boundary": "run_start",
+          "limit": 0,
+          "observed": 0,
+          "overshoot": 0,
+          "reason": "limit_reached",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "milliseconds"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 0,
+        "partial_output": null,
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_wall_time_ms": 0
+      },
+      "name": "zero_wall_time_stops_before_llm",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/zero_wall_time_stops_before_llm/created",
+          "input/initial/applied",
+          "turn/c1c/zero_wall_time_stops_before_llm/turn/initial/started",
+          "usage/active/c1c/zero_wall_time_stops_before_llm/turn/initial/1/1",
+          "turn/c1c/zero_wall_time_stops_before_llm/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/zero_wall_time_stops_before_llm/turn/initial/1/2",
+          "usage/active/c1c/zero_wall_time_stops_before_llm/turn/initial/1/3",
+          "turn/c1c/zero_wall_time_stops_before_llm/turn/initial/ended"
+        ],
+        "session_id": "c1c/zero_wall_time_stops_before_llm"
+      },
+      "steps": [
+        {
+          "assistant_output": "must not execute",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 1,
+            "uncached_input_tokens": 1
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "host_cost",
+          "enforcement_boundary": "cycle_start",
+          "limit": 100,
+          "observed": 120,
+          "overshoot": 20,
+          "reason": "limit_reached",
+          "tool_name": null,
+          "unavailable_reason": null,
+          "unit": "credits"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 0,
+        "partial_output": null,
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [
+        {
+          "amount_microunits": 0,
+          "currency": null,
+          "unit": "credits"
+        },
+        {
+          "amount_microunits": 0,
+          "currency": null,
+          "unit": "credits"
+        },
+        {
+          "amount_microunits": 120,
+          "currency": null,
+          "unit": "credits"
+        }
+      ],
+      "limits": {
+        "max_host_cost": {
+          "amount_microunits": 100,
+          "currency": null,
+          "unit": "credits"
+        }
+      },
+      "name": "host_cost_atomic_overshoot",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/host_cost_atomic_overshoot/created",
+          "input/initial/applied",
+          "turn/c1c/host_cost_atomic_overshoot/turn/initial/started",
+          "usage/active/c1c/host_cost_atomic_overshoot/turn/initial/1/1",
+          "turn/c1c/host_cost_atomic_overshoot/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/host_cost_atomic_overshoot/turn/initial/1/2",
+          "op/c1c/host_cost_atomic_overshoot/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/host_cost_atomic_overshoot/turn/initial/1/3",
+          "turn/c1c/host_cost_atomic_overshoot/turn/initial/boundary/budget/c1c/host_cost_atomic_overshoot/turn/initial/model/primary/1/start/1",
+          "usage/active/c1c/host_cost_atomic_overshoot/turn/initial/1/4",
+          "op/c1c/host_cost_atomic_overshoot/turn/initial/model/primary/1/1/result",
+          "usage/active/c1c/host_cost_atomic_overshoot/turn/initial/1/5",
+          "turn/c1c/host_cost_atomic_overshoot/turn/initial/ended"
+        ],
+        "session_id": "c1c/host_cost_atomic_overshoot"
+      },
+      "steps": [
+        {
+          "assistant_output": "costly draft",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 5,
+            "uncached_input_tokens": 5
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": {
+          "attempted_increment": null,
+          "currency": null,
+          "dimension": "host_cost",
+          "enforcement_boundary": "run_start",
+          "limit": 100,
+          "observed": null,
+          "overshoot": null,
+          "reason": "metric_unavailable",
+          "tool_name": null,
+          "unavailable_reason": "unit_mismatch",
+          "unit": "credits"
+        },
+        "completion_reason": "budget_exhausted",
+        "error": "Run budget exhausted.",
+        "model_calls": 0,
+        "partial_output": null,
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [
+        {
+          "amount_microunits": 0,
+          "currency": "USD",
+          "unit": "currency"
+        }
+      ],
+      "limits": {
+        "max_host_cost": {
+          "amount_microunits": 100,
+          "currency": null,
+          "unit": "credits"
+        },
+        "unavailable_metric_policy": "stop"
+      },
+      "name": "host_cost_unit_mismatch_strict_stops",
+      "no_tool_policy": "finish",
+      "pre_cancelled": false,
+      "producer": {
+        "records": [
+          "session/c1c/host_cost_unit_mismatch_strict_stops/created",
+          "input/initial/applied",
+          "turn/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/started",
+          "usage/active/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/1/1",
+          "turn/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/boundary/budget/run_start",
+          "usage/active/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/1/2",
+          "usage/active/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/1/3",
+          "turn/c1c/host_cost_unit_mismatch_strict_stops/turn/initial/ended"
+        ],
+        "session_id": "c1c/host_cost_unit_mismatch_strict_stops"
+      },
+      "steps": [
+        {
+          "assistant_output": "must not execute",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 1,
+            "uncached_input_tokens": 1
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "budget_exhaustion": null,
+        "completion_reason": "cancelled",
+        "error": "cancel_requested",
+        "model_calls": 0,
+        "partial_output": null,
+        "status": "failed",
+        "tool_execution_count": 0
+      },
+      "host_cost_readings": [],
+      "limits": {
+        "max_total_tokens": 0,
+        "max_wall_time_ms": 0
+      },
+      "name": "pre_cancelled_run_precedes_zero_budget",
+      "no_tool_policy": "finish",
+      "pre_cancelled": true,
+      "producer": {
+        "records": [
+          "session/c1c/pre_cancelled_run_precedes_zero_budget/created",
+          "input/initial/applied",
+          "turn/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/started",
+          "usage/active/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/1/1",
+          "input/cancel/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/applied",
+          "usage/active/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/1/2",
+          "usage/active/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/1/3",
+          "turn/c1c/pre_cancelled_run_precedes_zero_budget/turn/initial/ended"
+        ],
+        "session_id": "c1c/pre_cancelled_run_precedes_zero_budget"
+      },
+      "steps": [
+        {
+          "assistant_output": "must not execute",
+          "tool_calls": [],
+          "usage": {
+            "total_tokens": 1,
+            "uncached_input_tokens": 1
+          }
+        }
+      ]
+    }
+  ],
+  "terminal_precedence_cases": [
+    {
+      "conditions": [
+        "cancellation_visible",
+        "budget_limit_reached"
+      ],
+      "expected_completion_reason": "cancelled",
+      "name": "pre_cancelled_admission_precedes_budget"
+    },
+    {
+      "conditions": [
+        "operation_failed",
+        "budget_limit_exceeded"
+      ],
+      "expected_completion_reason": "failed",
+      "name": "operation_error_is_not_hidden_by_post_operation_budget"
+    },
+    {
+      "conditions": [
+        "budget_limit_exceeded",
+        "tool_finish"
+      ],
+      "expected_completion_reason": "budget_exhausted",
+      "name": "budget_precedes_task_terminal_projection"
+    },
+    {
+      "conditions": [
+        "budget_limit_exceeded",
+        "max_cycles"
+      ],
+      "expected_completion_reason": "budget_exhausted",
+      "name": "budget_precedes_max_cycles"
+    }
+  ],
+  "version": 2,
+  "wire_examples": {
+    "exhaustion": {
+      "attempted_increment": null,
+      "currency": null,
+      "dimension": "total_tokens",
+      "enforcement_boundary": "model_call_complete",
+      "limit": 1200,
+      "observed": 1250,
+      "overshoot": 50,
+      "reason": "limit_exceeded",
+      "tool_name": null,
+      "unavailable_reason": null,
+      "unit": "tokens"
+    },
+    "limits": {
+      "max_host_cost": {
+        "amount_microunits": 250000,
+        "currency": "USD",
+        "unit": "currency"
+      },
+      "max_tool_calls": 6,
+      "max_tool_calls_by_name": {
+        "fetch": 2,
+        "search": 3
+      },
+      "max_total_tokens": 1200,
+      "max_uncached_input_tokens": 800,
+      "max_wall_time_ms": 30000,
+      "unavailable_metric_policy": "continue_and_mark"
+    },
+    "snapshot": {
+      "cycles": 2,
+      "elapsed_ms": 1250,
+      "host_cost": {
+        "amount_microunits": 200000,
+        "currency": "USD",
+        "unit": "currency"
+      },
+      "tool_calls": 3,
+      "tool_calls_by_name": {
+        "fetch": 1,
+        "search": 2
+      },
+      "total_tokens": 1100,
+      "unavailable_dimensions": [
+        {
+          "dimension": "uncached_input_tokens",
+          "expected_currency": null,
+          "expected_unit": "tokens",
+          "observed_currency": null,
+          "observed_unit": null,
+          "reason": "usage_missing"
+        }
+      ],
+      "uncached_input_tokens": null
+    }
   }
 }

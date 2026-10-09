@@ -39,7 +39,7 @@ class Forbidden(importlib.abc.MetaPathFinder):
             raise AssertionError(f'unexpected import: {fullname}')
 sys.meta_path.insert(0, Forbidden())
 import vv_agent
-assert not any(name.startswith('vv_agent.session.') for name in sys.modules)
+assert not any(name.split('.')[0] in {'psycopg', 'django'} for name in sys.modules)
 import pytest
 raise SystemExit(pytest.main(['tests/session/test_records_reducer.py', '-q', '-p', 'no:cacheprovider']))
 """

@@ -339,14 +339,14 @@ def test_microcompact_plan_indices_match_applied_messages() -> None:
     "variant", fixture("memory_local")["summary_compaction"]["control_failure_case"]["variants"], ids=lambda v: v["name"]
 )
 def test_summary_control_failures_propagate(variant: dict[str, Any]) -> None:
-    from vv_agent.checkpoint import CheckpointError
     from vv_agent.runtime.cancellation import CancelledError
 
     inputs = fixture("memory_local")["summary_compaction"]["control_failure_case"]["input"]
     from vv_agent.budget import BudgetDimension, BudgetEnforcementBoundary, BudgetExhaustion, BudgetExhaustionReason
     from vv_agent.runtime.model_calls import ModelCallBudgetExhausted
 
-    error = CancelledError("cancelled") if variant["name"] == "cancellation" else CheckpointError("control", code=variant["name"])
+    assert variant["name"] in {"cancellation", "budget_exhaustion"}
+    error = CancelledError("cancelled")
     if variant["name"] == "budget_exhaustion":
         error = ModelCallBudgetExhausted(
             BudgetExhaustion(

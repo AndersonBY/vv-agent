@@ -101,7 +101,7 @@ class AgentCompiler:
             input=input,
             model=str(resolved.model_id or model),
             trace_id=trace_id,
-            session=run_config.session,
+            session=None,
             workspace=run_config.workspace,
             context=run_config.context,
             metadata=metadata,

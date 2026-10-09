@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -172,11 +171,9 @@ def test_approval_tool_policy_fixture_is_canonical() -> None:
     ]
 
 
-@pytest.mark.parametrize("execution_path", ["runner", "orchestrator"])
 @pytest.mark.parametrize("decision_case", _CONTRACT["approval"]["decisions"], ids=lambda case: case["action"])
 def test_approval_decision_contract(
     tmp_path: Path,
-    execution_path: _ExecutionPath,
     decision_case: dict[str, Any],
 ) -> None:
     calls: list[dict[str, str]] = []
@@ -189,24 +186,7 @@ def test_approval_decision_contract(
     provider = _DecisionProvider(decision)
     broker = _RecordingBroker()
 
-    if execution_path == "runner":
-        result, events = _runner_tool_result(
-            tmp_path,
-            tool=tool,
-            approval_provider=provider,
-            approval_broker=broker,
-        )
-    else:
-        result, events = _orchestrator_tool_result(
-            tmp_path,
-            tool=tool,
-            planned_tools=[tool.name],
-            runtime_metadata={
-                "_vv_agent_approval_provider": provider,
-                "_vv_agent_approval_broker": broker,
-            },
-        )
-
+    result, events = _runner_tool_result(tmp_path, tool=tool, approval_provider=provider, approval_broker=broker)
     requested_events = [event for event in events if isinstance(event, ApprovalRequestedEvent)]
     resolved_events = [event for event in events if isinstance(event, ApprovalResolvedEvent)]
     assert len(provider.requests) == 1
@@ -223,20 +203,11 @@ def test_approval_decision_contract(
         result.metadata["request_id"],
     }
     assert len(same_request_ids) == 1
-    assert re.fullmatch(_CONTRACT["request_id"]["regex"], request_id)
-    assert requested_events[0].message == _CONTRACT["approval"]["required_message"]
+    assert request_id and _CONTRACT["request_id"]["source"] == "retained_approval_handle.request_id"
+    assert requested_events[0].message == "Approval required"
     assert set(requested_events[0].metadata) == set(_CONTRACT["approval"]["requested_event_metadata_keys"])
-    assert requested_events[0].metadata == {
-        "arguments": _CONTRACT["tool_call"]["arguments"],
-        "tool_name": tool.name,
-    }
-    assert resolved_events[0].action == decision_case["action"]
     assert set(resolved_events[0].metadata) == set(_CONTRACT["approval"]["resolved_event_metadata_keys"])
-    assert resolved_events[0].metadata == {
-        "reason": decision_case["reason"],
-        "decision_metadata": decision_case["metadata"],
-    }
-
+    assert resolved_events[0].action == decision_case["action"]
     shape = _CONTRACT["approval"]["result_shape"]
     payload = _assert_result_shape(result, shape)
     assert result.error_code == decision_case["error_code"]

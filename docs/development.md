@@ -80,10 +80,10 @@ validating fixture bytes:
 ```bash
 uv run pytest tests/test_tool_orchestrator.py tests/test_runtime_hooks.py tests/test_events_contract.py tests/test_event_validation.py
 uv run pytest tests/test_runner.py tests/test_runner_events_producer_parity.py tests/test_runner_trace_contract.py
-uv run pytest tests/test_output_validation_contract.py tests/test_checkpoint_runner.py
+uv run pytest tests/test_output_validation_contract.py tests/test_run_resume.py
 uv run pytest tests/test_app_server_item_mapper.py tests/test_app_server_contract_parity.py
-uv run pytest tests/test_run_definition_producer.py tests/test_checkpoint.py tests/test_checkpoint_runner.py
-uv run pytest tests/test_distributed_checkpoint.py tests/test_configured_sub_agent_parity.py
+uv run pytest tests/test_run_definition_producer.py tests/test_run_resume.py
+uv run pytest tests/test_configured_sub_agent_parity.py tests/test_sub_task_manager_continuation_recovery.py
 uv run pytest tests/test_tool_metadata_contract.py tests/test_function_tool.py tests/test_tool_schema_contract.py tests/test_parity_evidence_manifests.py
 ```
 
@@ -108,22 +108,22 @@ Useful live-test environment variables:
 | Snapshot client and schema-2 adoption | `tests/test_contract_snapshot.py` |
 | Shared contract and canonical producers | `tests/test_tool_metadata_contract.py`, `tests/test_parity_evidence_manifests.py`, `tests/test_tool_schema_contract.py`, `tests/test_app_server_contract_parity.py`, `tests/test_runner_events_producer_parity.py` |
 | Tool metadata construction and model-schema isolation | `tests/test_tool_metadata_contract.py`, `tests/test_run_definition_producer.py`, `tests/test_function_tool.py`, `tests/test_tool_schema_contract.py`, `tests/test_parity_evidence_manifests.py` |
-| Metadata denial, delegation, and distributed projection | `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py`, `tests/test_distributed_checkpoint.py` |
-| Planned/started/completed typed telemetry | `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_contract.py`, `tests/test_checkpoint_runner.py` |
+| Metadata denial and child delegation | `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py` |
+| Planned/started/completed typed telemetry | `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_contract.py` |
 | Tool telemetry App Server projection | `tests/test_app_server_item_mapper.py`, `tests/test_app_server_contract_parity.py` |
-| Tool metadata and checkpoint freeze | `tests/test_run_definition_producer.py`, `tests/test_checkpoint.py`, `tests/test_checkpoint_runner.py`, `tests/test_distributed_checkpoint.py` |
-| Optional output validation and tools-free repair | `tests/test_output_validation_contract.py`, `tests/test_checkpoint_runner.py` |
+| Tool metadata and frozen turn definitions | `tests/test_run_definition_producer.py` |
+| Optional output validation and tools-free repair | `tests/test_output_validation_contract.py` |
 | Settings/model resolution | `tests/test_config.py` |
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
 | Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |
-| Public SDK contract | `tests/test_public_agent.py`, `tests/test_runner.py`, `tests/test_model_settings.py`, `tests/test_function_tool.py`, `tests/test_sessions.py`, `tests/test_run_events.py`, `tests/test_agent_as_tool.py`, `tests/test_handoffs.py`, `tests/test_tool_policy.py`, `tests/test_tool_approval.py`, `tests/test_guardrails.py`, `tests/test_tracing.py`, `tests/test_compiler.py` |
+| Public SDK contract | `tests/test_public_agent.py`, `tests/test_runner.py`, `tests/test_model_settings.py`, `tests/test_function_tool.py`, `tests/test_run_events.py`, `tests/test_agent_as_tool.py`, `tests/test_handoffs.py`, `tests/test_tool_policy.py`, `tests/test_tool_approval.py`, `tests/test_guardrails.py`, `tests/test_tracing.py`, `tests/test_compiler.py` |
 | Live handles and event replay | `tests/test_run_handle_live_stream.py`, `tests/test_event_store.py`, `tests/test_events_contract.py`, `tests/test_session_graph_events.py` |
 | App Server protocol, transport, replay, approvals, schema, and CLI | `tests/test_app_server_jsonrpc.py`, `tests/test_app_server_initialize.py`, `tests/test_app_server_transport.py`, `tests/test_app_server_request_serialization.py`, `tests/test_app_server_thread_store.py`, `tests/test_app_server_thread_turn.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_approval.py`, `tests/test_app_server_replay.py`, `tests/test_app_server_schema.py`, `tests/test_app_server_cli.py` |
 | Provider contracts | `tests/test_approval_protocol.py`, `tests/test_context_providers.py`, `tests/test_memory_provider.py`, `tests/test_interactive_approval_bridge.py`, `tests/test_interactive_memory_provider_bridge.py` |
-| LLM/tool hooks and after-cycle lifecycle hooks | `tests/test_runtime_hooks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint.py` |
+| LLM/tool hooks and after-cycle lifecycle hooks | `tests/test_runtime_hooks.py`, `tests/test_after_cycle_hooks.py` |
 | Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py`, `tests/test_tool_orchestrator.py` |
 | Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_microcompaction_policy.py`, `tests/test_microcompaction_events.py`, `tests/test_memory_local_contract.py`, `tests/test_session_memory.py` |
-| Execution backends | `tests/test_backends.py`, `tests/test_checkpoint.py` |
+| Execution backends | `tests/test_backends.py` |
 | Workspace backends | `tests/test_workspace_backends.py` |
 | Live provider behavior | `tests/test_live_moonshot.py` |
 
@@ -133,13 +133,13 @@ Useful live-test environment variables:
   public types. New user-facing SDK concepts must be importable from `vv_agent`.
 - Keep the runtime boundary explicit. Host integrations should implement
   `AppServerHost` for JSONL process integration, top-level `ApprovalProvider`,
-  `ContextProvider`, and `RunEventStore`, plus package extension points such as
+  `ContextProvider`, and `SessionRunEventStore` or `JsonlRunEventStore` projection sink, plus package extension points such as
   `vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor` or
   `FunctionTool`, instead of patching runner, compiler, memory, or
   tool-dispatch internals.
 - Treat typed `RunEvent` objects as the only app-state event contract. Host UI
   behavior must stream or replay events through `Runner.start()`,
-  `RunHandle.events()`, and `RunEventStore`.
+  `RunHandle.events()`, and `SessionRunEventStore` or `JsonlRunEventStore` projection sink.
 - For App Server host work, render state from `item/*` notifications and
   snapshot `items`.
 - Update README/examples when user-facing defaults, environment variables, or

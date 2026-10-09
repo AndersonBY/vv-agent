@@ -4,14 +4,13 @@
 
 These scripts are self-contained and runnable from the repository root. Public
 SDK examples use `Agent`, `Runner`, `RunConfig`, `ModelSettings`,
-`function_tool`, sessions, handoffs, typed events, and tool policy. Low-level
-runtime examples are kept separately for backend integration work.
+`function_tool`, sessions, handoffs, typed events, and tool policy. All examples use the current session kernel public entrypoints.
 
 For host-product migrations, prefer provider and executor extension points over
 runtime patches: `ApprovalProvider` for UI/rules, `ContextProvider` for product
 prompt fragments, `vv_agent.memory.MemoryProvider` for product persistence,
 `vv_agent.tools.ToolExecutor` or `FunctionTool` groups for product tools, and
-`RunEventStore` for app history. Use `Runner.start()` when the host needs live
+`SessionRunEventStore` for app history. Use `Runner.start()` when the host needs live
 typed events plus cancellation or approval control through `RunHandle`.
 
 ## Common Environment Variables
@@ -33,7 +32,7 @@ typed events plus cancellation or approval control through `RunHandle`.
 | 01 | `01_quick_start.py` | Minimal `Agent` + `Runner.run_sync` |
 | 02 | `02_agent_profiles.py` | Reusable agent profiles and `ModelSettings` |
 | 03 | `03_sdk_client.py` | Runner configuration, sessions, custom tool, typed events |
-| 04 | `04_session_api.py` | `MemorySession` across multiple runs |
+| 04 | `04_session_api.py` | Kernel session across multiple turns |
 | 05 | `05_ask_user_resume.py` | Tool approval and `WAIT_USER` events |
 | 06 | `06_runtime_hooks.py` | Low-level hooks passed through `RunConfig.hooks` |
 | 07 | `07_token_budget_guard.py` | Public token and tool-call run budgets |
@@ -64,17 +63,15 @@ preserves the example's behavior.
 
 ## Runtime Integration
 
-These examples use lower-level runtime APIs for cancellation, streaming,
-threaded execution, checkpointing, Celery dispatch, and workspace backends.
+These examples use kernel handles, durable sessions, streaming and workspace backends.
 
 | # | File | Shows |
 | --- | --- | --- |
-| 18 | `18_cancellation.py` | `CancellationToken` with a running task |
-| 19 | `19_streaming.py` | Raw runtime stream callback events |
-| 20 | `20_thread_backend.py` | `ThreadBackend` submit/future execution |
-| 21 | `21_state_checkpoint.py` | Durable Runner resume/replay with checkpoint v10 and SQLite |
-| 22 | `22_sdk_advanced.py` | Public SDK with streaming and `ThreadBackend` |
-| 23 | `23_celery_backend.py` | `CeleryBackend` distributed cycles |
+| 18 | `18_cancellation.py` | RunHandle cancellation |
+| 19 | `19_streaming.py` | Typed kernel stream events |
+| 20 | `20_thread_backend.py` | Non-blocking RunHandle execution |
+| 21 | `21_state_checkpoint.py` | Durable SQLite session history and retained-turn resume |
+| 22 | `22_sdk_advanced.py` | Public SDK streaming on the session kernel |
 | 24 | `24_workspace_backends.py` | Local, memory, S3, and custom workspace backends |
 | 25 | `25_temporary_tool_injection.py` | Run-scoped tool enablement |
 

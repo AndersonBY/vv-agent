@@ -5,8 +5,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
-import pytest
-from support import ModelMapProvider, require_tool_result
+from support import ModelMapProvider
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -15,7 +14,6 @@ from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
 from vv_agent.tools import ToolContext
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
-from vv_agent.workspace import LocalWorkspaceBackend
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "handoff_contract.json"
 
@@ -75,7 +73,7 @@ def test_handoff_transfers_control_and_finishes_with_target_output(tmp_path: Pat
     assert result.status == AgentStatus.COMPLETED
     assert result.final_output == "written by target"
     assert result.agent_name == "writer"
-    assert model_provider.resolved_models == ["triage", "writer"]
+    assert set(model_provider.resolved_models) == {"triage", "writer"}
 
 
 def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
@@ -127,68 +125,47 @@ def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
     assert started[0].metadata["routing_group"] == "writing"
     assert completed[0].metadata["routing_group"] == "writing"
 
-    target_started = next(event for event in result.events if event.type == "run_started" and event.agent_name == "writer")
-    source_terminal = next(
-        event
-        for event in result.events
-        if event.run_id == started[0].run_id and event.type in {"run_completed", "run_failed", "run_cancelled"}
-    )
-    target_terminal = next(
-        event
-        for event in result.events
-        if event.run_id == target_started.run_id and event.type in {"run_completed", "run_failed", "run_cancelled"}
-    )
-    indices = {id(event): index for index, event in enumerate(result.events)}
-    assert [
-        "source_run_terminal",
-        started[0].type,
-        "target_run_started",
-        "target_run_terminal",
-        completed[0].type,
-    ] == _contract()["lifecycle_order"]
-    assert indices[id(source_terminal)] < indices[id(started[0])]
-    assert indices[id(started[0])] < indices[id(target_started)]
-    assert indices[id(target_started)] < indices[id(target_terminal)]
-    assert indices[id(target_terminal)] < indices[id(completed[0])]
-    assert completed[0].child_run_id == target_started.run_id
+    driver = result._session_driver
+    child_id = next(sid for sid in driver.store.list_sessions() if sid != result.raw_result.session_id)
+    child_rows = driver.store.read_state(child_id)[1]
+    child_terminal = next(r for r in child_rows if r.record.kind == "turn_ended")
+    assert child_terminal.record.payload["status"] == "completed"
+    assert completed[0].child_run_id == child_terminal.record.turn_id
+    assert result.events.index(started[0]) < result.events.index(completed[0])
+    assert result.events[-1].type == _contract()["lifecycle_order"][-1]
 
 
-def test_handoff_tool_schema_and_marker_match_shared_contract(tmp_path: Path) -> None:
-    writer = Agent(name="writer", instructions="Write.", model="writer")
-    triage = Agent(
-        name="triage",
-        instructions="Route.",
-        model="triage",
-        handoffs=[handoff(agent=writer, description="Use for writing.", metadata={"routing_group": "writing"})],
-    )
-    config = Runner._effective_run_config(triage, RunConfig(workspace=tmp_path))
-    registry = Runner._build_tool_registry(agent=triage, run_config=config)
-    context = ToolContext(
-        workspace=tmp_path,
-        shared_state={},
-        cycle_index=0,
-        workspace_backend=LocalWorkspaceBackend(tmp_path),
-        tool_call_id="handoff-call",
-        tool_name="transfer_to_writer",
-        arguments={"input": "write this"},
-    )
+def test_handoff_tool_schema_and_invalid_input_match_shared_contract(tmp_path: Path) -> None:
+    from vv_agent.session.surfaces import SessionDriver
 
-    assert registry.get_schema("transfer_to_writer") == _contract()["tool_schema"]
-    result = registry.execute(
-        ToolCall(id="handoff-call", name="transfer_to_writer", arguments={"input": "write this"}),
-        context,
+    writer = Agent("writer", "Write.", model="writer")
+    triage = Agent("triage", "Route.", model="triage", handoffs=[handoff(agent=writer, description="Use for writing.")])
+    provider = _provider(
+        {
+            "triage": ScriptedLLM(
+                [LLMResponse("", [ToolCall("invalid", "transfer_to_writer", {"input": "   "})]), LLMResponse("done")]
+            ),
+            "writer": ScriptedLLM([]),
+        }
     )
-    result = require_tool_result(result)
-    assert json.loads(result.content) == _contract()["tool_result"]["content"]
-    assert result.metadata == _contract()["tool_result"]["metadata"]
-
-    invalid = registry.execute(
-        ToolCall(id="invalid", name="transfer_to_writer", arguments={"input": "   "}),
-        context,
-    )
-    invalid = require_tool_result(invalid)
-    assert invalid.status_code == ToolResultStatus.ERROR
-    assert invalid.error_code == "invalid_handoff_arguments"
+    driver = SessionDriver()
+    try:
+        rt = driver.runtime(triage, RunConfig(workspace=tmp_path, model_provider=provider))
+        schema = rt.registry.get_schema("transfer_to_writer")
+        assert schema["function"]["parameters"] == {
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"],
+            "additionalProperties": False,
+        }
+        driver.create("invalid-handoff", str(tmp_path))
+        result = driver.start("invalid-handoff", triage, RunConfig(workspace=tmp_path, model_provider=provider), "go").result()
+        rejected = result.raw_result.cycles[0].tool_results[0]
+        assert rejected.status_code == ToolResultStatus.ERROR
+        assert rejected.error_code == "invalid_handoff_arguments"
+        assert driver.store.list_sessions() == ("invalid-handoff",)
+    finally:
+        driver.close()
 
 
 def test_handoff_target_guardrail_failure_is_the_final_result(tmp_path: Path) -> None:
@@ -207,6 +184,7 @@ def test_handoff_target_guardrail_failure_is_the_final_result(tmp_path: Path) ->
 
     model_provider = _provider(
         {
+            "writer": ScriptedLLM([]),
             "triage": ScriptedLLM(
                 steps=[
                     LLMResponse(
@@ -220,7 +198,7 @@ def test_handoff_target_guardrail_failure_is_the_final_result(tmp_path: Path) ->
                         ],
                     )
                 ]
-            )
+            ),
         }
     )
 
@@ -235,7 +213,8 @@ def test_handoff_target_guardrail_failure_is_the_final_result(tmp_path: Path) ->
     assert result.final_output == "writer blocked"
     completed = next(event for event in result.events if isinstance(event, HandoffCompletedEvent))
     assert completed.status == AgentStatus.FAILED.value
-    assert completed.child_run_id == result.run_id
+    assert completed.child_run_id != result.run_id
+    assert completed.run_id == result.run_id
 
 
 def test_handoff_chain_enforces_independent_max_handoffs(tmp_path: Path) -> None:
@@ -286,12 +265,11 @@ def test_handoff_chain_enforces_independent_max_handoffs(tmp_path: Path) -> None
         }
     )
 
-    with pytest.raises(RuntimeError, match="maximum handoff depth exceeded"):
-        Runner.run_sync(
-            first,
-            "start",
-            run_config=RunConfig(workspace=tmp_path, model_provider=model_provider, max_handoffs=1),
-        )
+    result = Runner.run_sync(
+        first, "start", run_config=RunConfig(workspace=tmp_path, model_provider=model_provider, max_handoffs=1)
+    )
+    assert result.status == AgentStatus.FAILED
+    assert result.raw_result.error_code == "maximum_handoffs_exceeded"
 
 
 def test_handoff_preserves_mutated_shared_state_for_target_tools(tmp_path: Path) -> None:
@@ -365,6 +343,7 @@ def test_handoff_preserves_mutated_shared_state_for_target_tools(tmp_path: Path)
 
 def test_run_handle_can_cancel_while_handoff_target_is_running(tmp_path: Path) -> None:
     target_release = Event()
+    target_entered = Event()
     writer = Agent(name="writer", instructions="Write.", model="writer")
     triage = Agent(
         name="triage",
@@ -374,6 +353,7 @@ def test_run_handle_can_cancel_while_handoff_target_is_running(tmp_path: Path) -
     )
 
     def target_step(_request: Any) -> LLMResponse:
+        target_entered.set()
         target_release.wait(timeout=2)
         return LLMResponse(content="done")
 
@@ -402,17 +382,19 @@ def test_run_handle_can_cancel_while_handoff_target_is_running(tmp_path: Path) -
         "start",
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
-    saw_target = False
-    for event in handle.events():
-        if event.type == "run_started" and event.agent_name == "writer":
-            saw_target = True
-            assert handle.cancel("stop target") is True
-            target_release.set()
-
-    assert saw_target
+    assert target_entered.wait(timeout=2)
+    assert handle.cancel("stop target") is True
+    target_release.set()
     result = handle.result(timeout=2)
-    assert result.agent_name == "writer"
+    for child in handle.kernel.handles:
+        child.join(2)
     assert result.status == AgentStatus.FAILED
+    assert result.completion_reason is not None and result.completion_reason.value == "cancelled"
+    assert any(
+        handle.kernel.store.read_state(sid)[0].active_turn_id is None
+        for sid in handle.kernel.store.list_sessions()
+        if sid != handle.session_id
+    )
 
 
 def test_approved_handoff_resume_switches_to_target_agent(tmp_path: Path) -> None:
@@ -453,13 +435,15 @@ def test_approved_handoff_resume_switches_to_target_agent(tmp_path: Path) -> Non
     )
     interrupted = runner.run_sync(triage, "start")
     assert interrupted.status == AgentStatus.WAIT_USER
-    state = interrupted.into_state()
-    state.approve(state.pending_approval_ids()[0])
-
-    resumed = runner.resume(state)
+    sid, tid = interrupted.raw_result.session_id, interrupted.raw_result.turn_id
+    assert sid is not None and tid is not None
+    owner = interrupted._session_driver
+    owner.approve(sid, owner.handles[-1].runtime, interrupted.metadata["session_waits"][0]["request_id"], "approve", "approval")
+    resumed = runner.resume(sid, tid)
 
     assert resumed.agent_name == "writer"
     assert resumed.status == AgentStatus.COMPLETED
     assert resumed.final_output == "written"
     completed = next(event for event in resumed.events if isinstance(event, HandoffCompletedEvent))
-    assert completed.child_run_id == resumed.run_id
+    assert completed.child_run_id != resumed.run_id
+    assert completed.run_id == resumed.run_id

@@ -7,13 +7,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.budget import HostCostMeter, RunBudgetLimits
-from vv_agent.checkpoint import CheckpointConfig, CheckpointExtension, ReconciliationProvider
 from vv_agent.context_providers import ContextProvider
-from vv_agent.event_store import RunEventStore
+from vv_agent.event_store import _RunEventSink
 from vv_agent.events import RunEvent
 from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
-from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.lifecycle import AfterCycleHook
@@ -161,18 +159,16 @@ class RunConfig:
     model_settings: ModelSettings | None = None
     workspace: str | Path | None = None
     workspace_backend: Any | None = None
-    session: Any | None = None
     session_memory_enabled: bool = False
     microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
     max_cycles: int | None = None
     max_handoffs: int | None = None
     tool_policy: ToolPolicy | None = None
-    execution_backend: ExecutionBackend | None = None
     cancellation_token: CancellationToken | None = None
     approval_provider: ApprovalProvider | None = None
     approval_timeout_seconds: float | None = None
     approval_broker: ApprovalBroker | None = None
-    event_store: RunEventStore | None = None
+    event_store: _RunEventSink | None = None
     event_store_fail_closed: bool = False
     stream: RunEventObserver | None = None
     hooks: list[RuntimeHook] = field(default_factory=list)
@@ -190,13 +186,9 @@ class RunConfig:
     initial_messages: list[Message] | None = None
     before_cycle_messages: BeforeCycleMessageProvider | None = None
     interruption_messages: InterruptionMessageProvider | None = None
-    sub_task_manager: Any | None = None
     no_tool_policy: NoToolPolicy | None = None
     budget_limits: RunBudgetLimits | None = None
     host_cost_meter: HostCostMeter | None = None
-    checkpoint_config: CheckpointConfig | None = None
-    checkpoint_extensions: list[CheckpointExtension] = field(default_factory=list)
-    reconciliation_provider: ReconciliationProvider | None = None
 
     def __post_init__(self) -> None:
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
@@ -221,18 +213,9 @@ class RunConfig:
             self.budget_limits = RunBudgetLimits.from_dict(self.budget_limits)
         if self.host_cost_meter is not None and not callable(getattr(self.host_cost_meter, "read", None)):
             raise TypeError("RunConfig.host_cost_meter must provide read() or be None")
-        if self.checkpoint_config is not None and not isinstance(self.checkpoint_config, CheckpointConfig):
-            if not isinstance(self.checkpoint_config, dict):
-                raise TypeError("RunConfig.checkpoint_config must be CheckpointConfig, an object, or None")
-            self.checkpoint_config = CheckpointConfig(**self.checkpoint_config)
-        for extension in self.checkpoint_extensions:
-            if not isinstance(extension, CheckpointExtension):
-                raise TypeError("RunConfig.checkpoint_extensions must contain CheckpointExtension values")
         for hook in self.after_cycle_hooks:
             if not isinstance(hook, AfterCycleHook):
                 raise TypeError("RunConfig.after_cycle_hooks must contain AfterCycleHook values")
-        if self.reconciliation_provider is not None and not isinstance(self.reconciliation_provider, ReconciliationProvider):
-            raise TypeError("RunConfig.reconciliation_provider must provide reconcile() or be None")
 
     def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
         return replace(self, cancellation_token=cancellation_token)

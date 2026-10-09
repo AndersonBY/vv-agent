@@ -58,7 +58,7 @@ from vv_agent.session.records import (
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict, LeaseLost
-from vv_agent.session.surfaces import _SessionKernel
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.function import function_tool
@@ -220,7 +220,7 @@ def wait_turn() -> ToolExecutionResult:
 
 class Fixtures:
     def __init__(self):
-        self.kernel = _SessionKernel()
+        self.kernel = SessionDriver()
         self.clock = NOW
         self.kernel.store.connection.create_function("session_now_ms", 0, lambda: self.clock)
         self.runtimes: dict[str, Any] = {}
@@ -942,7 +942,7 @@ class Fixtures:
         provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("app done", raw={"usage": USAGE})])
         server = AppServer(
             transport=transport,
-            _kernel=self.kernel,
+            store=self.kernel.store,
             host=DefaultAppServerHost(
                 agent=Agent("app", "Be precise.", model="m"),
                 run_config=RunConfig(model_provider=provider, workspace="/fixture", tool_registry_factory=ToolRegistry),
@@ -1001,7 +1001,7 @@ class Fixtures:
         request(10, "thread/resume", {"threadId": "thread_1", "subscribe": False})
         request(11, "thread/list")
         exported = request(12, "schema/export")["result"]
-        assert exported == export_schema_bundles(_kernel=True)
+        assert exported == export_schema_bundles()
         # Schema text is retained once, rather than duplicated in the transcript.
         transcript[-1]["responses"][-1]["result"] = {"bundle_names": list(exported["jsonSchema"])}
         drain()
@@ -1019,7 +1019,7 @@ class Fixtures:
         )
         server = AppServer(
             transport=transport,
-            _kernel=self.kernel,
+            store=self.kernel.store,
             host=DefaultAppServerHost(
                 agent=Agent(
                     "app",
@@ -1057,7 +1057,7 @@ class Fixtures:
         server.run_adapter.join()
         drain()
         snapshot = request(26, "thread/read", {"threadId": sid})["result"]
-        assert snapshot["turns"][-1]["result"]["finalOutput"] == "parent done"
+        assert snapshot["turns"][-1]["result"]["finalOutput"] == "parent done", snapshot["turns"][-1]
         body = independent_bytes(
             [
                 {
@@ -1091,7 +1091,7 @@ class Fixtures:
                 tool_registry_factory=ToolRegistry,
             ),
         )
-        server = AppServer(transport=transport, _kernel=self.kernel, host=approval_host)
+        server = AppServer(transport=transport, store=self.kernel.store, host=approval_host)
         request(30, "initialize", {"clientInfo": {"name": "approval-owner"}})
         request(None, "initialized")
         sid = request(31, "thread/start")["result"]["threadId"]
@@ -1119,7 +1119,7 @@ class Fixtures:
         server.run_adapter.join()
         drain()
         # A fresh App Server has no process-local owner state; only the log supplies it.
-        server = AppServer(transport=observer, _kernel=self.kernel, host=approval_host)
+        server = AppServer(transport=observer, store=self.kernel.store, host=approval_host)
         request(35, "initialize", {"clientInfo": {"name": "observer-restart"}})
         request(None, "initialized")
         request(36, "thread/resume", {"threadId": sid})
@@ -1554,10 +1554,10 @@ def generate(output: Path):
                 for sid, stored in streams:
                     events = project_records(stored)
                     for event in events:
-                        assert event_from_dict(event.to_dict(), _kernel=True).to_dict() == event.to_dict(), (
+                        assert event_from_dict(event.to_dict()).to_dict() == event.to_dict(), (
                             sid,
                             event.to_dict(),
-                            event_from_dict(event.to_dict(), _kernel=True).to_dict(),
+                            event_from_dict(event.to_dict()).to_dict(),
                         )
                     projections.append(
                         {

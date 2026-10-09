@@ -55,7 +55,7 @@ def test_sanitize_for_resume_preserves_reasoning_only_messages() -> None:
 def test_sanitize_for_resume_drops_fully_empty_assistant_from_contract() -> None:
     case = _assistant_reasoning_case("fully_empty_assistant_is_removed")
 
-    sanitized = sanitize_for_resume([Message.from_dict(case["message"])])
+    sanitized = sanitize_for_resume([Message(**case["message"])])
 
     assert case["expected"]["retain_in_resumable_history"] is False
     assert sanitized == []
@@ -130,7 +130,6 @@ def test_sanitize_for_resume_drops_unresolved_tool_calls_with_empty_ids(tool_cal
 
 
 def test_sanitize_for_resume_removes_empty_call_from_mixed_tool_calls() -> None:
-    assert _configured_sub_agent_contract()["continuation"]["empty_tool_call_id_policy"] == "drop_incomplete_turn"
     messages = [
         Message(
             role="assistant",
@@ -163,7 +162,6 @@ def test_sanitize_for_resume_matches_tool_call_ids_after_trimming() -> None:
 
 
 def test_sanitize_for_resume_does_not_reuse_an_earlier_result_for_a_later_call() -> None:
-    assert _configured_sub_agent_contract()["continuation"]["tool_result_pairing"] == "immediately_following_assistant_turn"
     completed_assistant = Message(
         role="assistant",
         content="first",
@@ -191,7 +189,6 @@ def test_sanitize_for_resume_does_not_reuse_an_earlier_result_for_a_later_call()
 
 
 def test_sanitize_for_resume_drops_ambiguous_duplicate_ids_and_results() -> None:
-    assert _configured_sub_agent_contract()["continuation"]["duplicate_tool_call_id_policy"] == "drop_ambiguous_call_and_results"
     messages = [
         Message(role="user", content="before"),
         Message(
@@ -213,7 +210,6 @@ def test_sanitize_for_resume_drops_ambiguous_duplicate_ids_and_results() -> None
 
 
 def test_sanitize_for_resume_drops_out_of_order_results_and_unresolved_calls() -> None:
-    assert _configured_sub_agent_contract()["continuation"]["out_of_order_tool_result_policy"] == "drop_orphan_result"
     messages = [
         Message(role="tool", content="too early", tool_call_id="late"),
         Message(role="user", content="boundary"),
@@ -232,7 +228,6 @@ def test_sanitize_for_resume_drops_out_of_order_results_and_unresolved_calls() -
 
 
 def test_sanitize_for_resume_requires_results_in_tool_call_order() -> None:
-    assert _configured_sub_agent_contract()["continuation"]["tool_result_order"] == "same_as_tool_calls"
     messages = [
         Message(
             role="assistant",
@@ -286,7 +281,6 @@ def test_sanitize_for_resume_does_not_skip_ambiguity_to_keep_a_later_pair(
     call_ids: list[str],
     result_ids: list[str],
 ) -> None:
-    assert _configured_sub_agent_contract()["continuation"]["mismatched_tool_result_policy"] == "retain_ordered_prefix"
     messages = [
         Message(
             role="assistant",

@@ -16,7 +16,7 @@ from vv_agent.runtime.lifecycle import (
     persist_after_cycle_disallowed_tools,
     read_after_cycle_disallowed_tools,
 )
-from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.runtime.tool_results import build_skipped_result
 from vv_agent.types import CompletionReason, ToolCall, ToolDirective
 
 from .providers import Definitive
@@ -72,7 +72,7 @@ def after_cycle(driver: _Driver) -> bool:
         for child in children:
             a = child.attempts[max(child.attempts)]
             if a.state == "planned":
-                value = ToolCallRunner._build_skipped_result(
+                value = build_skipped_result(
                     ToolCall.from_dict(a.execution_plan.payload["request"]),
                     error_code="skipped_due_to_finish",
                     message="Tool skipped because a previous tool finished the task.",

@@ -8,7 +8,16 @@ import os
 import sys
 from pathlib import Path
 
-from vv_agent import Agent, MemorySession, ModelSettings, RunConfig, Runner, VvLlmModelProvider, function_tool
+from vv_agent import (
+    Agent,
+    AgentSessionOptions,
+    InteractiveAgentClient,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    VvLlmModelProvider,
+    function_tool,
+)
 from vv_agent.events import RunEvent
 
 
@@ -70,11 +79,23 @@ def main() -> None:
         workspace=workspace,
         max_cycles=max(max_cycles, 1),
         stream=print_event if verbose else None,
-        session=MemorySession(session_id) if session_id else None,
     )
 
     try:
-        result = Runner.run_sync(agent, prompt, run_config=config)
+        if session_id:
+            client = InteractiveAgentClient(
+                options=AgentSessionOptions(
+                    model_provider=config.model_provider,
+                    workspace=workspace,
+                    stream=print_event if verbose else None,
+                )
+            )
+            try:
+                result = client.create_session(agent=agent, session_id=session_id).prompt(prompt)
+            finally:
+                client.driver.close()
+        else:
+            result = Runner.run_sync(agent, prompt, run_config=config)
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     except Exception as exc:
         print(f"Error running agent: {exc}", file=sys.stderr)

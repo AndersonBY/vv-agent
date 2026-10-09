@@ -1,4 +1,25 @@
 {
+  "admission": {
+    "background": false,
+    "delivery_target": {
+      "attempt": 1,
+      "generation": 0,
+      "operation_id": "children/turn/initial/model/primary/1/attempt/1/tool/0",
+      "session_id": "children",
+      "turn_id": "children/turn/initial"
+    },
+    "generation": 0,
+    "kind": "child",
+    "session_id": "children/child/cd54c0761a7462c102c3263a",
+    "siblings": [
+      {
+        "generation": 0,
+        "session_id": "children/child/6ee1165917b969608daab8e3",
+        "turn_id": "children/child/6ee1165917b969608daab8e3/turn/start"
+      }
+    ],
+    "turn_id": "children/child/cd54c0761a7462c102c3263a/turn/start"
+  },
   "create_error_cases": [
     {
       "arguments": {
@@ -10,7 +31,32 @@
         "error_code": "agent_id_required",
         "ok": false
       },
-      "name": "portable_whitespace_agent_id_is_empty"
+      "name": "portable_whitespace_agent_id_is_empty",
+      "producer": {
+        "records": [
+          "session/c1c/manager_portable_whitespace_agent_id_is_empty/created",
+          "input/initial/applied",
+          "turn/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/started",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/1",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/2",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/3",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/4",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/5",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/6",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/7",
+          "op/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/1/8",
+          "turn/c1c/manager_portable_whitespace_agent_id_is_empty/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_portable_whitespace_agent_id_is_empty"
+      }
     },
     {
       "arguments": {
@@ -27,7 +73,32 @@
         "error_code": "sub_task_payload_conflict",
         "ok": false
       },
-      "name": "single_and_batch_modes_conflict"
+      "name": "single_and_batch_modes_conflict",
+      "producer": {
+        "records": [
+          "session/c1c/manager_single_and_batch_modes_conflict/created",
+          "input/initial/applied",
+          "turn/c1c/manager_single_and_batch_modes_conflict/turn/initial/started",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/1",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/2",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/3",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/4",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/5",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/6",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/7",
+          "op/c1c/manager_single_and_batch_modes_conflict/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_single_and_batch_modes_conflict/turn/initial/1/8",
+          "turn/c1c/manager_single_and_batch_modes_conflict/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_single_and_batch_modes_conflict"
+      }
     },
     {
       "arguments": {
@@ -38,7 +109,32 @@
         "error_code": "sub_task_payload_missing",
         "ok": false
       },
-      "name": "task_payload_is_required"
+      "name": "task_payload_is_required",
+      "producer": {
+        "records": [
+          "session/c1c/manager_task_payload_is_required/created",
+          "input/initial/applied",
+          "turn/c1c/manager_task_payload_is_required/turn/initial/started",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/1",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/2",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/3",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/4",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/5",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/6",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/7",
+          "op/c1c/manager_task_payload_is_required/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_task_payload_is_required/turn/initial/1/8",
+          "turn/c1c/manager_task_payload_is_required/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_task_payload_is_required"
+      }
     },
     {
       "arguments": {
@@ -51,7 +147,32 @@
         "error_code": "invalid_exclude_files_pattern",
         "ok": false
       },
-      "name": "lookaround_regex_is_rejected"
+      "name": "lookaround_regex_is_rejected",
+      "producer": {
+        "records": [
+          "session/c1c/manager_lookaround_regex_is_rejected/created",
+          "input/initial/applied",
+          "turn/c1c/manager_lookaround_regex_is_rejected/turn/initial/started",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/1",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/2",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/3",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/4",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/5",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/6",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/7",
+          "op/c1c/manager_lookaround_regex_is_rejected/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_lookaround_regex_is_rejected/turn/initial/1/8",
+          "turn/c1c/manager_lookaround_regex_is_rejected/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_lookaround_regex_is_rejected"
+      }
     },
     {
       "arguments": {
@@ -64,7 +185,32 @@
         "error_code": "invalid_exclude_files_pattern",
         "ok": false
       },
-      "name": "python_only_open_range_quantifier_is_rejected"
+      "name": "python_only_open_range_quantifier_is_rejected",
+      "producer": {
+        "records": [
+          "session/c1c/manager_python_only_open_range_quantifier_is_rejected/created",
+          "input/initial/applied",
+          "turn/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/started",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/1",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/2",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/3",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/4",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/5",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/6",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/7",
+          "op/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/1/8",
+          "turn/c1c/manager_python_only_open_range_quantifier_is_rejected/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_python_only_open_range_quantifier_is_rejected"
+      }
     },
     {
       "arguments": {
@@ -77,11 +223,40 @@
         "error_code": "invalid_exclude_files_pattern",
         "ok": false
       },
-      "name": "rust_only_stacked_quantifier_is_rejected"
+      "name": "rust_only_stacked_quantifier_is_rejected",
+      "producer": {
+        "records": [
+          "session/c1c/manager_rust_only_stacked_quantifier_is_rejected/created",
+          "input/initial/applied",
+          "turn/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/started",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/1",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/2",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/3",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/4",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/5",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/6",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/7",
+          "op/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/1/8",
+          "turn/c1c/manager_rust_only_stacked_quantifier_is_rejected/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_rust_only_stacked_quantifier_is_rejected"
+      }
     }
   ],
   "early_error_metadata_matches_content": true,
   "failed_outcome_error_code": "sub_task_failed",
+  "listener_identity": {
+    "stale_session_events_ignored": true,
+    "subscribe_failure_retry": true
+  },
   "manager_outcome": {
     "lookup_task_id": "lookup",
     "outcome_task_id": "wire",
@@ -95,14 +270,63 @@
     },
     "unicode_preview": {
       "repeat": 100,
-      "text": "文"
+      "text": "\u6587"
     }
   },
-  "listener_identity": {
-    "stale_session_events_ignored": true,
-    "subscribe_failure_retry": true
-  },
   "pending_interaction_previous_status": "pending",
+  "status_envelope": {
+    "lineage_fields": [
+      "parent_run_id",
+      "parent_tool_call_id"
+    ],
+    "recent_activity_when_unavailable": "omitted"
+  },
+  "status_error_cases": [
+    {
+      "arguments": {
+        "message": "continue",
+        "task_ids": [
+          "unknown"
+        ]
+      },
+      "expected": {
+        "details": {
+          "task_id": "unknown"
+        },
+        "error": "Sub-task unknown not found.",
+        "error_code": "sub_task_not_found",
+        "ok": false
+      },
+      "name": "task_scoped_error_includes_task_id",
+      "producer": {
+        "records": [
+          "session/c1c/manager_task_scoped_error_includes_task_id/created",
+          "input/initial/applied",
+          "turn/c1c/manager_task_scoped_error_includes_task_id/turn/initial/started",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/1",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/2",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/3",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/4",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/5",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/6",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/7",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/8",
+          "op/c1c/manager_task_scoped_error_includes_task_id/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_task_scoped_error_includes_task_id/turn/initial/1/9",
+          "turn/c1c/manager_task_scoped_error_includes_task_id/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_task_scoped_error_includes_task_id"
+      }
+    }
+  ],
   "status_success_cases": [
     {
       "arguments": {
@@ -121,7 +345,34 @@
           }
         ]
       },
-      "name": "default_status_query"
+      "name": "default_status_query",
+      "producer": {
+        "records": [
+          "session/c1c/manager_default_status_query/created",
+          "input/initial/applied",
+          "turn/c1c/manager_default_status_query/turn/initial/started",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/1",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/1/planned",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/2",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/1/started",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/3",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/1/result",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/4",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/5",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/6",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/2/1/planned",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/7",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/2/1/started",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/8",
+          "op/c1c/manager_default_status_query/turn/initial/model/primary/2/1/result",
+          "usage/active/c1c/manager_default_status_query/turn/initial/1/9",
+          "turn/c1c/manager_default_status_query/turn/initial/ended"
+        ],
+        "session_id": "c1c/manager_default_status_query"
+      }
     }
   ],
   "sync_failed_outcome": {
@@ -143,59 +394,45 @@
     "input_error_code": " "
   },
   "sync_wait_outcome": {
-    "internal_error_code": null,
-    "manager_status_error_code_field": "omitted",
-    "sub_run_event_error_code_field": "omitted",
-    "sync_single_tool_envelope_error_code": "sub_task_wait_user",
-    "expected": {
-      "agent_name": "researcher",
-      "completion_reason": "wait_user",
-      "completion_tool_name": "dangerous",
-      "cycles": 1,
-      "error": null,
-      "error_code": "sub_task_wait_user",
-      "final_answer": null,
-      "partial_output": "proposed change",
-      "resolved": {},
-      "session_id": "wait-session",
-      "status": "wait_user",
-      "task_id": "wait-child",
-      "todo_list": [],
-      "wait_reason": "Approve dangerous."
-    }
+    "parent_adopts_intermediate_wait": false,
+    "producer_session_id": "thread_2",
+    "same_turn_reply": true
   },
-  "worker_visibility": {
-    "running_status_authoritative": true,
-    "terminal_fields_hidden_until_worker_exit": true
-  },
-  "status_error_cases": [
+  "terminal_results": [
     {
-      "arguments": {
-        "message": "continue",
-        "task_ids": [
-          "unknown"
-        ]
-      },
-      "expected": {
-        "details": {
-          "task_id": "unknown"
-        },
-        "error": "Sub-task unknown not found.",
-        "error_code": "sub_task_not_found",
-        "ok": false
-      },
-      "name": "task_scoped_error_includes_task_id"
+      "attempt": 1,
+      "operation_id": "children/turn/initial/model/primary/1/attempt/1/tool/0",
+      "result": "first done",
+      "session_id": "children/child/cd54c0761a7462c102c3263a",
+      "status": "completed",
+      "terminal_digest": "455a1a2f637e3c5baec45c1e1fc59d33319567994dce6c73ad2cebe3738f4f4a",
+      "terminal_seq": 11,
+      "turn_id": "children/child/cd54c0761a7462c102c3263a/turn/start"
+    },
+    {
+      "attempt": 1,
+      "operation_id": "children/turn/initial/model/primary/1/attempt/1/tool/0",
+      "result": "second done",
+      "session_id": "children/child/6ee1165917b969608daab8e3",
+      "status": "completed",
+      "terminal_digest": "1979033f4922829d808c97688f57ab7031a9a8ebdf43a440acf3da1a5b27d700",
+      "terminal_seq": 11,
+      "turn_id": "children/child/6ee1165917b969608daab8e3/turn/start"
+    },
+    {
+      "attempt": 1,
+      "operation_id": "children/turn/initial/model/primary/1/attempt/1/tool/0",
+      "result": "first done",
+      "session_id": "children/child/cd54c0761a7462c102c3263a",
+      "status": "completed",
+      "terminal_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "terminal_seq": 11,
+      "turn_id": "children/child/cd54c0761a7462c102c3263a/turn/start"
     }
   ],
-  "status_envelope": {
-    "lineage_fields": [
-      "parent_run_id",
-      "parent_tool_call_id"
-    ],
-    "recent_activity_when_unavailable": "omitted"
-  },
   "validation": {
     "argument_validation_source": "builtin_tool_behavior.canonical.argument_validation",
+    "batch_item_shape": "schema_validated_before_handler",
     "handler_receives_schema_valid_arguments": true,
     "payload_mode_validation_precedes_exclude_pattern": true,
     "semantic_priority": [
@@ -204,7 +441,10 @@
       "payload_mode",
       "exclude_pattern_semantics"
     ],
-    "batch_item_shape": "schema_validated_before_handler",
     "top_level_output_requirements_scope": "single_only"
+  },
+  "worker_visibility": {
+    "running_status_authoritative": true,
+    "terminal_fields_hidden_until_terminal_delivery": true
   }
 }

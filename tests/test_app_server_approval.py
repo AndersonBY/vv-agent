@@ -99,27 +99,26 @@ def test_app_server_approval_timeout_denies_without_running_tool() -> None:
 
 def test_app_server_approval_disconnect_resolves_at_retained_deadline(surface) -> None:
     calls: list[str] = []
-    server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=1 if surface else None)
+    server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=1)
 
     approval_request = _start_and_wait_for_approval(server, transport)
     assert approval_request["method"] == "approval/request"
     server.router.unregister_transport("conn_1")
 
-    if surface:
-        cast(Any, server.run_adapter).join()
-        state, _, _ = surface.store.read_state("thread_1")
-        wait = next(iter(state.waits.values()))
-        deadline_ms = wait["deadline_ms"]
-        assert isinstance(deadline_ms, int)
-        assert server.store.read_thread("thread_1").thread.status == "interrupted"
-        assert cast(Any, server.run_adapter)._owner("thread_1", state.active_turn_id) == "conn_1"
-        surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms - 1)
-        cast(Any, server.run_adapter).recover("observer", "thread_1")
-        cast(Any, server.run_adapter).join()
-        assert surface.store.read_state("thread_1")[0].active_turn_id is not None
-        surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
-        cast(Any, server.run_adapter).recover("observer", "thread_1")
-        cast(Any, server.run_adapter).join()
+    cast(Any, server.run_adapter).join()
+    state, _, _ = surface.store.read_state("thread_1")
+    wait = next(iter(state.waits.values()))
+    deadline_ms = wait["deadline_ms"]
+    assert isinstance(deadline_ms, int)
+    assert server.store.read_thread("thread_1").thread.status == "interrupted"
+    assert cast(Any, server.run_adapter)._owner("thread_1", state.active_turn_id) == "conn_1"
+    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms - 1)
+    cast(Any, server.run_adapter).recover("observer", "thread_1")
+    cast(Any, server.run_adapter).join()
+    assert surface.store.read_state("thread_1")[0].active_turn_id is not None
+    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
+    cast(Any, server.run_adapter).recover("observer", "thread_1")
+    cast(Any, server.run_adapter).join()
     deadline = time.time() + 2
     while time.time() < deadline:
         snapshot = server.store.read_thread("thread_1")
@@ -134,7 +133,7 @@ def test_app_server_approval_disconnect_resolves_at_retained_deadline(surface) -
 
 def test_app_server_approval_is_owned_by_turn_starter_and_not_reassigned_on_disconnect(surface) -> None:
     calls: list[str] = []
-    server, owner = _server_with_approval_tool(calls, approval_timeout_seconds=1 if surface else None)
+    server, owner = _server_with_approval_tool(calls, approval_timeout_seconds=1)
     observer = ChannelTransport(connection_id="conn_2")
     server.router.register_transport(observer)
     _initialize(server, owner, request_id=0, client_name="owner")
@@ -163,13 +162,12 @@ def test_app_server_approval_is_owned_by_turn_starter_and_not_reassigned_on_disc
     assert not any(message.get("method") == "approval/request" for message in observer_before_disconnect)
 
     server.router.unregister_transport(owner.connection_id)
-    if surface:
-        cast(Any, server.run_adapter).join()
-        _drain_until_turn_completed(observer, timeout=2)
-        state, _, _ = surface.store.read_state(thread_id)
-        deadline_ms = next(iter(state.waits.values()))["deadline_ms"]
-        surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
-        cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
+    cast(Any, server.run_adapter).join()
+    _drain_until_turn_completed(observer, timeout=2)
+    state, _, _ = surface.store.read_state(thread_id)
+    deadline_ms = next(iter(state.waits.values()))["deadline_ms"]
+    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
+    cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
     observer_after_disconnect = _drain_until_turn_completed(observer, timeout=2)
 
     assert approval_request["method"] == "approval/request"

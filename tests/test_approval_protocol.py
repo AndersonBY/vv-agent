@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import suppress
 from threading import Event
 
 import pytest
@@ -19,7 +18,8 @@ from vv_agent import (
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
-from vv_agent.runtime.cancellation import CancellationToken, CancelledError
+from vv_agent.runtime.cancellation import CancellationToken
+from vv_agent.session.store import Conflict
 from vv_agent.types import LLMResponse, ToolCall
 
 
@@ -151,7 +151,7 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
     )
 
     request_id = ""
-    for event in handle.events():
+    for event in handle.result().events:
         if isinstance(event, ApprovalRequestedEvent):
             request_id = event.request_id
             assert calls == []
@@ -160,8 +160,9 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
             break
 
     assert request_id
+    assert handle.result().status is AgentStatus.WAIT_USER
+    assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
-    assert handle.result().final_output == "finished"
 
 
 def test_function_tool_approval_policy_always_requests_once() -> None:
@@ -191,7 +192,7 @@ def test_function_tool_approval_policy_always_requests_once() -> None:
     )
 
     request_ids: list[str] = []
-    for event in handle.events():
+    for event in handle.result().events:
         if isinstance(event, ApprovalRequestedEvent):
             if event.tool_name == "guarded_function":
                 request_ids.append(event.request_id)
@@ -202,8 +203,9 @@ def test_function_tool_approval_policy_always_requests_once() -> None:
 
     assert request_ids
     assert len(request_ids) == 1
+    assert handle.result().status is AgentStatus.WAIT_USER
+    assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
-    assert handle.result().final_output == "finished"
 
 
 def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> None:
@@ -238,7 +240,7 @@ def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> 
     )
 
     request_id = ""
-    for event in handle.events():
+    for event in handle.result().events:
         if isinstance(event, ApprovalRequestedEvent):
             if event.tool_name == "dangerous_executor":
                 request_id = event.request_id
@@ -248,8 +250,9 @@ def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> 
             break
 
     assert request_id
+    assert handle.result().status is AgentStatus.WAIT_USER
+    assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
-    assert handle.result().final_output == "finished"
 
 
 def test_executor_approval_policy_never_skips_executor_approval() -> None:
@@ -320,7 +323,7 @@ def test_executor_approval_policy_always_requests_executor_approval() -> None:
     )
 
     request_id = ""
-    for event in handle.events():
+    for event in handle.result().events:
         if isinstance(event, ApprovalRequestedEvent):
             if event.tool_name == "policy_executor":
                 request_id = event.request_id
@@ -330,8 +333,9 @@ def test_executor_approval_policy_always_requests_executor_approval() -> None:
             break
 
     assert request_id
+    assert handle.result().status is AgentStatus.WAIT_USER
+    assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
-    assert handle.result().final_output == "finished"
 
 
 def test_approval_denial_returns_tool_error_without_running_tool() -> None:
@@ -365,36 +369,34 @@ def test_approval_denial_returns_tool_error_without_running_tool() -> None:
     assert result.final_output == "finished"
 
 
-def test_approval_timeout_returns_tool_error_without_running_tool() -> None:
-    calls: list[str] = []
+def test_approval_timeout_returns_tool_error_without_running_tool():
+    calls = []
 
     @function_tool(needs_approval=True)
-    def dangerous() -> str:
+    def dangerous():
         calls.append("ran")
         return "allowed"
 
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
-    result = Runner.run_sync(
-        agent,
+    handle = Runner.start(
+        Agent("assistant", "Use tool.", model="test-model", tools=[dangerous]),
         "go",
         run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
+            model_provider=FixedModelProvider(
+                ScriptedLLM([LLMResponse("calling", [ToolCall("call_1", "dangerous", {})]), _finish_response()]),
+                _resolved_model(),
+            ),
             approval_provider=AlwaysAskApprovalProvider(),
-            approval_timeout_seconds=0.01,
         ),
     )
-
-    tool_result = result.raw_result.cycles[0].tool_results[0]
+    assert handle.result().status is AgentStatus.WAIT_USER
+    request = next(e for e in handle.result().events if isinstance(e, ApprovalRequestedEvent))
+    handle.approve(request.request_id, ApprovalDecision.timeout("deadline reached"))
+    result = handle.resume()
     assert calls == []
-    assert tool_result.error_code == "tool_approval_timeout"
+    assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_approval_timeout"
     assert result.final_output == "finished"
+    with pytest.raises(Conflict, match="different bytes"):
+        handle.approve(request.request_id, ApprovalDecision.allow())
 
 
 def test_approval_rejects_unknown_request_id_without_storing_decision() -> None:
@@ -410,42 +412,6 @@ def test_approval_rejects_unknown_request_id_without_storing_decision() -> None:
 
     with pytest.raises(KeyError, match="Unknown approval request"):
         handle.approve("approval_missing", ApprovalDecision.allow())
-
-
-def test_approval_rejects_stale_request_id_after_timeout() -> None:
-    @function_tool(needs_approval=True)
-    def dangerous() -> str:
-        return "allowed"
-
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
-    handle = Runner.start(
-        agent,
-        "go",
-        run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
-            approval_provider=AlwaysAskApprovalProvider(),
-            approval_timeout_seconds=0.01,
-        ),
-    )
-
-    request_id = ""
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            request_id = event.request_id
-        if event.type == "run_completed":
-            break
-
-    assert request_id
-    assert handle.result(timeout=2).final_output == "finished"
-    with pytest.raises(KeyError, match="Unknown approval request"):
-        handle.approve(request_id, ApprovalDecision.allow())
 
 
 def test_approval_provider_does_not_change_default_no_tool_policy() -> None:
@@ -472,232 +438,90 @@ def test_approval_provider_does_not_change_default_no_tool_policy() -> None:
     assert len(result.raw_result.cycles) == 1
 
 
-def test_cancel_unblocks_pending_approval_without_running_tool() -> None:
-    calls: list[str] = []
-
-    @function_tool(needs_approval=True)
-    def dangerous() -> str:
-        calls.append("ran")
-        return "allowed"
-
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
-    handle = Runner.start(
-        agent,
-        "go",
-        run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
-            approval_provider=AlwaysAskApprovalProvider(),
-        ),
-    )
-
-    request_id = ""
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            request_id = event.request_id
-            assert handle.cancel()
-            break
-
-    assert request_id
-    caught: BaseException | None = None
-    try:
-        handle.result(timeout=0.2)
-    except BaseException as exc:
-        caught = exc
-
-    if isinstance(caught, TimeoutError):
-        handle.approve(request_id, ApprovalDecision.deny("cleanup"))
-        with suppress(CancelledError):
-            handle.result(timeout=2)
-
-    assert not isinstance(caught, TimeoutError)
-    assert isinstance(caught, CancelledError)
-    assert calls == []
-
-
-def test_direct_cancellation_token_unblocks_pending_approval_without_running_tool() -> None:
-    calls: list[str] = []
+@pytest.mark.parametrize("via_token", [False, True])
+def test_cancel_pending_approval_without_running_tool(via_token):
+    calls = []
     token = CancellationToken()
 
     @function_tool(needs_approval=True)
-    def dangerous() -> str:
+    def dangerous():
         calls.append("ran")
         return "allowed"
 
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
     handle = Runner.start(
-        agent,
+        Agent("assistant", "Use tool.", model="test-model", tools=[dangerous]),
         "go",
         run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
+            model_provider=FixedModelProvider(
+                ScriptedLLM([LLMResponse("calling", [ToolCall("call_1", "dangerous", {})])]), _resolved_model()
+            ),
             approval_provider=AlwaysAskApprovalProvider(),
             cancellation_token=token,
         ),
     )
-
-    request_id = ""
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            request_id = event.request_id
-            token.cancel()
-            break
-
-    assert request_id
-    caught: BaseException | None = None
-    try:
-        handle.result(timeout=0.2)
-    except BaseException as exc:
-        caught = exc
-
-    if isinstance(caught, TimeoutError):
-        handle.approve(request_id, ApprovalDecision.deny("cleanup"))
-        with suppress(CancelledError):
-            handle.result(timeout=2)
-
-    assert not isinstance(caught, TimeoutError)
-    assert isinstance(caught, CancelledError)
+    assert handle.result().status is AgentStatus.WAIT_USER
+    if via_token:
+        token.cancel()
+    else:
+        assert handle.cancel()
+    result = handle.resume()
+    assert result.status is AgentStatus.FAILED
+    assert result.completion_reason is not None and result.completion_reason.value == "cancelled"
     assert calls == []
+    assert sum(e.type == "run_cancelled" for e in result.events) == 1
 
 
-def test_cancel_after_approval_resolved_prevents_tool_side_effect() -> None:
-    calls: list[str] = []
-    token = CancellationToken()
+def test_cancel_after_approval_is_queued_prevents_tool_side_effect():
+    calls = []
 
     @function_tool(needs_approval=True)
-    def dangerous() -> str:
+    def dangerous():
         calls.append("ran")
         return "allowed"
 
-    def stream(event) -> None:
-        if event.type == "approval_resolved":
-            token.cancel()
-
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
     handle = Runner.start(
-        agent,
+        Agent("assistant", "Use tool.", model="test-model", tools=[dangerous]),
         "go",
         run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
+            model_provider=FixedModelProvider(
+                ScriptedLLM([LLMResponse("calling", [ToolCall("call_1", "dangerous", {})])]), _resolved_model()
+            ),
             approval_provider=AlwaysAskApprovalProvider(),
-            cancellation_token=token,
-            stream=stream,
         ),
     )
-
-    request_id = ""
-    for event in handle.events():
-        if isinstance(event, ApprovalRequestedEvent):
-            request_id = event.request_id
-            handle.approve(request_id, ApprovalDecision.allow())
-            break
-
-    assert request_id
-    with pytest.raises(CancelledError):
-        handle.result(timeout=2)
+    waiting = handle.result()
+    request = next(e for e in waiting.events if isinstance(e, ApprovalRequestedEvent))
+    handle.approve(request.request_id, ApprovalDecision.allow())
+    assert handle.cancel()
+    result = handle.resume()
+    assert result.completion_reason is not None and result.completion_reason.value == "cancelled"
     assert calls == []
 
 
-def test_cancel_during_should_request_does_not_lose_cancellation() -> None:
-    calls: list[str] = []
-    provider = BlockingShouldRequestApprovalProvider()
+@pytest.mark.parametrize("should_request", [False, True])
+def test_cancel_during_should_request_prevents_tool_side_effect(should_request):
+    calls = []
+    provider = BlockingShouldRequestApprovalProvider(should_request_result=should_request)
 
     @function_tool(needs_approval=True)
-    def dangerous() -> str:
+    def dangerous():
         calls.append("ran")
         return "allowed"
 
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
     handle = Runner.start(
-        agent,
+        Agent("assistant", "Use tool.", model="test-model", tools=[dangerous]),
         "go",
         run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
+            model_provider=FixedModelProvider(
+                ScriptedLLM([LLMResponse("calling", [ToolCall("call_1", "dangerous", {})])]), _resolved_model()
+            ),
             approval_provider=provider,
         ),
     )
-
-    assert provider.entered.wait(timeout=2)
+    assert provider.entered.wait(2)
     assert handle.cancel()
     provider.proceed.set()
-
-    caught: BaseException | None = None
-    try:
-        handle.result(timeout=0.6)
-    except BaseException as exc:
-        caught = exc
-
-    if isinstance(caught, TimeoutError):
-        handle.approve(provider.request_id, ApprovalDecision.deny("cleanup"))
-        with suppress(CancelledError):
-            handle.result(timeout=2)
-
-    assert not isinstance(caught, TimeoutError)
-    assert isinstance(caught, CancelledError)
-    assert calls == []
-
-
-def test_cancel_during_should_request_false_prevents_tool_side_effect() -> None:
-    calls: list[str] = []
-    provider = BlockingShouldRequestApprovalProvider(should_request_result=False)
-
-    @function_tool(needs_approval=True)
-    def dangerous() -> str:
-        calls.append("ran")
-        return "allowed"
-
-    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            _finish_response(),
-        ]
-    )
-
-    handle = Runner.start(
-        agent,
-        "go",
-        run_config=RunConfig(
-            model_provider=FixedModelProvider(llm, _resolved_model()),
-            approval_provider=provider,
-        ),
-    )
-
-    assert provider.entered.wait(timeout=2)
-    assert handle.cancel()
-    provider.proceed.set()
-
-    caught: BaseException | None = None
-    try:
-        handle.result(timeout=0.6)
-    except BaseException as exc:
-        caught = exc
-
-    assert isinstance(caught, CancelledError)
+    handle.result(2)
+    result = handle.resume()
+    assert result.raw_result.error is not None and result.raw_result.error["code"] == "cancel_requested"
     assert calls == []

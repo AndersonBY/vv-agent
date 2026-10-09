@@ -2,15 +2,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from session.test_delegation_parity import routed
 from support import require_tool_result
+from support.kernel_runtime import start_runner
 
-from vv_agent import SubRunCompletedEvent, ToolCallOutcome
-from vv_agent.runtime import SubTaskManager
+from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
+from vv_agent.session.delegation import status_with_store
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolCall, ToolExecutionResult, ToolResultStatus
+from vv_agent.tools.outcomes import ToolCallOutcome
+from vv_agent.types import (
+    AgentStatus,
+    CompletionReason,
+    LLMResponse,
+    SubTaskOutcome,
+    ToolCall,
+    ToolExecutionResult,
+    ToolResultStatus,
+)
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope.json"
@@ -20,11 +32,46 @@ def _fixture() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_bytes())
 
 
-def _manager() -> SubTaskManager:
-    return SubTaskManager(
-        register_session=lambda _session_id, _session: None,
-        unregister_session=lambda _session_id, _session=None: None,
+@pytest.fixture
+def manager_driver():
+    driver = SessionDriver()
+    try:
+        yield driver
+    finally:
+        driver.close()
+
+
+def _manager(driver, workspace):
+    driver.create("parent", str(workspace))
+    runtime = driver.runtime(Agent("parent", "Delegate."), RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [])))
+    return runtime.child_tasks(driver.store, "parent").tool_manager()
+
+
+def _child(driver, workspace, response):
+    parent = start_runner(
+        driver,
+        "parent",
+        Agent("parent", "Delegate.", model="parent", sub_agents={"researcher": SubAgentConfig(model="m", description="Work.")}),
+        "go",
+        run_config=RunConfig(
+            workspace=workspace,
+            model_provider=routed(
+                [
+                    LLMResponse(
+                        "", [ToolCall("delegate", "create_sub_task", {"agent_id": "researcher", "task_description": "work"})]
+                    ),
+                    LLMResponse("parent done"),
+                ],
+                [response, response] if callable(response) else [response],
+            ),
+        ),
     )
+    assert parent.result().status is AgentStatus.COMPLETED
+    sid = next(sid for sid in driver.store.list_sessions() if sid != "parent")
+    manager = parent.runtime.child_tasks(driver.store, "parent")
+    context = _context(workspace)
+    context.sub_task_manager = manager.tool_manager()
+    return parent, sid, manager, context
 
 
 def _context(tmp_path: Path) -> ToolContext:
@@ -76,9 +123,9 @@ def test_create_sub_task_error_corpus_matches_full_envelope(tmp_path: Path, case
 
 
 @pytest.mark.parametrize("case", _fixture()["status_error_cases"], ids=lambda case: case["name"])
-def test_sub_task_status_error_corpus_matches_full_envelope(tmp_path: Path, case: dict[str, Any]) -> None:
+def test_sub_task_status_error_corpus_matches_full_envelope(tmp_path: Path, case: dict[str, Any], manager_driver) -> None:
     context = _context(tmp_path)
-    context.sub_task_manager = _manager()
+    context.sub_task_manager = _manager(manager_driver, tmp_path)
 
     result = build_default_registry().execute(
         ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
@@ -93,9 +140,9 @@ def test_sub_task_status_error_corpus_matches_full_envelope(tmp_path: Path, case
 
 
 @pytest.mark.parametrize("case", _fixture()["status_success_cases"], ids=lambda case: case["name"])
-def test_sub_task_status_success_corpus_matches_full_envelope(tmp_path: Path, case: dict[str, Any]) -> None:
+def test_sub_task_status_success_corpus_matches_full_envelope(tmp_path: Path, case: dict[str, Any], manager_driver) -> None:
     context = _context(tmp_path)
-    context.sub_task_manager = _manager()
+    context.sub_task_manager = _manager(manager_driver, tmp_path)
 
     result = build_default_registry().execute(
         ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
@@ -139,170 +186,79 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
     _assert_error_metadata_matches_content(result)
 
 
-def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> None:
+def test_sync_wait_stays_on_child_until_terminal_delivery():
+    from support.kernel_runtime import start_runner
+
+    from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider, SubAgentConfig, function_tool
+    from vv_agent.session.children import child_handles
+    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.types import LLMResponse, ToolDirective
+
+    @function_tool
+    def wait_tool():
+        return ToolExecutionResult("", "Choose", directive=ToolDirective.WAIT_USER)
+
     contract = _fixture()["sync_wait_outcome"]
-    context = _context(tmp_path)
-    outcome = SubTaskOutcome(
-        task_id="wait-child",
-        agent_name="researcher",
-        status=AgentStatus.WAIT_USER,
-        session_id="wait-session",
-        wait_reason="Approve dangerous.",
-        completion_reason=CompletionReason.WAIT_USER,
-        completion_tool_name="dangerous",
-        partial_output="proposed change",
-        cycles=1,
-    )
-    assert outcome.error_code == contract["internal_error_code"]
-    assert contract["manager_status_error_code_field"] == "omitted"
-    assert "error_code" not in outcome.to_dict()
-    context.sub_task_runner = lambda _request: outcome
-
-    result = (
-        build_default_registry()
-        .get("create_sub_task")
-        .handler(
-            context,
-            {"agent_id": "researcher", "task_description": "wait"},
-        )
-    )
-    result = require_tool_result(result)
-
-    payload = json.loads(result.content)
-    assert payload == contract["expected"]
-    assert result.error_code == contract["sync_single_tool_envelope_error_code"]
-    _assert_error_metadata_matches_content(result)
-
-    manager = _manager()
-    manager.record_outcome("wait-child", outcome)
-    status_context = _context(tmp_path)
-    status_context.sub_task_manager = manager
-    status_result = (
-        build_default_registry()
-        .get("sub_task_status")
-        .handler(
-            status_context,
-            {"task_ids": ["wait-child"]},
-        )
-    )
-    status_result = require_tool_result(status_result)
-    status_entry = json.loads(status_result.content)["tasks"][0]
-    assert "error_code" not in status_entry
-
-    sub_run_event = SubRunCompletedEvent(
-        run_id="child-run",
-        trace_id="trace",
-        parent_tool_call_id="parent-tool",
-        status=AgentStatus.WAIT_USER.value,
-        wait_reason=outcome.wait_reason,
-        completion_reason=outcome.completion_reason,
-        metadata={"cycles": outcome.cycles},
-    ).to_dict()
-    assert contract["sub_run_event_error_code_field"] == "omitted"
-    assert "error_code" not in sub_run_event["metadata"]
-
-
-def test_manager_outcome_identity_blank_code_and_unicode_preview_match_contract() -> None:
-    contract = _fixture()["manager_outcome"]
-    assert _fixture()["listener_identity"] == {
-        "stale_session_events_ignored": True,
-        "subscribe_failure_retry": True,
-    }
-    assert _fixture()["worker_visibility"] == {
-        "running_status_authoritative": True,
-        "terminal_fields_hidden_until_worker_exit": True,
-    }
-    manager = _manager()
-    manager.record_outcome(
-        contract["lookup_task_id"],
-        SubTaskOutcome(
-            task_id=contract["outcome_task_id"],
-            session_id="wire-session",
-            agent_name="researcher",
-            status=AgentStatus.FAILED,
-            error="child failed",
-            error_code=" ",
-        ),
-    )
-
-    entry = manager.get(contract["lookup_task_id"])
-    assert entry is not None
-    assert entry.task_id == contract["lookup_task_id"]
-    result = (
-        build_default_registry()
-        .get("sub_task_status")
-        .handler(
-            ToolContext(
-                workspace=Path.cwd(),
-                shared_state={},
-                cycle_index=1,
-                workspace_backend=MemoryWorkspaceBackend(),
-                sub_task_manager=manager,
+    driver = SessionDriver()
+    try:
+        parent = start_runner(
+            driver,
+            "parent",
+            Agent(
+                "parent", "Delegate.", tools=[wait_tool], sub_agents={"worker": SubAgentConfig(model="m", description="Work.")}
             ),
-            {"task_ids": [contract["lookup_task_id"]]},
+            "go",
+            run_config=RunConfig(
+                model_provider=ScriptedModelProvider.from_steps(
+                    "scripted",
+                    "m",
+                    [
+                        LLMResponse(
+                            "", [ToolCall("delegate", "create_sub_task", {"agent_id": "worker", "task_description": "work"})]
+                        ),
+                        LLMResponse("", [ToolCall("ask", "wait_tool", {})]),
+                        LLMResponse("child done"),
+                        LLMResponse("parent done"),
+                    ],
+                )
+            ),
         )
-    )
-    result = require_tool_result(result)
-    assert json.loads(result.content)["tasks"][0] == contract["status_entry"]
+        assert parent.result().status is AgentStatus.WAIT_USER
+        rows = driver.store.read_state("parent")[1]
+        parked = next(r.record for r in rows if r.record.kind == "op_parked" and r.record.payload["handle"]["kind"] == "child")
+        child = child_handles(parked.payload["handle"])[0]
+        assert not contract["parent_adopts_intermediate_wait"]
+        assert not any(r.record.kind == "child_terminal" for r in rows)
+        parent.runtime.wake = lambda _sid: None
+        parent.runtime.child_tasks(driver.store, "parent").message(child["session_id"], "answer", "choice")
+        assert Runner.resume(parent.session_id, parent.run_id).final_output == "parent done"
+        state = driver.store.read_state(child["session_id"])[0]
+        assert list(state.turns) == [child["turn_id"]] and contract["same_turn_reply"]
+    finally:
+        driver.close()
 
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_retained_child_identity_error_and_unicode_status_match_contract(manager_driver, tmp_path, failed):
+    contract = _fixture()["manager_outcome"]
     preview = contract["unicode_preview"]["text"] * contract["unicode_preview"]["repeat"]
-    manager.record_outcome(
-        "unicode-preview",
-        SubTaskOutcome(
-            task_id="unicode-preview-wire",
-            session_id="unicode-preview-session",
-            agent_name="researcher",
-            status=AgentStatus.COMPLETED,
-            final_answer=preview,
-        ),
-    )
-    preview_entry = manager.get("unicode-preview")
-    assert preview_entry is not None
-    assert preview_entry.recent_activity == preview
 
+    def fail(_request):
+        raise RuntimeError("child failed")
 
-class _PendingRecord:
-    task_id = "pending-task"
-    session_id = "pending-session"
-    agent_name = "researcher"
-    task_title = "pending"
-    parent_run_id = None
-    parent_tool_call_id = None
-    outcome = None
-    session = object()
-
-    @staticmethod
-    def is_running() -> bool:
-        return False
-
-
-class _PendingManager:
-    def __init__(self) -> None:
-        self.record = _PendingRecord()
-
-    def get(self, _task_id: str) -> _PendingRecord:
-        return self.record
-
-    def _continue_task_with_context(self, *, task_id: str, prompt: str, context: Any) -> None:
-        del task_id, prompt, context
-
-
-def test_pending_interaction_previous_status_matches_contract(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    context.sub_task_manager = cast(Any, _PendingManager())
-
-    result = (
-        build_default_registry()
-        .get("sub_task_status")
-        .handler(
-            context,
-            {"task_ids": ["pending-task"], "message": "continue"},
-        )
-    )
-    result = require_tool_result(result)
-
-    payload = json.loads(result.content)
-    assert payload["interaction"]["previous_status"] == _fixture()["pending_interaction_previous_status"]
+    _, sid, manager, context = _child(manager_driver, tmp_path, fail if failed else LLMResponse(preview))
+    entry = manager.get(sid)
+    assert entry is not None and entry.task_id == entry.session_id == sid
+    result = status_with_store(context, {"task_ids": [sid]})
+    assert result.status_code is ToolResultStatus.SUCCESS
+    status = json.loads(result.content)["tasks"][0]
+    assert status["task_id"] == status["session_id"] == sid
+    if failed:
+        assert status["status"] == contract["status_entry"]["status"]
+        assert status["error_code"] == contract["status_entry"]["error_code"]
+        assert status["error"] == entry.outcome.error == "model_outcome_unknown"
+    else:
+        assert status["status"] == "completed" and status["final_answer"] == preview
 
 
 def test_early_errors_mirror_content_into_metadata(tmp_path: Path) -> None:
@@ -439,10 +395,11 @@ def test_create_sub_task_rejects_non_string_schema_values(
 )
 def test_sub_task_status_rejects_non_string_schema_values(
     tmp_path: Path,
+    manager_driver,
     arguments: dict[str, Any],
 ) -> None:
     context = _context(tmp_path)
-    context.sub_task_manager = _manager()
+    context.sub_task_manager = _manager(manager_driver, tmp_path)
 
     result = build_default_registry().execute(
         ToolCall(id="invalid_status_arguments", name="sub_task_status", arguments=arguments),
@@ -455,45 +412,13 @@ def test_sub_task_status_rejects_non_string_schema_values(
     assert _fixture()["validation"]["handler_receives_schema_valid_arguments"] is True
 
 
-def test_status_envelope_preserves_lineage_and_omits_unknown_activity(tmp_path: Path) -> None:
-    manager = _manager()
-    manager.submit(
-        task_id="status-task",
-        session_id="status-session",
-        agent_name="researcher",
-        task_title="Inspect status",
-        workspace_backend=MemoryWorkspaceBackend(),
-        parent_run_id="parent-run",
-        parent_tool_call_id="delegate",
-        runner=lambda: SubTaskOutcome(
-            task_id="status-task",
-            session_id="status-session",
-            agent_name="researcher",
-            status=AgentStatus.COMPLETED,
-        ),
-    )
-    manager.wait("status-task", timeout=2)
-    record = manager.get("status-task")
-    assert record is not None
-    record.recent_activity = None
-    context = _context(tmp_path)
-    context.sub_task_manager = manager
-
-    result = (
-        build_default_registry()
-        .get("sub_task_status")
-        .handler(
-            context,
-            {"task_ids": ["status-task"], "detail_level": "snapshot"},
-        )
-    )
-    result = require_tool_result(result)
-    payload = json.loads(result.content)
-    entry = payload["tasks"][0]
-    fixture = _fixture()["status_envelope"]
-
-    assert all(field in entry for field in fixture["lineage_fields"])
-    assert entry["parent_run_id"] == "parent-run"
+def test_status_envelope_preserves_lineage_and_omits_unknown_activity(manager_driver, tmp_path):
+    parent, sid, _, context = _child(manager_driver, tmp_path, LLMResponse("child done"))
+    result = status_with_store(context, {"task_ids": [sid], "detail_level": "snapshot"})
+    entry = json.loads(result.content)["tasks"][0]
+    contract = _fixture()["status_envelope"]
+    assert all(field in entry for field in contract["lineage_fields"])
+    assert entry["parent_run_id"] == parent.run_id
     assert entry["parent_tool_call_id"] == "delegate"
     assert "recent_activity" not in entry["snapshot"]
-    assert fixture["recent_activity_when_unavailable"] == "omitted"
+    assert contract["recent_activity_when_unavailable"] == "omitted"

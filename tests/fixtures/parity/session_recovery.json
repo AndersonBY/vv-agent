@@ -1,0 +1,376 @@
+{
+  "cases": [
+    {
+      "bytes_base64": "eyJjYXNlIjoic3VtbWFyeV9yZWNlaXB0IiwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsImxvc3Rfd2FsbF9tcyI6MTAwMDAsInJlY2VpcHRfaWQiOiJvcC9zdW1tYXJ5X3JlY2VpcHQvdHVybi9pbml0aWFsL21vZGVsL2NvbXBhY3Rpb24vOWEwNjY4MTk1MWQ0MWY0ZTE2MWZmNTIzNzE2NGQyMmNlOTgxNjM5NjJlNjIzYTRiY2NkNmRiN2ZlODg3OTk3NS9zdW1tYXJ5LzEvMS9yZXN1bHQiLCJzZXNzaW9uX2lkIjoic3VtbWFyeV9yZWNlaXB0Iiwic3VtbWFyeV9kaXNwYXRjaGVzIjoxfQ==",
+      "case": "summary_receipt",
+      "expected_terminal": true,
+      "lost_wall_ms": 10000,
+      "receipt_id": "op/summary_receipt/turn/initial/model/compaction/9a06681951d41f4e161ff5237164d22ce98163962e623a4bccd6db7fe8879975/summary/1/1/result",
+      "record_id": null,
+      "session_id": "summary_receipt",
+      "sha256": "ff203364573e6d79971a10ec91b22248cf70674da30cc73d179b2cf24bfa811a",
+      "summary_dispatches": 1
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoicmVqZWN0ZWRfcmVjZWlwdCIsImV4cGVjdGVkX3Rlcm1pbmFsIjp0cnVlLCJsb3N0X3dhbGxfbXMiOjEwMDAwLCJyZWNlaXB0X2lkIjoib3AvcmVqZWN0ZWRfcmVjZWlwdC90dXJuL2luaXRpYWwvbW9kZWwvY29tcGFjdGlvbi9kMWM3MTE0MjE2OGZlNTJlZDdjZTc5ZDM2MDVmNGFiNjEyYWYzMTgwYWFiNWY0Y2E1MzVjMjg1Nzc3YjU2ZTRkL3N1bW1hcnkvMS8xL3Jlc3VsdCIsInNlc3Npb25faWQiOiJyZWplY3RlZF9yZWNlaXB0Iiwic3VtbWFyeV9kaXNwYXRjaGVzIjoxfQ==",
+      "case": "rejected_receipt",
+      "expected_terminal": true,
+      "lost_wall_ms": 10000,
+      "receipt_id": "op/rejected_receipt/turn/initial/model/compaction/d1c71142168fe52ed7ce79d3605f4ab612af3180aab5f4ca535c285777b56e4d/summary/1/1/result",
+      "record_id": null,
+      "session_id": "rejected_receipt",
+      "sha256": "c502e7e316310359f8dea1aa29934f04a99406c73bcd6b9bf89c51d7e634d10d",
+      "summary_dispatches": 1
+    },
+    {
+      "budget_usage": {
+        "cycles": 2,
+        "elapsed_ms": 0,
+        "host_cost": null,
+        "tool_calls": 0,
+        "tool_calls_by_name": {},
+        "total_tokens": null,
+        "unavailable_dimensions": [
+          {
+            "dimension": "wall_time",
+            "reason": "accounting_missing"
+          },
+          {
+            "dimension": "total_tokens",
+            "expected_currency": null,
+            "expected_unit": "tokens",
+            "observed_currency": null,
+            "observed_unit": null,
+            "reason": "usage_missing"
+          },
+          {
+            "dimension": "uncached_input_tokens",
+            "expected_currency": null,
+            "expected_unit": "tokens",
+            "observed_currency": null,
+            "observed_unit": null,
+            "reason": "usage_missing"
+          }
+        ],
+        "uncached_input_tokens": null
+      },
+      "bytes_base64": "eyJidWRnZXRfdXNhZ2UiOnsiY3ljbGVzIjoyLCJlbGFwc2VkX21zIjowLCJob3N0X2Nvc3QiOm51bGwsInRvb2xfY2FsbHMiOjAsInRvb2xfY2FsbHNfYnlfbmFtZSI6e30sInRvdGFsX3Rva2VucyI6bnVsbCwidW5hdmFpbGFibGVfZGltZW5zaW9ucyI6W3siZGltZW5zaW9uIjoid2FsbF90aW1lIiwicmVhc29uIjoiYWNjb3VudGluZ19taXNzaW5nIn0seyJkaW1lbnNpb24iOiJ0b3RhbF90b2tlbnMiLCJleHBlY3RlZF9jdXJyZW5jeSI6bnVsbCwiZXhwZWN0ZWRfdW5pdCI6InRva2VucyIsIm9ic2VydmVkX2N1cnJlbmN5IjpudWxsLCJvYnNlcnZlZF91bml0IjpudWxsLCJyZWFzb24iOiJ1c2FnZV9taXNzaW5nIn0seyJkaW1lbnNpb24iOiJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiLCJleHBlY3RlZF9jdXJyZW5jeSI6bnVsbCwiZXhwZWN0ZWRfdW5pdCI6InRva2VucyIsIm9ic2VydmVkX2N1cnJlbmN5IjpudWxsLCJvYnNlcnZlZF91bml0IjpudWxsLCJyZWFzb24iOiJ1c2FnZV9taXNzaW5nIn1dLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGx9LCJjYXNlIjoibG9zdF93YWxsX2NvbnRpbnVlX2FuZF9tYXJrIiwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsImxvc3Rfd2FsbF9tcyI6MTAwMDAsInByZWZpeF9pZHMiOlsic2Vzc2lvbi9sb3N0X3dhbGxfY29udGludWVfYW5kX21hcmsvY3JlYXRlZCIsImlucHV0L2luaXRpYWwvYXBwbGllZCIsInR1cm4vbG9zdF93YWxsX2NvbnRpbnVlX2FuZF9tYXJrL3R1cm4vaW5pdGlhbC9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2xvc3Rfd2FsbF9jb250aW51ZV9hbmRfbWFyay90dXJuL2luaXRpYWwvMS8xIiwidHVybi9sb3N0X3dhbGxfY29udGludWVfYW5kX21hcmsvdHVybi9pbml0aWFsL2JvdW5kYXJ5L2J1ZGdldC9ydW5fc3RhcnQiLCJ1c2FnZS9hY3RpdmUvbG9zdF93YWxsX2NvbnRpbnVlX2FuZF9tYXJrL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9sb3N0X3dhbGxfY29udGludWVfYW5kX21hcmsvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3BsYW5uZWQiLCJ1c2FnZS9hY3RpdmUvbG9zdF93YWxsX2NvbnRpbnVlX2FuZF9tYXJrL3R1cm4vaW5pdGlhbC8xLzMiLCJ0dXJuL2xvc3Rfd2FsbF9jb250aW51ZV9hbmRfbWFyay90dXJuL2luaXRpYWwvYm91bmRhcnkvYnVkZ2V0L2xvc3Rfd2FsbF9jb250aW51ZV9hbmRfbWFyay90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL3N0YXJ0LzEiLCJvcC9sb3N0X3dhbGxfY29udGludWVfYW5kX21hcmsvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiXSwic2Vzc2lvbl9pZCI6Imxvc3Rfd2FsbF9jb250aW51ZV9hbmRfbWFyayIsInN0YXR1cyI6ImNvbXBsZXRlZCJ9",
+      "case": "lost_wall_continue_and_mark",
+      "expected_terminal": true,
+      "lost_wall_ms": 10000,
+      "prefix_ids": [
+        "session/lost_wall_continue_and_mark/created",
+        "input/initial/applied",
+        "turn/lost_wall_continue_and_mark/turn/initial/started",
+        "usage/active/lost_wall_continue_and_mark/turn/initial/1/1",
+        "turn/lost_wall_continue_and_mark/turn/initial/boundary/budget/run_start",
+        "usage/active/lost_wall_continue_and_mark/turn/initial/1/2",
+        "op/lost_wall_continue_and_mark/turn/initial/model/primary/1/1/planned",
+        "usage/active/lost_wall_continue_and_mark/turn/initial/1/3",
+        "turn/lost_wall_continue_and_mark/turn/initial/boundary/budget/lost_wall_continue_and_mark/turn/initial/model/primary/1/start/1",
+        "op/lost_wall_continue_and_mark/turn/initial/model/primary/1/1/started"
+      ],
+      "record_id": null,
+      "session_id": "lost_wall_continue_and_mark",
+      "sha256": "1ba7d70f1fc8fdc9272c33538664c1e808750a2f9ed14af8b697faf785fb9499",
+      "status": "completed"
+    },
+    {
+      "budget_usage": {
+        "cycles": 1,
+        "elapsed_ms": 0,
+        "host_cost": null,
+        "tool_calls": 0,
+        "tool_calls_by_name": {},
+        "total_tokens": null,
+        "unavailable_dimensions": [
+          {
+            "dimension": "wall_time",
+            "reason": "accounting_missing"
+          },
+          {
+            "dimension": "total_tokens",
+            "expected_currency": null,
+            "expected_unit": "tokens",
+            "observed_currency": null,
+            "observed_unit": null,
+            "reason": "usage_missing"
+          },
+          {
+            "dimension": "uncached_input_tokens",
+            "expected_currency": null,
+            "expected_unit": "tokens",
+            "observed_currency": null,
+            "observed_unit": null,
+            "reason": "usage_missing"
+          }
+        ],
+        "uncached_input_tokens": null
+      },
+      "bytes_base64": "eyJidWRnZXRfdXNhZ2UiOnsiY3ljbGVzIjoxLCJlbGFwc2VkX21zIjowLCJob3N0X2Nvc3QiOm51bGwsInRvb2xfY2FsbHMiOjAsInRvb2xfY2FsbHNfYnlfbmFtZSI6e30sInRvdGFsX3Rva2VucyI6bnVsbCwidW5hdmFpbGFibGVfZGltZW5zaW9ucyI6W3siZGltZW5zaW9uIjoid2FsbF90aW1lIiwicmVhc29uIjoiYWNjb3VudGluZ19taXNzaW5nIn0seyJkaW1lbnNpb24iOiJ0b3RhbF90b2tlbnMiLCJleHBlY3RlZF9jdXJyZW5jeSI6bnVsbCwiZXhwZWN0ZWRfdW5pdCI6InRva2VucyIsIm9ic2VydmVkX2N1cnJlbmN5IjpudWxsLCJvYnNlcnZlZF91bml0IjpudWxsLCJyZWFzb24iOiJ1c2FnZV9taXNzaW5nIn0seyJkaW1lbnNpb24iOiJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiLCJleHBlY3RlZF9jdXJyZW5jeSI6bnVsbCwiZXhwZWN0ZWRfdW5pdCI6InRva2VucyIsIm9ic2VydmVkX2N1cnJlbmN5IjpudWxsLCJvYnNlcnZlZF91bml0IjpudWxsLCJyZWFzb24iOiJ1c2FnZV9taXNzaW5nIn1dLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGx9LCJjYXNlIjoibG9zdF93YWxsX3N0b3AiLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwibG9zdF93YWxsX21zIjoxMDAwMCwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2xvc3Rfd2FsbF9zdG9wL2NyZWF0ZWQiLCJpbnB1dC9pbml0aWFsL2FwcGxpZWQiLCJ0dXJuL2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC8xLzEiLCJ0dXJuL2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC9ib3VuZGFyeS9idWRnZXQvcnVuX3N0YXJ0IiwidXNhZ2UvYWN0aXZlL2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9sb3N0X3dhbGxfc3RvcC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcGxhbm5lZCIsInVzYWdlL2FjdGl2ZS9sb3N0X3dhbGxfc3RvcC90dXJuL2luaXRpYWwvMS8zIiwidHVybi9sb3N0X3dhbGxfc3RvcC90dXJuL2luaXRpYWwvYm91bmRhcnkvYnVkZ2V0L2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvc3RhcnQvMSIsIm9wL2xvc3Rfd2FsbF9zdG9wL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9zdGFydGVkIl0sInNlc3Npb25faWQiOiJsb3N0X3dhbGxfc3RvcCIsInN0YXR1cyI6ImZhaWxlZCJ9",
+      "case": "lost_wall_stop",
+      "expected_terminal": true,
+      "lost_wall_ms": 10000,
+      "prefix_ids": [
+        "session/lost_wall_stop/created",
+        "input/initial/applied",
+        "turn/lost_wall_stop/turn/initial/started",
+        "usage/active/lost_wall_stop/turn/initial/1/1",
+        "turn/lost_wall_stop/turn/initial/boundary/budget/run_start",
+        "usage/active/lost_wall_stop/turn/initial/1/2",
+        "op/lost_wall_stop/turn/initial/model/primary/1/1/planned",
+        "usage/active/lost_wall_stop/turn/initial/1/3",
+        "turn/lost_wall_stop/turn/initial/boundary/budget/lost_wall_stop/turn/initial/model/primary/1/start/1",
+        "op/lost_wall_stop/turn/initial/model/primary/1/1/started"
+      ],
+      "record_id": null,
+      "session_id": "lost_wall_stop",
+      "sha256": "239932d98eabe5c10c5edc2df5ab2e03ea6257de26339283f90e4ce91638b1a8",
+      "status": "failed"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoib3BfcGxhbm5lZCIsImN1dF9hZnRlciI6Im9wL2N1dF9vcF9wbGFubmVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsInByZWZpeF9pZHMiOlsic2Vzc2lvbi9jdXRfb3BfcGxhbm5lZC9jcmVhdGVkIiwiaW5wdXQvaW5pdGlhbC9hcHBsaWVkIiwidHVybi9jdXRfb3BfcGxhbm5lZC90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9jdXRfb3BfcGxhbm5lZC90dXJuL2luaXRpYWwvMS8xIiwidHVybi9jdXRfb3BfcGxhbm5lZC90dXJuL2luaXRpYWwvYm91bmRhcnkvYmVmb3JlX21lbW9yeS8xIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9wbGFubmVkL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9jdXRfb3BfcGxhbm5lZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcGxhbm5lZCJdLCJyZW1haW5pbmdfbW9kZWxfc3RlcHMiOjAsInNlc3Npb25faWQiOiJjdXRfb3BfcGxhbm5lZCJ9",
+      "case": "op_planned",
+      "cut_after": "op/cut_op_planned/turn/initial/model/primary/1/1/planned",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_op_planned/created",
+        "input/initial/applied",
+        "turn/cut_op_planned/turn/initial/started",
+        "usage/active/cut_op_planned/turn/initial/1/1",
+        "turn/cut_op_planned/turn/initial/boundary/before_memory/1",
+        "usage/active/cut_op_planned/turn/initial/1/2",
+        "op/cut_op_planned/turn/initial/model/primary/1/1/planned"
+      ],
+      "record_id": null,
+      "remaining_model_steps": 0,
+      "session_id": "cut_op_planned",
+      "sha256": "1fd16016d9ded874f741876351c0be14fb7ae3d508f0ceb4e61fdaeba784d79d"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoib3BfcHJlcGFyZWQiLCJjdXRfYWZ0ZXIiOiJvcC9jdXRfb3BfcHJlcGFyZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvcHJlcGFyZWQiLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2N1dF9vcF9wcmVwYXJlZC9jcmVhdGVkIiwiaW5wdXQvaW5pdGlhbC9hcHBsaWVkIiwidHVybi9jdXRfb3BfcHJlcGFyZWQvdHVybi9pbml0aWFsL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X29wX3ByZXBhcmVkL3R1cm4vaW5pdGlhbC8xLzEiLCJ0dXJuL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvYm91bmRhcnkvYmVmb3JlX21lbW9yeS8xIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvMS8yIiwib3AvY3V0X29wX3ByZXBhcmVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvMS8zIiwib3AvY3V0X29wX3ByZXBhcmVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvMS80Iiwib3AvY3V0X29wX3ByZXBhcmVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9yZXN1bHQiLCJvcC9jdXRfb3BfcHJlcGFyZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvcGxhbm5lZCIsIm9wL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9wcmVwYXJlZC90dXJuL2luaXRpYWwvMS81Iiwib3AvY3V0X29wX3ByZXBhcmVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3ByZXBhcmVkIl0sInJlbWFpbmluZ19tb2RlbF9zdGVwcyI6MCwic2Vzc2lvbl9pZCI6ImN1dF9vcF9wcmVwYXJlZCJ9",
+      "case": "op_prepared",
+      "cut_after": "op/cut_op_prepared/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_op_prepared/created",
+        "input/initial/applied",
+        "turn/cut_op_prepared/turn/initial/started",
+        "usage/active/cut_op_prepared/turn/initial/1/1",
+        "turn/cut_op_prepared/turn/initial/boundary/before_memory/1",
+        "usage/active/cut_op_prepared/turn/initial/1/2",
+        "op/cut_op_prepared/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_op_prepared/turn/initial/1/3",
+        "op/cut_op_prepared/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_op_prepared/turn/initial/1/4",
+        "op/cut_op_prepared/turn/initial/model/primary/1/1/result",
+        "op/cut_op_prepared/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "op/cut_op_prepared/turn/initial/model/primary/1/attempt/1/tool/1/1/planned",
+        "usage/active/cut_op_prepared/turn/initial/1/5",
+        "op/cut_op_prepared/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared"
+      ],
+      "record_id": null,
+      "remaining_model_steps": 0,
+      "session_id": "cut_op_prepared",
+      "sha256": "ee7fe81969de0a26f124ceba1d7841851a003f7f2789236440d8d632b54fc2ea"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoib3Bfc3RhcnRlZCIsImN1dF9hZnRlciI6Im9wL2N1dF9vcF9zdGFydGVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9zdGFydGVkIiwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsInByZWZpeF9pZHMiOlsic2Vzc2lvbi9jdXRfb3Bfc3RhcnRlZC9jcmVhdGVkIiwiaW5wdXQvaW5pdGlhbC9hcHBsaWVkIiwidHVybi9jdXRfb3Bfc3RhcnRlZC90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9jdXRfb3Bfc3RhcnRlZC90dXJuL2luaXRpYWwvMS8xIiwidHVybi9jdXRfb3Bfc3RhcnRlZC90dXJuL2luaXRpYWwvYm91bmRhcnkvYmVmb3JlX21lbW9yeS8xIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9zdGFydGVkL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9jdXRfb3Bfc3RhcnRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcGxhbm5lZCIsInVzYWdlL2FjdGl2ZS9jdXRfb3Bfc3RhcnRlZC90dXJuL2luaXRpYWwvMS8zIiwib3AvY3V0X29wX3N0YXJ0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiXSwicmVtYWluaW5nX21vZGVsX3N0ZXBzIjowLCJzZXNzaW9uX2lkIjoiY3V0X29wX3N0YXJ0ZWQifQ==",
+      "case": "op_started",
+      "cut_after": "op/cut_op_started/turn/initial/model/primary/1/1/started",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_op_started/created",
+        "input/initial/applied",
+        "turn/cut_op_started/turn/initial/started",
+        "usage/active/cut_op_started/turn/initial/1/1",
+        "turn/cut_op_started/turn/initial/boundary/before_memory/1",
+        "usage/active/cut_op_started/turn/initial/1/2",
+        "op/cut_op_started/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_op_started/turn/initial/1/3",
+        "op/cut_op_started/turn/initial/model/primary/1/1/started"
+      ],
+      "record_id": null,
+      "remaining_model_steps": 0,
+      "session_id": "cut_op_started",
+      "sha256": "8b2f63801d72bffc281aa53d5874e0889fb61b080389210b88d22c14d3ef55e1"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoib3BfY29tcGxldGVkIiwiY3V0X2FmdGVyIjoib3AvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9yZXN1bHQiLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2N1dF9vcF9jb21wbGV0ZWQvY3JlYXRlZCIsImlucHV0L2luaXRpYWwvYXBwbGllZCIsInR1cm4vY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9jdXRfb3BfY29tcGxldGVkL3R1cm4vaW5pdGlhbC8xLzEiLCJ0dXJuL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsL2JvdW5kYXJ5L2JlZm9yZV9tZW1vcnkvMSIsInVzYWdlL2FjdGl2ZS9jdXRfb3BfY29tcGxldGVkL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9jdXRfb3BfY29tcGxldGVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsLzEvMyIsIm9wL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvMS80Iiwib3AvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcmVzdWx0Iiwib3AvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wbGFubmVkIiwib3AvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsLzEvNSIsIm9wL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvcHJlcGFyZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvMS82Iiwib3AvY3V0X29wX2NvbXBsZXRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsLzEvNyIsIm9wL2N1dF9vcF9jb21wbGV0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvcmVzdWx0Il0sInJlbWFpbmluZ19tb2RlbF9zdGVwcyI6MCwic2Vzc2lvbl9pZCI6ImN1dF9vcF9jb21wbGV0ZWQifQ==",
+      "case": "op_completed",
+      "cut_after": "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_op_completed/created",
+        "input/initial/applied",
+        "turn/cut_op_completed/turn/initial/started",
+        "usage/active/cut_op_completed/turn/initial/1/1",
+        "turn/cut_op_completed/turn/initial/boundary/before_memory/1",
+        "usage/active/cut_op_completed/turn/initial/1/2",
+        "op/cut_op_completed/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_op_completed/turn/initial/1/3",
+        "op/cut_op_completed/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_op_completed/turn/initial/1/4",
+        "op/cut_op_completed/turn/initial/model/primary/1/1/result",
+        "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/1/1/planned",
+        "usage/active/cut_op_completed/turn/initial/1/5",
+        "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+        "usage/active/cut_op_completed/turn/initial/1/6",
+        "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/cut_op_completed/turn/initial/1/7",
+        "op/cut_op_completed/turn/initial/model/primary/1/attempt/1/tool/0/1/result"
+      ],
+      "record_id": null,
+      "remaining_model_steps": 0,
+      "session_id": "cut_op_completed",
+      "sha256": "5ad32fcc27761ddff42582516840974697523718f3b2604c017ae830351f3703"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoiYm91bmRhcnlfcmVjb3JkZWQiLCJjdXRfYWZ0ZXIiOiJ0dXJuL2N1dF9ib3VuZGFyeV9yZWNvcmRlZC90dXJuL2luaXRpYWwvYm91bmRhcnkvYmVmb3JlX21lbW9yeS8xIiwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsInByZWZpeF9pZHMiOlsic2Vzc2lvbi9jdXRfYm91bmRhcnlfcmVjb3JkZWQvY3JlYXRlZCIsImlucHV0L2luaXRpYWwvYXBwbGllZCIsInR1cm4vY3V0X2JvdW5kYXJ5X3JlY29yZGVkL3R1cm4vaW5pdGlhbC9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2N1dF9ib3VuZGFyeV9yZWNvcmRlZC90dXJuL2luaXRpYWwvMS8xIiwidHVybi9jdXRfYm91bmRhcnlfcmVjb3JkZWQvdHVybi9pbml0aWFsL2JvdW5kYXJ5L2JlZm9yZV9tZW1vcnkvMSJdLCJyZW1haW5pbmdfbW9kZWxfc3RlcHMiOjAsInNlc3Npb25faWQiOiJjdXRfYm91bmRhcnlfcmVjb3JkZWQifQ==",
+      "case": "boundary_recorded",
+      "cut_after": "turn/cut_boundary_recorded/turn/initial/boundary/before_memory/1",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_boundary_recorded/created",
+        "input/initial/applied",
+        "turn/cut_boundary_recorded/turn/initial/started",
+        "usage/active/cut_boundary_recorded/turn/initial/1/1",
+        "turn/cut_boundary_recorded/turn/initial/boundary/before_memory/1"
+      ],
+      "record_id": null,
+      "remaining_model_steps": 0,
+      "session_id": "cut_boundary_recorded",
+      "sha256": "0c7c56645b52fa0eaca321b54b29a61818e121f9cb22a4c5e8d2cca061c801d1"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoiYWNjZXB0ZWQiLCJlZmZlY3RzIjoxLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2N1dF9hY2NlcHRlZC9jcmVhdGVkIiwiaW5wdXQvaW5pdGlhbC9hcHBsaWVkIiwidHVybi9jdXRfYWNjZXB0ZWQvdHVybi9pbml0aWFsL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X2FjY2VwdGVkL3R1cm4vaW5pdGlhbC8xLzEiLCJvcC9jdXRfYWNjZXB0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3BsYW5uZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X2FjY2VwdGVkL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9jdXRfYWNjZXB0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X2FjY2VwdGVkL3R1cm4vaW5pdGlhbC8xLzMiLCJvcC9jdXRfYWNjZXB0ZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3Jlc3VsdCIsIm9wL2N1dF9hY2NlcHRlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF9hY2NlcHRlZC90dXJuL2luaXRpYWwvMS80Iiwib3AvY3V0X2FjY2VwdGVkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3N0YXJ0ZWQiXSwic2Vzc2lvbl9pZCI6ImN1dF9hY2NlcHRlZCJ9",
+      "case": "accepted",
+      "effects": 1,
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_accepted/created",
+        "input/initial/applied",
+        "turn/cut_accepted/turn/initial/started",
+        "usage/active/cut_accepted/turn/initial/1/1",
+        "op/cut_accepted/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_accepted/turn/initial/1/2",
+        "op/cut_accepted/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_accepted/turn/initial/1/3",
+        "op/cut_accepted/turn/initial/model/primary/1/1/result",
+        "op/cut_accepted/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/cut_accepted/turn/initial/1/4",
+        "op/cut_accepted/turn/initial/model/primary/1/attempt/1/tool/0/1/started"
+      ],
+      "record_id": null,
+      "session_id": "cut_accepted",
+      "sha256": "e47998433ff9e48c2b6d188c017cb16ec228845c8f1626cb10b44cf3bff7ace7"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoicGFya2VkIiwiZWZmZWN0cyI6MSwiZXhwZWN0ZWRfdGVybWluYWwiOnRydWUsInByZWZpeF9pZHMiOlsic2Vzc2lvbi9jdXRfcGFya2VkL2NyZWF0ZWQiLCJpbnB1dC9pbml0aWFsL2FwcGxpZWQiLCJ0dXJuL2N1dF9wYXJrZWQvdHVybi9pbml0aWFsL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X3BhcmtlZC90dXJuL2luaXRpYWwvMS8xIiwib3AvY3V0X3BhcmtlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcGxhbm5lZCIsInVzYWdlL2FjdGl2ZS9jdXRfcGFya2VkL3R1cm4vaW5pdGlhbC8xLzIiLCJvcC9jdXRfcGFya2VkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9zdGFydGVkIiwidXNhZ2UvYWN0aXZlL2N1dF9wYXJrZWQvdHVybi9pbml0aWFsLzEvMyIsIm9wL2N1dF9wYXJrZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3Jlc3VsdCIsIm9wL2N1dF9wYXJrZWQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvcGxhbm5lZCIsInVzYWdlL2FjdGl2ZS9jdXRfcGFya2VkL3R1cm4vaW5pdGlhbC8xLzQiLCJvcC9jdXRfcGFya2VkL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X3BhcmtlZC90dXJuL2luaXRpYWwvMS81Iiwib3AvY3V0X3BhcmtlZC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wYXJrZWQvYWZ0ZXJfZGlzcGF0Y2giXSwic2Vzc2lvbl9pZCI6ImN1dF9wYXJrZWQifQ==",
+      "case": "parked",
+      "effects": 1,
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_parked/created",
+        "input/initial/applied",
+        "turn/cut_parked/turn/initial/started",
+        "usage/active/cut_parked/turn/initial/1/1",
+        "op/cut_parked/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_parked/turn/initial/1/2",
+        "op/cut_parked/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_parked/turn/initial/1/3",
+        "op/cut_parked/turn/initial/model/primary/1/1/result",
+        "op/cut_parked/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/cut_parked/turn/initial/1/4",
+        "op/cut_parked/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/cut_parked/turn/initial/1/5",
+        "op/cut_parked/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch"
+      ],
+      "record_id": null,
+      "session_id": "cut_parked",
+      "sha256": "4df148be52745e197618e12324e5f0b47a936bb095418533b2d4c75a1879c4a2"
+    },
+    {
+      "bytes_base64": "eyJjYXNlIjoidG9vbF9hX2RvbmVfYl9wZW5kaW5nIiwiZWZmZWN0cyI6WyJhIiwiYiJdLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2N1dF90b29sX2EvY3JlYXRlZCIsImlucHV0L2luaXRpYWwvYXBwbGllZCIsInR1cm4vY3V0X3Rvb2xfYS90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9jdXRfdG9vbF9hL3R1cm4vaW5pdGlhbC8xLzEiLCJvcC9jdXRfdG9vbF9hL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF90b29sX2EvdHVybi9pbml0aWFsLzEvMiIsIm9wL2N1dF90b29sX2EvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvY3V0X3Rvb2xfYS90dXJuL2luaXRpYWwvMS8zIiwib3AvY3V0X3Rvb2xfYS90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcmVzdWx0Iiwib3AvY3V0X3Rvb2xfYS90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wbGFubmVkIiwib3AvY3V0X3Rvb2xfYS90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2N1dF90b29sX2EvdHVybi9pbml0aWFsLzEvNCIsIm9wL2N1dF90b29sX2EvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9jdXRfdG9vbF9hL3R1cm4vaW5pdGlhbC8xLzUiLCJvcC9jdXRfdG9vbF9hL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3Jlc3VsdCJdLCJzZXNzaW9uX2lkIjoiY3V0X3Rvb2xfYSJ9",
+      "case": "tool_a_done_b_pending",
+      "effects": [
+        "a",
+        "b"
+      ],
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/cut_tool_a/created",
+        "input/initial/applied",
+        "turn/cut_tool_a/turn/initial/started",
+        "usage/active/cut_tool_a/turn/initial/1/1",
+        "op/cut_tool_a/turn/initial/model/primary/1/1/planned",
+        "usage/active/cut_tool_a/turn/initial/1/2",
+        "op/cut_tool_a/turn/initial/model/primary/1/1/started",
+        "usage/active/cut_tool_a/turn/initial/1/3",
+        "op/cut_tool_a/turn/initial/model/primary/1/1/result",
+        "op/cut_tool_a/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "op/cut_tool_a/turn/initial/model/primary/1/attempt/1/tool/1/1/planned",
+        "usage/active/cut_tool_a/turn/initial/1/4",
+        "op/cut_tool_a/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/cut_tool_a/turn/initial/1/5",
+        "op/cut_tool_a/turn/initial/model/primary/1/attempt/1/tool/0/1/result"
+      ],
+      "record_id": null,
+      "session_id": "cut_tool_a",
+      "sha256": "c74fd1efd22662ca933d5b6564d020b09a9f264e80e600b7f86608734dabcb4d"
+    },
+    {
+      "bytes_base64": "eyJjYWxsYmFja19jYWxscyI6MywiY2FzZSI6ImJvdW5kYXJ5X2JlZm9yZV9jb21taXQiLCJleHBlY3RlZF90ZXJtaW5hbCI6dHJ1ZSwicHJlZml4X2lkcyI6WyJzZXNzaW9uL2JvdW5kYXJ5X2JlZm9yZV9jb21taXQvY3JlYXRlZCIsImlucHV0L2luaXRpYWwvYXBwbGllZCIsInR1cm4vYm91bmRhcnlfYmVmb3JlX2NvbW1pdC90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9iZWZvcmVfY29tbWl0L3R1cm4vaW5pdGlhbC8xLzEiLCJvcC9ib3VuZGFyeV9iZWZvcmVfY29tbWl0L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2JvdW5kYXJ5X2JlZm9yZV9jb21taXQvdHVybi9pbml0aWFsLzEvMiIsIm9wL2JvdW5kYXJ5X2JlZm9yZV9jb21taXQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3N0YXJ0ZWQiLCJ1c2FnZS9hY3RpdmUvYm91bmRhcnlfYmVmb3JlX2NvbW1pdC90dXJuL2luaXRpYWwvMS8zIiwib3AvYm91bmRhcnlfYmVmb3JlX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcmVzdWx0Iiwib3AvYm91bmRhcnlfYmVmb3JlX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wbGFubmVkIiwidXNhZ2UvYWN0aXZlL2JvdW5kYXJ5X2JlZm9yZV9jb21taXQvdHVybi9pbml0aWFsLzEvNCIsIm9wL2JvdW5kYXJ5X2JlZm9yZV9jb21taXQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9iZWZvcmVfY29tbWl0L3R1cm4vaW5pdGlhbC8xLzUiLCJvcC9ib3VuZGFyeV9iZWZvcmVfY29tbWl0L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3Jlc3VsdCJdLCJzZXNzaW9uX2lkIjoiYm91bmRhcnlfYmVmb3JlX2NvbW1pdCJ9",
+      "callback_calls": 3,
+      "case": "boundary_before_commit",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/boundary_before_commit/created",
+        "input/initial/applied",
+        "turn/boundary_before_commit/turn/initial/started",
+        "usage/active/boundary_before_commit/turn/initial/1/1",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/planned",
+        "usage/active/boundary_before_commit/turn/initial/1/2",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/started",
+        "usage/active/boundary_before_commit/turn/initial/1/3",
+        "op/boundary_before_commit/turn/initial/model/primary/1/1/result",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/boundary_before_commit/turn/initial/1/4",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/boundary_before_commit/turn/initial/1/5",
+        "op/boundary_before_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/result"
+      ],
+      "record_id": null,
+      "session_id": "boundary_before_commit",
+      "sha256": "4368558a220b7526959bef797905ac132f627e4e51f16ff95611bff8cbc74053"
+    },
+    {
+      "bytes_base64": "eyJjYWxsYmFja19jYWxscyI6MiwiY2FzZSI6ImJvdW5kYXJ5X2FmdGVyX2NvbW1pdCIsImV4cGVjdGVkX3Rlcm1pbmFsIjp0cnVlLCJwcmVmaXhfaWRzIjpbInNlc3Npb24vYm91bmRhcnlfYWZ0ZXJfY29tbWl0L2NyZWF0ZWQiLCJpbnB1dC9pbml0aWFsL2FwcGxpZWQiLCJ0dXJuL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9hZnRlcl9jb21taXQvdHVybi9pbml0aWFsLzEvMSIsIm9wL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcGxhbm5lZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9hZnRlcl9jb21taXQvdHVybi9pbml0aWFsLzEvMiIsIm9wL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9hZnRlcl9jb21taXQvdHVybi9pbml0aWFsLzEvMyIsIm9wL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEvcmVzdWx0Iiwib3AvYm91bmRhcnlfYWZ0ZXJfY29tbWl0L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3BsYW5uZWQiLCJ1c2FnZS9hY3RpdmUvYm91bmRhcnlfYWZ0ZXJfY29tbWl0L3R1cm4vaW5pdGlhbC8xLzQiLCJvcC9ib3VuZGFyeV9hZnRlcl9jb21taXQvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEvc3RhcnRlZCIsInVzYWdlL2FjdGl2ZS9ib3VuZGFyeV9hZnRlcl9jb21taXQvdHVybi9pbml0aWFsLzEvNSIsIm9wL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9yZXN1bHQiLCJ1c2FnZS9hY3RpdmUvYm91bmRhcnlfYWZ0ZXJfY29tbWl0L3R1cm4vaW5pdGlhbC8xLzYiLCJ0dXJuL2JvdW5kYXJ5X2FmdGVyX2NvbW1pdC90dXJuL2luaXRpYWwvYm91bmRhcnkvYWZ0ZXJfY3ljbGUvYm91bmRhcnlfYWZ0ZXJfY29tbWl0L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiXSwic2Vzc2lvbl9pZCI6ImJvdW5kYXJ5X2FmdGVyX2NvbW1pdCJ9",
+      "callback_calls": 2,
+      "case": "boundary_after_commit",
+      "expected_terminal": true,
+      "prefix_ids": [
+        "session/boundary_after_commit/created",
+        "input/initial/applied",
+        "turn/boundary_after_commit/turn/initial/started",
+        "usage/active/boundary_after_commit/turn/initial/1/1",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/planned",
+        "usage/active/boundary_after_commit/turn/initial/1/2",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/started",
+        "usage/active/boundary_after_commit/turn/initial/1/3",
+        "op/boundary_after_commit/turn/initial/model/primary/1/1/result",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+        "usage/active/boundary_after_commit/turn/initial/1/4",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+        "usage/active/boundary_after_commit/turn/initial/1/5",
+        "op/boundary_after_commit/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+        "usage/active/boundary_after_commit/turn/initial/1/6",
+        "turn/boundary_after_commit/turn/initial/boundary/after_cycle/boundary_after_commit/turn/initial/model/primary/1"
+      ],
+      "record_id": null,
+      "session_id": "boundary_after_commit",
+      "sha256": "eeb275c060aa6e8646a3d1f554e6283b271217b04285c1e686e05e560371c47f"
+    }
+  ]
+}

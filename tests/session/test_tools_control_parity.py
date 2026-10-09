@@ -13,7 +13,6 @@ from vv_agent import Agent, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker, ApprovalDecision
 from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.run_config import ToolPolicy
-from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch
 from vv_agent.session.kernel import Runtime, drive, read_state
 from vv_agent.session.projection import project_records
@@ -22,7 +21,7 @@ from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import function_tool
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
 from .conftest import open_store
 from .test_runner_parity import RESOLVED, echo, observe
@@ -34,7 +33,20 @@ class Restart(BaseException):
 
 def admit(store, config, sid="control"):
     with store.atomic() as tx:
-        tx.create(SessionSpec(sid, "test", str(config.workspace)), consumers=("events",))
+        tx.create(
+            SessionSpec(
+                sid,
+                "test",
+                str(config.workspace),
+                attributes={
+                    "seed": {
+                        "messages": [m.to_dict() for m in config.initial_messages or []],
+                        "shared_state": config.shared_state or {},
+                    }
+                },
+            ),
+            consumers=("events",),
+        )
         tx.push(sid, InboxItem("initial", "user", {"content": "go"}))
 
 
@@ -197,7 +209,11 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
     runner = Runner.configured(replace(config, model_provider=FixedModelProvider(ScriptedLLM(deepcopy(steps)), RESOLVED)))
     waiting = runner.run_sync(agent, "go")
     assert waiting.status == AgentStatus.WAIT_USER
-    resumed = runner.resume(waiting.into_state(), input="blue")
+    owner = waiting._session_driver
+    sid, tid = waiting.raw_result.session_id, waiting.raw_result.turn_id
+    assert sid is not None and tid is not None
+    owner.answer(sid, owner.handles[-1].runtime, "blue", "reply")
+    resumed = runner.resume(sid, tid)
     assert resumed.final_output == "blue"
     admit(store, config)
     llm = ScriptedLLM(steps)
@@ -687,8 +703,7 @@ def test_cancellation_control_result_event_parity(store, database, tmp_path, coo
         assert entered.wait(3)
         assert old_handle.cancel()
         release.set()
-        with pytest.raises(CancelledError):
-            old_handle.result(timeout=3)
+        assert old_handle.result(timeout=3).completion_reason == CompletionReason.CANCELLED
         old_events = list(old_handle.events())
         assert old_handle.state().cancelled
     finally:
@@ -723,7 +738,7 @@ def test_cancellation_control_result_event_parity(store, database, tmp_path, coo
         assert end.payload["status"] == "cancelled"
         events = project_records(read_state(store, "control")[1])
         assert [e.type for e in events].count("run_cancelled") == 1
-        assert [e.type for e in old_events].count("run_cancelled") == 0
+        assert [e.type for e in old_events].count("run_cancelled") == 1
         assert [e.type for e in events].count("tool_call_started") == [e.type for e in old_events].count("tool_call_started") == 1
         control = next(e for e in events if e.type == "run_state_changed")
         assert control.to_dict()["cancel_requested"] == {"from": False, "to": True}
@@ -785,9 +800,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
         assert entered.wait(3)
         assert handle.cancel()
         release.set()
-        # The current SDK child bridge also propagates the cancellation exception.
-        with pytest.raises(CancelledError):
-            handle.result(timeout=3)
+        assert handle.result(timeout=3).completion_reason == CompletionReason.CANCELLED
         sdk_events = list(handle.events())
         assert handle.state().cancelled
         assert [e.type for e in sdk_events].count("tool_call_started") == 1
@@ -1011,7 +1024,7 @@ def test_expired_approval_answer_cannot_authorize_effect(store, database, tmp_pa
         replace(config, approval_provider=capture, approval_broker=broker, approval_timeout_seconds=0),
         kernel=False,
     )
-    assert not broker.resolve(capture.requests[0].request_id, "allow")
+    assert capture.requests == []
     assert effects == []
 
 
@@ -1112,8 +1125,8 @@ def test_approval_absolute_deadline_includes_provider_time(store, database, tmp_
     config = RunConfig(workspace=tmp_path, approval_provider=provider, approval_timeout_seconds=0)
     steps: list[ScriptStep] = [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")]
     old = observe(agent, steps, config, kernel=False)
-    assert old["tools"] == [("a", "effect")] and effects == ["effect"]
-    assert len(provider.requests) == 1
+    assert json.loads(old["tools"][0][1])["error_code"] == "tool_approval_timeout"
+    assert effects == [] and provider.requests == []
     effects.clear()
     provider = Decisions(ApprovalDecision.allow())
     config = replace(config, approval_provider=provider)

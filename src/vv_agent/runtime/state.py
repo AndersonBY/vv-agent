@@ -1476,11 +1476,6 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 "checkpoint terminal status must match terminal_result status",
                 code="checkpoint_status_invalid",
             )
-        if checkpoint.terminal_result.checkpoint_key not in {None, checkpoint.checkpoint_key}:
-            raise CheckpointError(
-                "terminal_result checkpoint_key does not match checkpoint",
-                code="checkpoint_status_invalid",
-            )
         if checkpoint.terminal_result.token_usage.model_calls != checkpoint.model_calls:
             raise CheckpointError(
                 "terminal result model-call ledger does not match checkpoint",
@@ -2670,16 +2665,14 @@ def prepare_claimed_terminal(
     assert terminal_result is not None
     reason = _terminal_abort_reason(terminal_result)
     logical_cycle = checkpoint.cycle_index + 1
-    existing_observations = list(terminal_result.resume_observations)
     observations: list[ResumeObservation] = []
     if reason is not None:
         observations = _close_unclosed_tools(checkpoint)
-        terminal_result.resume_observations = _merge_resume_observations(existing_observations, observations)
         has_unclosed_cycle = any(
             entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
             for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
         )
-        if terminal_result.resume_observations or has_unclosed_cycle:
+        if observations or has_unclosed_cycle:
             _append_cycle_aborted_event(checkpoint, logical_cycle=logical_cycle, reason=reason, created_at=created_at)
     checkpoint.terminal_result = terminal_result
     preserve_model_journal = reason is not None
@@ -2719,16 +2712,14 @@ def prepare_unclaimed_terminal(checkpoint: Checkpoint, *, created_at: float | No
     assert result is not None
     reason = _terminal_abort_reason(result)
     logical_cycle = terminal.cycle_index + 1
-    existing_observations = list(result.resume_observations)
     observations: list[ResumeObservation] = []
     if reason is not None:
         observations = _close_unclosed_tools(terminal)
-        result.resume_observations = _merge_resume_observations(existing_observations, observations)
         has_unclosed_cycle = any(
             entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
             for entry in [*terminal.model_call_journal, *terminal.tool_journal]
         )
-        if result.resume_observations or has_unclosed_cycle:
+        if observations or has_unclosed_cycle:
             _append_cycle_aborted_event(terminal, logical_cycle=logical_cycle, reason=reason, created_at=created_at)
     terminal.model_call_journal = (
         [

@@ -132,7 +132,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
     state.applied_inputs[item.input_id] = record
     if p["disposition"] != "applied":
         return
-    tid = item.target_turn_id
+    tid = item.target_turn_id if item.target_turn_id is not None else record.turn_id
     if tid is not None:
         require(tid == record.turn_id, "input targets another turn")
     session_control = item.kind == "control" and item.payload["action"] in {"close", "archive"}
@@ -502,7 +502,7 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
     source = project_context(tuple(history), state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
-    replacement = [Message.from_dict(m, _kernel=True) for m in p["replacement"]]
+    replacement = [Message.from_dict(m) for m in p["replacement"]]
     ids = message_ids(source)
     definition = state.turns[tid].start._payload["definition"]
     manager = MemoryManager(**definition["memory_settings"])
@@ -803,7 +803,7 @@ class Fold:
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
                     for message in p["data"]["messages"]:
-                        Message.from_dict(message, _kernel=True)
+                        Message.from_dict(message)
                 elif p["stage"] == "session_memory_saved" and oid is not None:
                     require(
                         state.operations[oid].kind == "model"
@@ -852,7 +852,7 @@ class Fold:
                 elif p["stage"] in {"memory_started", "memory_completed"}:
                     from vv_agent.events import event_from_dict
 
-                    event = event_from_dict(p["data"]["event"], _kernel=True)
+                    event = event_from_dict(p["data"]["event"])
                     require(
                         event.type
                         == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),

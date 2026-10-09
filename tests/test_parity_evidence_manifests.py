@@ -33,13 +33,12 @@ EXPECTED_DOMAINS = (
     "tracing",
     "llm_bridge",
     "runtime_backend",
+    "session",
+    "exports",
 )
 EXPECTED_RUNNER_OPERATIONS = (
     "run",
     "start",
-    "start_distributed",
-    "start_distributed_compiled",
-    "finalize_distributed",
     "stream",
     "resume",
     "configured",
@@ -1997,7 +1996,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 179
+    assert len(capability_ids) == 239
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -2007,7 +2006,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 307
+        == 281
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

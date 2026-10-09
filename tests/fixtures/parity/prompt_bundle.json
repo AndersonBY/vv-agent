@@ -1,73 +1,149 @@
 {
-  "schema_version": "vv-agent.prompt-bundle.v2",
-  "section_contract": {
-    "required_fields": [
-      "id",
-      "text",
-      "stable"
-    ],
-    "optional_fields": [
-      "source",
-      "cache_hint",
-      "metadata"
-    ],
-    "unknown_fields": "reject",
-    "id": "non_empty_unique_string",
-    "text": "non_empty_after_canonical_ASCII_whitespace_trim",
-    "text_normalization": "strip only U+0009 U+000A U+000B U+000C U+000D and U+0020 from both ends before validation and serialization",
-    "source": "omitted_or_non_empty_string",
-    "cache_hint": "omitted_or_non_empty_string",
-    "metadata": "omitted_or_json_object",
-    "order": "array_order_is_model_visible_order",
-    "stable_semantics": "resolved_text_is_eligible_for_a_stable_prefix; it_never_requests_reexecution_per_cycle",
-    "empty_sections": "omit_before_bundle"
-  },
   "bundle_contract": {
-    "required_fields": [
-      "sections",
-      "stable_hash"
-    ],
-    "unknown_fields": "reject",
-    "sections": "non_empty_array_of_closed_prompt_sections",
-    "flat_prompt": "join section.text in array order with exactly two LF characters",
-    "stable_hash": {
-      "algorithm": "SHA-256",
-      "input": "RFC 8785 UTF-8 bytes of ordered stable section objects after absent optional fields are omitted",
-      "encoding": "lowercase_hex",
-      "provider_directive": false
-    },
     "derived_fields_not_serialized": [
       "prompt",
       "sources",
       "total_chars"
-    ]
+    ],
+    "flat_prompt": "join section.text in array order with exactly two LF characters",
+    "required_fields": [
+      "sections",
+      "stable_hash"
+    ],
+    "sections": "non_empty_array_of_closed_prompt_sections",
+    "stable_hash": {
+      "algorithm": "SHA-256",
+      "encoding": "lowercase_hex",
+      "input": "RFC 8785 UTF-8 bytes of ordered stable section objects after absent optional fields are omitted",
+      "provider_directive": false
+    },
+    "unknown_fields": "reject"
   },
   "compiler_contract": {
     "agent_instruction_values": [
       "string",
       "prompt_bundle"
     ],
-    "string_instruction_section": {
-      "id": "agent_instructions",
-      "stable": true,
-      "source": "agent.instructions"
-    },
-    "instruction_bundle_order": "preserve_exactly",
     "compiler_owned_sections_after_instruction_bundle": [
       "configured_sub_agents"
     ],
-    "provider_fragment_order": "ascending_priority_then_stable_before_volatile_then_utf16_id_then_provider_emission_order",
     "forbidden": [
       "flatten_then_rewrap_as_agent_instructions",
       "system_prompt_sections_metadata_transport",
       "per_cycle_instruction_or_context_producer_execution"
-    ]
+    ],
+    "instruction_bundle_order": "preserve_exactly",
+    "provider_fragment_order": "ascending_priority_then_stable_before_volatile_then_utf16_id_then_provider_emission_order",
+    "string_instruction_section": {
+      "id": "agent_instructions",
+      "source": "agent.instructions",
+      "stable": true
+    }
+  },
+  "invalid_cases": [
+    {
+      "bundle": {
+        "sections": [],
+        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "name": "empty_bundle"
+    },
+    {
+      "bundle": {
+        "sections": [
+          {
+            "id": "empty",
+            "stable": true,
+            "text": " "
+          }
+        ],
+        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "name": "empty_section_text"
+    },
+    {
+      "bundle": {
+        "sections": [
+          {
+            "id": "same",
+            "stable": true,
+            "text": "one"
+          },
+          {
+            "id": "same",
+            "stable": false,
+            "text": "two"
+          }
+        ],
+        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "name": "duplicate_section_id"
+    },
+    {
+      "bundle": {
+        "sections": [
+          {
+            "id": "known",
+            "priority": 1,
+            "stable": true,
+            "text": "value"
+          }
+        ],
+        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "name": "unknown_section_field"
+    },
+    {
+      "bundle": {
+        "sections": [
+          {
+            "id": "known",
+            "stable": true,
+            "text": "value"
+          }
+        ]
+      },
+      "name": "missing_stable_hash"
+    },
+    {
+      "bundle": {
+        "sections": [
+          {
+            "id": "known",
+            "stable": true,
+            "text": "value"
+          }
+        ],
+        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "name": "stable_hash_mismatch"
+    },
+    {
+      "bundle": {
+        "flat_prompt": "value",
+        "sections": [
+          {
+            "id": "known",
+            "stable": true,
+            "text": "value"
+          }
+        ],
+        "stable_hash": "b47a8e823a9f40ff61c67fb0b65014dd2820da7e3298e3f754938945f5870768"
+      },
+      "name": "unknown_bundle_field"
+    },
+    {
+      "metadata": {
+        "system_prompt_sections": []
+      },
+      "name": "metadata_section_side_channel"
+    }
+  ],
+  "normalization_rules": {
+    "computer_os": "Replace the host OS label in rendered environment text with <OS> and recompute the stable hash."
   },
   "provider_projection": {
     "common": {
-      "system_text": "flat_prompt",
-      "preserve_section_order": true,
-      "metadata_is_not_provider_cache_protocol": true,
       "local_fields_never_emitted": [
         "id",
         "stable",
@@ -75,162 +151,168 @@
         "cache_hint",
         "metadata",
         "stable_hash"
-      ]
+      ],
+      "metadata_is_not_provider_cache_protocol": true,
+      "preserve_section_order": true,
+      "system_text": "flat_prompt"
     },
     "explicit_section_cache": {
-      "capability_id": "explicit_system_section_cache.v1",
-      "system_representation": "ordered_text_blocks",
-      "separator_rule": "append exactly two LF characters to every block except the final block",
       "breakpoint_rule": "one breakpoint at the end of the longest leading stable run; no breakpoint when the first section is volatile",
+      "cache_hint_behavior": "ignored_by_this_capability",
+      "capability_id": "explicit_system_section_cache.v1",
       "provider_cache_control": {
         "type": "ephemeral"
       },
-      "cache_hint_behavior": "ignored_by_this_capability"
+      "separator_rule": "append exactly two LF characters to every block except the final block",
+      "system_representation": "ordered_text_blocks"
     },
     "flatten_only": {
-      "system_representation": "one_flattened_system_message",
-      "cache_control_fields": "absent"
+      "cache_control_fields": "absent",
+      "system_representation": "one_flattened_system_message"
     },
     "projection_cases": [
       {
-        "name": "flatten_en_US_full",
-        "scenario_ref": "en-US-full",
-        "mode": "flatten_only",
         "expected": {
+          "cache_control_fields": [],
           "system_message": {
-            "role": "system",
-            "content": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
-          },
-          "cache_control_fields": []
-        }
+            "content": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+            "role": "system"
+          }
+        },
+        "mode": "flatten_only",
+        "name": "flatten_en_US_full",
+        "scenario_ref": "en-US-full"
       },
       {
-        "name": "section_cache_en_US_full",
-        "scenario_ref": "en-US-full",
-        "mode": "explicit_section_cache",
         "expected": {
+          "cache_boundary_block_index": 2,
           "system_blocks": [
             {
-              "type": "text",
-              "text": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n"
+              "text": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n",
+              "type": "text"
             },
             {
-              "type": "text",
-              "text": "<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n"
+              "text": "<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n",
+              "type": "text"
             },
             {
-              "type": "text",
-              "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n",
               "cache_control": {
                 "type": "ephemeral"
-              }
+              },
+              "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n",
+              "type": "text"
             },
             {
-              "type": "text",
-              "text": "<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n"
+              "text": "<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n",
+              "type": "text"
             },
             {
-              "type": "text",
-              "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
+              "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+              "type": "text"
             }
-          ],
-          "cache_boundary_block_index": 2
-        }
+          ]
+        },
+        "mode": "explicit_section_cache",
+        "name": "section_cache_en_US_full",
+        "scenario_ref": "en-US-full"
       },
       {
-        "name": "section_cache_no_leading_stable_prefix",
-        "scenario_ref": "all-volatile",
-        "mode": "explicit_section_cache",
         "expected": {
+          "cache_boundary_block_index": null,
           "system_blocks": [
             {
-              "type": "text",
-              "text": "request_id=fixture-volatile"
+              "text": "request_id=fixture-volatile",
+              "type": "text"
             }
-          ],
-          "cache_boundary_block_index": null
-        }
+          ]
+        },
+        "mode": "explicit_section_cache",
+        "name": "section_cache_no_leading_stable_prefix",
+        "scenario_ref": "all-volatile"
       }
     ]
   },
-  "session_memory_gate": {
-    "control": "session_memory_enabled",
-    "default": false,
-    "enabled_value": true,
-    "disabled_or_omitted_context_behavior": "ignore_without_rendering_or_storage_access",
-    "session_memory_section_requires_enabled_true": true,
-    "context_presence_does_not_enable_session_memory": true,
-    "probe_cases": [
-      {
-        "name": "explicit_false_ignores_nonempty_context",
-        "base_scenario": "en-US-minimal",
-        "expected_session_memory_section_count": 0,
-        "expected_prompt_equals_base_output": true,
-        "expected_storage_reads": 0,
-        "expected_storage_writes": 0
-      },
-      {
-        "name": "omitted_control_ignores_nonempty_context",
-        "base_scenario": "en-US-minimal",
-        "input_mutation": {
-          "remove": "session_memory_enabled"
-        },
-        "expected_session_memory_section_count": 0,
-        "expected_prompt_equals_base_output": true,
-        "expected_storage_reads": 0,
-        "expected_storage_writes": 0
-      }
-    ]
+  "resume_producer": {
+    "records": [
+      "session/tools/created",
+      "input/initial/applied",
+      "turn/tools/turn/initial/started",
+      "usage/active/tools/turn/initial/1/1",
+      "turn/tools/turn/initial/boundary/budget/run_start",
+      "usage/active/tools/turn/initial/1/2",
+      "turn/tools/turn/initial/boundary/before_memory/1",
+      "usage/active/tools/turn/initial/1/3",
+      "op/tools/turn/initial/model/primary/1/1/planned",
+      "usage/active/tools/turn/initial/1/4",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/1/start/1",
+      "op/tools/turn/initial/model/primary/1/1/started",
+      "usage/active/tools/turn/initial/1/5",
+      "op/tools/turn/initial/model/primary/1/1/result",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/1/complete/1",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/1/tool_batch",
+      "op/tools/turn/initial/model/primary/1/attempt/1/tool/0/1/planned",
+      "usage/active/tools/turn/initial/1/6",
+      "op/tools/turn/initial/model/primary/1/attempt/1/tool/0/1/prepared",
+      "usage/active/tools/turn/initial/1/7",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/1/attempt/1/tool/0/start/1",
+      "op/tools/turn/initial/model/primary/1/attempt/1/tool/0/1/started",
+      "usage/active/tools/turn/initial/1/8",
+      "op/tools/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+      "usage/active/tools/turn/initial/1/9",
+      "turn/tools/turn/initial/boundary/after_cycle/tools/turn/initial/model/primary/1",
+      "usage/active/tools/turn/initial/1/10",
+      "turn/tools/turn/initial/boundary/before_memory/2",
+      "usage/active/tools/turn/initial/1/11",
+      "op/tools/turn/initial/model/primary/2/1/planned",
+      "usage/active/tools/turn/initial/1/12",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/2/start/1",
+      "op/tools/turn/initial/model/primary/2/1/started",
+      "usage/active/tools/turn/initial/1/13",
+      "op/tools/turn/initial/model/primary/2/1/result",
+      "turn/tools/turn/initial/boundary/budget/tools/turn/initial/model/primary/2/complete/1",
+      "usage/active/tools/turn/initial/1/14",
+      "turn/tools/turn/initial/boundary/after_cycle/tools/turn/initial/model/primary/2",
+      "usage/active/tools/turn/initial/1/15",
+      "turn/tools/turn/initial/boundary/budget/terminal",
+      "usage/active/tools/turn/initial/1/16",
+      "turn/tools/turn/initial/ended"
+    ],
+    "session_id": "tools"
   },
   "run_scope": {
-    "instruction_and_context_producers": "resolve_once_when_new_run_is_compiled",
-    "current_time": "resolve_once_per_new_run",
-    "same_run_cycles": "reuse_frozen_bundle",
-    "new_run": "may_resolve_a_different_time",
-    "checkpoint_resume": "restore_frozen_bundle_without_producer_or_clock_access",
-    "run_definition": {
-      "field": "prompt_bundle",
-      "schema_version": "vv-agent.run-definition.v5",
-      "forbidden_fields": [
-        "compiled_prompt",
-        "system_prompt_sections"
-      ]
-    },
     "conformance_cases": [
       {
-        "name": "three_cycles_reuse_one_resolution",
-        "new_run_compile_count": 1,
         "cycle_count": 3,
-        "expected_instruction_producer_calls": 1,
-        "expected_context_provider_calls": 1,
         "expected_clock_reads": 1,
-        "expected_distinct_bundle_values": 1
+        "expected_context_provider_calls": 1,
+        "expected_distinct_bundle_values": 1,
+        "expected_instruction_producer_calls": 1,
+        "name": "three_cycles_reuse_one_resolution",
+        "new_run_compile_count": 1
       },
       {
+        "expected_clock_reads": 2,
+        "expected_context_provider_calls": 2,
+        "expected_instruction_producer_calls": 2,
         "name": "two_new_runs_resolve_independently",
         "new_run_compile_count": 2,
-        "expected_instruction_producer_calls": 2,
-        "expected_context_provider_calls": 2,
-        "expected_clock_reads": 2,
         "time_values_may_differ": true
-      },
-      {
-        "name": "checkpoint_resume_uses_frozen_bundle",
-        "resume_count": 1,
-        "expected_resume_instruction_producer_calls": 0,
-        "expected_resume_context_provider_calls": 0,
-        "expected_resume_clock_reads": 0,
-        "expected_bundle_relation": "byte_equal"
       }
-    ]
-  },
-  "normalization_rules": {
-    "computer_os": "Replace the host OS label in rendered environment text with <OS> and recompute the stable hash."
+    ],
+    "current_time": "resolve_once_per_new_run",
+    "instruction_and_context_producers": "resolve_once_when_new_run_is_compiled",
+    "new_run": "may_resolve_a_different_time",
+    "run_definition": {
+      "carrier": "turn_started.definition",
+      "field": "task.prompt_bundle",
+      "validation_owner": "opaque J in turn_started.definition"
+    },
+    "same_run_cycles": "reuse_frozen_bundle",
+    "session_resume": "reuse_frozen_definition_without_reinvoking_producers"
   },
   "scenarios": [
     {
       "id": "en-US-full",
-      "producer": "build_system_prompt_bundle",
       "input": {
         "agent_type": "computer",
         "allow_interruption": true,
@@ -251,53 +333,53 @@
         "enable_todo_management": true,
         "language": "en-US",
         "original_system_prompt": "You are a careful coding agent.",
-        "session_memory_enabled": true,
         "session_memory_context": "<Session Memory>\n- Keep source evidence.\n</Session Memory>",
+        "session_memory_enabled": true,
         "use_workspace": true
       },
       "normalizations": [
         "computer_os"
       ],
       "output": {
+        "flat_prompt": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
         "sections": [
           {
             "id": "agent_definition",
-            "text": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>",
+            "source": "agent.instructions",
             "stable": true,
-            "source": "agent.instructions"
+            "text": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>"
           },
           {
             "id": "environment",
-            "text": "<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>",
+            "source": "runtime.environment",
             "stable": true,
-            "source": "runtime.environment"
+            "text": "<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>"
           },
           {
             "id": "tools",
-            "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>",
+            "source": "runtime.tools",
             "stable": true,
-            "source": "runtime.tools"
+            "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>"
           },
           {
             "id": "session_memory",
-            "text": "<Session Memory>\n- Keep source evidence.\n</Session Memory>",
+            "source": "session.memory",
             "stable": false,
-            "source": "session.memory"
+            "text": "<Session Memory>\n- Keep source evidence.\n</Session Memory>"
           },
           {
             "id": "current_time",
-            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+            "source": "run.clock",
             "stable": false,
-            "source": "run.clock"
+            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
           }
         ],
-        "flat_prompt": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
         "stable_hash": "030813d624f5fcef2b265a1ae5b3eec10f5001622eb2cec1228cbe1bd786ec3e"
-      }
+      },
+      "producer": "build_system_prompt_bundle"
     },
     {
       "id": "zh-CN-full",
-      "producer": "build_system_prompt_bundle",
       "input": {
         "agent_type": "computer",
         "allow_interruption": true,
@@ -305,66 +387,66 @@
           {
             "allowed_tools": "read_file search_files",
             "compatibility": "vv-agent >= 1",
-            "description": "核对代码与契约。",
+            "description": "\u6838\u5bf9\u4ee3\u7801\u4e0e\u5951\u7ea6\u3002",
             "location": "skills/review-code/SKILL.md",
             "name": "review-code"
           }
         ],
         "available_sub_agents": {
-          "researcher": "查找源码证据。",
-          "writer": "整理最终报告。"
+          "researcher": "\u67e5\u627e\u6e90\u7801\u8bc1\u636e\u3002",
+          "writer": "\u6574\u7406\u6700\u7ec8\u62a5\u544a\u3002"
         },
         "current_time_utc": "2026-07-10T08:30:00Z",
         "enable_todo_management": true,
         "language": "zh-CN",
-        "original_system_prompt": "你是一个严谨的编码 Agent。",
+        "original_system_prompt": "\u4f60\u662f\u4e00\u4e2a\u4e25\u8c28\u7684\u7f16\u7801 Agent\u3002",
+        "session_memory_context": "<Session Memory>\n- \u4fdd\u7559\u6e90\u7801\u8bc1\u636e\u3002\n</Session Memory>",
         "session_memory_enabled": true,
-        "session_memory_context": "<Session Memory>\n- 保留源码证据。\n</Session Memory>",
         "use_workspace": true
       },
       "normalizations": [
         "computer_os"
       ],
       "output": {
+        "flat_prompt": "<Agent Definition>\n\u4f60\u662f\u4e00\u4e2a\u4e25\u8c28\u7684\u7f16\u7801 Agent\u3002\n</Agent Definition>\n\n<Environment>\n\u4f60\u8fd0\u884c\u5728 <OS> \u5de5\u4f5c\u533a\u73af\u5883\u4e2d, \u53ef\u4ee5\u7528\u5de5\u5177\u8bfb\u53d6, \u641c\u7d22, \u4fee\u6539\u6587\u4ef6.\n</Environment>\n\n<Tools>\n\u53ea\u6709\u7f3a\u5c11\u65e0\u6cd5\u4ece\u4e0a\u4e0b\u6587\u6216\u53ef\u7528\u5de5\u5177\u4e2d\u83b7\u5f97\u7684\u5fc5\u8981\u51b3\u7b56\u65f6\u624d\u8be2\u95ee\u7528\u6237\u3002\n\n\u76f4\u63a5\u64cd\u4f5c\u6587\u4ef6\u65f6\u4f18\u5148\u4f7f\u7528\u5de5\u4f5c\u533a\u4e13\u7528\u5de5\u5177\uff1b\u4ec5\u5728\u4e13\u7528\u5de5\u5177\u4e0d\u8db3\u65f6\u4f7f\u7528 bash\u3002\n\n\u591a\u6b65\u9aa4\u5de5\u4f5c\u4e2d\uff0c\u540c\u4e00\u65f6\u95f4\u53ea\u4fdd\u7559\u4e00\u4e2a\u8fdb\u884c\u4e2d\u7684 TODO\u3002\n\n\u5df2\u914d\u7f6e\u7684\u5b50 Agent\uff1a\n- agent_id=`researcher`: \u67e5\u627e\u6e90\u7801\u8bc1\u636e\u3002\n- agent_id=`writer`: \u6574\u7406\u6700\u7ec8\u62a5\u544a\u3002\n\n\u53ef\u7528\u6280\u80fd\u5143\u6570\u636e (Agent Skills \u6807\u51c6\u683c\u5f0f):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n\u6838\u5bf9\u4ee3\u7801\u4e0e\u5951\u7ea6\u3002\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- \u4fdd\u7559\u6e90\u7801\u8bc1\u636e\u3002\n</Session Memory>\n\n<Current Time>\n\u4efb\u52a1\u5f00\u59cb\u65f6\u7684\u771f\u5b9e UTC \u65f6\u95f4:\n2026-07-10T08:30:00Z\n</Current Time>",
         "sections": [
           {
             "id": "agent_definition",
-            "text": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>",
+            "source": "agent.instructions",
             "stable": true,
-            "source": "agent.instructions"
+            "text": "<Agent Definition>\n\u4f60\u662f\u4e00\u4e2a\u4e25\u8c28\u7684\u7f16\u7801 Agent\u3002\n</Agent Definition>"
           },
           {
             "id": "environment",
-            "text": "<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>",
+            "source": "runtime.environment",
             "stable": true,
-            "source": "runtime.environment"
+            "text": "<Environment>\n\u4f60\u8fd0\u884c\u5728 <OS> \u5de5\u4f5c\u533a\u73af\u5883\u4e2d, \u53ef\u4ee5\u7528\u5de5\u5177\u8bfb\u53d6, \u641c\u7d22, \u4fee\u6539\u6587\u4ef6.\n</Environment>"
           },
           {
             "id": "tools",
-            "text": "<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>",
+            "source": "runtime.tools",
             "stable": true,
-            "source": "runtime.tools"
+            "text": "<Tools>\n\u53ea\u6709\u7f3a\u5c11\u65e0\u6cd5\u4ece\u4e0a\u4e0b\u6587\u6216\u53ef\u7528\u5de5\u5177\u4e2d\u83b7\u5f97\u7684\u5fc5\u8981\u51b3\u7b56\u65f6\u624d\u8be2\u95ee\u7528\u6237\u3002\n\n\u76f4\u63a5\u64cd\u4f5c\u6587\u4ef6\u65f6\u4f18\u5148\u4f7f\u7528\u5de5\u4f5c\u533a\u4e13\u7528\u5de5\u5177\uff1b\u4ec5\u5728\u4e13\u7528\u5de5\u5177\u4e0d\u8db3\u65f6\u4f7f\u7528 bash\u3002\n\n\u591a\u6b65\u9aa4\u5de5\u4f5c\u4e2d\uff0c\u540c\u4e00\u65f6\u95f4\u53ea\u4fdd\u7559\u4e00\u4e2a\u8fdb\u884c\u4e2d\u7684 TODO\u3002\n\n\u5df2\u914d\u7f6e\u7684\u5b50 Agent\uff1a\n- agent_id=`researcher`: \u67e5\u627e\u6e90\u7801\u8bc1\u636e\u3002\n- agent_id=`writer`: \u6574\u7406\u6700\u7ec8\u62a5\u544a\u3002\n\n\u53ef\u7528\u6280\u80fd\u5143\u6570\u636e (Agent Skills \u6807\u51c6\u683c\u5f0f):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n\u6838\u5bf9\u4ee3\u7801\u4e0e\u5951\u7ea6\u3002\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>"
           },
           {
             "id": "session_memory",
-            "text": "<Session Memory>\n- 保留源码证据。\n</Session Memory>",
+            "source": "session.memory",
             "stable": false,
-            "source": "session.memory"
+            "text": "<Session Memory>\n- \u4fdd\u7559\u6e90\u7801\u8bc1\u636e\u3002\n</Session Memory>"
           },
           {
             "id": "current_time",
-            "text": "<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>",
+            "source": "run.clock",
             "stable": false,
-            "source": "run.clock"
+            "text": "<Current Time>\n\u4efb\u52a1\u5f00\u59cb\u65f6\u7684\u771f\u5b9e UTC \u65f6\u95f4:\n2026-07-10T08:30:00Z\n</Current Time>"
           }
         ],
-        "flat_prompt": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>\n\n<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>\n\n<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- 保留源码证据。\n</Session Memory>\n\n<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>",
         "stable_hash": "bf60402d5fe400e20fd190532630bcdba031cbec6f32b6f4714870349396daac"
-      }
+      },
+      "producer": "build_system_prompt_bundle"
     },
     {
       "id": "en-US-minimal",
-      "producer": "build_system_prompt_bundle",
       "input": {
         "agent_type": null,
         "allow_interruption": false,
@@ -374,32 +456,32 @@
         "enable_todo_management": false,
         "language": "en-US",
         "original_system_prompt": "Return only verified facts.",
-        "session_memory_enabled": false,
         "session_memory_context": "<Session Memory>\n- MUST NOT RENDER.\n</Session Memory>",
+        "session_memory_enabled": false,
         "use_workspace": false
       },
       "output": {
+        "flat_prompt": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
         "sections": [
           {
             "id": "agent_definition",
-            "text": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>",
+            "source": "agent.instructions",
             "stable": true,
-            "source": "agent.instructions"
+            "text": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>"
           },
           {
             "id": "current_time",
-            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+            "source": "run.clock",
             "stable": false,
-            "source": "run.clock"
+            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
           }
         ],
-        "flat_prompt": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
         "stable_hash": "ff9555f1446040f95411ebbbeddff5cde33d8ea0ebd1b3674bb47e6c982f0fc8"
-      }
+      },
+      "producer": "build_system_prompt_bundle"
     },
     {
       "id": "custom-section-metadata",
-      "producer": "SystemPromptBuilder",
       "input": {
         "sections": [
           {
@@ -428,6 +510,7 @@
         ]
       },
       "output": {
+        "flat_prompt": "Use verified evidence.\n\nrequest_id=fixture-1",
         "sections": [
           {
             "cache_hint": "ephemeral",
@@ -447,82 +530,82 @@
             "text": "request_id=fixture-1"
           }
         ],
-        "flat_prompt": "Use verified evidence.\n\nrequest_id=fixture-1",
         "stable_hash": "2661381de659cba54464b647a1a2dd2b2dc5e194cb0959030fc9704a3e34c6d7"
-      }
+      },
+      "producer": "SystemPromptBuilder"
     },
     {
       "id": "all-volatile",
-      "producer": "PromptBundle",
       "input": {
         "sections": [
           {
             "id": "request_data",
-            "text": "request_id=fixture-volatile",
+            "source": "runtime.request",
             "stable": false,
-            "source": "runtime.request"
+            "text": "request_id=fixture-volatile"
           }
         ]
       },
       "output": {
+        "flat_prompt": "request_id=fixture-volatile",
         "sections": [
           {
             "id": "request_data",
-            "text": "request_id=fixture-volatile",
+            "source": "runtime.request",
             "stable": false,
-            "source": "runtime.request"
+            "text": "request_id=fixture-volatile"
           }
         ],
-        "flat_prompt": "request_id=fixture-volatile",
         "stable_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-      }
+      },
+      "producer": "PromptBundle"
     },
     {
       "id": "compiler-preserves-instruction-sections",
-      "producer": "AgentCompiler",
       "input": {
+        "compiler_owned_sections": [
+          {
+            "id": "configured_sub_agents",
+            "source": "agent.sub_agents",
+            "stable": true,
+            "text": "Configured agents."
+          }
+        ],
         "instruction_bundle": {
           "sections": [
             {
               "id": "identity",
-              "text": "Identity first.",
+              "source": "agent.instructions",
               "stable": true,
-              "source": "agent.instructions"
+              "text": "Identity first."
             },
             {
               "id": "run_data",
-              "text": "Request scoped data.",
+              "source": "agent.instructions",
               "stable": false,
-              "source": "agent.instructions"
+              "text": "Request scoped data."
             }
           ]
         },
-        "compiler_owned_sections": [
-          {
-            "id": "configured_sub_agents",
-            "text": "Configured agents.",
-            "stable": true,
-            "source": "agent.sub_agents"
-          }
-        ],
         "provider_fragments": [
           {
             "id": "runtime_hint",
-            "text": "Runtime hint.",
-            "stable": false,
             "priority": 40,
-            "source": "provider.runtime"
+            "source": "provider.runtime",
+            "stable": false,
+            "text": "Runtime hint."
           },
           {
             "id": "policy",
-            "text": "Policy first.",
-            "stable": true,
             "priority": 20,
-            "source": "provider.policy"
+            "source": "provider.policy",
+            "stable": true,
+            "text": "Policy first."
           }
         ]
       },
       "output": {
+        "flat_prompt": "Identity first.\n\nRequest scoped data.\n\nConfigured agents.\n\nPolicy first.\n\nRuntime hint.",
         "section_ids": [
           "identity",
           "run_data",
@@ -530,126 +613,75 @@
           "policy",
           "runtime_hint"
         ],
-        "flat_prompt": "Identity first.\n\nRequest scoped data.\n\nConfigured agents.\n\nPolicy first.\n\nRuntime hint.",
         "stable_hash": "6f8d6d898c66c11909d69f1106d12b6f71b027d1d055f8419a5656b65bdd429a"
-      }
+      },
+      "producer": "AgentCompiler"
     }
   ],
+  "schema_version": "vv-agent.prompt-bundle.v2",
+  "section_contract": {
+    "cache_hint": "omitted_or_non_empty_string",
+    "empty_sections": "omit_before_bundle",
+    "id": "non_empty_unique_string",
+    "metadata": "omitted_or_json_object",
+    "optional_fields": [
+      "source",
+      "cache_hint",
+      "metadata"
+    ],
+    "order": "array_order_is_model_visible_order",
+    "required_fields": [
+      "id",
+      "text",
+      "stable"
+    ],
+    "source": "omitted_or_non_empty_string",
+    "stable_semantics": "resolved_text_is_eligible_for_a_stable_prefix; it_never_requests_reexecution_per_cycle",
+    "text": "non_empty_after_canonical_ASCII_whitespace_trim",
+    "text_normalization": "strip only U+0009 U+000A U+000B U+000C U+000D and U+0020 from both ends before validation and serialization",
+    "unknown_fields": "reject"
+  },
+  "session_memory_gate": {
+    "context_presence_does_not_enable_session_memory": true,
+    "control": "session_memory_enabled",
+    "default": false,
+    "disabled_or_omitted_context_behavior": "ignore_without_rendering_or_storage_access",
+    "enabled_value": true,
+    "probe_cases": [
+      {
+        "base_scenario": "en-US-minimal",
+        "expected_prompt_equals_base_output": true,
+        "expected_session_memory_section_count": 0,
+        "expected_storage_reads": 0,
+        "expected_storage_writes": 0,
+        "name": "explicit_false_ignores_nonempty_context"
+      },
+      {
+        "base_scenario": "en-US-minimal",
+        "expected_prompt_equals_base_output": true,
+        "expected_session_memory_section_count": 0,
+        "expected_storage_reads": 0,
+        "expected_storage_writes": 0,
+        "input_mutation": {
+          "remove": "session_memory_enabled"
+        },
+        "name": "omitted_control_ignores_nonempty_context"
+      }
+    ],
+    "session_memory_section_requires_enabled_true": true
+  },
   "stable_hash_vectors": [
     {
-      "scenario_ref": "custom-section-metadata",
       "canonical_json_base64": "W3siY2FjaGVfaGludCI6ImVwaGVtZXJhbCIsImlkIjoicG9saWN5IiwibWV0YWRhdGEiOnsib3duZXIiOiJwYXJpdHkiLCJwcmlvcml0eSI6MX0sInNvdXJjZSI6ImNvbnRyYWN0Oi8vcG9saWN5Iiwic3RhYmxlIjp0cnVlLCJ0ZXh0IjoiVXNlIHZlcmlmaWVkIGV2aWRlbmNlLiJ9XQ==",
       "canonical_json_utf8_bytes": 160,
+      "scenario_ref": "custom-section-metadata",
       "sha256": "2661381de659cba54464b647a1a2dd2b2dc5e194cb0959030fc9704a3e34c6d7"
     },
     {
-      "scenario_ref": "all-volatile",
       "canonical_json_base64": "W10=",
       "canonical_json_utf8_bytes": 2,
+      "scenario_ref": "all-volatile",
       "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-    }
-  ],
-  "invalid_cases": [
-    {
-      "name": "empty_bundle",
-      "bundle": {
-        "sections": [],
-        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
-      "name": "empty_section_text",
-      "bundle": {
-        "sections": [
-          {
-            "id": "empty",
-            "text": " ",
-            "stable": true
-          }
-        ],
-        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
-      "name": "duplicate_section_id",
-      "bundle": {
-        "sections": [
-          {
-            "id": "same",
-            "text": "one",
-            "stable": true
-          },
-          {
-            "id": "same",
-            "text": "two",
-            "stable": false
-          }
-        ],
-        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
-      "name": "unknown_section_field",
-      "bundle": {
-        "sections": [
-          {
-            "id": "known",
-            "text": "value",
-            "stable": true,
-            "priority": 1
-          }
-        ],
-        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
-      "name": "missing_stable_hash",
-      "bundle": {
-        "sections": [
-          {
-            "id": "known",
-            "text": "value",
-            "stable": true
-          }
-        ]
-      }
-    },
-    {
-      "name": "stable_hash_mismatch",
-      "bundle": {
-        "sections": [
-          {
-            "id": "known",
-            "text": "value",
-            "stable": true
-          }
-        ],
-        "stable_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
-      "name": "unknown_bundle_field",
-      "bundle": {
-        "sections": [
-          {
-            "id": "known",
-            "text": "value",
-            "stable": true
-          }
-        ],
-        "stable_hash": "b47a8e823a9f40ff61c67fb0b65014dd2820da7e3298e3f754938945f5870768",
-        "flat_prompt": "value"
-      }
-    },
-    {
-      "name": "metadata_section_side_channel",
-      "metadata": {
-        "system_prompt_sections": []
-      }
-    },
-    {
-      "name": "stale_run_definition_schema",
-      "schema_version": "vv-agent.run-definition.v2"
     }
   ]
 }

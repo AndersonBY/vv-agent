@@ -48,7 +48,20 @@ def observe(agent, steps, config, *, kernel, provider_settings=None):
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("parity", "test", str(config.workspace)), consumers=("events",))
+            tx.create(
+                SessionSpec(
+                    "parity",
+                    "test",
+                    str(config.workspace),
+                    attributes={
+                        "seed": {
+                            "messages": [m.to_dict() for m in config.initial_messages or []],
+                            "shared_state": config.shared_state or {},
+                        }
+                    },
+                ),
+                consumers=("events",),
+            )
             tx.push("parity", InboxItem("input", "user", {"content": "go"}))
         rt = Runtime(agent, config, RESOLVED, provider.llm, lambda: nullcontext(store))
         drive(store, "parity", runtime=rt)
@@ -189,9 +202,7 @@ def test_output_validation_parity(tmp_path, repair):
     old = observe(agent, [LLMResponse("bad")], config, kernel=False)
     new = observe(agent, [LLMResponse("bad")], config, kernel=True)
     if repair:
-        # The old callback has no model ledger entry; kernel makes repair dispatch durable.
         assert new["events"].count("model_call_started") == 2
-        new["events"] = new["events"][:3] + new["events"][5:]
         assert repairs == ["bad", "bad"]
     assert new == old
 
@@ -325,7 +336,9 @@ def test_endpoint_attempts_do_not_stack(tmp_path, monkeypatch):
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", str(tmp_path)), consumers=())
+            tx.create(
+                SessionSpec("s", "test", str(tmp_path), attributes={"seed": {"messages": [], "shared_state": {}}}), consumers=()
+            )
             tx.push("s", InboxItem("i", "user", {"content": "go"}))
         llm = VvLlmClient(
             [EndpointTarget("a", "unused", "https://example.invalid"), EndpointTarget("b", "unused", "https://example.invalid")],
@@ -360,7 +373,10 @@ def test_shared_state_survives_runtime_reconstruction(tmp_path):
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", str(tmp_path)), consumers=())
+            tx.create(
+                SessionSpec("s", "test", str(tmp_path), attributes={"seed": {"messages": [], "shared_state": {"count": 0}}}),
+                consumers=(),
+            )
             tx.push("s", InboxItem("i", "user", {"content": "go"}))
         agent = Agent("parity", "Be concise.", tools=[increment])
         config = RunConfig(workspace=tmp_path, shared_state={"count": 0})
@@ -408,7 +424,9 @@ def test_result_projection_parity(tmp_path):
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", str(tmp_path)), consumers=())
+            tx.create(
+                SessionSpec("s", "test", str(tmp_path), attributes={"seed": {"messages": [], "shared_state": {}}}), consumers=()
+            )
             tx.push("s", InboxItem("i", "user", {"content": "go"}))
         runtime = Runtime(agent, config, RESOLVED, ScriptedLLM(deepcopy(steps)), lambda: nullcontext(store))
         drive(store, "s", runtime=runtime)
@@ -689,3 +707,187 @@ def test_user_vv_session_metadata_is_rejected(location):
         rt = Runtime(agent, config, RESOLVED, ScriptedLLM([]), lambda: nullcontext(store))
         with pytest.raises(ValueError, match="vv_session is reserved"):
             rt.compile("go", "turn")
+
+
+@pytest.mark.parametrize("surface_name", ["runner", "interactive", "app_server"])
+def test_lease_recovery_exhaustion_reaches_public_caller(monkeypatch, tmp_path, surface_name):
+    import vv_agent.session.kernel as kernel_module
+    from vv_agent import AgentSessionOptions, InteractiveAgentClient
+    from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
+    from vv_agent.model import ScriptedModelProvider
+    from vv_agent.session.store import LeaseLost, LeaseRetryExhausted
+    from vv_agent.session.surfaces import SessionDriver
+
+    attempts, delays = [], []
+    original_runtime = SessionDriver.runtime
+
+    def runtime(self, *args, **kwargs):
+        bound = original_runtime(self, *args, **kwargs)
+        bound.lease_retry_attempts = 4
+        bound.lease_retry_base_seconds = 0.01
+        bound.lease_retry_cap_seconds = 0.025
+        bound.lease_retry_jitter = lambda low, high: high
+        bound.lease_retry_sleep = delays.append
+        return bound
+
+    def lost(*args, **kwargs):
+        attempts.append(1)
+        raise LeaseLost("writer lost")
+
+    monkeypatch.setattr(SessionDriver, "runtime", runtime)
+    monkeypatch.setattr(kernel_module, "drive", lost)
+    provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("unused")])
+    agent = Agent("lease", "Answer.")
+    config = RunConfig(model_provider=provider, workspace=tmp_path)
+    if surface_name == "runner":
+        with pytest.raises(LeaseRetryExhausted) as exc:
+            Runner.run_sync(agent, "go", run_config=config)
+        assert exc.value.attempts == 4
+    elif surface_name == "interactive":
+        client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+        session = client.create_session(agent=agent)
+        with pytest.raises(LeaseRetryExhausted):
+            session.prompt("go")
+    else:
+        transport = ChannelTransport(connection_id="lease")
+        server = AppServer(transport=transport, host=DefaultAppServerHost(agent=agent, run_config=config))
+        for payload in (
+            {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "lease"}}},
+            {"jsonrpc": "2.0", "method": "initialized"},
+            {"jsonrpc": "2.0", "id": 1, "method": "thread/start"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "turn/start",
+                "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+            },
+        ):
+            server.processor.process_message("lease", payload)
+        messages = []
+        while True:
+            message = transport.receive_outbound(timeout=2)
+            messages.append(message)
+            if message.get("method") == "turn/completed":
+                break
+        server.run_adapter.join()
+        assert messages[-1]["params"]["status"] == "failed"
+        assert any(m.get("method") == "error/warning" and m["params"]["code"] == "lease_retry_exhausted" for m in messages)
+    assert len(attempts) == 4
+    assert delays == [0.01, 0.02, 0.025]
+
+
+@pytest.mark.parametrize("terminal_loss", [False, True])
+def test_lease_recovery_reuses_retained_work(monkeypatch, terminal_loss):
+    import vv_agent.session.kernel as kernel_module
+    from vv_agent.model import ScriptedModelProvider
+    from vv_agent.session.store import LeaseLost
+    from vv_agent.session.surfaces import SessionDriver
+
+    original_drive = kernel_module.drive
+    attempts, delays = [], []
+    driver = SessionDriver()
+    provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])
+    driver.create("retry", ".")
+    handle = driver.start("retry", Agent("retry", "Answer."), RunConfig(model_provider=provider), "go", autostart=False)
+    handle.runtime.lease_retry_sleep = delays.append
+    handle.runtime.lease_retry_jitter = lambda low, high: high
+
+    def drive(*args, **kwargs):
+        attempts.append(1)
+        if terminal_loss:
+            original_drive(*args, **kwargs)
+            raise LeaseLost("terminal already committed")
+        if len(attempts) < 3:
+            raise LeaseLost("temporary loss")
+        return original_drive(*args, **kwargs)
+
+    monkeypatch.setattr(kernel_module, "drive", drive)
+    try:
+        handle.start()
+        assert handle.result(timeout=2).final_output == "done"
+        records = driver.store.read_state("retry")[1]
+        assert sum(row.record.kind == "turn_started" for row in records) == 1
+        assert sum(row.record.kind == "turn_ended" for row in records) == 1
+        assert len(attempts) == (1 if terminal_loss else 3)
+        assert delays == ([] if terminal_loss else [0.01, 0.02])
+    finally:
+        driver.close()
+
+
+def test_session_driver_preserves_caller_store_ownership(store):
+    from vv_agent.session.surfaces import SessionDriver
+
+    driver = SessionDriver(store=store)
+    driver.create("owned-by-host", ".")
+    driver.close()
+    assert store.read_state("owned-by-host")[0].session_id == "owned-by-host"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("lease_retry_attempts", 0),
+        ("lease_retry_attempts", True),
+        ("lease_retry_attempts", 1.5),
+        ("lease_retry_base_seconds", 0),
+        ("lease_retry_base_seconds", True),
+        ("lease_retry_cap_seconds", float("inf")),
+        ("lease_retry_base_seconds", 1),
+        ("lease_retry_cap_seconds", float("nan")),
+    ],
+)
+def test_lease_retry_runtime_rejects_invalid_configuration(field, value):
+    from dataclasses import replace
+
+    from vv_agent.model import ScriptedModelProvider
+    from vv_agent.session.surfaces import SessionDriver
+
+    driver = SessionDriver()
+    try:
+        runtime = driver.runtime(Agent("retry", "Answer."), RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [])))
+        with pytest.raises(ValueError, match="lease"):
+            replace(runtime, **{field: value})
+    finally:
+        driver.close()
+
+
+def test_lease_loss_during_recovery_read_still_uses_backoff_and_typed_cap(monkeypatch):
+    import vv_agent.session.kernel as kernel_module
+    from vv_agent.model import ScriptedModelProvider
+    from vv_agent.session.store import LeaseLost, LeaseRetryExhausted
+    from vv_agent.session.surfaces import SessionDriver
+
+    driver = SessionDriver()
+    driver.create("read-loss", ".")
+    handle = driver.start(
+        "read-loss",
+        Agent("retry", "Answer."),
+        RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [])),
+        "go",
+        autostart=False,
+    )
+    delays, attempts = [], []
+    handle.runtime.lease_retry_attempts = 3
+    handle.runtime.lease_retry_sleep = delays.append
+    handle.runtime.lease_retry_jitter = lambda low, high: low
+    original_read = driver.store.read_state
+
+    def lost(*args, **kwargs):
+        attempts.append(1)
+        raise LeaseLost("drive lost")
+
+    def read(*args, **kwargs):
+        if attempts:
+            raise LeaseLost("recovery read lost")
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(kernel_module, "drive", lost)
+    monkeypatch.setattr(driver.store, "read_state", read)
+    try:
+        handle.start()
+        with pytest.raises(LeaseRetryExhausted) as exc:
+            handle.result(2)
+        assert exc.value.attempts == len(attempts) == 3
+        assert delays == [0.005, 0.01]
+    finally:
+        driver.close()

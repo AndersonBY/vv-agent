@@ -276,7 +276,7 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
 
     assert methods.count("turn/started") == 2
     assert methods.count("turn/completed") == 2
-    assert seen_user_messages == ([["hello", "continue"]] if hasattr(server.store, "kernel") else [["continue"]])
+    assert seen_user_messages == ([["hello", "continue"]])
 
 
 def test_turn_interrupt_cancels_active_turn() -> None:
@@ -325,7 +325,7 @@ def test_turn_interrupt_cancels_active_turn() -> None:
         "id": 3,
         "result": {
             "threadId": "thread_1",
-            "turnId": ("thread_1/turn/turn_1" if hasattr(server.store, "kernel") else "turn_1"),
+            "turnId": ("thread_1/turn/turn_1"),
             "cancelled": True,
         },
     }
@@ -418,10 +418,6 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         },
     )
     first = _drain_until_turn_completed(transport)
-    if surface is None:
-        assert cast(dict[str, Any], first[-1]["params"])["status"] == "completed"
-        assert cast(dict[str, Any], first[-1]["params"])["finalOutput"] == "child done"
-        return
     cast(Any, server.run_adapter).join()
     interrupted = next(
         m

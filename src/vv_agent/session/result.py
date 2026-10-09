@@ -106,7 +106,6 @@ def project_result(
                     else ModelCallStatus.AMBIGUOUS,
                     usage=model_usage(attempt.result.payload["usage"] if attempt.result else None),
                     error_code=error_code,
-                    _kernel=True,
                 )
             )
             if purpose != "primary" or op.selected_attempt != number or not attempt.result or error_code:
@@ -123,7 +122,7 @@ def project_result(
             cycles.append(
                 CycleRecord(
                     cycle,
-                    response.get("content", ""),
+                    response.get("content") or "",
                     [ToolCall.from_dict(c) for c in response.get("tool_calls", [])],
                     tool_results,
                     memory_compacted=any(
@@ -133,7 +132,6 @@ def project_result(
             )
             previous_primary_seq = plan_seqs[attempt.plan.record_id]
     usage = summarize_task_token_usage(calls)
-    usage._kernel = True
     status, reason, output, error, budget_usage = AgentStatus.RUNNING, None, None, None, None
     completion_tool_name, wait_reason, exhaustion = None, None, None
     for (tid, stage, _), r in state.boundaries.items():
@@ -151,6 +149,7 @@ def project_result(
             reason = CompletionReason(p["reason"])
         if p["status"] in {"cancelled", "aborted"}:
             reason = CompletionReason.CANCELLED
+            exhaustion = None
         if p["reason"] == "max_cycles":
             status = AgentStatus.MAX_CYCLES
         if status == AgentStatus.FAILED:
@@ -225,8 +224,8 @@ def project_result(
             else json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         ) or partial
     raw = AgentResult(
-        _kernel_session_id=session_id,
-        _kernel_turn_id=turn_id,
+        session_id=session_id,
+        turn_id=turn_id,
         status=status,
         messages=messages,
         cycles=cycles,

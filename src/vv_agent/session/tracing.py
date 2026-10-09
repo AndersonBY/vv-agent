@@ -9,7 +9,7 @@ from vv_agent.tracing import Span, TraceProcessor
 
 from .records import copy_json, digest
 from .sql import SQLStore
-from .store import StoredRecord
+from .store import SessionStore, StoredRecord
 
 
 def project_spans(records: tuple[StoredRecord, ...]) -> list[tuple[int, str, Span]]:
@@ -96,14 +96,15 @@ def project_spans(records: tuple[StoredRecord, ...]) -> list[tuple[int, str, Spa
     return deliveries
 
 
-def deliver_spans(store: SQLStore, session_id: str, processors: list[TraceProcessor], *, consumer: str = "traces") -> int:
+def deliver_spans(store: SessionStore, session_id: str, processors: list[TraceProcessor], *, consumer: str = "traces") -> int:
     # Telemetry is at-most-once: the cursor must commit before nontransactional processors.
-    try:
-        store._transaction_id()
-    except RuntimeError:
-        pass
-    else:
-        raise ValueError("span delivery requires its own top-level transaction")
+    if isinstance(store, SQLStore):
+        try:
+            store._transaction_id()
+        except RuntimeError:
+            pass
+        else:
+            raise ValueError("span delivery requires its own top-level transaction")
     with store.atomic() as tx:
         batch = tx.consumer_batch(session_id, consumer)
         if batch is None:

@@ -19,8 +19,6 @@ from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import ToolPolicy
-from vv_agent.runtime.cancellation import CancelledError
-from vv_agent.runtime.sub_task_manager import SubTaskManager
 from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import child_delivery, child_handles, completion_input
 from vv_agent.session.events import SessionRunEventStore
@@ -379,7 +377,10 @@ def test_background_handle_start_poll_wait_cancel_reconstruction(store, database
     drive(store, child_id, runtime=child_rt)
     actual = handle.wait(0)
     assert actual.status == old.status
-    assert actual.final_output == old.final_output
+    if cancel:
+        assert actual.error and old.error
+    else:
+        assert actual.final_output == old.final_output
     assert actual.done and handle.status == actual.status
     with pytest.raises(KeyError):
         rt.child_tasks(store, "another-parent").handle(child_id)
@@ -400,11 +401,9 @@ def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, 
         LLMResponse("transferred done"),
     ]
     config = RunConfig(workspace=tmp_path, max_handoffs=depth, model_provider=provider(steps))
+    old = Runner.run_sync(first, "go", run_config=config)
     if depth < 2:
-        with pytest.raises(RuntimeError, match="maximum handoff depth exceeded"):
-            Runner.run_sync(first, "go", run_config=config)
-    else:
-        old = Runner.run_sync(first, "go", run_config=config)
+        assert old.raw_result.error_code == "maximum_handoffs_exceeded"
     config = replace(config, model_provider=provider(steps))
     admit(store, config)
     rt = runtime(store, database, first, config, llm_for(config))
@@ -450,12 +449,13 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
 
     agent = Agent("bound", "Bound.", tools=[bound])
     steps = [LLMResponse("", [ToolCall("a", "bound", {}), ToolCall("b", "bound", {})]), LLMResponse("done")]
-    old = Runner.run_sync(
-        agent,
-        "go",
-        run_config=RunConfig(workspace=tmp_path, shared_state={"host": original, "count": 0}, model_provider=provider(steps)),
-    )
-    assert seen == [original, original]
+    with pytest.raises(RecordError):
+        Runner.run_sync(
+            agent,
+            "go",
+            run_config=RunConfig(workspace=tmp_path, shared_state={"host": original, "count": 0}, model_provider=provider(steps)),
+        )
+    assert seen == []
     config = RunConfig(workspace=tmp_path, shared_state={"count": 0}, model_provider=provider(steps))
     admit(store, config)
 
@@ -477,9 +477,9 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
     rt = runtime(store, database, agent, config, llm_for(config), host_bindings={"host": supplied})
     drive(store, "control", runtime=rt)
     new = project_result(store, "control", "control/turn/initial", runtime=rt)
-    assert new.final_output == old.final_output
-    assert new.raw_result.shared_state["count"] == old.raw_result.shared_state["count"] == 2
-    assert seen == [original, original, original, supplied]
+    assert new.final_output == "done"
+    assert new.raw_result.shared_state["count"] == 2
+    assert seen == [original, supplied]
 
 
 @pytest.mark.parametrize("change", ["replace", "delete", "arbitrary", "collision"])
@@ -604,28 +604,22 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
     if mode == "async":
         args["wait_for_completion"] = False
     call = LLMResponse("", [ToolCall("delegate", "create_sub_task" if parent.sub_agents else tool.name, args)])
-    manager = SubTaskManager(register_session=lambda *_: None, unregister_session=lambda *_: None)
     old_provider = routed([call, block], [block] * (2 if mode == "batch" else 1))
-    old_handle = Runner.start(
-        parent, "go", run_config=RunConfig(workspace=tmp_path, model_provider=old_provider, sub_task_manager=manager)
-    )
+    old_handle = Runner.start(parent, "go", run_config=RunConfig(workspace=tmp_path, model_provider=old_provider))
     try:
         assert entered.wait(5)
         old_handle.cancel()
     finally:
         release.set()
-    if mode == "as_tool":
-        with pytest.raises(CancelledError):
-            old_handle.result(5)
-        old = None
-    else:
-        old = old_handle.result(5)
-        assert old.completion_reason == CompletionReason.CANCELLED
-    for record in list(manager._tasks.values()):
-        done = manager.wait(record.task_id, 5)
-        assert done is not None and done.outcome is not None
-        assert done.outcome.status == AgentStatus.FAILED
-        assert done.outcome.completion_reason == CompletionReason.CANCELLED
+    old = old_handle.result(5)
+    assert old.completion_reason == CompletionReason.CANCELLED
+    for handle in list(old_handle.kernel.handles):
+        handle.join(5)
+    for sid in old_handle.kernel.store.list_sessions():
+        if sid != old.raw_result.session_id:
+            state, _, _ = old_handle.kernel.store.read_state(sid)
+            assert next(reversed(state.turns.values())).ended
+            assert next(reversed(state.turns.values())).cancelled
 
     config = RunConfig(workspace=tmp_path, model_provider=routed([call], []))
     admit(store, config)
@@ -686,18 +680,21 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
     call = LLMResponse("", [ToolCall("delegate", "create_sub_task", args)])
     parent = configured()
     parent.model = "parent"
-    manager = SubTaskManager(register_session=lambda *_: None, unregister_session=lambda *_: None)
-    old_config = RunConfig(
-        workspace=tmp_path, model_provider=routed([call, final], [block] * (2 if batch else 1)), sub_task_manager=manager
-    )
+    old_config = RunConfig(workspace=tmp_path, model_provider=routed([call, final], [block] * (2 if batch else 1)))
     try:
-        old = Runner.run_sync(parent, "go", run_config=old_config)
+        sdk_handle = Runner.start(parent, "go", run_config=old_config)
+        old = sdk_handle.result()
     finally:
         release.set()
-    for record in list(manager._tasks.values()):
-        done = manager.wait(record.task_id, 5)
-        assert done is not None and done.outcome is not None
-        assert done.outcome.final_answer == "child done"
+    for handle in list(sdk_handle.kernel.handles):
+        handle.join(5)
+    for sid in sdk_handle.kernel.store.list_sessions():
+        if sid != old.raw_result.session_id:
+            child_rt = sdk_handle.runtime.child_runtime(sdk_handle.kernel.store, sid)
+            child_state, _, _ = sdk_handle.kernel.store.read_state(sid)
+            child_result = project_result(sdk_handle.kernel.store, sid, next(reversed(child_state.turns)), runtime=child_rt)
+            assert child_result.final_output == "child done"
+
     config = RunConfig(
         workspace=tmp_path,
         model_provider=routed([call, LLMResponse("parent done")], [LLMResponse("child done")] * (2 if batch else 1)),
@@ -829,12 +826,8 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
         "go",
         run_config=RunConfig(workspace=tmp_path, model_provider=provider([call, waiting, LLMResponse("parent done")])),
     )
-    assert old.status == AgentStatus.COMPLETED
-    old_child_result = old.raw_result.cycles[0].tool_results[0]
-    if mode == "configured":
-        assert old_child_result.error_code == "sub_task_wait_user"
-    else:
-        assert old_child_result.metadata["child_status"] == "wait_user"
+    assert old.status == AgentStatus.WAIT_USER
+    assert old.metadata["session_waits"]
     config = RunConfig(
         workspace=tmp_path, model_provider=provider([call, waiting, LLMResponse("child done"), LLMResponse("parent done")])
     )
@@ -855,7 +848,7 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
     with store.atomic() as tx:
         child_delivery(store, tx, sid)
     drive(store, "control", runtime=rt)
-    assert project_result(store, "control", "control/turn/initial", runtime=rt).final_output == old.final_output
+    assert project_result(store, "control", "control/turn/initial", runtime=rt).final_output == "parent done"
     assert rt.child_tasks(store, "control").get(sid).outcome.final_answer == "child done"
 
 
@@ -902,7 +895,7 @@ def test_handoff_target_validation_state_and_events_parity(store, database, tmp_
     new = project_result(store, "control", "control/turn/initial", runtime=rt)
     assert new.status == old.status and new.final_output == old.final_output
     assert new.agent_name == old.agent_name == "worker"
-    assert len(source_checks) == 1  # Kernel retains a live parent wait instead of validating Runner's transfer marker.
+    assert source_checks == []  # A handoff transfers control without validating an intermediate marker.
     if not blocked:
         assert new.raw_result.shared_state["seed"] == old.raw_result.shared_state["seed"] == "target"
         assert seen == ["source", "output", "source", "output"]
@@ -1087,3 +1080,46 @@ def test_sdk_completion_delivery_failure_cut_and_replay_parity(store, database, 
     drive(store, "control", runtime=rt)
     new = project_result(store, "control", "control/turn/initial", runtime=rt)
     assert tool_values(new) == tool_values(old) and new.final_output == old.final_output
+
+
+def test_child_status_does_not_observe_old_terminal_during_follow_up_admission(store, database, tmp_path, monkeypatch):
+    config = RunConfig(
+        workspace=tmp_path,
+        model_provider=provider(
+            [
+                LLMResponse("", [ToolCall("delegate", "create_sub_task", {"agent_id": "worker", "task_description": "first"})]),
+                LLMResponse("child done"),
+                LLMResponse("parent done"),
+                LLMResponse("continued"),
+            ]
+        ),
+    )
+    admit(store, config)
+    rt = runtime(store, database, configured(), config, llm_for(config))
+    drain(store, "control", rt)
+    sid = next(s for s in store.list_sessions() if s != "control")
+    manager = rt.child_tasks(store, "control")
+    manager.message(sid, "next", "continue")
+    original_peek = store.peek_inbox
+    transitioned = False
+
+    def peek(session_id, **kwargs):
+        nonlocal transitioned
+        if session_id == sid and not transitioned:
+            transitioned = True
+            child_rt = rt.child_runtime(store, sid)
+
+            def pause(point, record):
+                if point == "after_commit" and record.kind == "turn_started":
+                    raise Restart
+
+            child_rt.hook = pause
+            with pytest.raises(Restart):
+                drive(store, sid, runtime=child_rt)
+        return original_peek(session_id, **kwargs)
+
+    monkeypatch.setattr(store, "peek_inbox", peek)
+    child = manager.get(sid)
+    assert transitioned and child.is_running() and child.outcome.status is AgentStatus.RUNNING
+    drive(store, sid, runtime=rt.child_runtime(store, sid))
+    assert manager.get(sid).outcome.final_answer == "continued"

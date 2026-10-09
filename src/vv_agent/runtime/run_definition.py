@@ -8,11 +8,7 @@ from vv_agent.agent import Agent
 from vv_agent.canonical_json import utf16_sort_key
 from vv_agent.checkpoint import (
     CREDENTIAL_REDACTION_VALUE,
-    RUN_DEFINITION_SCHEMA,
     CheckpointError,
-    compute_run_definition_digest,
-    validate_checkpoint_extension,
-    validate_run_definition,
 )
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.model_settings import ModelSettings
@@ -50,101 +46,7 @@ def build_run_definition(
     initial_messages: list[Message],
     credential_slots: list[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """Build the immutable, credential-redacted definition for one root run."""
-
-    checkpoint_config = run_config.checkpoint_config
-    if checkpoint_config is None:
-        raise CheckpointError(
-            "checkpoint_config is required to build a run definition",
-            code="checkpoint_config_invalid",
-        )
-    refs = deepcopy(checkpoint_config.capability_refs)
-    _validate_behavior_capability_refs(agent=agent, run_config=run_config, refs=refs)
-
-    model_settings_payload = model_settings.to_dict()
-    transport_timeout = model_settings_payload.pop("timeout_seconds", None)
-
-    _normalize_extra_headers(model_settings_payload)
-    provider_slots = list(credential_slots or [])
-    normalized_provider_slots = sorted(set(provider_slots), key=utf16_sort_key)
-    if normalized_provider_slots != provider_slots:
-        raise CheckpointError(
-            "provider credential_slots must be sorted and unique",
-            code="checkpoint_credential_slots_invalid",
-        )
-    normalized_slots = sorted(
-        set([*checkpoint_config.credential_slots, *normalized_provider_slots]),
-        key=utf16_sort_key,
-    )
-
-    context_ref = _take_ref(refs, "context", required=run_config.context is not None)
-    workspace_ref = _take_ref(
-        refs,
-        "workspace",
-        required=run_config.workspace is not None or run_config.workspace_backend is not None,
-    )
-    session_ref = _take_ref(refs, "session", required=run_config.session is not None)
-    predicate_ref = _take_ref(
-        refs,
-        "tool_policy.predicate",
-        required=bool(run_config.tool_policy and run_config.tool_policy.can_use_tool is not None),
-    )
-
-    definition: dict[str, Any] = {
-        "schema_version": RUN_DEFINITION_SCHEMA,
-        "agent": {"name": agent.name, "type": task.agent_type},
-        "root_input": root_input,
-        "prompt_bundle": task.prompt_bundle.to_dict(),
-        "initial_messages": [message.to_dict() for message in initial_messages],
-        "initial_shared_state": deepcopy(run_config.shared_state or {}),
-        "run_metadata": _behavior_metadata(agent=agent, run_config=run_config),
-        "context_ref": context_ref,
-        "model": {
-            "backend": resolved.backend,
-            "model_id": resolved.model_id,
-            "settings": model_settings_payload,
-            "transport_timeout_seconds": transport_timeout,
-        },
-        "credential_slots": normalized_slots,
-        "runtime_controls": {
-            "max_cycles": task.max_cycles,
-            "max_handoffs": run_config.max_handoffs,
-            "no_tool_policy": task.no_tool_policy,
-            "session_memory_enabled": run_config.session_memory_enabled,
-            "memory_compact_threshold": task.memory_compact_threshold,
-            "memory_threshold_percentage": task.memory_threshold_percentage,
-            "microcompaction_policy": task.microcompaction_policy.to_dict(),
-            "allow_interruption": task.allow_interruption,
-            "native_multimodal": task.native_multimodal,
-            "tool_use_behavior": agent.tool_use_behavior,
-            "stop_at_tool_names": list(agent.stop_at_tool_names),
-        },
-        "tools": _tool_definitions(registry=registry, task=task, refs=refs),
-        "tool_policy": _tool_policy_definition(
-            run_config.tool_policy,
-            predicate_ref=predicate_ref,
-            approval_timeout_seconds=run_config.approval_timeout_seconds,
-        ),
-        "checkpoint_policy": {
-            "ambiguous_model_policy": checkpoint_config.ambiguous_model_policy.value,
-            "ambiguous_tool_policy": checkpoint_config.ambiguous_tool_policy.value,
-            "max_extension_state_bytes": checkpoint_config.max_extension_state_bytes,
-        },
-        "budget_limits": (
-            run_config.budget_limits.to_dict()
-            if run_config.budget_limits is not None and run_config.budget_limits.has_limits
-            else None
-        ),
-        "output_schema": _output_schema(agent.output_type),
-        "workspace_ref": workspace_ref,
-        "session_ref": session_ref,
-        "extensions": _extension_definitions(run_config),
-        "capability_refs": dict(sorted(refs.items(), key=lambda item: utf16_sort_key(item[0]))),
-    }
-    _require_declared_credential_headers(definition, normalized_slots)
-    _redact_credential_slots(definition, normalized_slots)
-    validated = validate_run_definition(definition)
-    return validated, compute_run_definition_digest(validated)
+    raise RuntimeError("Checkpoint run definitions are retired; use Runtime.definition")
 
 
 def _tool_definitions(
@@ -209,38 +111,7 @@ def _tool_policy_definition(
 
 
 def _extension_definitions(run_config: RunConfig) -> list[dict[str, Any]]:
-    definitions: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    checkpoint_config = run_config.checkpoint_config
-    if checkpoint_config is None:
-        raise CheckpointError(
-            "checkpoint_config is required to define checkpoint extensions",
-            code="checkpoint_config_invalid",
-        )
-    required_namespaces = set(checkpoint_config.required_extension_namespaces)
-    for extension in run_config.checkpoint_extensions:
-        validate_checkpoint_extension(extension)
-        if extension.namespace in seen:
-            raise CheckpointError(
-                f"duplicate checkpoint extension {extension.namespace}",
-                code="checkpoint_extension_namespace_duplicate",
-            )
-        seen.add(extension.namespace)
-        required = bool(extension.required or extension.namespace in required_namespaces)
-        definitions.append(
-            {
-                "namespace": extension.namespace,
-                "version": extension.version,
-                "required": required,
-            }
-        )
-    missing = required_namespaces - seen
-    if missing:
-        raise CheckpointError(
-            f"missing required checkpoint extensions: {', '.join(sorted(missing))}",
-            code="checkpoint_extension_missing",
-        )
-    return sorted(definitions, key=lambda item: utf16_sort_key(item["namespace"]))
+    raise RuntimeError("Checkpoint run definitions are retired; use Runtime.definition")
 
 
 def _validate_behavior_capability_refs(
@@ -265,9 +136,7 @@ def _validate_behavior_capability_refs(
         (run_config.interruption_messages is not None, "interruption_messages"),
         (run_config.approval_provider is not None, "approval_provider"),
         (run_config.host_cost_meter is not None, "host_cost_meter"),
-        (run_config.reconciliation_provider is not None, "reconciliation_provider"),
         (run_config.tool_registry_factory is not None, "tool_registry_factory"),
-        (run_config.sub_task_manager is not None, "sub_task_manager"),
         (
             (agent.output_validation_enabled and agent.output_validator is not None)
             or agent.output_type not in {None, str, dict, list},

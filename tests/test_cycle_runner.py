@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
-import pytest
 from support import model_call_context
+from support.compaction import run_model_turn
 
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.errors import MAX_PTL_RETRIES, is_prompt_too_long_error
 from vv_agent.memory import (
-    CompactionExhaustedError,
     MemoryManager,
     SessionMemory,
     SessionMemoryConfig,
@@ -18,25 +18,15 @@ from vv_agent.memory import (
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 
 def _fake_summary(_prompt: str, _backend: str | None, _model: str | None) -> str:
-    return json.dumps(
-        {
-            "summary_version": 1,
-            "user_constraints": [],
-            "decisions": [],
-            "progress": ["done"],
-            "key_facts": [],
-            "open_issues": [],
-            "next_steps": [],
-        },
-        ensure_ascii=False,
-    )
+    from test_memory_lifecycle_contract import _summary_payload
+
+    return _summary_payload()
 
 
 def _fake_session_memory_extract(_prompt: str, _backend: str | None, _model: str | None) -> str:
@@ -82,8 +72,9 @@ def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
         sent_messages.append(messages)
         return LLMResponse(content="done", raw={"usage": {"prompt_tokens": 12, "completion_tokens": 4}})
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[raise_ptl, succeed_after_compact]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[raise_ptl, succeed_after_compact]),
         tool_registry=build_default_registry(),
     )
     messages = [
@@ -93,13 +84,14 @@ def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
         Message(role="user", content="c" * 40),
     ]
 
-    next_messages, cycle_record = runner.run_cycle(
+    result = runner(
         task=_build_task(),
         messages=messages,
-        cycle_index=1,
         memory_manager=_build_memory_manager(),
         ctx=model_call_context(),
     )
+    next_messages = result.messages
+    cycle_record = result.cycles[0]
 
     assert cycle_record.memory_compacted is True
     assert sent_messages
@@ -134,12 +126,13 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
         return original_emergency_compact(messages, cycle_index=cycle_index, drop_ratio=drop_ratio)
 
     monkeypatch.setattr(MemoryManager, "emergency_compact", tracking_emergency_compact)
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[raise_ptl, raise_ptl, succeed_after_retry]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[raise_ptl, raise_ptl, succeed_after_retry]),
         tool_registry=build_default_registry(),
     )
 
-    next_messages, cycle_record = runner.run_cycle(
+    result = runner(
         task=_build_task(),
         messages=[
             Message(role="system", content="sys"),
@@ -147,13 +140,14 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
             Message(role="assistant", content="a " * 800),
             Message(role="user", content="c" * 40),
         ],
-        cycle_index=1,
         memory_manager=memory_manager,
         ctx=model_call_context(),
     )
+    next_messages = result.messages
+    cycle_record = result.cycles[0]
 
     assert cycle_record.memory_compacted is True
-    assert emergency_calls == [0.4]
+    assert emergency_calls == []  # Emergency is a logged summary plan, not an in-memory pruner.
     assert sent_messages
     assert next_messages[-1].content == "done"
 
@@ -168,8 +162,9 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
         cast(LLMResponse | Callable[[LlmRequest], LLMResponse], ptl_step) for _ in range(MAX_PTL_RETRIES + 1)
     ]
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=ptl_steps),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=ptl_steps),
         tool_registry=build_default_registry(),
     )
     messages = [
@@ -179,17 +174,16 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
         Message(role="user", content="c" * 40),
     ]
 
-    with pytest.raises(CompactionExhaustedError) as exc_info:
-        runner.run_cycle(
-            task=_build_task(),
-            messages=messages,
-            cycle_index=1,
-            memory_manager=_build_memory_manager(),
-            ctx=model_call_context(),
-        )
+    result = runner(
+        task=_build_task(),
+        messages=messages,
+        memory_manager=_build_memory_manager(),
+        ctx=model_call_context(),
+    )
 
-    assert exc_info.value.attempts == MAX_PTL_RETRIES + 1
-    assert "context_length_exceeded" in str(exc_info.value.last_error)
+    assert result.status.value == "failed"
+    assert "CompactionExhaustedError" in str(result.error)
+    assert len([c for c in result.token_usage.model_calls if c.operation.value == "agent_cycle"]) == MAX_PTL_RETRIES + 1
 
 
 def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
@@ -197,19 +191,20 @@ def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
         _model, _messages = request.model, request.messages
         raise RuntimeError("network down")
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[raise_other]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[raise_other]),
         tool_registry=build_default_registry(),
     )
 
-    with pytest.raises(RuntimeError, match="network down"):
-        runner.run_cycle(
-            task=_build_task(),
-            messages=[Message(role="system", content="sys"), Message(role="user", content="hello")],
-            cycle_index=1,
-            memory_manager=_build_memory_manager(),
-            ctx=model_call_context(),
-        )
+    result = runner(
+        task=_build_task(),
+        messages=[Message(role="system", content="sys"), Message(role="user", content="hello")],
+        memory_manager=_build_memory_manager(),
+        ctx=model_call_context(),
+    )
+    assert result.status.value == "failed"
+    assert result.error_code == "model_outcome_unknown"
 
 
 def test_cycle_runner_recognizes_prompt_too_long_patterns() -> None:
@@ -244,8 +239,9 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
         sent_messages.append(messages)
         return LLMResponse(content="done")
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[capture]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[capture]),
         tool_registry=build_default_registry(),
     )
     memory_manager = _build_memory_manager(
@@ -279,13 +275,13 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
         Message(role="user", content="latest ask"),
     ]
 
-    _, cycle_record = runner.run_cycle(
+    result = runner(
         task=_build_task(),
         messages=messages,
-        cycle_index=3,
         memory_manager=memory_manager,
         ctx=model_call_context(),
     )
+    cycle_record = result.cycles[0]
 
     assert cycle_record.memory_compacted is True
     assert sent_messages
@@ -301,8 +297,9 @@ def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() 
         sent_messages.append(messages)
         return LLMResponse(content="done")
 
-    runner = CycleRunner(
-        llm_client=ScriptedLLM(steps=[capture]),
+    runner = partial(
+        run_model_turn,
+        llm=ScriptedLLM(steps=[capture]),
         tool_registry=build_default_registry(),
     )
     memory_manager = _build_memory_manager(
@@ -321,7 +318,7 @@ def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() 
         ),
     )
 
-    _, cycle_record = runner.run_cycle(
+    result = runner(
         task=_build_task(),
         messages=[
             Message(role="system", content="sys"),
@@ -329,15 +326,14 @@ def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() 
             Message(role="assistant", content="assistant analysis " * 40),
             Message(role="user", content="current request " * 40),
         ],
-        cycle_index=2,
         memory_manager=memory_manager,
-        previous_prompt_tokens=150,
         ctx=model_call_context(),
     )
+    cycle_record = result.cycles[0]
 
     assert cycle_record.memory_compacted is True
     assert sent_messages
     assert sent_messages[0][0].content == "sys"
     assert "<Session Memory>" not in sent_messages[0][0].content
     assert memory_manager.session_memory is not None
-    assert [entry.content for entry in memory_manager.session_memory.state.entries] == ["session memory survives"]
+    assert any(call.operation.value == "session_memory" for call in result.token_usage.model_calls)

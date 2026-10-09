@@ -10,7 +10,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Condition, RLock
-from typing import Any, Protocol, cast, overload
+from typing import Any, Protocol, Self, cast, overload
+from uuid import uuid4
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider
@@ -22,13 +23,13 @@ from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.prompt import PromptBundle, PromptSection, build_raw_system_prompt_bundle, build_system_prompt_bundle
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig, ToolPolicy
-from vv_agent.runner import Runner
-from vv_agent.runtime import CancellationToken
-from vv_agent.runtime.backends import ExecutionBackend
 from vv_agent.runtime.background_sessions import background_session_manager
-from vv_agent.runtime.engine import register_sub_agent_session, unregister_sub_agent_session
+from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.sub_task_manager import SubTaskManager, _SubTaskTurnSnapshot
+from vv_agent.session.kernel import drive
+from vv_agent.session.records import InboxItem, copy_json
+from vv_agent.session.result import project_result
 from vv_agent.sessions import MemorySession, Session
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.types import (
@@ -176,7 +177,6 @@ class AgentSessionOptions:
     tool_registry_factory: ToolRegistryFactory | None = None
     stream: RunEventObserver | None = None
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
-    execution_backend: ExecutionBackend | None = None
     cancellation_token: CancellationToken | None = None
     debug_dump_dir: str | None = None
     approval_provider: ApprovalProvider | None = None
@@ -188,7 +188,7 @@ class AgentSessionOptions:
     bash_env: dict[str, str] = field(default_factory=dict)
     context_providers: list[ContextProvider] = field(default_factory=list)
     memory_providers: list[MemoryProvider] = field(default_factory=list)
-    session: Session | None = None
+    session_store: Any | None = None
     event_buffer_capacity: int = 256
 
 
@@ -253,7 +253,7 @@ class AgentSessionRun(RunResult):
         instance.trace_id = result.trace_id
         instance.run_id = result.run_id
         instance.metadata = dict(result.metadata)
-        instance._resume_context = result._resume_context
+        instance._session_driver = result._session_driver
         return instance
 
 
@@ -270,7 +270,7 @@ class AgentSessionState:
     pending_follow_ups: int = 0
 
 
-class AgentSession:
+class _AgentSessionLifecycle:
     """Stateful, interactive session wrapper for desktop/runtime integrations."""
 
     def __init__(
@@ -329,10 +329,6 @@ class AgentSession:
     def messages(self) -> list[Message]:
         with self._lock:
             return list(self._messages)
-
-    @property
-    def session(self) -> Session:
-        return self._session
 
     @property
     def shared_state(self) -> dict[str, Any]:
@@ -436,7 +432,7 @@ class AgentSession:
             self._listeners.clear()
         return True
 
-    def __enter__(self) -> AgentSession:
+    def __enter__(self) -> Self:
         with self._lock:
             self._ensure_open_locked()
         return self
@@ -465,13 +461,6 @@ class AgentSession:
             self._ensure_open_locked()
             self._follow_up_queue.append(text)
         self._emit("session_follow_up_queued", prompt=text)
-
-    def clear_queues(self) -> None:
-        with self._lock:
-            self._ensure_open_locked()
-            self._steering_queue.clear()
-            self._follow_up_queue.clear()
-        self._emit("session_queues_cleared")
 
     def cancel(self) -> bool:
         with self._lock:
@@ -553,27 +542,6 @@ class AgentSession:
                 pending_steering=len(self._steering_queue),
                 pending_follow_ups=len(self._follow_up_queue),
             )
-
-    def replace_messages(self, messages: list[Message]) -> None:
-        replacement = list(messages)
-        with self._lock:
-            self._ensure_open_locked()
-            if self._running:
-                raise RuntimeError("Cannot replace messages while session is running.")
-            self._session.clear()
-            if replacement:
-                self._session.add_items(replacement)
-            self._messages = replacement
-        self._emit("session_messages_replaced", message_count=len(replacement))
-
-    def replace_shared_state(self, shared_state: dict[str, Any]) -> None:
-        with self._lock:
-            self._ensure_open_locked()
-            if self._running:
-                raise RuntimeError("Cannot replace shared_state while session is running.")
-            self._shared_state = dict(shared_state)
-            self._shared_state.setdefault("todo_list", [])
-        self._emit("session_shared_state_replaced")
 
     def _run_once(
         self,
@@ -859,12 +827,187 @@ class AgentSession:
             raise RuntimeError("Interactive session is closed.")
 
 
+class _Transcript:
+    def __init__(self, kernel, session_id):
+        self.kernel, self.session_id = kernel, session_id
+
+    def get_items(self, limit=None):
+        messages = self.kernel.messages(self.session_id)
+        return messages if limit is None else messages[-limit:] if limit else []
+
+
+class AgentSession(_AgentSessionLifecycle):
+    def __init__(self, *, client, agent, workspace, shared_state, session_id, seed_messages: list[Message]):
+        self._client = client
+        self.driver = client.driver
+        sid = session_id or uuid4().hex[:12]
+        self.driver.create(
+            sid, str(workspace), {"seed": {"messages": [m.to_dict() for m in seed_messages], "shared_state": shared_state or {}}}
+        )
+        definition = client._apply_startup_shell_defaults(agent) if isinstance(agent, InteractiveAgentDefinition) else None
+        super().__init__(
+            execute_run=client._execute,
+            session_id=sid,
+            agent_name="inline" if definition else agent.name,
+            definition=definition,
+            agent=None if definition else agent,
+            workspace=workspace,
+            shared_state=shared_state,
+            session=cast(Any, _Transcript(self.driver, sid)),
+            approval_broker=client.options.approval_broker,
+            parent_cancellation_token=client.options.cancellation_token,
+            event_buffer_capacity=client.options.event_buffer_capacity,
+        )
+        state, _, _ = self.driver.store.read_state(sid)
+        self._closed = state.closed
+        if state.turns:
+            result = project_result(self.driver.store, sid, next(reversed(state.turns)), runtime=self._runtime())
+            self._shared_state = result.raw_result.shared_state
+            self._latest_run = AgentSessionRun.from_run_result(result)
+
+    @property
+    def messages(self):
+        return self.driver.messages(self.session_id)
+
+    @property
+    def shared_state(self):
+        state, rows, _ = self.driver.store.read_state(self.session_id)
+        if state.turns:
+            return copy_json(
+                project_result(self.driver.store, self.session_id, next(reversed(state.turns))).raw_result.shared_state
+            )
+        return copy_json(rows[0].record.payload["attributes"].get("seed", {}).get("shared_state", {}))
+
+    def _runtime(self):
+        handle = self._active_run_handle
+        if handle is None:
+            handle = next((h for h in reversed(self.driver.handles) if h.session_id == self.session_id), None)
+        if handle is None:
+            state, _, _ = self.driver.store.read_state(self.session_id)
+            definition = self.definition
+            task = state.turns[next(reversed(state.turns))].start.task() if state.turns and definition else None
+            agent = self.agent
+            if agent is None:
+                assert definition is not None
+                agent = Agent(
+                    self.agent_name,
+                    task.prompt_bundle if task else definition.system_prompt or definition.description,
+                    model=definition.model,
+                    sub_agents=definition.sub_agents,
+                )
+            options = self._client.options
+            config = RunConfig(
+                model_provider=options.model_provider,
+                workspace=self.workspace,
+                tool_policy=options.tool_policy,
+                approval_provider=options.approval_provider,
+                approval_broker=self._approval_broker,
+                approval_timeout_seconds=options.approval_timeout_seconds,
+                tool_registry_factory=options.tool_registry_factory,
+                hooks=options.runtime_hooks,
+                memory_providers=[*options.memory_providers, *(definition.memory_providers if definition else [])],
+                context_providers=[*options.context_providers, *(definition.context_providers if definition else [])],
+                metadata={"session_id": self.session_id},
+            )
+            return self.driver.runtime(agent, config, task)
+        return handle.runtime
+
+    def _persist_custom_run_delta(self, previous, run):
+        del previous, run
+
+    def _before_cycle_messages(self, cycle_index, _, __):
+        return []
+
+    def _interruption_messages(self):
+        return []
+
+    def steer(self, prompt):
+        self._queue("steer", prompt)
+
+    def follow_up(self, prompt):
+        self._queue("follow_up", prompt)
+
+    def _queue(self, kind, prompt):
+        text = prompt.strip()
+        if not text:
+            raise ValueError(f"{kind} prompt cannot be empty")
+        with self._lock:
+            self._ensure_open_locked()
+        state, _, _ = self.driver.store.read_state(self.session_id)
+        target = state.active_turn_id if kind == "steer" else None
+        self.driver.push(self.session_id, InboxItem(uuid4().hex, kind, {"content": text}, target))
+        self._emit(f"session_{kind}_queued", prompt=text)
+
+    def prompt(self, prompt, *, auto_follow_up=True):
+        text = prompt.strip()
+        if not text:
+            raise ValueError("prompt cannot be empty")
+        state, _, _ = self.driver.store.read_state(self.session_id)
+        if state.active_turn_id:
+            self.driver.answer(self.session_id, self._runtime(), text, uuid4().hex)
+        run = self._run_once(text)
+        while auto_follow_up and run.status == AgentStatus.COMPLETED and self._pending("follow_up"):
+            run = self._run_once("")
+        return run
+
+    def continue_run(self, prompt=None):
+        if prompt and prompt.strip():
+            return self.prompt(prompt, auto_follow_up=False)
+        state, _, _ = self.driver.store.read_state(self.session_id)
+        if not state.active_turn_id and not self._pending("follow_up"):
+            raise ValueError("No queued prompt available. Provide prompt or call follow_up() first.")
+        return self._run_once("")
+
+    def approve(self, request_id, decision):
+        self.driver.approve(self.session_id, self._runtime(), request_id, decision, f"approval/{request_id}/answer")
+
+    def archive(self, *, input_id="interactive/archive"):
+        return self.driver.control(self.session_id, "archive", input_id, runtime=self._runtime())
+
+    def close(self):
+        input_id = "interactive/close"
+        state, _, _ = self.driver.store.read_state(self.session_id)
+        self.driver.control(self.session_id, "close", input_id)
+        changed = super().close()
+        if not self._running:
+            try:
+                runtime = self._runtime()
+            except RuntimeError:
+                return changed
+            drive(self.driver.store, self.session_id, runtime=runtime, _one_turn=True)
+        return changed and not state.closed
+
+    def cancel(self):
+        handle = self._active_run_handle
+        return bool(handle and handle.cancel())
+
+    def _pending(self, kind):
+        state, _, _ = self.driver.store.read_state(self.session_id)
+        count = sum(i.item.kind == kind for i in self.driver.store.peek_inbox(self.session_id))
+        count += sum(
+            r._payload["input"]["kind"] == kind and r._payload["disposition"] == "queued" and key not in state.admitted_inputs
+            for key, r in state.applied_inputs.items()
+        )
+        return count
+
+    def state(self):
+        return replace(
+            super().state(),
+            messages=self.driver.messages(self.session_id),
+            shared_state=self.shared_state,
+            pending_steering=self._pending("steer"),
+            pending_follow_ups=self._pending("follow_up"),
+        )
+
+
 class InteractiveAgentClient:
     """Session client backed by vv-agent runtime primitives."""
 
-    def __init__(self, *, options: AgentSessionOptions, _kernel: Any = None) -> None:
+    def __init__(self, *, options: AgentSessionOptions, store=None) -> None:
+        from vv_agent.session.surfaces import SessionDriver
+
         self.options = options
-        self._kernel = _kernel
+        self.driver = SessionDriver(store=store or options.session_store)
 
     def create_session(
         self,
@@ -873,44 +1016,26 @@ class InteractiveAgentClient:
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         session_id: str | None = None,
-        session: Session | None = None,
+        session: dict[str, Any] | None = None,
     ) -> AgentSession:
-        definition = self._apply_startup_shell_defaults(agent) if isinstance(agent, InteractiveAgentDefinition) else None
-        sdk_agent = agent if isinstance(agent, Agent) else None
-        effective_workspace = self._resolve_workspace(workspace)
-        if self._kernel is not None:
-            from vv_agent.session.interactive import _KernelAgentSession
+        from vv_agent.session.store import Conflict
 
-            seed_session = session or self.options.session
-
-            return _KernelAgentSession(
-                client=self,
-                agent=agent,
-                workspace=effective_workspace,
-                shared_state=shared_state,
-                session_id=session_id,
-                seed_messages=seed_session.get_items() if seed_session is not None else [],
-            )
-        session_sub_task_manager = SubTaskManager(
-            register_session=register_sub_agent_session,
-            unregister_session=unregister_sub_agent_session,
-        )
-
-        def _execute_session_run(**kwargs: Any) -> AgentSessionRun:
-            return self._execute(**kwargs, sub_task_manager=session_sub_task_manager)
-
+        seed = session if session is not None else {"messages": [], "shared_state": shared_state or {}}
+        if session is None and shared_state is None and session_id is not None:
+            with suppress(KeyError, Conflict):
+                seed = self.driver.store.read(session_id, limit=1).records[0].record.payload["attributes"]["seed"]
+        if not isinstance(seed, dict) or set(seed) != {"messages", "shared_state"}:
+            raise ValueError("session seed requires exactly messages and shared_state")
+        if not isinstance(seed["messages"], list):
+            raise ValueError("seed messages must be a list")
+        messages = [Message.from_dict(m) for m in seed["messages"]]
         return AgentSession(
-            execute_run=_execute_session_run,
+            client=self,
+            agent=agent,
+            workspace=self._resolve_workspace(workspace),
+            shared_state=seed["shared_state"],
             session_id=session_id,
-            agent_name=sdk_agent.name if sdk_agent is not None else "inline",
-            definition=definition,
-            agent=sdk_agent,
-            workspace=effective_workspace,
-            shared_state=shared_state,
-            session=session if session is not None else self.options.session,
-            approval_broker=self.options.approval_broker,
-            parent_cancellation_token=self.options.cancellation_token,
-            event_buffer_capacity=self.options.event_buffer_capacity,
+            seed_messages=messages,
         )
 
     def prepare_task(
@@ -1051,8 +1176,10 @@ class InteractiveAgentClient:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
-        retained_state = self._kernel.store.read_state(session_id)[0] if self._kernel is not None else None
-        retained_turn = retained_state.turns.get(retained_state.active_turn_id) if retained_state else None
+        if session_id is None:
+            raise ValueError("execution requires an admitted session")
+        retained_state = self.driver.store.read_state(session_id)[0]
+        retained_turn = retained_state.turns.get(retained_state.active_turn_id) if retained_state.active_turn_id else None
         task = (
             retained_turn.start.task()
             if retained_turn
@@ -1089,17 +1216,15 @@ class InteractiveAgentClient:
             instructions=task.prompt_bundle,
             model=definition.model,
             metadata=dict(task.metadata),
-            sub_agents=dict(definition.sub_agents) if self._kernel is not None else {},
+            sub_agents=dict(definition.sub_agents),
         )
 
         run_config = RunConfig(
             model=model_ref,
             model_provider=self.options.model_provider,
             workspace=effective_workspace,
-            session=session,
             max_cycles=task.max_cycles,
             tool_policy=self.options.tool_policy,
-            execution_backend=self.options.execution_backend,
             cancellation_token=cancellation_token,
             approval_provider=self.options.approval_provider,
             approval_timeout_seconds=self.options.approval_timeout_seconds,
@@ -1115,14 +1240,9 @@ class InteractiveAgentClient:
             initial_messages=initial_messages,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
-            sub_task_manager=sub_task_manager,
             stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
-        handle = (
-            self._kernel.start(session_id, sdk_agent, run_config, self._kernel_content(session_id, prompt), task=task)
-            if self._kernel is not None
-            else Runner._start_compiled(sdk_agent, prompt, task=task, run_config=run_config)
-        )
+        handle = self.driver.start(session_id, sdk_agent, run_config, self._session_content(session_id, prompt), task=task)
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
@@ -1154,9 +1274,7 @@ class InteractiveAgentClient:
         run_config = RunConfig(
             model_provider=self.options.model_provider,
             workspace=effective_workspace,
-            session=session,
             tool_policy=self.options.tool_policy,
-            execution_backend=self.options.execution_backend,
             cancellation_token=cancellation_token,
             approval_provider=self.options.approval_provider,
             approval_timeout_seconds=self.options.approval_timeout_seconds,
@@ -1172,14 +1290,11 @@ class InteractiveAgentClient:
             initial_messages=initial_messages,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
-            sub_task_manager=sub_task_manager,
             stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
-        handle = (
-            self._kernel.start(session_id, agent, run_config, self._kernel_content(session_id, prompt))
-            if self._kernel is not None
-            else Runner.start(agent, prompt, run_config=run_config)
-        )
+        if session_id is None:
+            raise ValueError("execution requires an admitted session")
+        handle = self.driver.start(session_id, agent, run_config, self._session_content(session_id, prompt))
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
@@ -1189,8 +1304,10 @@ class InteractiveAgentClient:
                 active_handle_callback(None)
         return AgentSessionRun.from_run_result(result)
 
-    def _kernel_content(self, session_id: str | None, prompt: str) -> str | None:
-        state, _, _ = self._kernel.store.read_state(session_id)
+    def _session_content(self, session_id: str | None, prompt: str) -> str | None:
+        if session_id is None:
+            raise ValueError("execution requires an admitted session")
+        state, _, _ = self.driver.store.read_state(session_id)
         return None if state.active_turn_id or not prompt else prompt
 
     def _apply_context_providers_to_task(
@@ -1301,26 +1418,19 @@ class InteractiveAgentClient:
 
 def create_agent_session(
     *,
-    execute_run: Callable[..., AgentSessionRun],
-    session_id: str | None = None,
-    agent_name: str,
-    definition: InteractiveAgentDefinition,
-    workspace: Path,
+    agent: Agent | InteractiveAgentDefinition,
+    options: AgentSessionOptions,
+    workspace: str | Path | None = None,
     shared_state: dict[str, Any] | None = None,
-    session: Session | None = None,
-    approval_broker: ApprovalBroker | None = None,
-    event_buffer_capacity: int = 256,
+    session_id: str | None = None,
+    session: dict[str, Any] | None = None,
 ) -> AgentSession:
-    return AgentSession(
-        execute_run=execute_run,
-        session_id=session_id,
-        agent_name=agent_name,
-        definition=definition,
+    return InteractiveAgentClient(options=options).create_session(
+        agent=agent,
         workspace=workspace,
         shared_state=shared_state,
+        session_id=session_id,
         session=session,
-        approval_broker=approval_broker,
-        event_buffer_capacity=event_buffer_capacity,
     )
 
 

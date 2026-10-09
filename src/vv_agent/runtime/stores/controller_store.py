@@ -354,8 +354,6 @@ def _terminal_result(
         shared_state=deepcopy(checkpoint.shared_state),
         token_usage=summarize_task_token_usage(checkpoint.model_calls),
         completion_reason=reason,
-        checkpoint_key=checkpoint.checkpoint_key,
-        resume_observations=resume_observations or [],
     )
 
 

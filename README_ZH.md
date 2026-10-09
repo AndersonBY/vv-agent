@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-从 VectorVein 生产环境抽象出的轻量 Agent 框架。基于 cycle 的执行模型，支持可插拔 LLM 后端、工具分发、上下文压缩和分布式调度。
+从 VectorVein 生产环境抽象出的轻量 Agent 框架。基于 cycle 的执行模型，支持可插拔 LLM 后端、工具分发、上下文压缩和持久会话调度。
 
 ## 安装
 
@@ -12,131 +12,29 @@
 详见[合约工作流](docs/parity-contract.md)。本实现保留符合 Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.16.1"
+python -m pip install -e .
 ```
 
-需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
-`vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
+PostgreSQL SessionStore 按需安装 `postgres` extra，S3 工作区按需安装 `s3` extra。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
 
-### 0.16.1 重点能力
-
-- Memory、SQLite 与 Redis 共用快照状态转换，各自保留原生原子提交边界。
-- Redis host response 恢复保留并发更新的记录。
-- 跨语言恢复测试在 Python 与 Rust 间交换持久化 SQLite checkpoint 和 Redis controller 记录。
-
-### 0.16.0 重点能力
-
-- 注入 LLM client 的分布式 worker 无需配置文件即可运行。
-- Host prompt 与用户回复在 checkpoint、通知及模型恢复中保留原始业务内容。
-- 分布式终态决策、未知工具回执和不支持幂等的工具请求遵循同一 Python/Rust 契约。
-- Frozen finalization 使用持久化定义，Redis checkpoint 通过一次原子读取取得快照。
-
-### 0.14.3 重点能力
-
-- terminal replay 会先幂等投递 pending lifecycle events 并确认 terminal checkpoint，且不重复执行 runtime 或终态副作用。
-
-### 0.14.2 重点能力
-
-- Redis host interaction response recovery 在恢复事务内使用 Redis 权威时间计算保留的
-  checkpoint lease，replay 与 CAS 行为保持不变。
-
-### 0.14.1 重点能力
-
-- Redis controller admission 使用 Redis 权威时间判断 claim 过期并计算 recovery lease。
-
-### 0.14.0 重点能力
-
-- Checkpoint v10 对确定性工具 receipt 原子记录完整 canonical result；普通失败保留 result 与 digest，合成的取消闭包保持无 result。
-- 恢复过程直接从经过 digest 校验的 journal result 重放失败结果，保留 metadata、directive、artifact 和 cursor，不重复执行工具或模型。
-- 公共结果使用排序后的 `resume_observations`，worker response 升级为 v4。
-- 公共 API inventory 为 `vv-agent-public-api-v7`；AgentResult wire 保持 v6。
-- RunEvent 使用 wire version v5；live claim 的取消信号使用顶层 typed transition，deferred admission 遇到 Completed outcome 时零写拒绝。
-- 确定性 ordinary/deferred tool receipt 统一使用稳定的
-  `evt_receipt_<identity_key>` event identity；controller wake reaper 按 checkpoint
-  限定范围，并排除 ambiguous row。
-
-### 0.12.3 重点能力
-
-- heartbeat 会对瞬时失败进行重试，并通过本地 lease fence 保护 claim 所有权。
-- heartbeat 会持续到 cycle commit 完成。
-- 不明确的工具结果采用 fail-closed 语义，不会被当作确定性失败。
-- `max_cycles` 会完成 session 的终态收尾。
-- 各 checkpoint store 对 terminal acknowledge 使用一致的 active-claim fence。
-
-### 0.12.2 重点能力
-
-- 持久化模型调用在崩溃后恢复时会保留原始 operation identity，不会错误地分配重复的 slot。
-
-### 0.12.1 重点能力
-
-- 分布式 Celery worker 会先根据不可变的 run definition 恢复 planner extra 工具，
-  再校验任务 schema。
-
-### 0.12.0 重点能力
-
-- `Runner.start_distributed_compiled()` 接受已经编译好的 `AgentTask`，保留其中准备好的
-  runtime 字段，不会再次编译任务，并返回被动的分布式运行句柄。
-
-### 0.11.0 重点能力
-
-- `Runner.start_distributed()` 创建持久 checkpoint、投递 Cycle 1，并立即返回被动的
-  `DistributedRunHandle`。
-- `CeleryBackend.advance()` 每次只重读一次共享 checkpoint，并只执行一次投递、延迟重试、
-  等待、终态收尾或终态重放决策。
-- Cycle 任务使用 late ack 和 worker 丢失拒绝语义；终态处理由独立且幂等的
-  `Runner.finalize_distributed()` 任务完成。
-
-### 0.10.0 重点能力
-
-- 每次真正进入模型调用边界的尝试都会写入
-  `result.token_usage.model_calls`，包括 Agent 主循环、Session Memory、完整上下文
-  压缩、失败、重试和结果不确定的调用。Provider 没有返回 token 或缓存字段时会明确
-  保持“不可用”，不会伪装成 0。
-- 工具参数会在审批和副作用发生前，按照 JSON Schema Draft 2020-12 对完整参数做
-  校验。无效调用返回结构化的 `invalid_tool_arguments`，不会执行工具 handler。
-- 可选的宿主输出校验默认关闭；开启后最多执行一次不携带任何工具的修复回调，之后
-  才提交终态结果。
-- 已解析的 `PromptBundle` 会在一次 run 开始时固定 prompt section 和时间；checkpoint
-  恢复、分布式 worker 不会重新执行 instructions 或 context producer。
-- 开启 Session Memory 后，新 run 会先读取一次已持久化记忆，再把它冻结进
-  `PromptBundle`。当前 run 提取出的新记忆只负责持久化，从下一个新 run 开始可见，
-  不会中途改写当前 system prompt。
-- canonical 15 个内建工具使用精简 schema。`compress_memory` 不再暴露给模型，框架内部
-  自动上下文压缩仍然保留。
-- 大型 bash 输出返回最多 12,000 个字符的预览和安全 workspace artifact；本地 workspace
-  会把 artifact 存在 shell 工作目录之外的私有位置，并以流式方式写入完整输出。大型文件
-  读取返回有界文本和经校验的 cursor，不需要重复执行原操作。
-- `MicrocompactionPolicy` 可以配置触发比例、目标比例、受保护的最近 cycle 数和最小结果
-  长度。内建工具与自定义工具的旧结果默认都可归档；只有完整内容已经写入不可变 artifact，
-  且模型仍能调用 `read_file` 时，runtime 才会把旧结果替换为精简标记。模型只看到短预览和
-  恢复路径，大小与哈希等完整性信息只保留在宿主侧。
-- 持久化执行统一使用 `vv-agent.checkpoint.v10`、
-  `vv-agent.run-definition.v5`、`vv-agent.distributed-run.v5` 和
-  `vv-agent.distributed-worker-response.v4`，严格限定恢复与分布式 controller
-  边界。`RunEvent` 使用 wire version `v5`，SQLite session store 使用
-  `PRAGMA user_version=2`。
-
-详细规则见[输出校验](docs/output-validation.md)和
-[Checkpoint 与恢复](docs/checkpoint-resume.md)。
+当前 HEAD 使用 contract v24、public API v8 和唯一 session kernel 执行路径。
+旧版本行为由 Git tags 保留。
 
 ## 架构
 
-```
-Agent / RunConfig / ModelSettings
-└── Runner
-    └── AgentRuntime
-        ├── CycleRunner          # 单轮 LLM 调用：上下文 -> 补全 -> 工具调用
-        ├── ToolCallRunner       # 工具分发与 directive 收敛
-        ├── RuntimeHookManager   # before/after 钩子
-        ├── MemoryManager        # 上下文超阈值时自动压缩历史
-        └── ExecutionBackend     # inline、thread 或 Celery 调度
+```text
+Runner / InteractiveAgentClient / CLI / AppServer
+  -> SessionDriver -> SessionStore (SQLite or PostgreSQL)
+  -> session.kernel.drive
+  -> retained model/tool operations and child delivery
+  -> RunResult / RunEvent / tracing / protocol projections
 ```
 
 公开 SDK 入口从 `vv_agent` 顶层导出：`Agent`、`Runner`、`RunConfig`、
-`RunHandle`、`ModelSettings`、`function_tool`、`Session`、`PromptBundle`、
+`RunHandle`、`ModelSettings`、`function_tool`、`SessionStore`、`PromptBundle`、
 `PromptSection`、`ToolExecutionResult`、`ToolArtifactRef`、`ToolResultCursor`、
-强类型 `RunEvent`、`ApprovalProvider`、`ContextProvider`、`RunEventStore`，以及面向桌面
+强类型 `RunEvent`、`ApprovalProvider`、`ContextProvider`、`SessionRunEventStore`，以及面向桌面
 runtime 集成的 interactive session API。位于包模块中的扩展点包括 `vv_agent.memory.MemoryProvider`
 和 `vv_agent.tools.ToolExecutor`。底层 runtime 实现细节包括 `AgentTask`、
 `AgentResult`、`Message`、`CycleRecord` 和 `ToolCall`。
@@ -215,52 +113,25 @@ Provider 优先级为 per-run、Runner；Model 优先级为 per-run、Agent、Ru
 
 ### 流式输出与 Session
 
-`RunConfig.workspace` 控制本次运行的工作区。`RunConfig.session` 可传入
-`MemorySession`、`SQLiteSession` 或 `RedisSession`，用于跨多次运行保留消息历史。
+Ordinary Runner runs use a fresh SQLite `:memory:` store. `Runner.start()` returns
+ a live RunHandle; events(), result(), cancel() and approve() share the same
+kernel path. Durable events derive from the session log; assistant deltas are
+volatile live observations. A JsonlRunEventStore is an optional projection sink.
 
 ```python
-from vv_agent import Agent, MemorySession, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner
 
-agent = Agent(name="assistant", instructions="记住上下文。", model="kimi-k3")
-session = MemorySession("thread-001")
-config = RunConfig(
-    default_backend="moonshot",
-    workspace="./workspace/thread-001",
-    session=session,
-)
-
-Runner.run_sync(agent, "先分析项目", run_config=config)
-for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", run_config=config):
+agent = Agent("assistant", "Answer briefly.", model="kimi-k3")
+handle = Runner.start(agent, "Inspect the project", run_config=RunConfig(default_backend="moonshot"))
+for event in handle.events():
     if event.type == "assistant_delta":
         print(event.delta, end="")
+print(handle.result().final_output)
 ```
 
-宿主需要活跃运行句柄而不是阻塞等待结果时，使用 `Runner.start()`。
-`RunHandle.events()` 会产生与 `Runner.stream_sync()` 相同的强类型 `RunEvent`
-流，`RunHandle.result()` 等待最终 `RunResult`，`RunHandle.cancel()` 取消运行，
-`RunHandle.approve()` 处理待审批请求。当 handle 挂接到 `AgentSession` 时，
-`RunHandle.steer()` 会为当前运行排入 steering 上下文，`RunHandle.follow_up()`
-会排入下一个 session turn。普通一次性 `Runner.start()` handle 不拥有 session
-队列，因此这些方法需要交互式 session controller。
-
-`RunConfig.event_store` 可以持久化每个强类型事件。`JsonlRunEventStore` 会保存事件
-字典，并按 `run_id` 回放事件，包括 `parent_run_id` 指向该 run 的子 run。公开的
-runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统一使用
-`DiagnosticEvent`。
-
-一个参数已规范化且通过 schema 校验的工具调用依次发出 `tool_call_planned`、可选
-审批事件、在可能产生副作用前紧邻发出的 `tool_call_started`，以及结果形成后的
-`tool_call_completed`。参数解析失败不会发出这些事件；schema 校验失败、策略拒绝、
-审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
-`directive`、可空的
-`error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v10 operation journal
-为准。
-
-需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。
-
-Redis 支持可通过 `uv sync --extra redis` 安装，也可以在构造 `RedisSession`
-时注入 Redis 兼容 client。
+Use InteractiveAgentClient for multiple turns and SessionStore for durable
+retention. Waiting operations retain the same session_id and turn_id. After
+answering a parked approval, explicitly resume the handle or retained turn.
 
 ### App Server
 
@@ -286,57 +157,37 @@ uv run vv-agent debug app-server send-message "hello"
 
 ### Interactive Session
 
-普通一次性运行、流式运行，以及由 `RunConfig.session` 管理历史的会话，优先使用
-`Runner`。宿主应用需要稳定 `session_id`、运行时监听、运行中 steering、follow-up、
-取消和共享工具状态时，使用 `InteractiveAgentClient`。session 运行期间，
-`session.active_run_handle` 会暴露统一的 `RunHandle` 控制面，可用于审批、取消、
-steering 和 follow-up。
-
-需要持久化历史时，可通过 `AgentSessionOptions.session`（或
-`create_session(session=...)`）注入已有的 `MemorySession`、`SQLiteSession` 或
-`RedisSession`。facade 会在创建时恢复完整历史，后续每轮由 `Runner` 写回同一个
-Session；不要再把同一份历史作为 initial messages 重复传入。同时提供
-`session_id` 时，它必须与 backing Session 的 id 一致。
+InteractiveAgentClient owns conversation turns, steering, follow-up, cancellation
+and approvals. Its default store is SQLite `:memory:`. Supply SQLiteStore or
+PostgresStore through AgentSessionOptions.session_store for durable retention.
+Creation-time `session` is a closed seed with messages and shared_state; messages
+and shared_state become read-only projections after creation.
 
 ```python
 from pathlib import Path
+from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, SQLiteStore, VvLlmModelProvider
 
-from vv_agent import (
-    AgentSessionOptions,
-    InteractiveAgentClient,
-    InteractiveAgentDefinition,
-    SQLiteSession,
-)
-from vv_agent.runtime.backends import ThreadBackend
-
-client = InteractiveAgentClient(
-    options=AgentSessionOptions(
-        settings_file=Path("local_settings.py"),
-        default_backend="moonshot",
-        workspace=Path("./workspace/thread-001"),
-        execution_backend=ThreadBackend(max_workers=4),
-        session=SQLiteSession("thread-001", db_path=Path("./sessions.sqlite3")),
-    )
-)
-
-session = client.create_session(
-    session_id="thread-001",
-    agent=InteractiveAgentDefinition(
-        description="在用户工作区内操作并汇报进度。",
-        model="kimi-k3",
-        no_tool_policy="finish",
-    ),
-)
-unsubscribe = session.subscribe(lambda event, payload: print(event, payload))
-try:
-    run = session.prompt("检查工作区")
-    print(run.result.status, run.result.final_answer)
-finally:
-    unsubscribe()
+with SQLiteStore.standalone("sessions.sqlite3") as store:
+    if not store.connection.execute("PRAGMA user_version").fetchone()[0]:
+        store.install_schema()
+    client = InteractiveAgentClient(options=AgentSessionOptions(
+        model_provider=VvLlmModelProvider(Path("local_settings.py"), default_backend="moonshot"),
+        session_store=store,
+    ))
+    try:
+        session = client.create_session(
+            agent=Agent("assistant", "Remember prior turns.", model="kimi-k3"),
+            session_id="thread-001",
+        )
+        print(session.prompt("Remember the project codename River.").final_output)
+        print(session.prompt("What is the codename?").final_output)
+    finally:
+        client.driver.close()
 ```
 
-Interactive session 的公开入口是 `InteractiveAgentClient`、
-`AgentSessionOptions` 与 `AgentSession`。
+Runner.resume(session_id, turn_id), AgentSession.continue_run() and App Server
+turn/resume drive an explicitly retained turn. Replies preserve turn budgets;
+fresh turns reset their counters. Closed sessions reject execution.
 
 ### Agent as Tool、Handoff 与工具策略
 
@@ -429,7 +280,7 @@ policy = ToolPolicy(
 预算或 runtime 限制。
 
 Typed metadata 与通用的 `FunctionTool.metadata` 相互独立，也不会进入模型可见的函数
-schema。`ToolMetadata.idempotency` 是执行、事件与 checkpoint 唯一使用的幂等性声明。
+schema。`ToolMetadata.idempotency` 是执行、事件与保留 operation 唯一使用的幂等性声明。
 
 ### Guardrails 与 Trace
 
@@ -473,7 +324,7 @@ result = Runner.run_sync(
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
 - 该运行时 shell 提示仅在本地 LLM request 的单个 task/session-run 内固化，确保跨 cycles 的 request schema 文本稳定并保护 prompt cache 命中率。分布式 run definition 保留已编译 task 规划出的 canonical schema，因此宿主机相关的提示文本不会影响 task-scoped toolset digest。
 - SDK/CLI 自动生成的任务会把一次解析完成的 `PromptBundle` 显式传给 `AgentTask`、每次
-  `LlmRequest`、run definition、checkpoint 和分布式执行；通用 metadata 不再承担 prompt
+  `LlmRequest`、frozen turn definition 与 logged model operations；通用 metadata 不再承担 prompt
   section 传输。Anthropic 可以按 canonical section 设置缓存断点，其他 provider 接收确定性
   展平后的 prompt。
 
@@ -499,65 +350,26 @@ result = Runner.run_sync(
 )
 ```
 
-## 执行后端
+## 会话执行
 
-cycle 循环由可插拔的 `ExecutionBackend` 调度。
-
-| 后端 | 场景 |
-|------|------|
-| `InlineBackend` | 默认。同步，单进程。 |
-| `ThreadBackend` | 线程池。`submit()` 返回 `Future`，非阻塞。 |
-| `CeleryBackend` | 分布式。每轮 cycle 作为独立 Celery task 分发到 worker。 |
-
-### CeleryBackend
-
-每轮 cycle 都作为 Celery task 执行。Worker 从必填的 `RuntimeRecipe` 重建
-`AgentRuntime`，并解析其中声明的共享 `CheckpointStore` 能力。
+All public entrypoints use SessionDriver and the session kernel. SessionStore
+transactions own the log, inbox, leases, child admission and retained receipts.
+Ordinary runs use SQLite `:memory:`; durable SQLite/PostgreSQL are opt-in through
+the session API. Runner.start() provides non-blocking execution and cancellation.
 
 ```python
-from vv_agent import CheckpointConfig, RunConfig
-from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
-from vv_agent.runtime.backends.distributed import (
-    CapabilityRef,
-    DistributedCapabilities,
-    DistributedCapabilityRegistry,
-)
-from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+from vv_agent import Agent, RunConfig, Runner
 
-checkpoint_ref = CapabilityRef("checkpoint.production", "1")
-checkpoint_store = SqliteCheckpointStore(".vv-agent-state/checkpoints.db")
-worker_capabilities = DistributedCapabilityRegistry()
-worker_capabilities.register("checkpoint_store", checkpoint_ref, checkpoint_store)
-register_cycle_task(celery_app, capability_registry=worker_capabilities)
-
-recipe = RuntimeRecipe(
-    settings_file="local_settings.py",
-    backend="moonshot",
-    model="kimi-k3",
-    workspace="./workspace",
-    capabilities=DistributedCapabilities(checkpoint_store_ref=checkpoint_ref),
-)
-backend = CeleryBackend(celery_app=celery_app, runtime_recipe=recipe)
-run_config = RunConfig(
-    execution_backend=backend,
-    checkpoint_config=CheckpointConfig(
-        key="tenant-7/task-42",
-        store=checkpoint_store,
-    ),
-)
+handle = Runner.start(Agent("assistant", "Answer briefly.", model="kimi-k3"), "Explain session history.",
+                      run_config=RunConfig(default_backend="moonshot"))
+# A host can call handle.cancel() from its UI or a timer.
+print(handle.result().final_output)
 ```
 
-`dispatch_outbox_store` 是可选的 Celery 传输适配器。需要持久化投递回执时由宿主显式注入，
-并由宿主负责调度 lease reaper；不注入时使用稳定的 cycle task id 和 at-least-once 投递，
-worker 侧 checkpoint claim/CAS 会阻止重复的模型或工具状态副作用。
-
-安装 celery 依赖：`uv sync --extra celery`。
-
-### 取消与流式输出
-
-```python
-from vv_agent.events import AssistantDeltaEvent, RunEvent
-from vv_agent.runtime import CancellationToken, ExecutionContext
+See [runtime-control.md](docs/runtime-control.md) for waits, explicit resume,
+LeaseLost backoff, budgets and event projections. The old runtime loop,
+checkpoint stores and execution backends are retired implementation files awaiting
+F3b deletion.
 
 # 从另一个线程取消
 token = CancellationToken()
@@ -578,7 +390,7 @@ result = runtime.run(task, ctx=ctx)
 
 `tool_result` 诊断事件只保留模型可见 `content`、普通 metadata 和有界的
 `content_preview`，不会重复携带 artifact 或 cursor。结构化恢复字段属于
-`ToolExecutionResult`，并会保留在 cycle result、checkpoint 和分布式 wire 中。被截断的
+`ToolExecutionResult`，并会保留在 cycle result 与保留的 operation receipt 中。被截断的
 bash 结果指向不可变 workspace artifact，`read_file` 结果指向带源文件校验的 cursor。
 宿主必须通过正常的 workspace 权限读取 artifact；cursor 会拒绝内容变化、路径不匹配和
 无效偏移。
@@ -600,21 +412,12 @@ bash 结果指向不可变 workspace artifact，`read_file` 结果指向带源�
 | `S3WorkspaceBackend` | S3 兼容对象存储（AWS S3、阿里云 OSS、MinIO、Cloudflare R2）。 |
 
 ```python
+from pathlib import Path
+from vv_agent import RunConfig
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
-# 显式指定本地后端
-runtime = AgentRuntime(
-    llm_client=llm,
-    tool_registry=registry,
-    workspace_backend=LocalWorkspaceBackend(Path("./workspace")),
-)
-
-# 内存后端，适合测试
-runtime = AgentRuntime(
-    llm_client=llm,
-    tool_registry=registry,
-    workspace_backend=MemoryWorkspaceBackend(),
-)
+local_config = RunConfig(workspace_backend=LocalWorkspaceBackend(Path("./workspace")))
+memory_config = RunConfig(workspace_backend=MemoryWorkspaceBackend())
 ```
 
 ### S3WorkspaceBackend
@@ -656,11 +459,8 @@ class MyBackend:
 
 | 模块 | 说明 |
 |------|------|
-| `vv_agent.runtime.AgentRuntime` | 顶层状态机（completed / wait_user / max_cycles / failed） |
-| `vv_agent.runtime.CycleRunner` | 单轮 LLM 调用与 cycle 记录构建 |
-| `vv_agent.runtime.ToolCallRunner` | 工具执行与 directive 收敛 |
 | `vv_agent.runtime.RuntimeHookManager` | Hook 分发（before/after LLM、工具调用、上下文压缩） |
-| `vv_agent.runtime.CheckpointStore` | Checkpoint 持久化协议（`InMemoryCheckpointStore` / `SqliteCheckpointStore` / `RedisCheckpointStore`） |
+| `vv_agent.session.SessionStore` | Durable log, inbox, leases and projections |
 | `vv_agent.memory.MemoryManager` | 历史超阈值时自动压缩 |
 | `vv_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
 | `vv_agent.tools` | 内建工具，以及 `function_tool`、`FunctionTool`、结构化工具输出 |
@@ -689,7 +489,7 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
 - `vv_agent.tools.ToolExecutor` 暴露产品工具的 schema、审批、超时、错误和执行行为。
   普通 Python 函数使用 `FunctionTool` 或 `@function_tool`；自定义 executor 由
   `ToolOrchestrator` 路由。
-- `RunEventStore` 持久化强类型 `RunEvent` 历史，让应用视图可以回放已完成 run 和父子
+- `SessionRunEventStore` 投影强类型 `RunEvent` 历史，让应用视图可以回放已完成 run 和父子
   run 图。
 
 这个边界让 `Agent`、`Runner`、`RunConfig`、`RunHandle` 和 `RunEvent` 保持稳定，
@@ -707,7 +507,7 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
   - 解析出的模型容量分别记录为 `model_context_window` 和
     `model_max_output_tokens`；输出 capability 不会自动复制到
     `reserved_output_tokens`。
-  - 既有 durable task / checkpoint 在解码或恢复时保留原有阈值和元数据，
+  - 既有 durable turn definition 在解码或恢复时保留原有阈值和元数据，
     不按新默认值回写。
 - token 预算模型：
   - Context 优先级：显式 `model_context_window`、解析出的模型 capability、
@@ -777,7 +577,7 @@ excerpt:
   - 新 run 编译时只读取一次，并以 `<Session Memory>` 形式冻结进第一条 system message；
     后续每个 cycle 都复用同一个 `PromptBundle`
   - 当前 run 提取出的新条目会持久化，但直到下一个新 run 编译时才对模型可见
-  - Checkpoint resume 直接复用已冻结的记忆 section，不重新读取 store，也不改写当前 prompt
+  - Retained-turn resume 直接复用已冻结的记忆 section，不重新读取 store，也不改写当前 prompt
   - 提取阶段复用现有的 memory summary backend/model 选择逻辑
   - 全量压缩后只重置 transcript 跟踪索引，不清空已持久化记忆
   - 子任务默认关闭 Session Memory，避免父子任务共享同一记忆文件
@@ -822,7 +622,7 @@ excerpt:
 
 `check_background_command({"session_id":"bg_..."})` 立即读取当前状态和输出，
 `stop_background_command({"session_id":"bg_..."})` 请求停止进程树。
-成功启动和运行中查询均返回 `SUCCESS` / `continue`，checkpointed Runner 可以继续
+成功启动和运行中查询均返回 `SUCCESS` / `continue`，session kernel 可以继续
 调用模型；进程自身状态放在 content 和 metadata 中。实际非零退出仍返回错误，
 只有确认停止后才报告终态。句柄归属于启动任务及其 workspace；本地记录丢失不代表
 外部进程已经退出。运行中的大输出同样通过不可变 artifact 完整恢复，确认终态后保留

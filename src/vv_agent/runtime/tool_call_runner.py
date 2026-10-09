@@ -4,13 +4,12 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.checkpoint import CheckpointError, OperationState
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.events import RunEvent, ToolCallCompletedEvent
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
-from vv_agent.result import _PendingToolApproval
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController, ToolOperationPlan
 from vv_agent.runtime.hooks import RuntimeHookManager
@@ -35,6 +34,23 @@ from vv_agent.types import (
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingToolApproval:
+    interruption_id: str
+    call: ToolCall
+    cycle_index: int
+    context: Any
+    allowed_tool_names: frozenset[str]
+    orchestrator: Any
+    task: AgentTask
+    hook_manager: Any
+    source_checkpoint_key: str | None = None
+    source_operation_id: str | None = None
+    source_request_digest: str | None = None
+    source_idempotency_key: str | None = None
+    source_idempotency_support: str | None = None
 
 
 @dataclass(slots=True)

@@ -6,7 +6,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vv_agent.session.app_server import _KernelThreadStore
 
 from vv_agent.app_server.protocol import ThreadItem
 
@@ -82,7 +85,7 @@ class ThreadSnapshot:
     items: list[ThreadItem]
 
 
-class ThreadStore:
+class _LegacyThreadStore:
     def __init__(self, db_path: str | Path | None = None) -> None:
         path = ":memory:" if db_path is None else str(db_path)
         self._connection = sqlite3.connect(path, check_same_thread=False)
@@ -487,3 +490,11 @@ class ThreadStore:
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
         )
+
+
+class ThreadStore:
+    def __new__(cls, store=None) -> _KernelThreadStore:
+        from vv_agent.session.app_server import _KernelThreadStore
+        from vv_agent.session.surfaces import SessionDriver
+
+        return _KernelThreadStore(SessionDriver(store=store))

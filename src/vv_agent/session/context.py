@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
-from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.runtime.tool_results import build_image_notification
 from vv_agent.types import Message, ToolExecutionResult
 
 from .records import copy_json, digest
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) -> list[Message]:
     seed = records[0].record._payload["attributes"].get("seed", {}) if records else {}
     messages: list[Message] = (
-        filter_empty_assistant_messages([Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]])
+        filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in seed["messages"]])
         if seed.get("messages")
         else []
     )
@@ -31,13 +31,11 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
         p = r._payload
         if r.kind == "boundary_recorded":
             if p["stage"] == "before_memory":
-                messages = filter_empty_assistant_messages(
-                    [Message.from_dict(copy_json(m), _kernel=True) for m in p["data"]["messages"]]
-                )
+                messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in p["data"]["messages"]])
             elif p["stage"] == "after_cycle" and not p["data"]["error"]:
                 messages.extend(Message("user", text) for text in p["data"]["steering_messages"])
         elif r.kind == "context_compacted":
-            messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m), _kernel=True) for m in p["replacement"]])
+            messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in p["replacement"]])
         elif r.kind == "turn_started":
             task = r._task()
             history = filter_empty_assistant_messages(deepcopy(task.initial_messages)) if task.initial_messages else messages
@@ -47,14 +45,14 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
             ]
             initial_input = task.metadata.get("vv_session", {}).get("input_messages")
             messages.extend(
-                filter_empty_assistant_messages([Message.from_dict(m, _kernel=True) for m in initial_input])
+                filter_empty_assistant_messages([Message.from_dict(m) for m in initial_input])
                 if initial_input
                 else [Message("user", task.user_prompt)]
             )
         elif r.kind == "input_applied" and p["disposition"] == "applied" and p["input"]["kind"] == "steer":
             content = p["input"]["payload"]["content"]
             messages.extend(
-                filter_empty_assistant_messages([Message.from_dict(m, _kernel=True) for m in content["messages"]])
+                filter_empty_assistant_messages([Message.from_dict(m) for m in content["messages"]])
                 if isinstance(content, dict) and "messages" in content
                 else [Message("user", str(content))]
             )
@@ -110,6 +108,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                 messages.append(assistant)
             else:
                 messages.extend(filter_empty_assistant_messages([assistant]))
+            images = []
             for i, call in enumerate(calls):
                 tool = state.operations.get(f"{r.operation_id}/attempt/{r.attempt}/tool/{i}")
                 if tool is None:
@@ -119,14 +118,15 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                     result = ToolExecutionResult.from_dict(copy_json(a.result._payload["result"]))
                     message = result.to_tool_message()
                     messages.append(message)
-                    image = ToolCallRunner._build_image_notification(result=result, include_image=task.native_multimodal)
+                    image = build_image_notification(result=result, include_image=task.native_multimodal)
                     if image is not None:
-                        messages.append(image)
+                        images.append(image)
                 elif a.wait and "interaction_result" in a.wait:
                     messages.append(ToolExecutionResult.from_dict(copy_json(a.wait["interaction_result"])).to_tool_message())
                 else:
                     content = json.dumps({"error": "tool_outcome_unknown", "retryable": False})
                     messages.append(Message("tool", content, tool_call_id=call["id"], name=call["name"]))
+            messages.extend(images)
             if (
                 not calls
                 and task.no_tool_policy == "continue"

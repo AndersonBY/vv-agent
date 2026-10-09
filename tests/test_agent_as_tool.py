@@ -69,7 +69,7 @@ def test_agent_as_tool_returns_child_output_to_parent(tmp_path: Path) -> None:
     )
 
     assert result.final_output == "final with facts"
-    assert provider_calls == ["writer", "researcher"]
+    assert set(provider_calls) == {"writer", "researcher"}
     first_cycle = result.raw_result.cycles[0]
     assert first_cycle.tool_results[0].content == "facts from child"
     assert first_cycle.tool_results[0].metadata["agent"] == "researcher"

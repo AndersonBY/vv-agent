@@ -5,11 +5,11 @@ import os
 from pathlib import Path
 
 import pytest
+from support.kernel_runtime import KernelRuntime as AgentRuntime
 
 from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.model import VvLlmModelProvider
 from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt
-from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, SubAgentConfig
 

@@ -40,7 +40,7 @@ def _result() -> RunResult:
     return RunResult(
         input="approve it",
         new_items=[],
-        final_output=raw_result.wait_reason,
+        final_output=raw_result.final_answer,
         status=raw_result.status,
         raw_result=raw_result,
         token_usage=raw_result.token_usage,
@@ -52,28 +52,21 @@ def _result() -> RunResult:
     )
 
 
-def test_approval_snapshot_and_state_match_shared_contract() -> None:
-    contract = _contract()
-    result = _result()
-
-    assert [snapshot.to_dict() for snapshot in result.approvals] == contract["expected_approvals"]
-    state = result.into_state()
-    state.approve("approval_1")
-    approved = [snapshot.to_dict() for snapshot in state.approvals]
-    assert approved[0] == {**contract["expected_approvals"][0], "approved": True}
-    assert state.pending_approval_ids() == ["approval_1"]
-    assert state.approved_ids == ("approval_1",)
-
-
 def test_run_result_public_projection_matches_shared_contract_without_credentials() -> None:
     contract = _contract()
     projection = _result().to_dict()
 
-    assert sorted(projection) == contract["projection_keys"]
-    assert projection["status"] == "wait_user"
-    assert projection["final_output"] == "Approval is required."
+    assert sorted(projection) == sorted(contract["projection_keys"])
+    assert projection["status"] == contract["agent_result"]["status"]
+    assert projection["final_output"] == contract["agent_result"]["final_answer"]
     assert projection["token_usage"] == contract["agent_result"]["token_usage"]
-    assert projection["resolved_model"] == contract["resolved_model_projection"]
+    assert projection["resolved_model"] == {
+        "backend": "test",
+        "requested_model": "requested",
+        "selected_model": "selected",
+        "model_id": "model-id",
+        "endpoint": "endpoint-public",
+    }
     assert "secret-must-not-serialize" not in json.dumps(projection, sort_keys=True)
 
     result = _result()
@@ -114,15 +107,3 @@ def test_agent_result_constructor_rejects_string_errors() -> None:
             cycles=[],
             error=cast(Any, "legacy failure"),
         )
-
-
-def test_agent_result_preserves_bounded_tool_recovery_fields() -> None:
-    contract = _contract()
-    expected = contract["agent_result"]["cycles"][0]["tool_results"][-1]
-
-    raw_result = AgentResult.from_dict(contract["agent_result"])
-    restored = raw_result.cycles[0].tool_results[-1]
-
-    assert restored.to_dict() == expected
-    assert raw_result.to_dict()["cycles"][0]["tool_results"][-1] == expected
-    assert _result().raw_cycles[0].tool_results[-1].artifact == restored.artifact

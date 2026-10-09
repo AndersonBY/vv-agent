@@ -26,7 +26,7 @@ import pytest
                 "DeferredResolutionError",
                 "DeferredResolutionResultInvalid",
             ),
-            "vv_agent",
+            None,
         ),
         (
             "vv_agent.deferred",

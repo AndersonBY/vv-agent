@@ -9,6 +9,11 @@ Use the Python SDK directly for in-process runs. Use the App Server when the
 host needs a separate process, stable Thread / Turn / Item lifecycle events,
 approval callbacks, replay, and generated schema files.
 
+App Server thread/turn/item state is a projection of SessionStore records. Closed
+threads reject execution and resume. User and approval replies resume the same
+turn through its inbox; no checkpoint/controller execution path is selected.
+Lease retry exhaustion produces a typed JSON-RPC error or failure notification.
+
 ## Startup
 
 The first transport is JSONL over stdio:
@@ -41,7 +46,7 @@ The server responds to `initialize` with the user agent, protocol version, and
 capabilities:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v1","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true,"schemaExport":true,"approvalResolve":true}}}
+{"jsonrpc":"2.0","id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v2","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true,"schemaExport":true,"approvalResolve":true}}}
 ```
 
 Requests other than `initialize` are rejected until the connection has been

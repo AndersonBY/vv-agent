@@ -90,9 +90,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         elif r.kind == "boundary_recorded":
             data, stage = p["data"], p["stage"]
             if stage in {"memory_started", "memory_completed"}:
-                event = event_from_dict(
-                    data["event"] | {"metadata": data["event"].get("metadata", {}) | common["metadata"]}, _kernel=True
-                )
+                event = event_from_dict(data["event"] | {"metadata": data["event"].get("metadata", {}) | common["metadata"]})
             elif stage == "after_cycle":
                 code = (
                     "after_cycle_failed"
@@ -110,7 +108,9 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     exhaustion.enforcement_boundary
                     if exhaustion
                     else (
-                        BudgetEnforcementBoundary.TOOL_BATCH_PREFLIGHT
+                        BudgetEnforcementBoundary.TOOL_BATCH_COMPLETE
+                        if "/tool_complete/" in p["boundary_id"]
+                        else BudgetEnforcementBoundary.TOOL_BATCH_PREFLIGHT
                         if p["boundary_id"].endswith("/tool_batch")
                         else BudgetEnforcementBoundary.TERMINAL
                         if p["boundary_id"] == "terminal"

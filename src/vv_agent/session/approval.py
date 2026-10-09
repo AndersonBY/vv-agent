@@ -64,7 +64,9 @@ def resolve_approval(driver: _Driver, attempt: Attempt) -> bool:
                 return True
             if decision is not None:
                 broker.resolve(request.request_id, decision)
-                decision = broker.wait(request.request_id, timeout=0)
+            with broker._condition:
+                if request.request_id in broker._decisions:
+                    decision = broker.wait(request.request_id, timeout=0)
     if decision is None:
         return False
     payload = {

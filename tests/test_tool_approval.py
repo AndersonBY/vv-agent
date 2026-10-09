@@ -51,7 +51,7 @@ def test_tool_needs_approval_interrupts_before_invocation(tmp_path: Path) -> Non
 
     assert invoked is False
     assert result.status == AgentStatus.WAIT_USER
-    assert "delete_file" in (result.final_output or "")
+    assert result.metadata["session_waits"][0]["scope"] == ["delete_file"]
     approval_events = [event for event in result.events if isinstance(event, ApprovalRequestedEvent)]
     assert len(approval_events) == 1
     assert approval_events[0].tool_name == "delete_file"

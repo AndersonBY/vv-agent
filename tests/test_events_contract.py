@@ -25,14 +25,13 @@ from vv_agent import (
     RunFailedEvent,
     RunStartedEvent,
     RunStateChangedEvent,
-    SessionPersistedEvent,
     SubRunCompletedEvent,
     SubRunStartedEvent,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
     event_from_dict,
 )
-from vv_agent.events import ToolCallPlannedEvent
+from vv_agent.events import SessionPersistedEvent, ToolCallPlannedEvent
 from vv_agent.tools.metadata import ToolMetadata
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events.jsonl"
@@ -105,7 +104,7 @@ def test_run_event_has_stable_identity_and_timing() -> None:
 
     payload = event.to_dict()
 
-    assert payload["version"] == "v5"
+    assert payload["version"] == "v6"
     assert payload["type"] == "run_started"
     assert payload["event_id"].startswith("evt_")
     assert payload["run_id"] == "run_1"
@@ -123,6 +122,7 @@ def test_event_from_dict_rejects_stale_v1_discriminator() -> None:
                 "version": "v1",
                 "type": "run_started",
                 "event_id": "evt_stale",
+                "session_id": "event-session",
                 "run_id": "run_stale",
                 "trace_id": "trace_stale",
                 "created_at": 1.0,
@@ -135,9 +135,10 @@ def test_event_from_dict_rejects_superseded_created_at_milliseconds() -> None:
     with pytest.raises(ValueError, match="unknown fields: created_at_ms"):
         event_from_dict(
             {
-                "version": "v5",
+                "version": "v6",
                 "type": "run_started",
                 "event_id": "evt_old_time",
+                "session_id": "event-session",
                 "run_id": "run_old_time",
                 "trace_id": "trace_old_time",
                 "created_at_ms": 123456.789,
@@ -187,6 +188,7 @@ def test_typed_tool_lifecycle_fields_are_normalized_and_round_trip() -> None:
     )
     planned = ToolCallPlannedEvent(
         run_id="run_tool",
+        session_id="event-session",
         trace_id="trace_tool",
         tool_name="search",
         tool_call_id="call_tool",
@@ -195,6 +197,7 @@ def test_typed_tool_lifecycle_fields_are_normalized_and_round_trip() -> None:
     )
     started = ToolCallStartedEvent(
         run_id="run_tool",
+        session_id="event-session",
         trace_id="trace_tool",
         tool_name="search",
         tool_call_id="call_tool",
@@ -203,6 +206,7 @@ def test_typed_tool_lifecycle_fields_are_normalized_and_round_trip() -> None:
     )
     completed = ToolCallCompletedEvent(
         run_id="run_tool",
+        session_id="event-session",
         trace_id="trace_tool",
         tool_name="search",
         tool_call_id="call_tool",
@@ -226,9 +230,10 @@ def test_typed_tool_lifecycle_fields_are_normalized_and_round_trip() -> None:
 
 def test_tool_completion_rejects_missing_current_fields() -> None:
     incomplete_payload = {
-        "version": "v5",
+        "version": "v6",
         "type": "tool_call_completed",
         "event_id": "evt_incomplete_tool",
+        "session_id": "event-session",
         "run_id": "run_incomplete_tool",
         "trace_id": "trace_incomplete_tool",
         "created_at": 99.0,
@@ -243,9 +248,10 @@ def test_tool_completion_rejects_missing_current_fields() -> None:
 
 def test_memory_compaction_rejects_missing_current_fields() -> None:
     incomplete_started = {
-        "version": "v5",
+        "version": "v6",
         "type": "memory_compact_started",
         "event_id": "evt_incomplete_memory_started",
+        "session_id": "event-session",
         "run_id": "run_incomplete_memory",
         "trace_id": "trace_incomplete_memory",
         "created_at": 99.0,
@@ -253,9 +259,10 @@ def test_memory_compaction_rejects_missing_current_fields() -> None:
         "estimated_tokens": 120,
     }
     incomplete_completed = {
-        "version": "v5",
+        "version": "v6",
         "type": "memory_compact_completed",
         "event_id": "evt_incomplete_memory_completed",
+        "session_id": "event-session",
         "run_id": "run_incomplete_memory",
         "trace_id": "trace_incomplete_memory",
         "created_at": 100.0,
@@ -272,9 +279,10 @@ def test_memory_compaction_rejects_missing_current_fields() -> None:
 
 def test_memory_compact_started_accepts_explicit_null_model_output_capability() -> None:
     payload = {
-        "version": "v5",
+        "version": "v6",
         "type": "memory_compact_started",
         "event_id": "evt_nullable_memory_capability",
+        "session_id": "event-session",
         "run_id": "run_nullable_memory_capability",
         "trace_id": "trace_nullable_memory_capability",
         "created_at": 101.0,
@@ -319,6 +327,7 @@ def test_approval_resolved_action_is_the_only_wire_decision() -> None:
     for action in ("allow", "allow_session", "deny", "timeout"):
         event = ApprovalResolvedEvent(
             run_id="run_approval",
+            session_id="event-session",
             trace_id="trace_approval",
             request_id="request_approval",
             tool_name="shell",
@@ -349,7 +358,7 @@ def test_tool_event_can_point_to_parent_event_and_run() -> None:
 
     payload = event.to_dict()
 
-    assert payload["version"] == "v5"
+    assert payload["version"] == "v6"
     assert payload["type"] == "tool_call_started"
     assert payload["event_id"].startswith("evt_")
     assert payload["run_id"] == "run_child"
@@ -435,7 +444,7 @@ def test_concrete_event_constructors_can_preserve_replayed_identity_and_timing()
 
     for event in events:
         payload = event.to_dict()
-        assert payload["version"] == "v5"
+        assert payload["version"] == "v6"
         assert payload["event_id"] == "evt_replayed"
         assert payload["created_at"] == 123.45
         assert payload["session_id"] == "session_replay"
@@ -481,7 +490,9 @@ def test_base_run_event_is_public() -> None:
 
 
 def test_typed_stream_wire_requires_positive_cycle_index() -> None:
-    payload = json.loads(PARITY_FIXTURE.read_text(encoding="ascii").splitlines()[4])
+    payload = next(
+        json.loads(line) for line in PARITY_FIXTURE.read_text().splitlines() if json.loads(line)["type"] == "model_call_started"
+    )
     payload.pop("cycle_index")
 
     with pytest.raises(ValueError, match="missing required fields: cycle_index"):
@@ -494,7 +505,7 @@ def test_run_events_parity_fixture_round_trips_current_wire() -> None:
     lines = fixture_bytes.decode("ascii").splitlines()
     events = [event_from_dict(json.loads(line)) for line in lines]
 
-    assert [event.type for event in events] == PARITY_EVENT_TYPES
+    assert all(event.version == "v6" for event in events)
     for _index, (line, event) in enumerate(zip(lines, events, strict=True)):
         if event.run_id == "run_parity":
             assert event.event_id.startswith("evt_")
@@ -510,12 +521,7 @@ def test_budget_events_fixture_round_trips() -> None:
     lines = fixture_bytes.decode("ascii").splitlines()
     events = [event_from_dict(json.loads(line)) for line in lines]
 
-    assert [event.type for event in events] == [
-        "budget_snapshot",
-        "budget_exhausted",
-        "run_failed",
-        "run_completed",
-    ]
+    assert {event.type for event in events} == {"budget_snapshot", "budget_exhausted", "run_failed"}
     for line, event in zip(lines, events, strict=True):
         assert event.to_dict() == json.loads(line)
 

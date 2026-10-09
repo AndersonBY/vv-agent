@@ -13,9 +13,8 @@ from urllib.parse import unquote
 
 from vv_agent import events, types
 from vv_agent.app_server.schema import export_schema_bundles
-from vv_agent.interaction import CONTROLLER_COMMAND_ID_SCHEMA, HOST_REQUEST_SCHEMA
+from vv_agent.interaction import CONTROLLER_COMMAND_ID_SCHEMA, HOST_OUTCOME_SCHEMA, HOST_REQUEST_SCHEMA
 from vv_agent.prompt import PromptSection
-from vv_agent.runtime.controller import HOST_OUTCOME_SCHEMA
 from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_SCHEMA
 from vv_agent.session.records import INPUT_SCHEMA, RECORD_SCHEMA
 
@@ -78,7 +77,7 @@ def literal_fields(decoder, variable):
 
 def validate_outputs(values, base: Path, keep, replacements):
     kept = {name: json.loads((base / name).read_text()) for name in keep}
-    schemas = {name: json.loads(source) for name, source in export_schema_bundles(_kernel=True)["jsonSchema"].items()}
+    schemas = {name: json.loads(source) for name, source in export_schema_bundles()["jsonSchema"].items()}
     baseline = {name: json.loads((base / name).read_text()) for name in replacements if name.endswith(".json")}
     # Inventory versions belong to the author; wire versions come from live producer constants/schemas.
     inventory_versions = {name: value.get("version") for name, value in baseline.items() if "version" in value}
@@ -106,23 +105,13 @@ def validate_outputs(values, base: Path, keep, replacements):
             for _, node in walk(schema)
             if isinstance(node, dict) and isinstance(node.get("const"), str) and SCHEMA_TOKEN.fullmatch(node["const"])
         )
-    # The private producer selects these literals at its _kernel boundary while v23 stays the default.
-    kernel_literals = set()
-    for module in (events, types):
-        for node in ast.walk(ast.parse(inspect.getsource(module))):
-            if (
-                isinstance(node, ast.IfExp)
-                and "_kernel" in ast.unparse(node.test)
-                and isinstance(node.body, ast.Constant)
-                and isinstance(node.body.value, str)
-            ):
-                kernel_literals.add(node.body.value)
-    current.update(value for value in kernel_literals if SCHEMA_TOKEN.fullmatch(value))
-    event_version = next(v for v in kernel_literals if re.fullmatch(r"v[0-9]+", v))
+    current.update({types.TOKEN_USAGE_SCHEMA_VERSION, types.MODEL_CALL_SCHEMA_VERSION, types.TASK_TOKEN_USAGE_SCHEMA_VERSION})
+    event_version = events.RUN_EVENT_VERSION
     protocol_version = schemas["InitializeResponse"]["properties"]["protocolVersion"]["const"]
     obsolete = set()
     for name in (*replacements, *DELETE):
-        obsolete.update(SCHEMA_TOKEN.findall((base / name).read_text()))
+        if (base / name).exists():
+            obsolete.update(SCHEMA_TOKEN.findall((base / name).read_text()))
     obsolete -= current
     terminal = schemas["ServerNotification"]["$defs"]["TurnCompletedParams"]
     assert terminal["additionalProperties"] is False

@@ -11,18 +11,19 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from threading import Event, Thread, current_thread, main_thread
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from support import FixedModelProvider, require_tool_result
+from support.kernel_runtime import start_runner
 
-from vv_agent import Agent, CheckpointConfig, RunConfig, Runner, ToolPolicy, function_tool
-from vv_agent.checkpoint import OperationState
+from vv_agent import Agent, RunConfig, ToolPolicy, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.llm.base import LlmRequest
 from vv_agent.runtime import background_sessions as background_runtime
-from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolContext, ToolRegistry, build_default_registry
 from vv_agent.tools.handlers import background as background_handler
 from vv_agent.tools.handlers import bash as bash_handler
@@ -30,29 +31,6 @@ from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolExecutionResu
 from vv_agent.workspace import LocalWorkspaceBackend
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures/parity/bash_process_management.json").read_text())
-
-
-class ReceiptSqliteStore(SqliteCheckpointStore):
-    """Observe committed real receipts before the normal cycle journal compaction."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(path)
-        self.receipts: dict[str, Any] = {}
-
-    def record_tool_receipt(self, checkpoint, **kwargs):
-        recorded = super().record_tool_receipt(checkpoint, **kwargs)
-        if recorded:
-            stored = self.load_checkpoint(checkpoint.checkpoint_key)
-            assert stored is not None
-            for entry in stored.tool_journal:
-                if entry.result is not None and entry.result_digest is not None:
-                    assert entry.tool_call_id is not None
-                    previous = self.receipts.get(entry.tool_call_id)
-                    if previous is not None:
-                        assert previous.result == entry.result
-                        assert previous.result_digest == entry.result_digest
-                    self.receipts[entry.tool_call_id] = deepcopy(entry)
-        return recorded
 
 
 @pytest.fixture
@@ -152,7 +130,7 @@ def test_contract_rejects_invalid_arguments_before_execution(tmp_path, manager, 
 
 
 @pytest.mark.parametrize("launch_case", CONTRACT["launch_cases"], ids=lambda case: case["name"])
-def test_real_runner_checkpoint_continues_after_start_query_and_stop(tmp_path, manager, launch_case):
+def test_real_runner_retains_receipts_and_continues_after_start_query_and_stop(tmp_path, manager, launch_case):
     body = """from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 class Handler(BaseHTTPRequestHandler):
@@ -168,7 +146,8 @@ Path('port').write_text(str(server.server_port))
 server.serve_forever()
 """
     command = python_command(tmp_path, body)
-    store = ReceiptSqliteStore(tmp_path / "checkpoint.sqlite")
+    driver = SessionDriver(tmp_path / "session.sqlite")
+    store = driver.store
     key = f"bash-{launch_case['name']}"
     seen: list[str] = []
     receipts: dict[str, Any] = {}
@@ -180,10 +159,14 @@ server.serve_forever()
         return "MIXED_TOOL_OK"
 
     def receipt(call_id: str):
-        entry = store.receipts[call_id]
-        assert entry.state is not OperationState.AMBIGUOUS
-        assert entry.result is not None and entry.result_digest is not None
-        return entry
+        rows = store.read_state(key)[1]
+        plans = {r.record.operation_id: r.record for r in rows if r.record.kind == "op_planned"}
+        completed = next(
+            r.record
+            for r in rows
+            if r.record.kind == "op_completed" and plans[r.record.operation_id].payload["request"].get("id") == call_id
+        )
+        return SimpleNamespace(result=completed.payload["result"], result_digest=completed.payload["result_digest"])
 
     def query_after_start(request: LlmRequest) -> LLMResponse:
         seen.append("model-after-start")
@@ -253,7 +236,9 @@ server.serve_forever()
             finish_after_stop,
         ]
     )
-    result = Runner.run_sync(
+    result = start_runner(
+        driver,
+        key,
         Agent(
             name="bash-runner",
             instructions="Use the local command tools.",
@@ -268,32 +253,19 @@ server.serve_forever()
             max_cycles=5,
             no_tool_policy="finish",
             tool_registry_factory=runner_registry,
-            checkpoint_config=CheckpointConfig(
-                key=key,
-                store=store,
-                capability_refs={
-                    "workspace": {"id": "test.local-workspace", "version": "1"},
-                    "tool_registry_factory": {"id": "test.real-bash-registry", "version": "21"},
-                },
-            ),
         ),
-    )
+    ).result()
     assert result.status is AgentStatus.COMPLETED, result.raw_result
     assert result.final_output == "NEXT_MODEL_CYCLE_OK"
     assert seen == ["mixed-tool", "model-after-start", "model-after-query", "model-after-stop"]
     for call_id, original in receipts.items():
         assert receipt(call_id).result == original.result
         assert receipt(call_id).result_digest == original.result_digest
-        stored = store.load_checkpoint(key)
-        assert stored is not None
-        historical = store.load_checkpoint_history(key)
-        retained = next(
-            tool for cycle in [*historical.cycles, *stored.cycles] for tool in cycle.tool_results if tool.tool_call_id == call_id
-        )
+        retained = next(tool for cycle in result.raw_result.cycles for tool in cycle.tool_results if tool.tool_call_id == call_id)
         assert retained.to_dict() == original.result
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", int((tmp_path / "port").read_text())), timeout=0.2)
-    store.close()
+    driver.close()
 
 
 def test_execution_deadline_is_original_start_and_watchdog_needs_no_query(tmp_path, manager):

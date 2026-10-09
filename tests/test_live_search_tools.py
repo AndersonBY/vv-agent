@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from support.kernel_runtime import KernelRuntime as AgentRuntime
 
 from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.constants import FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME
 from vv_agent.model import VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, ToolCall, ToolExecutionResult, ToolResultStatus
 

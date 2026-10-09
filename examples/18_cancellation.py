@@ -1,89 +1,33 @@
 #!/usr/bin/env python3
-"""Cancellation: 在后台线程中运行 agent, 超时后自动取消."""
-
-from __future__ import annotations
+"""Cancel a live kernel RunHandle after a bounded wait."""
 
 import os
-import sys
 import threading
-import uuid
 from pathlib import Path
 
-from vv_agent.config import build_vv_llm_from_local_settings
-from vv_agent.events import DiagnosticEvent, RunEvent
-from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
-from vv_agent.runtime.backends.thread import ThreadBackend
-from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentTask
-
-
-def event_handler(event: RunEvent) -> None:
-    name = event.code if isinstance(event, DiagnosticEvent) else event.type
-    if name in {"cycle_started", "cycle_llm_response", "run_completed", "cycle_failed"}:
-        payload = event.details if isinstance(event, DiagnosticEvent) else event.to_dict()
-        print(f"  [{name}] {payload}", flush=True)
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
-    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    timeout = float(os.getenv("VV_AGENT_EXAMPLE_TIMEOUT", "10"))
-    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    llm, resolved = build_vv_llm_from_local_settings(settings_file, backend=backend, model=model)
-
-    # 使用 ThreadBackend 以便在后台线程执行
-    thread_backend = ThreadBackend(max_workers=2)
-    runtime = AgentRuntime(
-        llm_client=llm,
-        tool_registry=build_default_registry(),
-        default_workspace=workspace,
-        event_handler=event_handler if verbose else None,
-        execution_backend=thread_backend,
+    agent = Agent("cancel-demo", "Complete the task carefully.", model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"))
+    config = RunConfig(
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
-
-    system_prompt = build_system_prompt(
-        "You are a helpful agent. Complete the task step by step.",
-        language="zh-CN",
-        allow_interruption=True,
-        use_workspace=True,
+    handle = Runner.start(
+        agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Write a detailed history of artificial intelligence."), run_config=config
     )
-
-    task = AgentTask(
-        task_id=f"cancel_demo_{uuid.uuid4().hex[:8]}",
-        model=resolved.model_id,
-        system_prompt=system_prompt,
-        user_prompt="写一篇关于人工智能发展历史的长文, 至少 2000 字",
-        max_cycles=20,
-    )
-
-    # 创建 CancellationToken + ExecutionContext
-    token = CancellationToken()
-    ctx = ExecutionContext(cancellation_token=token)
-
-    # 设置超时取消: timeout 秒后自动 cancel
-    timer = threading.Timer(timeout, token.cancel)
+    timer = threading.Timer(float(os.getenv("VV_AGENT_EXAMPLE_TIMEOUT", "10")), handle.cancel)
     timer.start()
-    print(f"[demo] 任务已启动, {timeout}s 后将自动取消...")
-
     try:
-        result = runtime.run(task, ctx=ctx)
-        print(f"\n[demo] 最终状态: {result.status.value}")
-        print(f"[demo] 完成 cycles: {len(result.cycles)}")
-        if result.error:
-            print(f"[demo] 错误信息: {result.error}")
-        if result.final_answer:
-            print(f"[demo] 最终回答: {result.final_answer[:200]}...")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        result = handle.result()
+        print(result.status.value, result.raw_result.completion_reason, result.final_output)
     finally:
         timer.cancel()
+        handle.kernel.close()
 
 
 if __name__ == "__main__":

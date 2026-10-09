@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Advanced public SDK run with streaming and ThreadBackend."""
+"""Advanced public SDK run with streaming on the session kernel."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
-from vv_agent.runtime.backends.thread import ThreadBackend
 
 
 def print_event(event) -> None:
@@ -29,10 +28,9 @@ def main() -> None:
             default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
         ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        execution_backend=ThreadBackend(max_workers=2),
         stream=print_event,
     )
-    result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain ThreadBackend."), run_config=config)
+    result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain retained session history."), run_config=config)
     print("\nfinal:", result.final_output)
 
 

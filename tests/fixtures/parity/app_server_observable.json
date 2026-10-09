@@ -1,12 +1,1300 @@
 {
-  "version": 3,
-  "jsonRpc": {
-    "version": "2.0",
-    "validRequestIds": [
-      0,
-      42,
-      "req_42"
+  "actionAdmission": {
+    "actionId": {
+      "idempotency_key": "scope-local input to the global command_id derivation",
+      "maxUtf8Bytes": 512,
+      "same_action_id_different_payload": "same derived command_id; reject action_id_conflict/controller_command_conflict without a write",
+      "same_action_id_different_scope": "different derived command_id; admit an independent receipt",
+      "same_action_id_same_payload": "same derived command_id; return sanitized retained receipt without a second command or wake",
+      "stable_across_client_retries": "within the exact threadId+turnId scope",
+      "stable_scope": [
+        "threadId",
+        "turnId"
+      ],
+      "type": "non_empty_string"
+    },
+    "actionPayloads": {
+      "abort": [
+        "kind"
+      ],
+      "cancel": [
+        "kind"
+      ],
+      "respond": [
+        "kind",
+        "message"
+      ],
+      "resume": [
+        "kind"
+      ],
+      "suspend": [
+        "kind"
+      ]
+    },
+    "actionVariants": [
+      "respond",
+      "suspend",
+      "resume",
+      "cancel",
+      "abort"
     ],
+    "askUserSameTurnContinuation": true,
+    "commandIdCases": [
+      {
+        "actionId": "same-action",
+        "bytes_base64": "eyJhY3Rpb25faWQiOiJzYW1lLWFjdGlvbiIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQuY29udHJvbGxlci1jb21tYW5kLWlkLnYxIiwidGhyZWFkX2lkIjoidGhyZWFkLTEiLCJ0dXJuX2lkIjoidHVybi0xIn0=",
+        "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
+        "name": "same_scope_replay",
+        "outcome": "replayed_retained_receipt",
+        "payloadRelation": "same",
+        "sha256": "644d480c227b427ae37e36621edb1b6b299fd98fea8a9d9324e3ac02084b4883",
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "writes": 0
+      },
+      {
+        "actionId": "same-action",
+        "bytes_base64": "eyJhY3Rpb25faWQiOiJzYW1lLWFjdGlvbiIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQuY29udHJvbGxlci1jb21tYW5kLWlkLnYxIiwidGhyZWFkX2lkIjoidGhyZWFkLTEiLCJ0dXJuX2lkIjoidHVybi0xIn0=",
+        "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
+        "name": "same_scope_payload_conflict",
+        "outcome": "action_id_conflict_then_controller_command_conflict",
+        "payloadRelation": "different_action_payload",
+        "sha256": "644d480c227b427ae37e36621edb1b6b299fd98fea8a9d9324e3ac02084b4883",
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "writes": 0
+      },
+      {
+        "actionId": "same-action",
+        "bytes_base64": "eyJhY3Rpb25faWQiOiJzYW1lLWFjdGlvbiIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQuY29udHJvbGxlci1jb21tYW5kLWlkLnYxIiwidGhyZWFkX2lkIjoidGhyZWFkLTIiLCJ0dXJuX2lkIjoidHVybi0xIn0=",
+        "expectedCommandId": "6756d671ff428cce142a8ad2878554f48e9f604ee383112786426e884257bb2b",
+        "name": "different_thread_same_action",
+        "outcome": "independent_receipt",
+        "payloadRelation": "different_scope",
+        "sha256": "50a71ed837d1e4bed0f995c9a515ccce5dff36c73ab913449f179a8068affca0",
+        "threadId": "thread-2",
+        "turnId": "turn-1",
+        "writes": 1
+      },
+      {
+        "actionId": "same-action",
+        "bytes_base64": "eyJhY3Rpb25faWQiOiJzYW1lLWFjdGlvbiIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQuY29udHJvbGxlci1jb21tYW5kLWlkLnYxIiwidGhyZWFkX2lkIjoidGhyZWFkLTEiLCJ0dXJuX2lkIjoidHVybi0yIn0=",
+        "expectedCommandId": "01591a216491fe8148edb6a851bbac90be771ccd2b01c71c6ddc29d24690f270",
+        "name": "different_turn_same_action",
+        "outcome": "independent_receipt",
+        "payloadRelation": "different_scope",
+        "sha256": "30b7bb5b6461fe6cac1a8a28e62a36c9bc871e507ca7c21e60aa6aefb85016ee",
+        "threadId": "thread-1",
+        "turnId": "turn-2",
+        "writes": 1
+      },
+      {
+        "actionId": "same-action",
+        "bytes_base64": "eyJhY3Rpb25faWQiOiJzYW1lLWFjdGlvbiIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQuY29udHJvbGxlci1jb21tYW5kLWlkLnYxIiwidGhyZWFkX2lkIjoidGhyZWFkL+S4reaWhyIsInR1cm5faWQiOiJ0dXJuLfCfmIAifQ==",
+        "expectedCommandId": "a8e2cd09beba02260172b94cfd8b2023b5e9f3182fa7bd25377d5c5e957411f5",
+        "name": "unicode_length_prefixed_vector",
+        "outcome": "independent_receipt",
+        "payloadRelation": "different_scope",
+        "sha256": "40fd49eb95f628150c6564d15187ab98d133374b268f5daabe0b8d7601017ac9",
+        "threadId": "thread/\u4e2d\u6587",
+        "turnId": "turn-\ud83d\ude00",
+        "writes": 1
+      }
+    ],
+    "controlIsAdmissionOnly": true,
+    "endpointKind": "narrow_public_action_adapter",
+    "hostInteractionProjection": {
+      "agentStatus": "host_interaction",
+      "completionReason": null,
+      "error": null,
+      "turnStatus": "interrupted",
+      "waitReason": "host_interaction"
+    },
+    "hostPromptProjection": {
+      "fields": [
+        "threadId",
+        "status",
+        "waitReason",
+        "prompt",
+        "interactionId",
+        "sessionId",
+        "childTurnId",
+        "interactions"
+      ],
+      "readSurface": [
+        {
+          "interactions": [
+            {
+              "interactionId": "interaction/thread_2/child/3de00d534564135ab7cc3892/turn/start/model/primary/1/attempt/1/tool/0/1",
+              "prompt": "Choose",
+              "sessionId": "thread_2/child/3de00d534564135ab7cc3892",
+              "turnId": "thread_2/child/3de00d534564135ab7cc3892/turn/start"
+            }
+          ],
+          "prompt": "Choose",
+          "status": "interrupted",
+          "threadId": "thread_2",
+          "waitReason": "host_interaction"
+        }
+      ],
+      "status": "interrupted"
+    },
+    "identityFields": [
+      "threadId",
+      "turnId",
+      "actionId"
+    ],
+    "identityMaxUtf8Bytes": 512,
+    "messageSchema": {
+      "closed": true,
+      "contentMaxUtf8Bytes": 65536,
+      "contentType": "non_empty_utf8_string",
+      "requiredFields": [
+        "role",
+        "content"
+      ],
+      "role": "user",
+      "unknownFields": "reject"
+    },
+    "method": "turn/action",
+    "producerCases": [
+      {
+        "connection_id": "child-owner",
+        "request": {
+          "id": 25,
+          "jsonrpc": "2.0",
+          "method": "turn/action",
+          "params": {
+            "action": {
+              "kind": "respond",
+              "message": {
+                "content": "answer",
+                "role": "user"
+              }
+            },
+            "actionId": "reply-child",
+            "threadId": "thread_2",
+            "turnId": "thread_2/turn/turn_1"
+          }
+        },
+        "responses": [
+          {
+            "id": 25,
+            "jsonrpc": "2.0",
+            "result": {
+              "accepted": true,
+              "actionId": "reply-child",
+              "status": "running",
+              "threadId": "thread_2",
+              "turnId": "thread_2/turn/turn_1"
+            }
+          }
+        ]
+      },
+      {
+        "connection_id": "child-owner",
+        "request": {
+          "id": 27,
+          "jsonrpc": "2.0",
+          "method": "turn/action",
+          "params": {
+            "action": {
+              "kind": "respond",
+              "message": {
+                "content": "answer",
+                "role": "user"
+              }
+            },
+            "actionId": "reply-child",
+            "threadId": "thread_2",
+            "turnId": "thread_2/turn/turn_1"
+          }
+        },
+        "responses": [
+          {
+            "id": 27,
+            "jsonrpc": "2.0",
+            "result": {
+              "accepted": true,
+              "actionId": "reply-child",
+              "status": "running",
+              "threadId": "thread_2",
+              "turnId": "thread_2/turn/turn_1"
+            }
+          }
+        ]
+      },
+      {
+        "connection_id": "child-owner",
+        "request": {
+          "id": 28,
+          "jsonrpc": "2.0",
+          "method": "turn/action",
+          "params": {
+            "action": {
+              "kind": "cancel"
+            },
+            "actionId": "reply-child",
+            "threadId": "thread_2",
+            "turnId": "thread_2/turn/turn_1"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32602,
+              "message": "actionId was reused with a different action payload"
+            },
+            "id": 28,
+            "jsonrpc": "2.0"
+          }
+        ]
+      }
+    ],
+    "publicActionSchemas": {
+      "abort": "{kind:'abort'}",
+      "cancel": "{kind:'cancel'}",
+      "respond": "{kind:'respond', message:{role:'user', content:string<=65536 UTF-8 bytes}}",
+      "resume": "{kind:'resume'}",
+      "suspend": "{kind:'suspend'}"
+    },
+    "publicReceiptSanitized": true,
+    "requestFields": [
+      "threadId",
+      "turnId",
+      "actionId",
+      "action"
+    ],
+    "responseFields": [
+      "threadId",
+      "turnId",
+      "actionId",
+      "accepted",
+      "status"
+    ],
+    "strictCases": {
+      "action_id_over_utf8_limit": "reject_action_id_invalid",
+      "action_id_replay_different_payload": "reject_action_id_conflict",
+      "action_id_replay_different_thread_or_turn": "derive_independent_command_id",
+      "action_id_replay_same_payload": "return_sanitized_retained_receipt",
+      "action_id_unknown_field": "reject",
+      "identity_over_utf8_limit": "reject",
+      "message_content_over_utf8_limit": "reject",
+      "message_unknown_field": "reject",
+      "missing_action_id": "reject",
+      "server_derived_fence_is_not_client_supplied": true,
+      "unknown_action_variant": "reject",
+      "unknown_internal_request_field": "reject"
+    },
+    "suspendedProjection": {
+      "agentStatus": "suspended",
+      "completionReason": null,
+      "error": null,
+      "turnStatus": "interrupted",
+      "waitReason": "suspended"
+    },
+    "turnResumeNewInputAllowed": false
+  },
+  "approval": {
+    "caseSensitive": true,
+    "deadline_ms": 1101102,
+    "decisions": [
+      "allow",
+      "allow_session",
+      "deny",
+      "timeout"
+    ],
+    "disconnectDecision": "retained_owner_until_absolute_deadline",
+    "duplicateServerRequestId": "reject",
+    "observerCannotApprove": true,
+    "owner": "approval-owner",
+    "timeoutDecision": "timeout"
+  },
+  "durableResume": {
+    "closedExecutionResumeError": {
+      "code": -32602,
+      "message": "Thread is closed"
+    },
+    "method": "turn/resume",
+    "newInputAllowed": false,
+    "projectionCases": [
+      {
+        "completionReason": "no_tool_finish",
+        "finalOutput": "app done",
+        "status": "completed",
+        "threadId": "thread_1",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": 10,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_1/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_1/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "providerUsage": {
+                  "completion_tokens": 5,
+                  "prompt_tokens": 10,
+                  "total_tokens": 15
+                },
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": 15,
+                "usageSource": "provider_reported"
+              }
+            }
+          ],
+          "outputTokens": 5,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": 15
+        },
+        "turnId": "thread_1/turn/turn_1"
+      },
+      {
+        "completionReason": "wait_user",
+        "finalOutput": "child_pending",
+        "status": "interrupted",
+        "threadId": "thread_2",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": null,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_2/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_2/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            }
+          ],
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": null
+        },
+        "turnId": "thread_2/turn/turn_1",
+        "waitReason": "child_pending"
+      },
+      {
+        "completionReason": "no_tool_finish",
+        "finalOutput": "parent done",
+        "status": "completed",
+        "threadId": "thread_2",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": null,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_2/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_2/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_2/turn/turn_1/model/primary/2/1",
+              "cycleIndex": 2,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_2/turn/turn_1/model/primary/2",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            }
+          ],
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": null
+        },
+        "turnId": "thread_2/turn/turn_1"
+      },
+      {
+        "completionReason": "wait_user",
+        "finalOutput": "approval",
+        "status": "interrupted",
+        "threadId": "thread_3",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": null,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_3/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_3/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            }
+          ],
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": null
+        },
+        "turnId": "thread_3/turn/turn_1",
+        "waitReason": "approval"
+      },
+      {
+        "completionReason": "wait_user",
+        "finalOutput": "approval",
+        "status": "interrupted",
+        "threadId": "thread_3",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": null,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_3/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_3/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            }
+          ],
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": null
+        },
+        "turnId": "thread_3/turn/turn_1",
+        "waitReason": "approval"
+      },
+      {
+        "completionReason": "no_tool_finish",
+        "finalOutput": "denied safely",
+        "status": "completed",
+        "threadId": "thread_3",
+        "tokenUsage": {
+          "cacheUsage": {
+            "readInputTokens": null,
+            "source": "aggregate",
+            "status": "accounting_missing",
+            "uncachedInputTokens": null,
+            "writeInputTokens": null
+          },
+          "inputTokens": null,
+          "modelCalls": [
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_3/turn/turn_1/model/primary/1/1",
+              "cycleIndex": 1,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_3/turn/turn_1/model/primary/1",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            },
+            {
+              "attempt": 1,
+              "backend": "scripted",
+              "callId": "thread_3/turn/turn_1/model/primary/2/1",
+              "cycleIndex": 2,
+              "errorCode": null,
+              "model": "m",
+              "operation": "agent_cycle",
+              "operationId": "thread_3/turn/turn_1/model/primary/2",
+              "schemaVersion": "vv-agent.model-call.v2",
+              "status": "completed",
+              "usage": {
+                "cacheUsage": {
+                  "readInputTokens": null,
+                  "source": null,
+                  "status": "accounting_missing",
+                  "uncachedInputTokens": null,
+                  "writeInputTokens": null
+                },
+                "inputTokens": null,
+                "outputTokens": null,
+                "providerUsage": {},
+                "reasoningTokens": null,
+                "schemaVersion": "vv-agent.token-usage.v1",
+                "totalTokens": null,
+                "usageSource": "accounting_missing"
+              }
+            }
+          ],
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "schemaVersion": "vv-agent.task-token-usage.v3",
+          "totalTokens": null
+        },
+        "turnId": "thread_3/turn/turn_1"
+      }
+    ],
+    "protocolCases": [
+      {
+        "connection_id": "owner",
+        "rejected_request": {
+          "bytes_base64": "eyJpZCI6NSwianNvbnJwYyI6IjIuMCIsIm1ldGhvZCI6InR1cm4vcmVzdW1lIiwicGFyYW1zIjp7ImNoZWNrcG9pbnRLZXkiOiJvbGQiLCJ0aHJlYWRJZCI6InRocmVhZF8xIiwidHVybklkIjoidGhyZWFkXzEvdHVybi90dXJuXzEifX0=",
+          "record_id": null,
+          "sha256": "7c7b14632c463bc6bff47895b61ae69804a56a26dee61f04bc518a316741e6f4"
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32602,
+              "message": "turn/resume requires exactly threadId and turnId"
+            },
+            "id": 5,
+            "jsonrpc": "2.0"
+          }
+        ]
+      },
+      {
+        "connection_id": "owner",
+        "request": {
+          "id": 7,
+          "jsonrpc": "2.0",
+          "method": "turn/resume",
+          "params": {
+            "threadId": "thread_1",
+            "turnId": "thread_1/turn/turn_1"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32602,
+              "message": "Thread is closed"
+            },
+            "id": 7,
+            "jsonrpc": "2.0"
+          }
+        ]
+      },
+      {
+        "connection_id": "owner",
+        "request": {
+          "id": 9,
+          "jsonrpc": "2.0",
+          "method": "thread/resume",
+          "params": {
+            "subscribe": true,
+            "threadId": "thread_1"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32602,
+              "message": "Thread is closed"
+            },
+            "id": 9,
+            "jsonrpc": "2.0"
+          }
+        ]
+      },
+      {
+        "connection_id": "owner",
+        "request": {
+          "id": 15,
+          "jsonrpc": "2.0",
+          "method": "thread/resume",
+          "params": {
+            "threadId": "thread_1"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32602,
+              "message": "Thread is closed"
+            },
+            "id": 15,
+            "jsonrpc": "2.0"
+          }
+        ]
+      },
+      {
+        "connection_id": "owner",
+        "request": {
+          "id": 10,
+          "jsonrpc": "2.0",
+          "method": "thread/resume",
+          "params": {
+            "subscribe": false,
+            "threadId": "thread_1"
+          }
+        },
+        "responses": [
+          {
+            "id": 10,
+            "jsonrpc": "2.0",
+            "result": {
+              "items": [
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/7f948cd89493a87acc3390bab3def57e925accc79222a00644cbf0d61cbaa4ab/event",
+                  "payload": {
+                    "text": "go"
+                  },
+                  "status": "completed",
+                  "threadId": "thread_1",
+                  "turnId": "thread_1/turn/turn_1",
+                  "type": "userMessage",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/8eea78ba2dbb38f334446c6fa44a9408733b11e4d36d563e42be168531dccc86/event",
+                  "payload": {
+                    "attempt": 1,
+                    "backend": "scripted",
+                    "callId": "thread_1/turn/turn_1/model/primary/1/1",
+                    "cycleIndex": 1,
+                    "model": "m",
+                    "operation": "agent_cycle",
+                    "operationId": "thread_1/turn/turn_1/model/primary/1"
+                  },
+                  "status": "started",
+                  "threadId": "thread_1",
+                  "turnId": "thread_1/turn/turn_1",
+                  "type": "modelCall",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/9443b8464d54100ef2816f292c277a7cf2b3568f1cc2b6e05edb8027afb7865c/event",
+                  "payload": {
+                    "attempt": 1,
+                    "backend": "scripted",
+                    "callId": "thread_1/turn/turn_1/model/primary/1/1",
+                    "cycleIndex": 1,
+                    "model": "m",
+                    "operation": "agent_cycle",
+                    "operationId": "thread_1/turn/turn_1/model/primary/1",
+                    "usage": {
+                      "cacheUsage": {
+                        "readInputTokens": null,
+                        "source": null,
+                        "status": "accounting_missing",
+                        "uncachedInputTokens": null,
+                        "writeInputTokens": null
+                      },
+                      "inputTokens": 10,
+                      "outputTokens": 5,
+                      "providerUsage": {
+                        "completion_tokens": 5,
+                        "prompt_tokens": 10,
+                        "total_tokens": 15
+                      },
+                      "reasoningTokens": null,
+                      "schemaVersion": "vv-agent.token-usage.v1",
+                      "totalTokens": 15,
+                      "usageSource": "provider_reported"
+                    }
+                  },
+                  "status": "completed",
+                  "threadId": "thread_1",
+                  "turnId": "thread_1/turn/turn_1",
+                  "type": "modelCall",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/4dea441fbe5f721e1d17746eaf2006834cb2635c09e39804d5660eeaeb99900d/event",
+                  "payload": {
+                    "text": "app done"
+                  },
+                  "status": "completed",
+                  "threadId": "thread_1",
+                  "turnId": "thread_1/turn/turn_1",
+                  "type": "agentMessage",
+                  "updatedAt": 1041.102
+                }
+              ],
+              "thread": {
+                "agentKey": "default",
+                "archivedAt": 1041.102,
+                "createdAt": 1041.102,
+                "cwd": "/fixture",
+                "metadata": {},
+                "status": "closed",
+                "threadId": "thread_1",
+                "updatedAt": 1041.102
+              },
+              "turns": [
+                {
+                  "completedAt": 1041.102,
+                  "input": [
+                    {
+                      "text": "go",
+                      "type": "text"
+                    }
+                  ],
+                  "result": {
+                    "completionReason": "no_tool_finish",
+                    "finalOutput": "app done",
+                    "tokenUsage": {
+                      "cacheUsage": {
+                        "readInputTokens": null,
+                        "source": "aggregate",
+                        "status": "accounting_missing",
+                        "uncachedInputTokens": null,
+                        "writeInputTokens": null
+                      },
+                      "inputTokens": 10,
+                      "modelCalls": [
+                        {
+                          "attempt": 1,
+                          "backend": "scripted",
+                          "callId": "thread_1/turn/turn_1/model/primary/1/1",
+                          "cycleIndex": 1,
+                          "errorCode": null,
+                          "model": "m",
+                          "operation": "agent_cycle",
+                          "operationId": "thread_1/turn/turn_1/model/primary/1",
+                          "schemaVersion": "vv-agent.model-call.v2",
+                          "status": "completed",
+                          "usage": {
+                            "cacheUsage": {
+                              "readInputTokens": null,
+                              "source": null,
+                              "status": "accounting_missing",
+                              "uncachedInputTokens": null,
+                              "writeInputTokens": null
+                            },
+                            "inputTokens": 10,
+                            "outputTokens": 5,
+                            "providerUsage": {
+                              "completion_tokens": 5,
+                              "prompt_tokens": 10,
+                              "total_tokens": 15
+                            },
+                            "reasoningTokens": null,
+                            "schemaVersion": "vv-agent.token-usage.v1",
+                            "totalTokens": 15,
+                            "usageSource": "provider_reported"
+                          }
+                        }
+                      ],
+                      "outputTokens": 5,
+                      "reasoningTokens": null,
+                      "schemaVersion": "vv-agent.task-token-usage.v3",
+                      "totalTokens": 15
+                    }
+                  },
+                  "runId": "thread_1/turn/turn_1",
+                  "startedAt": 1041.102,
+                  "status": "completed",
+                  "threadId": "thread_1",
+                  "turnId": "thread_1/turn/turn_1"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "connection_id": "child-owner",
+        "request": {
+          "id": 29,
+          "jsonrpc": "2.0",
+          "method": "thread/resume",
+          "params": {
+            "afterItemId": "item_sk/df5f8258cc7c6430a563ca25459aa4b7909a1bcfdd30f6792c0d1ec9e323ed89/event",
+            "subscribe": false,
+            "threadId": "thread_2"
+          }
+        },
+        "responses": [
+          {
+            "id": 29,
+            "jsonrpc": "2.0",
+            "result": {
+              "items": [],
+              "thread": {
+                "agentKey": "default",
+                "archivedAt": null,
+                "createdAt": 1041.102,
+                "cwd": null,
+                "metadata": {},
+                "status": "idle",
+                "threadId": "thread_2",
+                "updatedAt": 1041.102
+              },
+              "turns": [
+                {
+                  "completedAt": 1041.102,
+                  "input": [
+                    {
+                      "text": "delegate",
+                      "type": "text"
+                    }
+                  ],
+                  "result": {
+                    "completionReason": "no_tool_finish",
+                    "finalOutput": "parent done",
+                    "tokenUsage": {
+                      "cacheUsage": {
+                        "readInputTokens": null,
+                        "source": "aggregate",
+                        "status": "accounting_missing",
+                        "uncachedInputTokens": null,
+                        "writeInputTokens": null
+                      },
+                      "inputTokens": null,
+                      "modelCalls": [
+                        {
+                          "attempt": 1,
+                          "backend": "scripted",
+                          "callId": "thread_2/turn/turn_1/model/primary/1/1",
+                          "cycleIndex": 1,
+                          "errorCode": null,
+                          "model": "m",
+                          "operation": "agent_cycle",
+                          "operationId": "thread_2/turn/turn_1/model/primary/1",
+                          "schemaVersion": "vv-agent.model-call.v2",
+                          "status": "completed",
+                          "usage": {
+                            "cacheUsage": {
+                              "readInputTokens": null,
+                              "source": null,
+                              "status": "accounting_missing",
+                              "uncachedInputTokens": null,
+                              "writeInputTokens": null
+                            },
+                            "inputTokens": null,
+                            "outputTokens": null,
+                            "providerUsage": {},
+                            "reasoningTokens": null,
+                            "schemaVersion": "vv-agent.token-usage.v1",
+                            "totalTokens": null,
+                            "usageSource": "accounting_missing"
+                          }
+                        },
+                        {
+                          "attempt": 1,
+                          "backend": "scripted",
+                          "callId": "thread_2/turn/turn_1/model/primary/2/1",
+                          "cycleIndex": 2,
+                          "errorCode": null,
+                          "model": "m",
+                          "operation": "agent_cycle",
+                          "operationId": "thread_2/turn/turn_1/model/primary/2",
+                          "schemaVersion": "vv-agent.model-call.v2",
+                          "status": "completed",
+                          "usage": {
+                            "cacheUsage": {
+                              "readInputTokens": null,
+                              "source": null,
+                              "status": "accounting_missing",
+                              "uncachedInputTokens": null,
+                              "writeInputTokens": null
+                            },
+                            "inputTokens": null,
+                            "outputTokens": null,
+                            "providerUsage": {},
+                            "reasoningTokens": null,
+                            "schemaVersion": "vv-agent.token-usage.v1",
+                            "totalTokens": null,
+                            "usageSource": "accounting_missing"
+                          }
+                        }
+                      ],
+                      "outputTokens": null,
+                      "reasoningTokens": null,
+                      "schemaVersion": "vv-agent.task-token-usage.v3",
+                      "totalTokens": null
+                    }
+                  },
+                  "runId": "thread_2/turn/turn_1",
+                  "startedAt": 1041.102,
+                  "status": "completed",
+                  "threadId": "thread_2",
+                  "turnId": "thread_2/turn/turn_1"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "connection_id": "observer",
+        "request": {
+          "id": 36,
+          "jsonrpc": "2.0",
+          "method": "thread/resume",
+          "params": {
+            "threadId": "thread_3"
+          }
+        },
+        "responses": [
+          {
+            "id": 36,
+            "jsonrpc": "2.0",
+            "result": {
+              "items": [
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/618c4dc31d9796ad43fbe9bcedfbdfbfa80e11b2369d5fd1f6f5e74b6d60ea8e/event",
+                  "payload": {
+                    "text": "approve"
+                  },
+                  "status": "completed",
+                  "threadId": "thread_3",
+                  "turnId": "thread_3/turn/turn_1",
+                  "type": "userMessage",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/02192b3116924d10a3091d12161f97690c3a83ac1de376b3d412f89c27638f6c/event",
+                  "payload": {
+                    "attempt": 1,
+                    "backend": "scripted",
+                    "callId": "thread_3/turn/turn_1/model/primary/1/1",
+                    "cycleIndex": 1,
+                    "model": "m",
+                    "operation": "agent_cycle",
+                    "operationId": "thread_3/turn/turn_1/model/primary/1"
+                  },
+                  "status": "started",
+                  "threadId": "thread_3",
+                  "turnId": "thread_3/turn/turn_1",
+                  "type": "modelCall",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/32965b5385b146db96c7bda7cd1ea26152a7ca317ce338ce55208b140aaaf4cd/event",
+                  "payload": {
+                    "attempt": 1,
+                    "backend": "scripted",
+                    "callId": "thread_3/turn/turn_1/model/primary/1/1",
+                    "cycleIndex": 1,
+                    "model": "m",
+                    "operation": "agent_cycle",
+                    "operationId": "thread_3/turn/turn_1/model/primary/1",
+                    "usage": {
+                      "cacheUsage": {
+                        "readInputTokens": null,
+                        "source": null,
+                        "status": "accounting_missing",
+                        "uncachedInputTokens": null,
+                        "writeInputTokens": null
+                      },
+                      "inputTokens": null,
+                      "outputTokens": null,
+                      "providerUsage": {},
+                      "reasoningTokens": null,
+                      "schemaVersion": "vv-agent.token-usage.v1",
+                      "totalTokens": null,
+                      "usageSource": "accounting_missing"
+                    }
+                  },
+                  "status": "completed",
+                  "threadId": "thread_3",
+                  "turnId": "thread_3/turn/turn_1",
+                  "type": "modelCall",
+                  "updatedAt": 1041.102
+                },
+                {
+                  "createdAt": 1041.102,
+                  "itemId": "item_sk/2cbbbeffe5d30e05e11a8b481942368b1a548d895ed3967472ac1198262947be/event",
+                  "payload": {
+                    "arguments": {},
+                    "message": "Approval required",
+                    "requestId": "approval/thread_3/turn/turn_1/model/primary/1/attempt/1/tool/0/1",
+                    "toolCallId": "approved",
+                    "toolName": "approved"
+                  },
+                  "status": "started",
+                  "threadId": "thread_3",
+                  "turnId": "thread_3/turn/turn_1",
+                  "type": "approval",
+                  "updatedAt": 1041.102
+                }
+              ],
+              "thread": {
+                "agentKey": "default",
+                "archivedAt": null,
+                "createdAt": 1041.102,
+                "cwd": null,
+                "metadata": {},
+                "status": "interrupted",
+                "threadId": "thread_3",
+                "updatedAt": 1041.102
+              },
+              "turns": [
+                {
+                  "completedAt": null,
+                  "input": [
+                    {
+                      "text": "approve",
+                      "type": "text"
+                    }
+                  ],
+                  "result": {
+                    "completionReason": "wait_user",
+                    "finalOutput": "approval",
+                    "tokenUsage": {
+                      "cacheUsage": {
+                        "readInputTokens": null,
+                        "source": "aggregate",
+                        "status": "accounting_missing",
+                        "uncachedInputTokens": null,
+                        "writeInputTokens": null
+                      },
+                      "inputTokens": null,
+                      "modelCalls": [
+                        {
+                          "attempt": 1,
+                          "backend": "scripted",
+                          "callId": "thread_3/turn/turn_1/model/primary/1/1",
+                          "cycleIndex": 1,
+                          "errorCode": null,
+                          "model": "m",
+                          "operation": "agent_cycle",
+                          "operationId": "thread_3/turn/turn_1/model/primary/1",
+                          "schemaVersion": "vv-agent.model-call.v2",
+                          "status": "completed",
+                          "usage": {
+                            "cacheUsage": {
+                              "readInputTokens": null,
+                              "source": null,
+                              "status": "accounting_missing",
+                              "uncachedInputTokens": null,
+                              "writeInputTokens": null
+                            },
+                            "inputTokens": null,
+                            "outputTokens": null,
+                            "providerUsage": {},
+                            "reasoningTokens": null,
+                            "schemaVersion": "vv-agent.token-usage.v1",
+                            "totalTokens": null,
+                            "usageSource": "accounting_missing"
+                          }
+                        }
+                      ],
+                      "outputTokens": null,
+                      "reasoningTokens": null,
+                      "schemaVersion": "vv-agent.task-token-usage.v3",
+                      "totalTokens": null
+                    },
+                    "waitReason": "approval"
+                  },
+                  "runId": "thread_3/turn/turn_1",
+                  "startedAt": 1041.102,
+                  "status": "interrupted",
+                  "threadId": "thread_3",
+                  "turnId": "thread_3/turn/turn_1"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "requestFields": [
+      "threadId",
+      "turnId"
+    ],
+    "response": "TurnResumeResponse",
+    "responseFields": [
+      "budgetExhaustion",
+      "budgetUsage",
+      "completionReason",
+      "completionToolName",
+      "error",
+      "finalOutput",
+      "partialOutput",
+      "runId",
+      "status",
+      "threadId",
+      "tokenUsage",
+      "turnId",
+      "waitReason"
+    ]
+  },
+  "input": {
+    "invalid": [
+      "hello",
+      7,
+      true,
+      null,
+      []
+    ],
+    "valid": [
+      {
+        "text": "hello",
+        "type": "text"
+      },
+      {
+        "type": "image",
+        "url": "https://example.invalid/image.png"
+      }
+    ]
+  },
+  "jsonRpc": {
+    "errorResponseAllowsNullId": true,
     "invalidRequestIds": [
       null,
       true,
@@ -14,60 +1302,369 @@
       [],
       {}
     ],
-    "errorResponseAllowsNullId": true
-  },
-  "timestamps": {
-    "unit": "unix_seconds",
-    "jsonType": "number",
-    "eventMillis": 1720000000123,
-    "eventSeconds": 1720000000.123
-  },
-  "input": {
-    "valid": [
-      {
-        "type": "text",
-        "text": "hello"
-      },
-      {
-        "type": "image",
-        "url": "https://example.invalid/image.png"
-      }
+    "validRequestIds": [
+      0,
+      42,
+      "req_42"
     ],
-    "invalid": [
-      "hello",
-      7,
-      true,
-      null,
-      []
-    ]
+    "version": "2.0"
   },
   "liveReplay": {
     "item": {
-      "itemId": "item_evt_contract",
-      "threadId": "thread_contract",
-      "turnId": "turn_contract",
-      "type": "agentMessage",
-      "status": "completed",
+      "createdAt": 1041.102,
+      "itemId": "item_sk/7f948cd89493a87acc3390bab3def57e925accc79222a00644cbf0d61cbaa4ab/event",
       "payload": {
-        "text": "contract payload"
+        "text": "go"
       },
-      "createdAt": 1720000000.123,
-      "updatedAt": 1720000000.123
+      "status": "completed",
+      "threadId": "thread_1",
+      "turnId": "thread_1/turn/turn_1",
+      "type": "userMessage",
+      "updatedAt": 1041.102
     },
     "notificationMethod": "item/completed",
     "payloadMustMatch": true
   },
-  "approval": {
-    "decisions": [
-      "allow",
-      "allow_session",
-      "deny",
-      "timeout"
+  "modelLifecycle": {
+    "completedNotifications": [
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/9443b8464d54100ef2816f292c277a7cf2b3568f1cc2b6e05edb8027afb7865c/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_1/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_1/turn/turn_1/model/primary/1",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": 10,
+              "outputTokens": 5,
+              "providerUsage": {
+                "completion_tokens": 5,
+                "prompt_tokens": 10,
+                "total_tokens": 15
+              },
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": 15,
+              "usageSource": "provider_reported"
+            }
+          },
+          "status": "completed",
+          "threadId": "thread_1",
+          "turnId": "thread_1/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/68f242e196b6ab75b2f5d0260ad26c16baac3ae1c15bad19e2aac3ab092d9f32/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_2/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_2/turn/turn_1/model/primary/1",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": null,
+              "outputTokens": null,
+              "providerUsage": {},
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": null,
+              "usageSource": "accounting_missing"
+            }
+          },
+          "status": "completed",
+          "threadId": "thread_2",
+          "turnId": "thread_2/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/ab5885b3957a11111e7d65c52a1c23e2363b90ffb241bc43e154fcc297e39c27/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_2/turn/turn_1/model/primary/2/1",
+            "cycleIndex": 2,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_2/turn/turn_1/model/primary/2",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": null,
+              "outputTokens": null,
+              "providerUsage": {},
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": null,
+              "usageSource": "accounting_missing"
+            }
+          },
+          "status": "completed",
+          "threadId": "thread_2",
+          "turnId": "thread_2/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/32965b5385b146db96c7bda7cd1ea26152a7ca317ce338ce55208b140aaaf4cd/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_3/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_3/turn/turn_1/model/primary/1",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": null,
+              "outputTokens": null,
+              "providerUsage": {},
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": null,
+              "usageSource": "accounting_missing"
+            }
+          },
+          "status": "completed",
+          "threadId": "thread_3",
+          "turnId": "thread_3/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "createdAt": 1101.102,
+          "itemId": "item_sk/a88f01d10473aa6dca7a87582e031e0b70418df53796b4daa674a204b7fa99c0/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_3/turn/turn_1/model/primary/2/1",
+            "cycleIndex": 2,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_3/turn/turn_1/model/primary/2",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": null,
+              "outputTokens": null,
+              "providerUsage": {},
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": null,
+              "usageSource": "accounting_missing"
+            }
+          },
+          "status": "completed",
+          "threadId": "thread_3",
+          "turnId": "thread_3/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1101.102
+        }
+      }
     ],
-    "caseSensitive": true,
-    "timeoutDecision": "timeout",
-    "disconnectDecision": "timeout",
-    "duplicateServerRequestId": "reject"
+    "failedNotifications": [],
+    "forbiddenPayloadFields": [
+      "prompt",
+      "messages",
+      "output",
+      "error",
+      "errorBody"
+    ],
+    "identityFields": [
+      "callId",
+      "operationId",
+      "attempt",
+      "operation",
+      "cycleIndex",
+      "backend",
+      "model"
+    ],
+    "itemType": "modelCall",
+    "startedNotifications": [
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/8eea78ba2dbb38f334446c6fa44a9408733b11e4d36d563e42be168531dccc86/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_1/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_1/turn/turn_1/model/primary/1"
+          },
+          "status": "started",
+          "threadId": "thread_1",
+          "turnId": "thread_1/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/61cf0a457d5bf1ce188eff40c8cdeb3dd9beefb783a40eec0f9635a8d89b59ee/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_2/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_2/turn/turn_1/model/primary/1"
+          },
+          "status": "started",
+          "threadId": "thread_2",
+          "turnId": "thread_2/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/5175f26eb061978a489fc1ba93dfc19fb3a8f4b24daecac0a71538d7ca1d97e5/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_2/turn/turn_1/model/primary/2/1",
+            "cycleIndex": 2,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_2/turn/turn_1/model/primary/2"
+          },
+          "status": "started",
+          "threadId": "thread_2",
+          "turnId": "thread_2/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "createdAt": 1041.102,
+          "itemId": "item_sk/02192b3116924d10a3091d12161f97690c3a83ac1de376b3d412f89c27638f6c/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_3/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_3/turn/turn_1/model/primary/1"
+          },
+          "status": "started",
+          "threadId": "thread_3",
+          "turnId": "thread_3/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1041.102
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "createdAt": 1101.102,
+          "itemId": "item_sk/e6e968947f72faf44f2e69985b6db6305c41a522614d95484d25e3a0ed32bffa/event",
+          "payload": {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_3/turn/turn_1/model/primary/2/1",
+            "cycleIndex": 2,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_3/turn/turn_1/model/primary/2"
+          },
+          "status": "started",
+          "threadId": "thread_3",
+          "turnId": "thread_3/turn/turn_1",
+          "type": "modelCall",
+          "updatedAt": 1101.102
+        }
+      }
+    ]
+  },
+  "nullability": {
+    "threadSnapshot": {
+      "archivedAt": null,
+      "cwd": null
+    },
+    "threadStartResponse": {
+      "cwd": null
+    },
+    "turnSnapshot": {
+      "completedAt": null,
+      "runId": null
+    }
   },
   "ordering": {
     "threadStart": [
@@ -84,176 +1681,32 @@
       "turn/completed"
     ]
   },
-  "terminal": {
-    "threadStatusAfterTurn": "idle",
-    "turnStatuses": [
-      "completed",
-      "failed",
-      "interrupted"
-    ],
-    "optionalFieldsOmittedWhenAbsent": [
-      "runId",
-      "finalOutput",
-      "completionReason",
-      "completionToolName",
-      "partialOutput",
-      "error",
-      "tokenUsage",
-      "budgetUsage",
-      "budgetExhaustion",
-      "checkpoint",
-      "interruption"
-    ],
-    "completionReasonValues": [
-      "tool_finish",
-      "no_tool_finish",
-      "stop_on_first_tool",
-      "stop_at_tool_name",
-      "wait_user",
-      "max_cycles",
-      "cancelled",
-      "failed",
-      "budget_exhausted"
-    ],
-    "agentStatusProjection": [
-      {
-        "name": "wait_user_is_interrupted_without_error",
-        "agentStatus": "wait_user",
-        "turnStatus": "interrupted",
-        "completionReason": "wait_user",
-        "errorField": "omitted"
-      },
-      {
-        "name": "cancelled_failure_stays_failed",
-        "agentStatus": "failed",
-        "turnStatus": "failed",
-        "completionReason": "cancelled",
-        "errorField": "present"
-      },
-      {
-        "name": "budget_exhaustion_is_failed_with_typed_observation",
-        "agentStatus": "failed",
-        "turnStatus": "failed",
-        "completionReason": "budget_exhausted",
-        "errorField": "present",
-        "budgetUsageField": "present",
-        "budgetExhaustionField": "present"
-      },
-      {
-        "name": "reconciliation_required_is_interrupted_without_error",
-        "agentStatus": "reconciliation_required",
-        "turnStatus": "interrupted",
-        "completionReason": null,
-        "errorField": "omitted",
-        "checkpointField": "present",
-        "interruptionField": "present"
-      },
-      {
-        "name": "deferred_pending_is_interrupted_and_resumable",
-        "agentStatus": "deferred",
-        "turnStatus": "interrupted",
-        "completionReason": null,
-        "errorField": "omitted",
-        "waitReason": "deferred_pending",
-        "checkpointField": "present",
-        "interruptionField": "omitted",
-        "terminal": false
-      }
-    ],
-    "tokenUsageProjection": {
-      "sourceSchemaVersion": "vv-agent.task-token-usage.v2",
-      "field": "tokenUsage",
-      "fieldNaming": "camelCase_contract_fields_with_providerUsage_keys_preserved",
-      "value": {
-        "schemaVersion": "vv-agent.task-token-usage.v2",
-        "inputTokens": 1000,
-        "outputTokens": 120,
-        "totalTokens": 1120,
-        "reasoningTokens": null,
-        "cacheUsage": {
-          "status": "provider_reported",
-          "readInputTokens": 640,
-          "writeInputTokens": null,
-          "uncachedInputTokens": 360,
-          "source": "aggregate"
-        },
-        "modelCalls": [
-          {
-            "callId": "op_model_cycle_2_main:attempt:1",
-            "operationId": "op_model_cycle_2_main",
-            "attempt": 1,
-            "operation": "agent_cycle",
-            "cycleIndex": 2,
-            "backend": "test",
-            "model": "model-parity",
-            "status": "completed",
-            "usage": {
-              "schemaVersion": "vv-agent.token-usage.v1",
-              "inputTokens": 1000,
-              "outputTokens": 120,
-              "totalTokens": 1120,
-              "reasoningTokens": null,
-              "usageSource": "provider_reported",
-              "cacheUsage": {
-                "status": "provider_reported",
-                "readInputTokens": 640,
-                "writeInputTokens": null,
-                "uncachedInputTokens": 360,
-                "source": "provider_usage"
-              },
-              "providerUsage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 120,
-                "total_tokens": 1120,
-                "prompt_tokens_details": {
-                  "cached_tokens": 640
-                }
-              }
-            },
-            "errorCode": null
-          }
-        ]
-      }
-    }
-  },
-  "nullability": {
-    "threadStartResponse": {
-      "cwd": null
-    },
-    "threadSnapshot": {
-      "cwd": null,
-      "archivedAt": null
-    },
-    "turnSnapshot": {
-      "runId": null,
-      "completedAt": null
-    }
-  },
+  "protocolVersion": "v2",
   "restart": {
     "connectionIdCanReinitialize": true,
-    "staleRunningThreadStatus": "idle"
+    "staleRunningThreadStatus": "running"
   },
   "schema": {
     "json": [
-      "AppItem.json",
-      "AppThread.json",
-      "AppTurn.json",
-      "ApprovalDecision.json",
-      "ApprovalRequestParams.json",
-      "ApprovalResolveParams.json",
-      "ClientRequest.json",
-      "InitializeParams.json",
-      "InitializeResponse.json",
-      "JsonRpcMessage.json",
-      "SchemaExportResponse.json",
-      "ServerNotification.json",
-      "ServerRequest.json",
-      "ThreadReadResponse.json",
-      "ThreadResumeResponse.json",
-      "ThreadStartResponse.json",
-      "TurnResumeParams.json",
-      "TurnResumeResponse.json",
-      "TurnStartResponse.json"
+      "AppItem",
+      "AppThread",
+      "AppTurn",
+      "ApprovalDecision",
+      "ApprovalRequestParams",
+      "ApprovalResolveParams",
+      "ClientRequest",
+      "InitializeParams",
+      "InitializeResponse",
+      "JsonRpcMessage",
+      "SchemaExportResponse",
+      "ServerNotification",
+      "ServerRequest",
+      "ThreadReadResponse",
+      "ThreadResumeResponse",
+      "ThreadStartResponse",
+      "TurnResumeParams",
+      "TurnResumeResponse",
+      "TurnStartResponse"
     ],
     "typescript": [
       "AppItem.ts",
@@ -277,885 +1730,331 @@
     ],
     "typescriptSelfContained": true
   },
-  "toolLifecycle": {
-    "plannedHasNoNotification": {
-      "event": {
-        "type": "tool_call_planned",
-        "event_id": "evt_tool_planned",
-        "created_at": 100,
-        "tool_name": "inspect",
-        "tool_call_id": "call_tool",
-        "arguments": {
-          "path": "README.md"
-        },
-        "tool_metadata": {
-          "side_effect": "read",
-          "idempotency": "supported",
-          "terminal": false,
-          "result_retention": "archive",
-          "capability_tags": [
-            "source.inspect"
-          ],
-          "cost_dimensions": [
-            "workspace.bytes_read"
-          ]
-        }
-      },
-      "notifications": [],
-      "persistedItem": null,
-      "argumentsAvailableToApprovalRouting": true,
-      "presentedAsExecution": false
+  "statusProjection": [
+    {
+      "agentKey": "default",
+      "cwd": "/fixture",
+      "status": "idle",
+      "threadId": "thread_1"
     },
+    {
+      "status": "running",
+      "threadId": "thread_1",
+      "turnId": "thread_1/turn/turn_1"
+    },
+    {
+      "status": "idle",
+      "threadId": "thread_1"
+    },
+    {
+      "status": "closed",
+      "threadId": "thread_1"
+    },
+    {
+      "agentKey": "default",
+      "cwd": null,
+      "status": "idle",
+      "threadId": "thread_2"
+    },
+    {
+      "status": "running",
+      "threadId": "thread_2",
+      "turnId": "thread_2/turn/turn_1"
+    },
+    {
+      "interactions": [
+        {
+          "interactionId": "interaction/thread_2/child/3de00d534564135ab7cc3892/turn/start/model/primary/1/attempt/1/tool/0/1",
+          "prompt": "Choose",
+          "sessionId": "thread_2/child/3de00d534564135ab7cc3892",
+          "turnId": "thread_2/child/3de00d534564135ab7cc3892/turn/start"
+        }
+      ],
+      "prompt": "Choose",
+      "status": "interrupted",
+      "threadId": "thread_2",
+      "waitReason": "host_interaction"
+    },
+    {
+      "accepted": true,
+      "actionId": "reply-child",
+      "status": "running",
+      "threadId": "thread_2",
+      "turnId": "thread_2/turn/turn_1"
+    },
+    {
+      "accepted": true,
+      "actionId": "reply-child",
+      "status": "running",
+      "threadId": "thread_2",
+      "turnId": "thread_2/turn/turn_1"
+    },
+    {
+      "agentKey": "default",
+      "cwd": null,
+      "status": "idle",
+      "threadId": "thread_3"
+    },
+    {
+      "status": "running",
+      "threadId": "thread_3",
+      "turnId": "thread_3/turn/turn_1"
+    }
+  ],
+  "terminal": {
+    "agentStatusProjection": [
+      {
+        "agentStatus": "wait_user",
+        "completionReason": "wait_user",
+        "errorField": "omitted",
+        "name": "wait_user_is_interrupted_without_error",
+        "turnStatus": "interrupted"
+      },
+      {
+        "agentStatus": "failed",
+        "completionReason": "cancelled",
+        "errorField": "present",
+        "name": "cancelled_failure_stays_failed",
+        "turnStatus": "failed"
+      },
+      {
+        "agentStatus": "failed",
+        "budgetExhaustionField": "present",
+        "budgetUsageField": "present",
+        "completionReason": "budget_exhausted",
+        "errorField": "present",
+        "name": "budget_exhaustion_is_failed_with_typed_observation",
+        "turnStatus": "failed"
+      }
+    ],
+    "completionReasonValues": [
+      "tool_finish",
+      "no_tool_finish",
+      "stop_on_first_tool",
+      "stop_at_tool_name",
+      "wait_user",
+      "max_cycles",
+      "cancelled",
+      "failed",
+      "budget_exhausted"
+    ],
+    "optionalFieldsOmittedWhenAbsent": [
+      "budgetExhaustion",
+      "budgetUsage",
+      "completionReason",
+      "completionToolName",
+      "error",
+      "finalOutput",
+      "partialOutput",
+      "runId",
+      "tokenUsage",
+      "waitReason"
+    ],
+    "threadStatusAfterTurn": "idle",
+    "threadStatusValues": [
+      "idle",
+      "running",
+      "interrupted",
+      "archived",
+      "closed"
+    ],
+    "tokenUsageProjection": {
+      "field": "tokenUsage",
+      "fieldNaming": "camelCase_contract_fields_with_providerUsage_keys_preserved",
+      "sourceSchemaVersion": "vv-agent.task-token-usage.v3",
+      "value": {
+        "cacheUsage": {
+          "readInputTokens": null,
+          "source": "aggregate",
+          "status": "accounting_missing",
+          "uncachedInputTokens": null,
+          "writeInputTokens": null
+        },
+        "inputTokens": 10,
+        "modelCalls": [
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "callId": "thread_1/turn/turn_1/model/primary/1/1",
+            "cycleIndex": 1,
+            "errorCode": null,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operationId": "thread_1/turn/turn_1/model/primary/1",
+            "schemaVersion": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cacheUsage": {
+                "readInputTokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncachedInputTokens": null,
+                "writeInputTokens": null
+              },
+              "inputTokens": 10,
+              "outputTokens": 5,
+              "providerUsage": {
+                "completion_tokens": 5,
+                "prompt_tokens": 10,
+                "total_tokens": 15
+              },
+              "reasoningTokens": null,
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "totalTokens": 15,
+              "usageSource": "provider_reported"
+            }
+          }
+        ],
+        "outputTokens": 5,
+        "reasoningTokens": null,
+        "schemaVersion": "vv-agent.task-token-usage.v3",
+        "totalTokens": 15
+      }
+    },
+    "turnStatuses": [
+      "completed",
+      "failed",
+      "interrupted"
+    ]
+  },
+  "timestamps": {
+    "eventMillis": 1720000000123,
+    "eventSeconds": 1720000000.123,
+    "jsonType": "number",
+    "unit": "unix_seconds"
+  },
+  "toolLifecycle": {
     "executed": {
+      "completedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "createdAt": 1041.102,
+            "itemId": "item_sk/ab7ac42a40e3a941ab2a5ae20e25142563d352a49e4fdcca38e55eb79988de1c/event",
+            "payload": {
+              "directive": "continue",
+              "durationMs": null,
+              "errorCode": null,
+              "executionStarted": true,
+              "status": "success",
+              "toolCallId": "child",
+              "toolName": "create_sub_task"
+            },
+            "status": "completed",
+            "threadId": "thread_2",
+            "turnId": "thread_2/turn/turn_1",
+            "type": "toolCall",
+            "updatedAt": 1041.102
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "createdAt": 1101.102,
+            "itemId": "item_sk/91862734db0c2e50c0a8d1149719a632af29bb626ff55ed7fbecd491026f1f7c/event",
+            "payload": {
+              "directive": "continue",
+              "durationMs": null,
+              "errorCode": "tool_approval_timeout",
+              "executionStarted": false,
+              "status": "error",
+              "toolCallId": "approved",
+              "toolName": "approved"
+            },
+            "status": "failed",
+            "threadId": "thread_3",
+            "turnId": "thread_3/turn/turn_1",
+            "type": "toolCall",
+            "updatedAt": 1101.102
+          }
+        }
+      ],
       "startedNotifications": [
         {
           "jsonrpc": "2.0",
           "method": "item/started",
           "params": {
-            "itemId": "item_evt_tool_started",
-            "threadId": "thread-tool",
-            "turnId": "turn-tool",
-            "type": "toolCall",
+            "createdAt": 1041.102,
+            "itemId": "item_sk/55cfc33ffcc1c83872ab88c8c12d4c4ef8253725174542e4b5a8f9b91b20a030/event",
+            "payload": {
+              "toolCallId": "child",
+              "toolName": "create_sub_task"
+            },
             "status": "started",
-            "payload": {
-              "toolName": "inspect",
-              "toolCallId": "call_tool",
-              "toolMetadata": {
-                "sideEffect": "read",
-                "idempotency": "supported",
-                "terminal": false,
-                "capabilityTags": [
-                  "source.inspect"
-                ],
-                "costDimensions": [
-                  "workspace.bytes_read"
-                ]
-              }
-            },
-            "createdAt": 100.1,
-            "updatedAt": 100.1
-          }
-        },
-        {
-          "jsonrpc": "2.0",
-          "method": "item/toolCall/delta",
-          "params": {
-            "itemId": "item_evt_tool_started",
-            "threadId": "thread-tool",
-            "turnId": "turn-tool",
+            "threadId": "thread_2",
+            "turnId": "thread_2/turn/turn_1",
             "type": "toolCall",
-            "status": "started",
-            "payload": {
-              "toolName": "inspect",
-              "toolCallId": "call_tool",
-              "toolMetadata": {
-                "sideEffect": "read",
-                "idempotency": "supported",
-                "terminal": false,
-                "capabilityTags": [
-                  "source.inspect"
-                ],
-                "costDimensions": [
-                  "workspace.bytes_read"
-                ]
-              }
-            },
-            "createdAt": 100.1,
-            "updatedAt": 100.1,
-            "delta": {
-              "path": "README.md"
-            }
-          }
-        }
-      ],
-      "completedNotifications": [
-        {
-          "jsonrpc": "2.0",
-          "method": "item/completed",
-          "params": {
-            "itemId": "item_evt_tool_completed",
-            "threadId": "thread-tool",
-            "turnId": "turn-tool",
-            "type": "toolCall",
-            "status": "completed",
-            "payload": {
-              "toolName": "inspect",
-              "toolCallId": "call_tool",
-              "status": "success",
-              "directive": "continue",
-              "errorCode": null,
-              "executionStarted": true,
-              "durationMs": 7,
-              "toolMetadata": {
-                "sideEffect": "read",
-                "idempotency": "supported",
-                "terminal": false,
-                "capabilityTags": [
-                  "source.inspect"
-                ],
-                "costDimensions": [
-                  "workspace.bytes_read"
-                ]
-              }
-            },
-            "createdAt": 100.2,
-            "updatedAt": 100.2
+            "updatedAt": 1041.102
           }
         }
       ]
     },
+    "plannedHasNoNotification": {
+      "argumentsAvailableToApprovalRouting": true,
+      "event": {
+        "arguments": {
+          "path": "README.md"
+        },
+        "created_at": 100,
+        "event_id": "evt_tool_planned",
+        "tool_call_id": "call_tool",
+        "tool_metadata": {
+          "capability_tags": [
+            "source.inspect"
+          ],
+          "cost_dimensions": [
+            "workspace.bytes_read"
+          ],
+          "idempotency": "supported",
+          "result_retention": "archive",
+          "side_effect": "read",
+          "terminal": false
+        },
+        "tool_name": "inspect",
+        "type": "tool_call_planned"
+      },
+      "notifications": [],
+      "persistedItem": null,
+      "presentedAsExecution": false
+    },
     "policyDenial": {
-      "startedNotifications": [],
       "completedNotifications": [
         {
           "jsonrpc": "2.0",
           "method": "item/completed",
           "params": {
+            "createdAt": 100.3,
             "itemId": "item_evt_tool_denied",
-            "threadId": "thread-tool",
-            "turnId": "turn-tool",
-            "type": "toolCall",
-            "status": "failed",
             "payload": {
-              "toolName": "write_record",
-              "toolCallId": "call_denied",
-              "status": "error",
               "directive": "continue",
+              "durationMs": null,
               "errorCode": "tool_not_allowed",
               "executionStarted": false,
-              "durationMs": null,
+              "status": "error",
+              "toolCallId": "call_denied",
               "toolMetadata": {
-                "sideEffect": "write",
-                "idempotency": "unsupported",
-                "terminal": false,
                 "capabilityTags": [
                   "record.write"
                 ],
-                "costDimensions": []
-              }
+                "costDimensions": [],
+                "idempotency": "unsupported",
+                "sideEffect": "write",
+                "terminal": false
+              },
+              "toolName": "write_record"
             },
-            "createdAt": 100.3,
+            "status": "failed",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
             "updatedAt": 100.3
           }
         }
-      ]
+      ],
+      "startedNotifications": []
     }
   },
-  "modelLifecycle": {
-    "itemType": "modelCall",
-    "identityFields": [
-      "callId",
-      "operationId",
-      "attempt",
-      "operation",
-      "cycleIndex",
-      "backend",
-      "model"
-    ],
-    "forbiddenPayloadFields": [
-      "prompt",
-      "messages",
-      "output",
-      "error",
-      "errorBody"
-    ],
-    "startedNotifications": [
-      {
-        "jsonrpc": "2.0",
-        "method": "item/started",
-        "params": {
-          "itemId": "item_evt_model_started",
-          "threadId": "thread-model",
-          "turnId": "turn-model",
-          "type": "modelCall",
-          "status": "started",
-          "payload": {
-            "callId": "op_model_cycle_2_main:attempt:1",
-            "operationId": "op_model_cycle_2_main",
-            "attempt": 1,
-            "operation": "agent_cycle",
-            "cycleIndex": 2,
-            "backend": "test",
-            "model": "model-parity"
-          },
-          "createdAt": 100.4,
-          "updatedAt": 100.4
-        }
-      }
-    ],
-    "completedNotifications": [
-      {
-        "jsonrpc": "2.0",
-        "method": "item/completed",
-        "params": {
-          "itemId": "item_evt_model_completed",
-          "threadId": "thread-model",
-          "turnId": "turn-model",
-          "type": "modelCall",
-          "status": "completed",
-          "payload": {
-            "callId": "op_model_cycle_2_main:attempt:1",
-            "operationId": "op_model_cycle_2_main",
-            "attempt": 1,
-            "operation": "agent_cycle",
-            "cycleIndex": 2,
-            "backend": "test",
-            "model": "model-parity",
-            "usage": {
-              "schemaVersion": "vv-agent.token-usage.v1",
-              "inputTokens": 1000,
-              "outputTokens": 120,
-              "totalTokens": 1120,
-              "reasoningTokens": null,
-              "usageSource": "provider_reported",
-              "cacheUsage": {
-                "status": "provider_reported",
-                "readInputTokens": 640,
-                "writeInputTokens": null,
-                "uncachedInputTokens": 360,
-                "source": "provider_usage"
-              },
-              "providerUsage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 120,
-                "total_tokens": 1120,
-                "prompt_tokens_details": {
-                  "cached_tokens": 640
-                }
-              }
-            }
-          },
-          "createdAt": 100.5,
-          "updatedAt": 100.5
-        }
-      }
-    ],
-    "failedNotifications": [
-      {
-        "jsonrpc": "2.0",
-        "method": "item/completed",
-        "params": {
-          "itemId": "item_evt_model_failed",
-          "threadId": "thread-model",
-          "turnId": "turn-model",
-          "type": "modelCall",
-          "status": "failed",
-          "payload": {
-            "callId": "op_model_cycle_2_session:attempt:1",
-            "operationId": "op_model_cycle_2_session",
-            "attempt": 1,
-            "operation": "session_memory",
-            "cycleIndex": 2,
-            "backend": "memory-test",
-            "model": "memory-model",
-            "outcome": "definitive",
-            "usage": {
-              "schemaVersion": "vv-agent.token-usage.v1",
-              "inputTokens": null,
-              "outputTokens": null,
-              "totalTokens": null,
-              "reasoningTokens": null,
-              "usageSource": "accounting_missing",
-              "cacheUsage": {
-                "status": "accounting_missing",
-                "readInputTokens": null,
-                "writeInputTokens": null,
-                "uncachedInputTokens": null,
-                "source": null
-              },
-              "providerUsage": {}
-            },
-            "errorCode": "provider_rejected"
-          },
-          "createdAt": 100.6,
-          "updatedAt": 100.6
-        }
-      }
-    ]
-  },
-  "durableResume": {
-    "method": "turn/resume",
-    "requestFields": [
-      "threadId",
-      "turnId",
-      "checkpointKey"
-    ],
-    "response": "TurnResumeResponse",
-    "newInputAllowed": false,
-    "approvalResumeIsSeparate": true,
-    "reconciliationRequiredTurnStatus": "interrupted",
-    "deferredPendingTurnStatus": "interrupted",
-    "deferredPendingIsTerminal": false,
-    "deferredPendingWaitReason": "deferred_pending",
-    "checkpointSummary": {
-      "statusDomain": "AgentStatus persisted in checkpoint.status; it is not the App Server TurnStatus",
-      "fields": [
-        "key",
-        "resumeAttempt",
-        "cycleIndex",
-        "status",
-        "terminalAcknowledged"
-      ],
-      "example": {
-        "key": "tenant-7/run-42",
-        "resumeAttempt": 2,
-        "cycleIndex": 1,
-        "status": "reconciliation_required",
-        "terminalAcknowledged": false
-      }
-    },
-    "interruptionSummary": {
-      "fields": [
-        "reason",
-        "operationId",
-        "operationKind",
-        "cycleIndex",
-        "risk",
-        "idempotencySupport"
-      ],
-      "example": {
-        "reason": "resume_requires_reconciliation",
-        "operationId": "op_tool_cycle_2_call_2",
-        "operationKind": "tool",
-        "cycleIndex": 2,
-        "risk": "unknown_tool_side_effect",
-        "idempotencySupport": "unknown"
-      }
-    },
-    "responseFields": [
-      "threadId",
-      "turnId",
-      "runId",
-      "status",
-      "finalOutput",
-      "completionReason",
-      "completionToolName",
-      "partialOutput",
-      "waitReason",
-      "checkpoint",
-      "interruption",
-      "error"
-    ],
-    "protocolCases": [
-      {
-        "name": "resume_reaches_reconciliation_interruption",
-        "request": {
-          "jsonrpc": "2.0",
-          "id": "resume-1",
-          "method": "turn/resume",
-          "params": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "checkpointKey": "tenant-7/run-42"
-          }
-        },
-        "response": {
-          "jsonrpc": "2.0",
-          "id": "resume-1",
-          "result": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "runId": "run-resume-1",
-            "status": "running"
-          }
-        },
-        "notifications": [
-          {
-            "jsonrpc": "2.0",
-            "method": "thread/status/changed",
-            "params": {
-              "threadId": "thread-1",
-              "status": "running"
-            }
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "turn/started",
-            "params": {
-              "threadId": "thread-1",
-              "turnId": "turn-1",
-              "runId": "run-resume-1",
-              "status": "running"
-            }
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "thread/status/changed",
-            "params": {
-              "threadId": "thread-1",
-              "status": "idle"
-            }
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "turn/completed",
-            "params": {
-              "threadId": "thread-1",
-              "turnId": "turn-1",
-              "runId": "run-resume-1",
-              "status": "interrupted",
-              "checkpoint": {
-                "key": "tenant-7/run-42",
-                "resumeAttempt": 2,
-                "cycleIndex": 1,
-                "status": "reconciliation_required",
-                "terminalAcknowledged": false
-              },
-              "interruption": {
-                "reason": "resume_requires_reconciliation",
-                "operationId": "op_tool_cycle_2_call_2",
-                "operationKind": "tool",
-                "cycleIndex": 2,
-                "risk": "unknown_tool_side_effect",
-                "idempotencySupport": "unknown"
-              }
-            }
-          }
-        ],
-        "notificationOrder": [
-          "thread/status/changed:running",
-          "turn/started",
-          "thread/status/changed:idle",
-          "turn/completed:interrupted"
-        ]
-      },
-      {
-        "name": "deferred_pending_resume_is_interrupted_not_terminal",
-        "request": {
-          "jsonrpc": "2.0",
-          "id": "resume-deferred",
-          "method": "turn/resume",
-          "params": {
-            "threadId": "thread-1",
-            "turnId": "turn-deferred",
-            "checkpointKey": "tenant-7/run-42"
-          }
-        },
-        "response": {
-          "jsonrpc": "2.0",
-          "id": "resume-deferred",
-          "result": {
-            "threadId": "thread-1",
-            "turnId": "turn-deferred",
-            "runId": "run-deferred",
-            "status": "running"
-          }
-        },
-        "notifications": [
-          {
-            "jsonrpc": "2.0",
-            "method": "thread/status/changed",
-            "params": {"threadId": "thread-1", "status": "running"}
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "turn/started",
-            "params": {
-              "threadId": "thread-1",
-              "turnId": "turn-deferred",
-              "runId": "run-deferred",
-              "status": "running"
-            }
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "thread/status/changed",
-            "params": {"threadId": "thread-1", "status": "idle"}
-          },
-          {
-            "jsonrpc": "2.0",
-            "method": "turn/completed",
-            "params": {
-              "threadId": "thread-1",
-              "turnId": "turn-deferred",
-              "runId": "run-deferred",
-              "status": "interrupted",
-              "waitReason": "deferred_pending",
-              "checkpoint": {
-                "key": "tenant-7/run-42",
-                "resumeAttempt": 2,
-                "cycleIndex": 2,
-                "status": "deferred",
-                "terminalAcknowledged": false
-              }
-            }
-          }
-        ],
-        "notificationOrder": [
-          "thread/status/changed:running",
-          "turn/started",
-          "thread/status/changed:idle",
-          "turn/completed:interrupted"
-        ],
-        "terminal": false,
-        "externalCalls": 0
-      },
-      {
-        "name": "live_claim_keeps_existing_owner",
-        "request": {
-          "jsonrpc": "2.0",
-          "id": "resume-2",
-          "method": "turn/resume",
-          "params": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "checkpointKey": "tenant-7/run-42"
-          }
-        },
-        "response": {
-          "jsonrpc": "2.0",
-          "id": "resume-2",
-          "result": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "runId": "run-existing-owner",
-            "status": "running",
-            "checkpoint": {
-              "key": "tenant-7/run-42",
-              "resumeAttempt": 2,
-              "cycleIndex": 1,
-              "status": "running",
-              "terminalAcknowledged": false
-            }
-          }
-        },
-        "notifications": [],
-        "ownership": "existing_worker",
-        "newRunCreated": false,
-        "externalCalls": 0
-      },
-      {
-        "name": "terminal_replay_is_response_only",
-        "request": {
-          "jsonrpc": "2.0",
-          "id": "resume-3",
-          "method": "turn/resume",
-          "params": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "checkpointKey": "tenant-7/run-42"
-          }
-        },
-        "response": {
-          "jsonrpc": "2.0",
-          "id": "resume-3",
-          "result": {
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "runId": "run-terminal",
-            "status": "completed",
-            "finalOutput": "done",
-            "completionReason": "no_tool_finish",
-            "checkpoint": {
-              "key": "tenant-7/run-42",
-              "resumeAttempt": 2,
-              "cycleIndex": 2,
-              "status": "completed",
-              "terminalAcknowledged": true
-            }
-          }
-        },
-        "notifications": [],
-        "newRunCreated": false,
-        "externalCalls": 0
-      }
-    ],
-    "projectionCasesScope": "terminal TurnSnapshot or turn/completed params, not the immediate TurnResumeResponse",
-    "projectionCases": [
-      {
-        "name": "reconciliation_required",
-        "turnStatus": "interrupted",
-        "completionReasonField": "omitted",
-        "errorField": "omitted",
-        "checkpoint": {
-          "key": "tenant-7/run-42",
-          "resumeAttempt": 2,
-          "cycleIndex": 1,
-          "status": "reconciliation_required",
-          "terminalAcknowledged": false
-        },
-        "interruption": {
-          "reason": "resume_requires_reconciliation",
-          "operationId": "op_tool_cycle_2_call_2",
-          "operationKind": "tool",
-          "cycleIndex": 2,
-          "risk": "unknown_tool_side_effect",
-          "idempotencySupport": "unknown"
-        }
-      },
-      {
-        "name": "deferred_pending",
-        "turnStatus": "interrupted",
-        "completionReasonField": "omitted",
-        "errorField": "omitted",
-        "waitReason": "deferred_pending",
-        "checkpoint": {
-          "key": "tenant-7/run-42",
-          "resumeAttempt": 2,
-          "cycleIndex": 2,
-          "status": "deferred",
-          "terminalAcknowledged": false
-        },
-        "resumeMethod": "turn/resume",
-        "terminal": false
-      },
-      {
-        "name": "live_claim",
-        "turnStatus": "running",
-        "completionReasonField": "omitted",
-        "errorField": "omitted",
-        "checkpoint": {
-          "key": "tenant-7/run-42",
-          "resumeAttempt": 2,
-          "cycleIndex": 1,
-          "status": "running",
-          "terminalAcknowledged": false
-        },
-        "interruptionField": "omitted",
-        "externalCalls": 0
-      },
-      {
-        "name": "terminal_replay",
-        "turnStatus": "completed",
-        "completionReason": "no_tool_finish",
-        "errorField": "omitted",
-        "checkpoint": {
-          "key": "tenant-7/run-42",
-          "resumeAttempt": 2,
-          "cycleIndex": 2,
-          "status": "completed",
-          "terminalAcknowledged": true
-        },
-        "interruptionField": "omitted",
-        "externalCalls": 0
-      }
-    ],
-    "sensitiveFieldsNeverProjected": [
-      "runDefinition",
-      "runDefinitionDigest",
-      "operationArguments",
-      "operationResponse",
-      "extensionState",
-      "idempotencyKey"
-    ],
-    "ordering": [
-      "response",
-      "thread/status/changed",
-      "turn/started"
-    ]
-  },
-  "controllerAdmission": {
-    "method": "turn/action",
-    "endpointKind": "narrow_public_action_adapter",
-    "requestFields": [
-      "threadId",
-      "turnId",
-      "actionId",
-      "action"
-    ],
-    "identityMaxUtf8Bytes": 512,
-    "identityFields": ["threadId", "turnId", "actionId"],
-    "actionVariants": ["respond", "suspend", "resume", "cancel", "abort"],
-    "actionPayloads": {
-      "respond": ["kind", "message"],
-      "suspend": ["kind"],
-      "resume": ["kind"],
-      "cancel": ["kind"],
-      "abort": ["kind"]
-    },
-  "actionId": {
-    "type": "non_empty_string",
-    "maxUtf8Bytes": 512,
-    "stable_scope": ["threadId", "turnId"],
-    "stable_across_client_retries": "within the exact threadId+turnId scope",
-    "idempotency_key": "scope-local input to the global command_id derivation",
-    "same_action_id_same_payload": "same derived command_id; return sanitized retained receipt without a second command or wake",
-    "same_action_id_different_payload": "same derived command_id; reject action_id_conflict/controller_command_conflict without a write",
-    "same_action_id_different_scope": "different derived command_id; admit an independent receipt"
-    },
-    "messageSchema": {
-      "closed": true,
-      "requiredFields": ["role", "content"],
-      "role": "user",
-      "contentType": "non_empty_utf8_string",
-      "contentMaxUtf8Bytes": 65536,
-      "unknownFields": "reject"
-    },
-    "publicActionSchemas": {
-      "respond": "{kind:'respond', message:{role:'user', content:string<=65536 UTF-8 bytes}}",
-      "suspend": "{kind:'suspend'}",
-      "resume": "{kind:'resume'}",
-      "cancel": "{kind:'cancel'}",
-      "abort": "{kind:'abort'}"
-    },
-  "serverDerivedCommand": {
-    "deterministic": true,
-    "commandId": "server derives command_id from (threadId, turnId, actionId) with the strict identity algorithm; client commandId is rejected",
-    "identityAlgorithm": "identity_derivation.algorithms.command_id: domain prefix + NUL + uint64_be(JCS UTF-8 byte length) + RFC8785 JCS UTF-8 payload, hashed with SHA-256",
-    "commandIdAlgorithm": "fixtures/controller_command.json#identity_derivation.algorithms.command_id",
-    "identityMaxUtf8Bytes": 512,
-    "internalFenceSource": "authoritative checkpoint, never public request",
-    "requestDigest": "RFC8785 over server-derived closed command",
-    "commandIdOutput": "64 lowercase ASCII hexadecimal bytes"
-  },
-  "commandIdCases": [
-    {
-      "name": "same_scope_replay",
-      "threadId": "thread-1",
-      "turnId": "turn-1",
-      "actionId": "same-action",
-      "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
-      "payloadRelation": "same",
-      "outcome": "replayed_retained_receipt",
-      "writes": 0
-    },
-    {
-      "name": "same_scope_payload_conflict",
-      "threadId": "thread-1",
-      "turnId": "turn-1",
-      "actionId": "same-action",
-      "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
-      "payloadRelation": "different_action_payload",
-      "outcome": "action_id_conflict_then_controller_command_conflict",
-      "writes": 0
-    },
-    {
-      "name": "different_thread_same_action",
-      "threadId": "thread-2",
-      "turnId": "turn-1",
-      "actionId": "same-action",
-      "expectedCommandId": "6756d671ff428cce142a8ad2878554f48e9f604ee383112786426e884257bb2b",
-      "payloadRelation": "different_scope",
-      "outcome": "independent_receipt",
-      "writes": 1
-    },
-    {
-      "name": "different_turn_same_action",
-      "threadId": "thread-1",
-      "turnId": "turn-2",
-      "actionId": "same-action",
-      "expectedCommandId": "01591a216491fe8148edb6a851bbac90be771ccd2b01c71c6ddc29d24690f270",
-      "payloadRelation": "different_scope",
-      "outcome": "independent_receipt",
-      "writes": 1
-    },
-    {
-      "name": "unicode_length_prefixed_vector",
-      "threadId": "thread/中文",
-      "turnId": "turn-😀",
-      "actionId": "same-action",
-      "expectedCommandId": "a8e2cd09beba02260172b94cfd8b2023b5e9f3182fa7bd25377d5c5e957411f5",
-      "payloadRelation": "different_scope",
-      "outcome": "independent_receipt",
-      "writes": 1
-    }
-  ],
-    "internalDerivations": [
-      "checkpointKey",
-      "runId",
-      "traceId",
-      "resumeAttempt",
-      "expectedRevision",
-      "commandId",
-      "commandDigest",
-      "logicalCycle",
-      "interactionId",
-      "operationId",
-      "toolCallId",
-      "requestDigest"
-    ],
-    "internalFieldsRejected": [
-      "checkpointKey",
-      "command",
-      "commandDigest",
-      "revision",
-      "runId",
-      "traceId"
-    ],
-    "controlIsAdmissionOnly": true,
-    "responseFields": [
-      "threadId",
-      "turnId",
-      "actionId",
-      "accepted",
-      "status",
-      "waitReason"
-    ],
-    "publicReceiptSanitized": true,
-    "publicReceiptFields": ["actionId", "accepted", "status", "waitReason"],
-    "receiptInternalFieldsNeverReturned": [
-      "commandId",
-      "commandDigest",
-      "handle",
-      "expectedRevision",
-      "resultingRevision",
-      "outboxState",
-      "leaseOwner",
-      "leaseExpiresAt"
-    ],
-    "hostInteractionProjection": {
-      "agentStatus": "host_interaction",
-      "turnStatus": "interrupted",
-      "waitReason": "host_interaction",
-      "completionReason": null,
-      "error": null
-    },
-    "hostPromptProjection": {
-      "fields": ["status", "waitReason", "prompt"],
-      "prompt": "unmodified prompt text",
-      "readSurface": {
-        "method": "thread/status",
-        "notification": "thread/status/changed",
-        "source": "host_interaction_notification_outbox.payload",
-        "payloadFields": ["status", "waitReason", "prompt"],
-        "notificationId": "internal notification_id is not public; delivery is correlated by turnId",
-        "deliverySemantics": "at_least_once",
-        "observerDeduplicationKey": "notification_id plus payload_digest",
-        "ambiguousDelivery": "framework reconciles to delivered, retry, or abort; App Server exposes only sanitized projection",
-        "ambiguousReaper": "pending/expired claimed may retry; ambiguous is never blind-retried",
-        "suspendedStateChange": "a separate complete run_state_changed notification with waitReason=suspended; the host notification payload is immutable"
-      },
-      "neverProjects": [
-        "requestDigest",
-        "operationId",
-        "toolCallId",
-        "checkpointKey",
-        "runId",
-        "traceId",
-        "commandId",
-        "leaseOwner"
-      ],
-      "unknown_fields": "reject"
-    },
-    "frameworkReceipt": {
-      "type": "ControllerCommandReceipt",
-      "visibility": "framework_public",
-      "appServerProjection": "sanitized receipt fields only",
-      "appServerFields": ["actionId", "accepted", "status", "waitReason"]
-    },
-    "suspendedProjection": {
-      "agentStatus": "suspended",
-      "turnStatus": "interrupted",
-      "waitReason": "suspended",
-      "completionReason": null,
-      "error": null
-    },
-    "turnResumeNewInputAllowed": false,
-    "askUserTerminalSemanticsUnchanged": true,
-    "receiptInternalFieldsHidden": true,
-  "strictCases": {
-      "missing_action_id": "reject",
-      "action_id_over_utf8_limit": "reject_action_id_invalid",
-      "action_id_unknown_field": "reject",
-    "action_id_replay_same_payload": "return_sanitized_retained_receipt",
-    "action_id_replay_different_payload": "reject_action_id_conflict",
-    "action_id_replay_different_thread_or_turn": "derive_independent_command_id",
-      "message_unknown_field": "reject",
-      "message_content_over_utf8_limit": "reject",
-      "identity_over_utf8_limit": "reject",
-      "unknown_internal_request_field": "reject",
-      "unknown_action_variant": "reject",
-      "server_derived_fence_is_not_client_supplied": true
-    }
-  }
+  "version": 4
 }

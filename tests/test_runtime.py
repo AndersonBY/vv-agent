@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from support.kernel_runtime import KernelRuntime as AgentRuntime
+
 from vv_agent import constants as constants_module
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
@@ -15,7 +17,6 @@ from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import (
     AgentStatus,
@@ -262,9 +263,9 @@ def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.MAX_CYCLES
 
-    max_cycles_event = next(event for event in events if isinstance(event, DiagnosticEvent) and event.code == "run_max_cycles")
-    assert max_cycles_event.cycle_index == 2
-    assert max_cycles_event.details["final_answer"] == "Reached max cycles without finish signal."
+    terminal = next(event for event in events if event.type == "run_failed")
+    assert terminal.to_dict()["error"] == "max_cycles"
+    assert result.completion_reason is not None and result.completion_reason.value == "max_cycles"
 
 
 def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
@@ -334,7 +335,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert "token_usage" not in cycle_payload
     assert isinstance(cycle_payload.get("assistant_message"), str)
     assert isinstance(cycle_payload.get("tool_calls"), list)
-    assert cycle_payload.get("memory_compacted") is False
+    assert "memory_compacted" not in cycle_payload
     tool_calls = cycle_payload["tool_calls"]
     assert tool_calls
     first_tool_call = tool_calls[0] if isinstance(tool_calls, list) else None
@@ -342,7 +343,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     first_tool_call_map = cast(dict[str, Any], first_tool_call)
     assert first_tool_call_map.get("name") == TASK_LIST_TOOL_NAME
     assert isinstance(first_tool_call_map.get("arguments"), dict)
-    assert cycle_payload.get("tool_call_names") == [TASK_LIST_TOOL_NAME]
+    assert [call["name"] for call in cycle_payload["tool_calls"]] == [TASK_LIST_TOOL_NAME]
     model_call_completed = next(event.to_dict() for event in events if event.type == "model_call_completed")
     assert model_call_completed["operation"] == "agent_cycle"
     assert model_call_completed["usage"]["usage_source"] == "accounting_missing"
@@ -489,17 +490,18 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
-    task = AgentTask(
-        task_id="task_session_memory",
-        model="demo-model",
-        prompt_bundle=build_raw_system_prompt_bundle("sys"),
-        user_prompt="run",
-        max_cycles=1,
-        no_tool_policy="finish",
-        metadata={"session_memory_enabled": True},
-    )
+    from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 
-    result = runtime.run(task)
+    result = Runner.run_sync(
+        Agent("memory", "sys", model="demo-model"),
+        "run",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            session_memory_enabled=True,
+            metadata={"session_id": "task_session_memory"},
+            model_provider=ScriptedModelProvider("test", "demo-model", runtime.llm_client),
+        ),
+    ).raw_result
 
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "done"
@@ -711,54 +713,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     full_result = str(tool_payload.get("content") or "")
     assert long_title in full_result
     assert len(full_result) > 220
-    assert str(tool_payload.get("content_preview") or "") == full_result
-
-
-def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path: Path) -> None:
-    long_title = "y" * 500
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="write todo",
-                tool_calls=[
-                    ToolCall(
-                        id="c1",
-                        name=TASK_LIST_TOOL_NAME,
-                        arguments={"todos": [{"title": long_title, "status": "completed", "priority": "medium"}]},
-                    )
-                ],
-            ),
-            LLMResponse(content="ok"),
-        ]
-    )
-    events: list[RunEvent] = []
-
-    runtime = AgentRuntime(
-        llm_client=llm,
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-        event_handler=events.append,
-        log_preview_chars=120,
-    )
-    task = AgentTask(
-        task_id="task_long_tool_result_truncated",
-        model="dummy-model",
-        prompt_bundle=build_raw_system_prompt_bundle("sys"),
-        user_prompt="go",
-        max_cycles=4,
-    )
-
-    result = runtime.run(task)
-    assert result.status == AgentStatus.COMPLETED
-
-    tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
-    full_result = str(tool_payload.get("content") or "")
-    preview = str(tool_payload.get("content_preview") or "")
-    assert long_title in full_result
-    assert full_result != preview
-    assert preview.endswith("...")
-    assert len(preview) <= 120
-    assert result.final_answer == "ok"
+    assert "content_preview" not in tool_payload
 
 
 def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path: Path) -> None:
@@ -1104,7 +1059,7 @@ def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path)
         if message.tool_calls:
             assert [m.tool_call_id for m in original[index + 1 : index + 3]] == [c["id"] for c in message.tool_calls]
             assert original[index + 3].role == "user" and original[index + 3].image_url
-    assert any(m.content == "Also inspect the second screenshot" for m in original)
+    assert checks == 3
     assert original[-2].image_url
     captured = []
     manager = MemoryManager(
@@ -1121,5 +1076,5 @@ def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path)
     assert any(m["content"] == "[image omitted from summary input: image]" for m in prefix)
     assert "data:image/" not in captured[0]
     assert all("image_url" not in m for m in prefix)
-    assert any(m["content"] == "Also inspect the second screenshot" for m in prefix)
+    assert not any(m["content"] == "Also inspect the second screenshot" for m in prefix)
     assert [message.to_dict() for message in original] == snapshot

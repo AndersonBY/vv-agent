@@ -1,79 +1,45 @@
 #!/usr/bin/env python3
-"""Durable checkpoint v10: resume or replay one stable Runner task."""
-
-from __future__ import annotations
+"""Durable session history and explicit retained-turn resume with SQLite."""
 
 import os
 from pathlib import Path
 
-from vv_agent import Agent, CheckpointConfig, RunConfig, Runner, VvLlmModelProvider
-from vv_agent.checkpoint import ResumePolicy
-from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, SQLiteStore, VvLlmModelProvider
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
     workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-
-    db_path = Path(
-        os.getenv(
-            "VV_AGENT_EXAMPLE_DB",
-            str(workspace / ".vv-agent-state" / "checkpoints.db"),
-        )
-    ).resolve()
+    db_path = Path(os.getenv("VV_AGENT_EXAMPLE_DB", str(workspace / ".vv-agent-state" / "sessions.db")))
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint_key = os.getenv(
-        "VV_AGENT_EXAMPLE_CHECKPOINT_KEY",
-        "example-21-state-checkpoint",
-    )
-    prompt = os.getenv(
-        "VV_AGENT_EXAMPLE_PROMPT",
-        "Calculate 2+3, briefly verify the result, and finish.",
-    )
-
-    store = SqliteCheckpointStore(db_path)
-    config = RunConfig(
-        model=model,
-        model_provider=VvLlmModelProvider(
-            settings_file=settings_file,
-            default_backend=backend,
-        ),
-        workspace=workspace,
-        max_cycles=5,
-        checkpoint_config=CheckpointConfig(
-            key=checkpoint_key,
-            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
-            store=store,
-            capability_refs={
-                "workspace": {"id": "workspace.example-21", "version": "1"},
-            },
-        ),
-    )
-    agent = Agent(
-        name="checkpoint-demo",
-        instructions="Complete the requested task carefully, then provide the final answer.",
-        model=model,
-    )
-
-    print(f"[demo] checkpoint={checkpoint_key}")
-    print(f"[demo] database={db_path}")
-    result = Runner.run_sync(agent, prompt, run_config=config)
-    print(f"[demo] status={result.status.value}")
-    print(f"[demo] output={result.final_output}")
-
-    retained = store.load_checkpoint(checkpoint_key)
-    if retained is not None:
-        print(
-            "[demo] durable_state="
-            f"cycle:{retained.cycle_index} "
-            f"resume_attempt:{retained.resume_attempt} "
-            f"terminal_acknowledged:{retained.terminal_acknowledged}"
+    with SQLiteStore.standalone(db_path) as store:
+        if not store.connection.execute("PRAGMA user_version").fetchone()[0]:
+            store.install_schema()
+        client = InteractiveAgentClient(
+            options=AgentSessionOptions(
+                model_provider=VvLlmModelProvider(
+                    settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+                    default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+                ),
+                workspace=workspace,
+                session_store=store,
+            )
         )
-    print("[demo] Run the same command again to replay or resume this checkpoint.")
-    store.close()
+        session = client.create_session(
+            agent=Agent(
+                "durable-demo", "Complete the requested task carefully.", model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+            ),
+            session_id=os.getenv("VV_AGENT_EXAMPLE_SESSION_ID", "example-21"),
+        )
+        try:
+            state, _, _ = store.read_state(session.session_id)
+            if state.active_turn_id is not None:
+                result = session.continue_run()
+            else:
+                result = session.prompt(os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Calculate 2+3 and finish."))
+            print(result.raw_result.session_id, result.raw_result.turn_id, result.status.value, result.final_output)
+        finally:
+            client.driver.close()
 
 
 if __name__ == "__main__":

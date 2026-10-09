@@ -186,18 +186,16 @@ def memory_config(tmp_path):
 
 
 def paired_memory_manager(monkeypatch, threshold=1000, keep=1):
-    from vv_agent.runtime.engine import AgentRuntime
+    from vv_agent.session.surfaces import SessionDriver
 
-    original = AgentRuntime._build_memory_manager
+    original = SessionDriver.runtime
 
-    def build(self, **kwargs):
-        manager = original(self, **kwargs)
-        manager.compact_threshold = threshold
-        manager.keep_recent_messages = keep
-        manager.model = ""
-        return manager
+    def build(self, *args, **kwargs):
+        rt = original(self, *args, **kwargs)
+        rt.memory_manager = MemoryManager(compact_threshold=threshold, keep_recent_messages=keep)
+        return rt
 
-    monkeypatch.setattr(AgentRuntime, "_build_memory_manager", build)
+    monkeypatch.setattr(SessionDriver, "runtime", build)
     return MemoryManager(compact_threshold=threshold, keep_recent_messages=keep)
 
 
@@ -221,7 +219,7 @@ def test_memory_provider_logged_callbacks_restart_parity(store, database, tmp_pa
         for field in ("type", "cycle_index"):
             assert getattr(a, field) == getattr(b, field)
     for event in new.events:
-        assert event_from_dict(event.to_dict(), _kernel=True).to_dict() == event.to_dict()
+        assert event_from_dict(event.to_dict()).to_dict() == event.to_dict()
     lifecycle = [e for e in new.events if e.type.startswith("memory_compact_")]
     assert len(lifecycle) == 2
     for a, b in zip(lifecycle, [e for e in old.events if e.type.startswith("memory_compact_")], strict=True):
@@ -261,17 +259,17 @@ def test_memory_compaction_runner_producer_parity(store, database, tmp_path, mon
         # Trigger by context pressure while preserving a recoverable raw tail.
         memory.microcompaction_policy = MicrocompactionPolicy(keep_recent_cycles=1, trigger_ratio=0.0001, target_ratio=0.00005)
         config = replace(config, initial_messages=history, microcompaction_policy=memory.microcompaction_policy)
-        from vv_agent.runtime.engine import AgentRuntime
+        from vv_agent.session.surfaces import SessionDriver
 
-        original = AgentRuntime._build_memory_manager
+        original = SessionDriver.runtime
 
-        def micro(self, **kwargs):
-            manager = original(self, **kwargs)
-            manager.compact_threshold = 999999
-            manager.microcompaction_policy = memory.microcompaction_policy
-            return manager
+        def micro(self, *args, **kwargs):
+            rt = original(self, *args, **kwargs)
+            rt.memory_manager.compact_threshold = 999999
+            rt.memory_manager.microcompaction_policy = memory.microcompaction_policy
+            return rt
 
-        monkeypatch.setattr(AgentRuntime, "_build_memory_manager", micro)
+        monkeypatch.setattr(SessionDriver, "runtime", micro)
 
     def too_long(_request):
         raise RuntimeError("maximum context length exceeded")
@@ -454,12 +452,7 @@ def test_typed_output_repair_ledger_restart_parity(store, database, tmp_path, ou
         output_repair=fix if repair else None,
     )
     config = RunConfig(workspace=tmp_path)
-    if output_type is Answer and repair:
-        with pytest.raises(TypeError, match="not JSON serializable"):
-            old_run(agent, config, [LLMResponse("bad")])
-        old = None
-    else:
-        old = old_run(agent, config, [LLMResponse("bad" if repair else good)])
+    old = old_run(agent, config, [LLMResponse("bad" if repair else good)])
     new = new_run(store, database, agent, config, [LLMResponse("bad" if repair else good)], cut=cut_boundary("output_checked"))
     if old is not None:
         same_result(new, old)
@@ -470,16 +463,16 @@ def test_typed_output_repair_ledger_restart_parity(store, database, tmp_path, ou
 
     usage_wire = new.token_usage.to_dict()
     assert usage_wire["schema_version"] == "vv-agent.task-token-usage.v3"
-    assert TaskTokenUsage.from_dict(usage_wire, _kernel=True).to_dict() == usage_wire
+    assert TaskTokenUsage.from_dict(usage_wire).to_dict() == usage_wire
     with pytest.raises(ValueError):
-        TaskTokenUsage.from_dict(usage_wire | {"schema_version": "vv-agent.task-token-usage.v2"}, _kernel=True)
+        TaskTokenUsage.from_dict(usage_wire | {"schema_version": "vv-agent.task-token-usage.v2"})
     for call in new.token_usage.model_calls:
         wire = call.to_dict()
         assert wire["schema_version"] == "vv-agent.model-call.v2"
         assert wire["usage"]["schema_version"] == "vv-agent.token-usage.v1"
-        assert ModelCallRecord.from_dict(wire, _kernel=True).to_dict() == wire
+        assert ModelCallRecord.from_dict(wire).to_dict() == wire
         with pytest.raises(ValueError):
-            ModelCallRecord.from_dict(wire | {"schema_version": "vv-agent.model-call.v1"}, _kernel=True)
+            ModelCallRecord.from_dict(wire | {"schema_version": "vv-agent.model-call.v1"})
     assert [call["purpose"] for call in ledger] == (["primary", "output_repair"] if repair else ["primary"])
     assert len(calls) == (2 if repair else 0)
     if repair:
@@ -560,7 +553,7 @@ def test_lifecycle_events_replay_ack_and_rollback_parity(store, database, tmp_pa
     assert len({e.event_id for e in replayed}) == len(replayed)
     bridge.append(replayed[0])
     with pytest.raises(ValueError):
-        bridge.append(event_from_dict(replayed[0].to_dict() | {"event_id": "external"}, _kernel=True))
+        bridge.append(event_from_dict(replayed[0].to_dict() | {"event_id": "external"}))
     with pytest.raises(Restart), store.atomic() as tx:
         result = bridge.batch(tx)
         assert result is not None
@@ -738,7 +731,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
     old = Runner.run_sync(agent, "go", run_config=replace(config, model_provider=FixedModelProvider(reference, RESOLVED)))
     old_calls = list(calls)
     old2 = Runner.run_sync(agent, "go", run_config=replace(config, model_provider=FixedModelProvider(reference, RESOLVED)))
-    old_next = calls[-1]
+    expected_next = old_calls[-1]
     calls.clear()
     fail_remaining = failures
     admit(store, config)
@@ -767,7 +760,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
     with store.atomic() as tx:
         tx.push("control", InboxItem("second", "user", {"content": "go"}))
     drive(store, "control", runtime=rt)
-    assert calls[-1] == old_next
+    assert calls[-1] == expected_next
     new2 = project_result(store, "control", "control/turn/second", runtime=rt)
     assert (new2.final_output, new2.status) == (old2.final_output, old2.status)
     # A terminal result remains the original turn's projection after subsequent work.
@@ -798,11 +791,10 @@ def test_repair_usage_budget_is_logged_intentional_difference(store, database, t
         output_repair=fix,
     )
     config = RunConfig(workspace=tmp_path, budget_limits=RunBudgetLimits(max_total_tokens=20))
-    # Runner treats callback LLMResponse as an arbitrary candidate and has no repair accounting.
     old = old_run(agent, config, [LLMResponse("invalid", raw={"usage": USAGE})])
     new = new_run(store, database, agent, config, [LLMResponse("invalid", raw={"usage": USAGE})])
     assert old.status == new.status == AgentStatus.FAILED
-    assert old.raw_result.error["code"] == "output_validation_failed"
+    assert old.raw_result.error["code"] == "run_budget_exhausted"
     assert new.completion_reason.value == "budget_exhausted"
     assert new.budget_usage.total_tokens == 30 and new.budget_usage.cycles == 1
     assert new.budget_exhaustion is not None and new.budget_exhaustion.observed == 30
@@ -1029,7 +1021,7 @@ def test_delegation_events_and_child_replay_paired_producer(store, database, tmp
     replayed = list(bridge.replay(RunEventReplayQuery(new.run_id, include_children=True)))
     descendants = [e for e in replayed if e.run_id != new.run_id]
     assert descendants and all(e.parent_run_id == new.run_id for e in descendants)
-    assert all(event_from_dict(e.to_dict(), _kernel=True).to_dict() == e.to_dict() for e in replayed)
+    assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in replayed)
 
 
 def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
@@ -1065,8 +1057,8 @@ def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
 @pytest.mark.parametrize("output_type", [dict, list, Answer])
 def test_output_coercion_exception_becomes_durable_result(store, database, tmp_path, output_type):
     agent, config = Agent("test", "test", output_type=output_type), RunConfig(workspace=tmp_path)
-    with pytest.raises(ValueError, match="failed to validate final output"):
-        old_run(agent, config, [LLMResponse("invalid")])
+    reference = old_run(agent, config, [LLMResponse("invalid")])
+    assert reference.status == AgentStatus.FAILED and reference.raw_result.error_code == "output_type_invalid"
     new = new_run(store, database, agent, config, [LLMResponse("invalid")], cut=cut_boundary("output_checked"))
     assert new.status == AgentStatus.FAILED and new.raw_result.error_code == "output_type_invalid"
     assert new.partial_output == "invalid"
@@ -1222,7 +1214,7 @@ def test_repair_missing_usage_policy_is_durable(store, database, tmp_path, polic
     config = RunConfig(workspace=tmp_path, budget_limits=RunBudgetLimits(max_total_tokens=100, unavailable_metric_policy=policy))
     old = old_run(agent, config, [LLMResponse("invalid", raw={"usage": USAGE})])
     new = new_run(store, database, agent, config, [LLMResponse("invalid", raw={"usage": USAGE})])
-    assert old.final_output == "valid" and old.budget_usage.total_tokens == 15
+    same_result(new, old)
     assert new.budget_usage.total_tokens is None and new.budget_usage.cycles == 1
     assert new.status == (AgentStatus.FAILED if policy == UnavailableMetricPolicy.STOP else AgentStatus.COMPLETED)
     assert new.budget_exhaustion is not None if policy == UnavailableMetricPolicy.STOP else new.budget_exhaustion is None

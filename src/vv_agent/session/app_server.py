@@ -9,8 +9,9 @@ from typing import Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
-from vv_agent.app_server.run_adapter import RunAdapter, StartedTurn, TurnResumeError
-from vv_agent.app_server.thread_store import ThreadRecord, ThreadSnapshot, ThreadStore, TurnRecord
+from vv_agent.app_server.run_adapter import StartedTurn, TurnResumeError
+from vv_agent.app_server.run_adapter import _RunAdapterFormatting as RunAdapter
+from vv_agent.app_server.thread_store import ThreadRecord, ThreadSnapshot, TurnRecord
 from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent
 from vv_agent.interaction import derive_controller_command_id
@@ -21,7 +22,7 @@ from .records import InboxItem
 from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict
-from .surfaces import _SessionKernel
+from .surfaces import SessionDriver
 
 
 class ThreadStatus(StrEnum):
@@ -61,8 +62,8 @@ def _content(adapter: RunAdapter, input: list[dict[str, Any]], metadata: dict[st
     }
 
 
-class _KernelThreadStore(ThreadStore):
-    def __init__(self, kernel: _SessionKernel) -> None:
+class _KernelThreadStore:
+    def __init__(self, kernel: SessionDriver) -> None:
         self.kernel = kernel
         self.runtimes: dict[str, Any] = {}
 
@@ -313,8 +314,7 @@ class _KernelRunAdapter(RunAdapter):
             error = exc
         self._complete_turn(connection_id, started, result=result, error=error)
 
-    def resume_turn(self, *, connection_id, thread_id, turn_id, checkpoint_key=None, request_id=None):
-        del checkpoint_key
+    def resume_turn(self, *, connection_id, thread_id, turn_id, request_id=None):
         snapshot = self._store.read_thread(thread_id)
         if snapshot.thread.status == ThreadStatus.CLOSED:
             raise TurnResumeError("Thread is closed")
@@ -451,8 +451,15 @@ class _KernelRunAdapter(RunAdapter):
 
     def _complete_turn(self, connection_id, started, *, result, error):
         if error is not None:
-            # A crashed driver owns no terminal write; recovery reads the retained operation.
-            self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
+            from .store import LeaseRetryExhausted
+
+            sid, tid = started.thread.thread_id, started.turn.turn_id
+            self._state_manager.clear_active_turn(sid, tid)
+            code = error.code if isinstance(error, LeaseRetryExhausted) else "event_stream"
+            self._notify_subscribers(sid, "error/warning", {"message": str(error), "code": code})
+            self._notify_subscribers(
+                sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": "failed", "error": str(error)}
+            )
             return
         if result is not None and result.status is AgentStatus.SUSPENDED:
             result = replace(result, raw_result=replace(result.raw_result, wait_reason="suspended", completion_reason=None))

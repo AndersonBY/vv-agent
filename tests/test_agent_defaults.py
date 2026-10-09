@@ -10,7 +10,7 @@ from vv_agent import Agent, ApprovalPolicy, RunConfig, Runner, ToolPolicy, funct
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import ASK_USER_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
-from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
+from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeLLMEvent
 from vv_agent.types import AgentStatus, LLMResponse
 
 
@@ -52,7 +52,7 @@ def test_dynamic_instructions_receive_agent_and_complete_run_context(tmp_path: P
 
     def finish(request: LlmRequest) -> LLMResponse:
         _model, messages = request.model, request.messages
-        assert "tenant=acme agent=assistant run=run_" in messages[0].content
+        assert f"tenant=acme agent=assistant run={observed['run_id']}" in messages[0].content
         return LLMResponse(content="done")
 
     agent = Agent(
@@ -73,7 +73,7 @@ def test_dynamic_instructions_receive_agent_and_complete_run_context(tmp_path: P
 
     assert result.final_output == "done"
     assert observed["same_agent"] is True
-    assert str(observed["run_id"]).startswith("run_")
+    assert observed["run_id"] == result.run_id
     assert observed["agent_name"] == "assistant"
     assert observed["model"] == "m"
     assert observed["workspace"] == tmp_path

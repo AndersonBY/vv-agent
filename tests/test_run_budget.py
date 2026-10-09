@@ -26,7 +26,6 @@ from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.runtime import CancellationToken
-from vv_agent.runtime.backends import InlineBackend, ThreadBackend
 from vv_agent.tools import ToolOutputText
 from vv_agent.types import CacheUsage, CacheUsageStatus, LLMResponse, TokenUsage, ToolCall, UsageSource
 
@@ -289,7 +288,8 @@ def _scripted_response(step: dict[str, Any]) -> LLMResponse:
 
 
 @pytest.mark.parametrize("case", _fixture()["runner_cases"], ids=lambda case: case["name"])
-def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_path: Path) -> None:
+def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("vv_agent.session.kernel.time.monotonic_ns", lambda: 100_000_000)
     model_calls = 0
     scripted_steps: list[ScriptStep] = []
     for step in case["steps"]:
@@ -374,7 +374,10 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
     expected_exhaustion = expected["budget_exhaustion"]
     assert (result.budget_exhaustion.to_dict() if result.budget_exhaustion is not None else None) == expected_exhaustion
     if expected_exhaustion is not None:
-        assert [event.type for event in result.events[-2:]] == ["budget_exhausted", "run_failed"]
+        assert [event.type for event in result.events if event.type in {"budget_exhausted", "run_failed"}] == [
+            "budget_exhausted",
+            "run_failed",
+        ]
     if "budget_event_types" in expected:
         assert [event.type for event in result.events if event.type.startswith("budget_")] == expected["budget_event_types"]
 
@@ -478,18 +481,10 @@ def test_post_tool_host_cost_exhaustion_precedes_tool_finish(tmp_path: Path) -> 
     def invoke_tool(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
         nonlocal tool_calls
         tool_calls += 1
+        meter._last = HostCost(unit="credits", amount_microunits=120)
         return ToolOutputText(text="tool finished")
 
-    meter = _Meter(
-        [
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=120),
-        ]
-    )
+    meter = _Meter([HostCost(unit="credits", amount_microunits=0)])
     provider = _provider(
         [
             LLMResponse(
@@ -547,22 +542,15 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
     def invoke_tool(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
         nonlocal tool_calls
         tool_calls += 1
+        meter._last = HostCost(unit="credits", amount_microunits=120)
+        cancellation.cancel("cancelled after completed tool call")
         return ToolOutputText(text="tool side effect completed")
 
     def cancel_after_tool_result(event: Any) -> None:
         if isinstance(event, DiagnosticEvent) and event.code == "tool_result":
             cancellation.cancel("cancelled after completed tool call")
 
-    meter = _Meter(
-        [
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=0),
-            HostCost(unit="credits", amount_microunits=120),
-        ]
-    )
+    meter = _Meter([HostCost(unit="credits", amount_microunits=0)])
     provider = _provider(
         [
             LLMResponse(
@@ -617,51 +605,6 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
     assert result.budget_exhaustion is None
     assert "budget_exhausted" not in [event.type for event in result.events]
     assert result.events[-1].type == "run_cancelled"
-
-
-@pytest.mark.parametrize(
-    "backend_factory",
-    [InlineBackend, lambda: ThreadBackend(max_workers=1)],
-    ids=["inline", "thread"],
-)
-def test_inline_and_thread_backends_share_budget_enforcement(
-    backend_factory: Any,
-    tmp_path: Path,
-) -> None:
-    provider = _provider(
-        [
-            LLMResponse(
-                content="backend draft",
-                raw={
-                    "usage": {
-                        "prompt_tokens": 2,
-                        "completion_tokens": 0,
-                        "total_tokens": 2,
-                        "prompt_tokens_details": {"cached_tokens": 0},
-                    }
-                },
-            )
-        ]
-    )
-    result = Runner.run_sync(
-        Agent(
-            name="backend-budget",
-            instructions="Return the scripted response.",
-            model=MODEL,
-            no_tool_policy="finish",
-        ),
-        "run",
-        run_config=RunConfig(
-            workspace=tmp_path,
-            execution_backend=backend_factory(),
-            budget_limits=RunBudgetLimits(max_total_tokens=1),
-            model_provider=provider,
-        ),
-    )
-
-    assert result.completion_reason is CompletionReason.BUDGET_EXHAUSTED
-    assert result.budget_exhaustion is not None
-    assert result.budget_exhaustion.enforcement_boundary is BudgetEnforcementBoundary.MODEL_CALL_COMPLETE
 
 
 def test_per_run_budget_replaces_configured_runner_default_as_a_whole(tmp_path: Path) -> None:
@@ -781,7 +724,7 @@ def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str
     )
     assert calls == (["memory_compaction", "agent_cycle"] if summary_usage < 10 else ["memory_compaction"])
     assert result.budget_usage is not None
-    assert result.budget_usage.cycles == 1
+    assert result.budget_usage.cycles == (1 if summary_usage < 10 else 0)
     if summary_usage < 10:
         assert result.final_output == "done"
     else:

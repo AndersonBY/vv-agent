@@ -163,18 +163,13 @@ def child_config(runtime: Runtime, context: ToolContext, agent: Agent, mode: str
         runtime.config,
         model=None,
         model_settings=None,
-        session=None,
         stream=None,
         shared_state=runtime.durable_state(context.shared_state),
         initial_messages=None,
         before_cycle_messages=None,
         interruption_messages=None,
-        sub_task_manager=None,
         cancellation_token=None,
         host_cost_meter=None,
-        checkpoint_config=None,
-        checkpoint_extensions=[],
-        reconciliation_provider=None,
         workspace=context.workspace,
         workspace_backend=context.workspace_backend,
     )
@@ -572,13 +567,16 @@ class ChildTasks:
         if created._payload["parent_session_id"] != self.parent_id:
             return None
         rt = reconstruct(self.runtime, self.store, task_id)
-        value = outcome(self.store, task_id, rt)
-        state, _, _ = self.store.read_state(task_id)
+        # Read pending inputs before the log so admission cannot look like an old terminal.
+        pending = self.store.peek_inbox(task_id)
+        snapshot = self.store.read_state(task_id)
+        state, _, _ = snapshot
+        value = outcome(self.store, task_id, rt, snapshot=snapshot)
         latest_turn = state.turns[next(reversed(state.turns))] if state.turns else None
         if state.active_turn_id is not None and state.phase == "active":
             value = replace(value, status=AgentStatus.RUNNING)
         if state.active_turn_id is None and (
-            any(item.item.kind == "follow_up" for item in self.store.peek_inbox(task_id))
+            any(item.item.kind == "follow_up" and item.item.input_id not in state.admitted_inputs for item in pending)
             or any(
                 r._payload["disposition"] == "queued" and i not in state.admitted_inputs for i, r in state.applied_inputs.items()
             )
@@ -667,6 +665,7 @@ class ChildTasks:
                 }
         with self.store.atomic() as tx:
             tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
+        self.runtime.wake(task_id)
         return action
 
     def tool_manager(self) -> SubTaskManager:

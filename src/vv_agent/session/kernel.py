@@ -15,15 +15,16 @@ from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
 from vv_agent.events import _project_provider_stream_payload
 from vv_agent.llm.errors import is_prompt_too_long_error
 from vv_agent.llm.vv_llm_client import VvLlmClient
+from vv_agent.memory.microcompact import is_microcompacted_tool_content
 from vv_agent.output_validation import OutputRepairRequest
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
-from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.runtime.tool_results import apply_tool_use_behavior, build_skipped_result
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 from .approval import resolve_approval
-from .children import child_handles, child_outcome, create_child, verify_completion
+from .children import cancel_children, child_handles, child_outcome, create_child, verify_completion
 from .compaction import compact_context, finish_summary
 from .context import project_context
 from .delegation import admitted_result, assemble, result_for_children
@@ -369,7 +370,7 @@ class _Driver:
         records = []
         op = self.state.operations[plan.operation_id]
         turn = self.state.turns[plan.turn_id]
-        if op.kind == "model" and plan._payload["purpose"] == "primary" and context == "normal":
+        if op.kind == "model" and context == "normal":
             if any(
                 r._payload["data"]["exhaustion"]
                 for (tid, stage, _), r in self.state.boundaries.items()
@@ -379,12 +380,18 @@ class _Driver:
             evaluator = self.live_budget()
             if evaluator and self.boundary("budget", f"{plan.operation_id}/complete/{plan.attempt}") is None:
                 exhaustion = evaluator.model_call_complete(model_usage(outcome.usage))
+                if self.scope.token.cancelled or (
+                    self.runtime.config.cancellation_token is not None and self.runtime.config.cancellation_token.cancelled
+                ):
+                    exhaustion = None
                 records.append(
                     self.budget_record(
                         f"{plan.operation_id}/complete/{plan.attempt}", evaluator, exhaustion, source=plan.operation_id
                     )
                 )
                 if exhaustion:
+                    return records
+                if plan._payload["purpose"] != "primary":
                     return records
                 names = [call["name"] for call in outcome.result.get("tool_calls", [])]
                 if names:
@@ -400,6 +407,8 @@ class _Driver:
                     )
                     if exhaustion:
                         return records
+            if plan._payload["purpose"] != "primary":
+                return records
             definition = turn.start._payload["definition"]
             for i, call in enumerate(outcome.result.get("tool_calls", [])):
                 oid = f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}"
@@ -412,6 +421,21 @@ class _Driver:
                         capability=definition["capabilities"].get(call["name"], {}),
                     )
                     records.append(planned)
+        elif op.kind != "model" and context == "normal":
+            evaluator = self.live_budget()
+            if evaluator is not None:
+                before = evaluator.snapshot()
+                exhaustion = evaluator.tool_batch_complete(operation_failed=outcome.result.get("status_code") == "ERROR")
+                if self.scope.token.cancelled or (
+                    self.runtime.config.cancellation_token is not None and self.runtime.config.cancellation_token.cancelled
+                ):
+                    exhaustion = None
+                if evaluator.snapshot() != before or exhaustion:
+                    records.append(
+                        self.budget_record(
+                            f"{plan.operation_id}/tool_complete/{plan.attempt}", evaluator, exhaustion, source=plan.operation_id
+                        )
+                    )
         return records
 
     def unknown(self, plan: Record, reason: str) -> Record:
@@ -510,7 +534,7 @@ class _Driver:
                 )
             ):
                 continue
-            if item.kind == "steer" and self.pending_batch() and target_tid == tid:
+            if item.kind == "steer" and (tid is None or (self.pending_batch() and target_tid == tid)):
                 continue
             if item.kind == "child_result":
                 target, extra, disposition, reason = self.apply_child(item)
@@ -760,7 +784,7 @@ class _Driver:
             if not self.state.turns:
                 seed = self.records[0].record._payload["attributes"].get("seed")
                 if seed is not None:
-                    task.initial_messages = [Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]]
+                    task.initial_messages = [Message.from_dict(copy_json(m)) for m in seed["messages"]]
                     task.initial_shared_state = copy_json(seed["shared_state"])
             definition = self.runtime._definition(task)
             prior = self.runtime._retained_task_key
@@ -822,7 +846,7 @@ class _Driver:
         assert self.state.active_turn_id is not None
         return self.runtime.bind_state(self.durable_shared_state(), self.state.turns[self.state.active_turn_id].start._task())
 
-    def model_plan(self) -> Record:
+    def model_plan(self) -> Record | None:
         messages = self.transcript()
         tid = self.state.active_turn_id
         assert tid is not None
@@ -841,6 +865,8 @@ class _Driver:
             for op in self.state.operations.values()
         )
         shared = self.shared_state()
+        if self.runtime.config.interruption_messages:
+            messages.extend(self.runtime.config.interruption_messages())
         if self.runtime.config.before_cycle_messages:
             messages.extend(self.runtime.config.before_cycle_messages(cycle, list(messages), shared))
         messages, schemas = self.runtime.hooks.apply_before_llm(
@@ -853,6 +879,13 @@ class _Driver:
         denied = read_after_cycle_disallowed_tools(shared)
         if denied:
             schemas = [schema for schema in schemas if schema["function"]["name"] not in denied]
+        if not any(schema["function"]["name"] == "read_file" for schema in schemas) and any(
+            (message.role == "tool" and is_microcompacted_tool_content(message.content))
+            or any(message.metadata.get("_vv_agent_compaction", {}).get(key) for key in ("artifacts", "cursors"))
+            for message in messages
+        ):
+            self.close("failed", "microcompaction_recovery_unavailable")
+            return None
         request = {
             "model": task.model,
             "messages": [m.to_dict() for m in messages],
@@ -897,7 +930,7 @@ class _Driver:
                             a.execution_plan,
                             Definitive(
                                 (
-                                    ToolCallRunner._build_skipped_result(
+                                    build_skipped_result(
                                         ToolCall.from_dict(a.execution_plan.payload["request"]),
                                         error_code="skipped_due_to_finish",
                                         message="Tool skipped because a previous tool finished the task.",
@@ -928,34 +961,13 @@ class _Driver:
                             continue
                     records.append(self.unknown(a.execution_plan, reason or "turn stopped"))
 
-        def cancel_children(tx: SessionTx) -> list[Record]:
-            for op in self.state.operations.values():
-                if op.turn_id != tid:
-                    continue
-                for a in op.attempts.values():
-                    group = a.child_handle
-                    if group is None:
-                        continue
-                    for h in child_handles(group):
-                        child_state, _, _ = read_state(self.store, h["session_id"])
-                        child_tid = child_state.active_turn_id or h["turn_id"]
-                        child_turn = child_state.turns.get(child_tid)
-                        if child_turn is None or not child_turn.ended:
-                            tx.push(
-                                h["session_id"],
-                                InboxItem(
-                                    f"parent-cancel/{self.sid}/{tid}/{a.plan.operation_id}/{a.plan.attempt}",
-                                    "control",
-                                    {"action": "cancel"},
-                                    child_tid,
-                                    child_turn.start._payload["generation"] if child_turn else h["generation"],
-                                ),
-                            )
-            return []
-
         stopping = status in {"failed", "cancelled", "aborted"}
         if records or stopping:
-            self.commit(records, guarded=True, prepare=cancel_children if stopping else None)
+            self.commit(
+                records,
+                guarded=True,
+                prepare=(lambda tx: cancel_children(self.store, tx, self.state, self.sid, tid)) if stopping else None,
+            )
         evaluator = budget(self.state, tid)
         terminal = self.record(
             "turn_ended",
@@ -1137,7 +1149,7 @@ class _Driver:
                     and pending.state == "planned"
                     and pending.plan._payload["dependencies"] == plan._payload["dependencies"]
                 ):
-                    result = ToolCallRunner._build_skipped_result(
+                    result = build_skipped_result(
                         ToolCall.from_dict(pending.execution_plan.payload["request"]),
                         error_code="skipped_due_to_wait_user",
                         message="Tool skipped because a previous tool requested user input.",
@@ -1307,9 +1319,9 @@ class _Driver:
             context=replace(context, tool_call_id=call.id, tool_name=call.name, arguments=dict(call.arguments)),
             result=ToolExecutionResult.from_dict(outcome.result),
         )
-        if not result.tool_call_id:
+        if not result.tool_call_id.strip():
             result.tool_call_id = call.id
-        stop = ToolCallRunner._apply_tool_use_behavior(task=self.task(), call=call, result=result)
+        stop = apply_tool_use_behavior(task=self.task(), call=call, result=result)
         if stop is not None:
             result.metadata["completion_reason"] = stop.value
         return replace(outcome, result=result.to_dict(), shared_state=self.runtime.durable_state(context.shared_state))
@@ -1397,7 +1409,7 @@ class _Driver:
                     result._payload["result"].get("error_code")
                     if transfer_failed
                     else result._payload["result"].get("metadata", {}).get("completion_reason", "tool_finish"),
-                    result._payload["result"]["content"],
+                    result._payload["result"].get("metadata", {}).get("final_message", result._payload["result"]["content"]),
                     transferred=result._payload["result"].get("metadata", {}).get("mode") == "handoff",
                 )
                 return True
@@ -1412,7 +1424,7 @@ class _Driver:
                 for other_id, other in operations:
                     pending = other.attempts[max(other.attempts)]
                     if other_id != result.operation_id and pending.state == "planned":
-                        value = ToolCallRunner._build_skipped_result(
+                        value = build_skipped_result(
                             ToolCall.from_dict(pending.execution_plan.payload["request"]),
                             error_code="skipped_due_to_wait_user",
                             message="Tool skipped because a previous tool requested user input.",
@@ -1479,7 +1491,7 @@ class _Driver:
                 if op.kind == "model" and a.plan._payload["purpose"] != "compaction":
                     self.close("failed", "model_outcome_unknown")
                     return True
-            if a.state == "planned" or (a.state == "parked" and a.approval):
+            if a.state == "planned" or (a.state == "parked" and a.approval and a.wait and a.wait["handle"]["kind"] == "approval"):
                 if (a.plan._payload["not_before_ms"] or 0) > self.scope.poll(self.store).db_now_ms:
                     return False
                 self.dispatch(a)
@@ -1580,7 +1592,9 @@ class _Driver:
             return True
         if compact_context(self):
             return True
-        self.commit([self.model_plan()], guarded=True)
+        plan = self.model_plan()
+        if plan is not None:
+            self.commit([plan], guarded=True)
         return True
 
 

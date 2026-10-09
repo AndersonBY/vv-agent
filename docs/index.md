@@ -15,12 +15,12 @@ history.
 | `session-kernel-capability-matrix.md` | F3 capability gate, Runner/SQLite parity evidence, explicit gaps and short-run benchmark methodology. |
 | `session-kernel-f2d-children-report.md` | F2d-3 child SDK adapters, host bindings, intentional differences and measured gates. |
 | `session-kernel-f2d-surfaces-report.md` | F2d-4 private interactive/CLI/App Server assembly, C1 wire items, F3 deletion inventory and measured gates. |
-| `session-kernel.md` | Internal non-default session kernel, SQL stores, recovery, compaction, and test isolation. |
+| `session-kernel.md` | Default session kernel, SQL stores, recovery, compaction, and test isolation. |
 | `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
-| `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and checkpoint receipts. |
-| `run-budgets.md` | Token, tool, wall-time, and host-cost limits; observations, resume, and distributed behavior. |
+| `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and retained operation receipts. |
+| `run-budgets.md` | Token, tool, wall-time, and host-cost limits; retained observations and same-turn resume. |
 | `output-validation.md` | Default-off typed output validation, one tools-free repair callback, and failure semantics. |
-| `checkpoint-resume.md` | Checkpoint v12, immutable run definitions, model-call ledgers, deferred barriers, ambiguity, host interaction, and durable terminal ordering. |
+| `session-kernel-f3a-report.md` | Contract v24 adoption, entrypoint cutover, validation and F3b extraction inventory. |
 | `app-server.md` | JSONL protocol, lifecycle, approval, schema generation, CLI startup, and host boundary. |
 
 ## Existing Entry Points

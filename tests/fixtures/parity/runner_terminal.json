@@ -1,80 +1,195 @@
 {
-  "version": "v1",
-  "success_with_session": {
-    "tail": [
-      "session_persisted",
-      "run_completed"
-    ],
-    "terminal": "run_completed",
-    "status": "completed",
-    "completion_reason": "tool_finish"
-  },
-  "output_guardrail_block": {
-    "tail": [
-      "session_persisted",
-      "run_failed"
-    ],
-    "terminal": "run_failed",
-    "status": "failed",
-    "completion_reason": "failed",
-    "partial_output": "blocked final output candidate",
-    "error": "blocked final output",
-    "later_guardrails_run": false
-  },
-  "cancellation": {
-    "terminal": "run_cancelled",
-    "terminal_count": 1,
-    "completion_reason": "cancelled"
-  },
-  "max_cycles": {
-    "terminal": "run_failed",
-    "status": "max_cycles",
-    "completion_reason": "max_cycles",
-    "partial_output": "unfinished draft"
-  },
   "budget_exhausted": {
+    "budget_fixture": "run_budget.json",
+    "completion_reason": "budget_exhausted",
+    "completion_tool_name": null,
+    "error": "Run budget exhausted.",
     "events_tail": [
       "budget_exhausted",
       "run_failed"
     ],
-    "terminal": "run_failed",
-    "terminal_count": 1,
+    "partial_output": null,
     "status": "failed",
-    "completion_reason": "budget_exhausted",
-    "completion_tool_name": null,
-    "partial_output": "draft over budget",
-    "error": "Run budget exhausted.",
-    "budget_fixture": "run_budget.json"
+    "terminal": "run_failed",
+    "terminal_count": 1
   },
-  "event_store_fail_closed": {
-    "error": "run event store append failed: store down",
-    "panics": false
+  "cancellation": {
+    "completion_reason": "cancelled",
+    "terminal": "run_cancelled",
+    "terminal_count": 1
   },
-  "reconciliation_required": {
-    "events_tail": [
-      "operation_ambiguous",
-      "reconciliation_required"
+  "max_cycles": {
+    "completion_reason": "max_cycles",
+    "partial_output": "unfinished draft",
+    "status": "max_cycles",
+    "terminal": "run_failed"
+  },
+  "output_guardrail_block": {
+    "completion_reason": "failed",
+    "error": "blocked final output",
+    "later_guardrails_run": false,
+    "partial_output": "blocked final output candidate",
+    "status": "failed",
+    "tail": [
+      "model_call_completed",
+      "run_failed"
     ],
-    "terminal": null,
-    "terminal_count": 0,
-    "status": "reconciliation_required",
-    "completion_reason": null,
-    "error": null,
-    "checkpoint_retained": true
+    "terminal": "run_failed"
   },
-  "checkpoint_terminal_order": {
-    "order": [
-      "runtime_candidate_result",
-      "output_guardrail",
-      "session_add_items_once",
-      "session_persisted_observation",
-      "terminal_event_outbox_pending",
-      "checkpoint_terminal_finalize",
-      "terminal_event_outbox_delivered",
-      "terminal_event_delivery_recorded",
-      "terminal_acknowledge_retained"
+  "producer_cases": [
+    {
+      "completion_reason": "no_tool_finish",
+      "completion_tool_name": null,
+      "cycles": 2,
+      "error": null,
+      "error_code": null,
+      "final_answer": "done",
+      "final_output": "done",
+      "model_calls": 2,
+      "name": "tools",
+      "partial_output": null,
+      "session_id": "tools",
+      "status": "completed",
+      "terminal_events": [
+        {
+          "agent_name": "fixture",
+          "created_at": 1000.0,
+          "event_id": "sk/936e749e2a58cda0469f4197ffc5a9cfdff5bfdd4bcb9d4725c55999c0476a37/event",
+          "final_output": "done",
+          "metadata": {
+            "session_seq": 42
+          },
+          "run_id": "tools/turn/initial",
+          "session_id": "tools",
+          "status": "completed",
+          "trace_id": "tools/turn/initial",
+          "type": "run_completed",
+          "version": "v6"
+        }
+      ],
+      "tool_execution_count": 1,
+      "turn_id": "tools/turn/initial",
+      "wait_reason": null
+    },
+    {
+      "completion_reason": "failed",
+      "completion_tool_name": null,
+      "cycles": 0,
+      "error": "blocked",
+      "error_code": "agent_failed",
+      "final_answer": null,
+      "final_output": "blocked",
+      "model_calls": 0,
+      "name": "blocked",
+      "partial_output": null,
+      "session_id": "blocked",
+      "status": "failed",
+      "terminal_events": [
+        {
+          "agent_name": "blocked",
+          "created_at": 1000.0,
+          "error": "agent_failed",
+          "event_id": "sk/d4e1b413bdb97ef4d4c18e6d7f190abc794a6fc3c5e45c0700712235c8233f7d/event",
+          "metadata": {
+            "session_seq": 6
+          },
+          "partial_output": null,
+          "run_id": "blocked/turn/initial",
+          "session_id": "blocked",
+          "status": "failed",
+          "trace_id": "blocked/turn/initial",
+          "type": "run_failed",
+          "version": "v6"
+        }
+      ],
+      "tool_execution_count": 0,
+      "turn_id": "blocked/turn/initial",
+      "wait_reason": null
+    },
+    {
+      "completion_reason": "budget_exhausted",
+      "completion_tool_name": null,
+      "cycles": 1,
+      "error": "Run budget exhausted.",
+      "error_code": "run_budget_exhausted",
+      "final_answer": null,
+      "final_output": "Run budget exhausted.",
+      "model_calls": 1,
+      "name": "budget",
+      "partial_output": null,
+      "session_id": "budget",
+      "status": "failed",
+      "terminal_events": [
+        {
+          "agent_name": "fixture",
+          "created_at": 1000.0,
+          "error": "budget_exhausted",
+          "event_id": "sk/e1112e970f5a0d33fd33dc7edebf45201dd15e1b56ff7f71dff0ac6ddb0d5457/event",
+          "metadata": {
+            "session_seq": 16
+          },
+          "partial_output": null,
+          "run_id": "budget/turn/initial",
+          "session_id": "budget",
+          "status": "failed",
+          "trace_id": "budget/turn/initial",
+          "type": "run_failed",
+          "version": "v6"
+        }
+      ],
+      "tool_execution_count": 0,
+      "turn_id": "budget/turn/initial",
+      "wait_reason": null
+    },
+    {
+      "completion_reason": "no_tool_finish",
+      "completion_tool_name": null,
+      "cycles": 1,
+      "error": null,
+      "error_code": null,
+      "final_answer": "[1, 2]",
+      "final_output": [
+        1,
+        2
+      ],
+      "model_calls": 2,
+      "name": "repair",
+      "partial_output": null,
+      "session_id": "repair",
+      "status": "completed",
+      "terminal_events": [
+        {
+          "agent_name": "fixture",
+          "created_at": 1021.001,
+          "event_id": "sk/a1fdc24e98d4e6cfcf851cea882628c48c68e57ae7ed273f013c54fd21cc1097/event",
+          "final_output": [
+            1,
+            2
+          ],
+          "metadata": {
+            "session_seq": 20
+          },
+          "run_id": "repair/turn/initial",
+          "session_id": "repair",
+          "status": "completed",
+          "trace_id": "repair/turn/initial",
+          "type": "run_completed",
+          "version": "v6"
+        }
+      ],
+      "tool_execution_count": 0,
+      "turn_id": "repair/turn/initial",
+      "wait_reason": null
+    }
+  ],
+  "success_with_session": {
+    "completion_reason": "tool_finish",
+    "status": "completed",
+    "tail": [
+      "diagnostic",
+      "run_completed"
     ],
-    "terminal_deleted_on_acknowledgement": false,
-    "explicit_retention_cleanup_required": true
-  }
+    "terminal": "run_completed"
+  },
+  "version": "v2"
 }

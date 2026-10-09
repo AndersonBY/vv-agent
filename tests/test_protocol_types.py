@@ -7,12 +7,25 @@ from typing import Any
 
 import pytest
 
+from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools.outcomes import DeferredResolutionResultInvalid, validate_definitive_result
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
 BOUNDED_RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "bounded_tool_result.json"
+
+
+def _produced_tool_calls(calls):
+    from vv_agent.types import LLMResponse
+
+    result = Runner.run_sync(
+        Agent("tools", "Run tools."),
+        "go",
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("", calls), LLMResponse("done")]),
+        ),
+    )
+    return next(message.tool_calls for message in result.raw_result.messages if message.tool_calls)
 
 
 def _set_dotted(payload: dict[str, Any], dotted: str, value: object) -> None:
@@ -195,7 +208,7 @@ def test_assistant_message_preserves_tool_call_extra_content() -> None:
 
 
 def test_cycle_runner_serializes_tool_call_extra_content() -> None:
-    serialized = CycleRunner._serialize_tool_calls(
+    serialized = _produced_tool_calls(
         [
             ToolCall(
                 id="call_1",
@@ -209,11 +222,9 @@ def test_cycle_runner_serializes_tool_call_extra_content() -> None:
 
 
 def test_cycle_runner_serializes_tool_call_arguments_as_canonical_json() -> None:
-    serialized = CycleRunner._serialize_tool_calls(
-        [ToolCall(id="call_1", name="task_finish", arguments={"message": "done", "count": 2})]
-    )
+    serialized = _produced_tool_calls([ToolCall(id="call_1", name="task_finish", arguments={"message": "done", "count": 2})])
 
-    assert serialized[0]["function"]["arguments"] == '{"message":"done","count":2}'
+    assert serialized[0]["function"]["arguments"] == '{"count":2,"message":"done"}'
 
 
 def test_assistant_message_can_skip_reasoning_content() -> None:

@@ -1,12 +1,28 @@
-# Internal session kernel
+# Session kernel
 
-`vv_agent.session` is an internal, non-default synchronous kernel. Runner,
-interactive sessions, CLI and App Server keep their current public defaults.
-Interactive, CLI and App Server tests can supply one private `_kernel` owner;
-there is no environment switch or user-selectable execution mode. Nothing is
-exported from the top-level `vv_agent` package. The contract
-lock and public wire remain at version 23; this module is not a verified public
-persistence or wire format. Rust remains frozen and is outside this adoption.
+The session kernel is the only execution path for Runner, configured Runner,
+RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinary
+runs own an SQLite `:memory:` store. Hosts opt into durable execution through
+SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
+
+The lock selects contract 24.0.1. Current codecs are RunEvent v6, model-call v2,
+task-token-usage v3, strict Message and App Server protocol v2. Public exports
+match public_api v8. Rust remains frozen at contract 23.0.0 and is outside this
+Python adoption. Retired execution modules remain on disk for F3b extraction;
+they supply no public execution path.
+
+Runner.resume(session_id, turn_id) reads the retained identity. User and approval
+replies continue the same turn; a fresh prompt after a terminal admits a fresh
+turn. AgentSession history and state are read-only projections; initial messages
+and JSON state belong to the creation-time seed. A closed session cannot reopen.
+
+LeaseLost recovery uses bounded exponential backoff with jitter. Runtime defaults
+are five losses, 10 ms initial delay and a 500 ms delay cap; each delay is sampled
+between half and all of the capped delay. Runtime accepts injected sleep/jitter
+functions for deterministic tests. Exhaustion raises LeaseRetryExhausted to
+Runner and interactive callers and produces typed App Server error responses or
+notifications. Recovery reads can also lose their lease and count toward the
+same cap. A committed terminal completes its original turn without re-dispatch.
 
 ## Modules and logical bytes
 
@@ -33,7 +49,7 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
   session-memory file projections to committed boundaries.
 - `projection.py`, `result.py`, `events.py` and `tracing.py` provide typed host
   projections; events and spans acknowledge through existing consumer cursors.
-- `surfaces.py` assembles the private SQLite owner and host handles; ordinary
+- `surfaces.py` assembles the SQLite owner and host handles; ordinary
   runs use `:memory:` and retained sessions use a SQLite file. Blocking children
   drive after releasing the parent lease; background children drive independently.
 - `interactive.py` implements steering, follow-up, user/approval replies,
@@ -42,7 +58,7 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
   creates no second thread ledger. App Server metadata uses the closed reserved
   `session_created.attributes.app_server` object (`agent_key`, `cwd`, `metadata`).
 
-The private App Server resumes active turns from retained records and the original
+The App Server resumes active turns from retained records and the original
 approval owner. Recovery waits for an existing lease to release or expire. Client
 timeline replay uses stable item IDs and `afterItemId`; notification delivery
 acknowledges the `app_server` consumer cursor only after transport projection.
@@ -50,14 +66,8 @@ Images retain both their wire input and model messages. Child waits expose safe
 session/turn/interaction identities; responses target the child's inbox before
 the parent adopts its terminal. Archive and close use stable control identities:
 equal bytes replay, different bytes conflict, and closed turns never revive.
-The internal wire differences and unchanged schema/model exports are recorded in
-[`session-kernel-f2d-surfaces-report.md`](session-kernel-f2d-surfaces-report.md).
-
-Handles also recover after lease loss: `drive` raises `LeaseLost` on heartbeat
-failure, and the private App Server/interactive handle acquires a fresh epoch
-and rebuilds from retained records. It waits while another writer owns the lease;
-committed model/tool receipts are not dispatched again. A retained terminal
-receipt completes the original handle without admitting another turn.
+Current adoption and fixture correction evidence is recorded in
+[`session-kernel-f3a-report.md`](session-kernel-f3a-report.md).
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
 with SHA-256 digests. Producer construction validates and freezes each Record's
@@ -726,8 +736,8 @@ consumer. `deliver_spans` requires a top-level transaction and commits its curso
 before invoking processors, preventing recovery duplicates. Telemetry is therefore
 at most once and may be lost after acknowledgement; processor failures remain
 isolated. Span output is detached before delivery so processors cannot mutate
-retained result data. Host assembly supplies processors explicitly; no default
-wiring changed.
+retained result data. Host assembly supplies processors explicitly, and all
+public entrypoints use these kernel projections.
 
 ## C1b reviewer decisions and v24 authoring
 
@@ -739,7 +749,7 @@ object containing optional `endpoint_order`, `endpoint_id`, `shared_state` and
 `cycle_index`. All other metadata keys remain opaque JSON, including names
 previously used by the kernel. Completion state lives in required-nullable
 `op_completed.shared_state`; usage contains measurements. `output_repair` is a
-kernel model-call v2 operation; non-kernel model-call v1 rejects it.
+model-call v2 operation; older model-call versions are rejected.
 Other extension content remains opaque JSON. Hashes require exactly 64 lowercase
 hex characters, including at nested inbox/handle boundaries; a newline fails.
 Compaction identity has no summary segment when `summary_operation_id` is null.
@@ -757,7 +767,7 @@ writable session access. Seed cannot be changed after creation.
 | Closed execution | `turn/start`, `turn/resume` and execution-subscribing `thread/resume` reject with -32602 `Thread is closed`; read/list and nonexecuting resume remain available. |
 | Lost approval owner | Retain the original owner; observers cannot approve or take over. A configured absolute deadline resolves unanswered approval using timeoutDecision, including after owner loss/restart; recovery never resets it. Hosts configure finite `approval_timeout_seconds` for bounded waits. |
 | Provider completion | Inbox discriminator is `provider_result`; the retired discriminator is rejected. |
-| Q4 public execution API | F3 switches Runner.resume to explicit session/turn IDs or AgentSession and removes RunState wrappers and public AgentRuntime/ToolCallRunner execution surfaces. SessionRunEventStore and JSONL remain projection/sink capabilities; the old RunEventStore protocol and IdempotentRunEventStore ledger are removed. C1b retains default public wiring. |
+| Q4 public execution API | Runner.resume uses explicit session/turn IDs; RunState wrappers and public AgentRuntime/ToolCallRunner execution surfaces are removed. SessionRunEventStore and JSONL remain projection/sink capabilities; the old RunEventStore protocol and IdempotentRunEventStore ledger are removed. F3a adopts this wiring. |
 | Q8 public versions | Private App Server and both schema exporters emit protocol v2 now. Public API fixture v8 and default adoption belong to F3; bundle names stay unchanged. |
 
 `scripts/session_kernel_fixtures.py --output DIR` authors forty-five v24 files
@@ -824,16 +834,11 @@ observe it, and still detaches the task before host callbacks.
 Result projection reads retained tasks and scalar plan fields without copying
 unrelated tool schemas; its returned messages and shared state remain detached.
 
-Runner and ConfiguredRunner accept the private `_kernel` selector for authoring.
-Private handles use committed records, support independent event iterators, isolate
-observer failures, and translate a configured cancellation token into durable
-control input after turn admission. Their resume selector takes an existing
-session and `_turn_id`, admits no new input, and rejects closed sessions before
-writing. Default v23 behavior and package exports remain unchanged. Kernel result
-serialization carries session/turn identity and the current usage ledger. Kernel
-Message decoding reuses the strict shared value codec, including seed admission;
-it does not use the retired transcript store as execution authority. The JSONL
-sink has a private decoder selector for v6 projected events.
+Runner and ConfiguredRunner use one session driver. Handles project committed
+records, expose independent event iterators, isolate observer failures and translate
+cancellation tokens into durable inbox controls. Resume identifies an existing
+session and turn and rejects closed sessions before writing. Message decoding uses
+the strict shared codec; JSONL sinks accept only v6 projected events.
 Compilation binds the supplied turn identity before freezing the definition.
 Cancellation requests share a retained inbox identity, so repeated requests do
 not create another control. Approval-provider failures retain a failed terminal
@@ -847,10 +852,9 @@ the admitted manager projection.
 Context projection uses the shared empty-assistant sanitizer, preserving reasoning
 and tool calls while excluding fully empty turns from model and resumable history.
 
-The public API v8 file is an authoring plan: actual Python exports minus the
-retired inventory plus accepted session names. Store and transaction capabilities
-have names and behavior only. F3 must wire the planned root exports and the
-public `Runner.resume(session_id, turn_id)` shape.
+The public API v8 file matches actual Python exports and accepted session names.
+Store and transaction capabilities have names and behavior only. Public root
+exports and `Runner.resume(session_id, turn_id)` select this path.
 
 Record encoding reuses the exact nested JCS bytes already checked for an embedded
 digest when composing the closed ASCII-key record envelope. Other payload fields

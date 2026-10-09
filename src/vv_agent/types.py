@@ -11,7 +11,6 @@ from typing import Any, Literal, cast
 
 from vv_agent.budget import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.canonical_json import canonical_json_bytes, validate_sha256
-from vv_agent.checkpoint import ResumeObservation
 from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import PromptBundle
@@ -193,48 +192,12 @@ class Message:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> Message:
-        if _kernel:
-            # Reuse the strict value codec, without the old transcript storage authority.
-            from vv_agent.sessions.base import _decode_canonical_message
+    def from_dict(cls, data: dict[str, Any]) -> Message:
+        from vv_agent.message_codec import _decode_canonical_message
 
-            if not isinstance(data, dict):
-                raise TypeError("Message payload must be a dict")
-            return _decode_canonical_message(data)
         if not isinstance(data, dict):
             raise TypeError("Message payload must be a dict")
-        _reject_unknown_fields(data, _MESSAGE_FIELDS, "Message")
-        if "role" not in data or not isinstance(data["role"], str):
-            raise TypeError("Message field 'role' must be a string")
-        if data["role"] not in {"system", "user", "assistant", "tool"}:
-            raise ValueError(f"Unknown Message role: {data['role']}")
-        if "content" not in data or not isinstance(data["content"], str):
-            raise TypeError("Message field 'content' must be a string")
-        for field_name in ("name", "tool_call_id", "reasoning_content", "image_url"):
-            if field_name in data and data[field_name] is not None and not isinstance(data[field_name], str):
-                raise TypeError(f"Message field {field_name!r} must be a string")
-        if "tool_calls" in data:
-            tool_calls = data["tool_calls"]
-            if not isinstance(tool_calls, list) or not all(isinstance(item, dict) for item in tool_calls):
-                raise TypeError("Message field 'tool_calls' must be a list of dicts")
-        metadata = data.get("metadata", {})
-        if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
-            raise TypeError("Message field 'metadata' must be a dict with string keys")
-        validate_compaction_metadata(metadata)
-        raw_artifact_ref = data.get("artifact_ref")
-        if "artifact_ref" in data and not isinstance(raw_artifact_ref, dict):
-            raise TypeError("Message field 'artifact_ref' must be an object")
-        return cls(
-            role=cast(Role, data["role"]),
-            content=data["content"],
-            name=data.get("name"),
-            tool_call_id=data.get("tool_call_id"),
-            tool_calls=data.get("tool_calls"),
-            reasoning_content=data.get("reasoning_content"),
-            image_url=data.get("image_url"),
-            metadata=dict(metadata),
-            artifact_ref=ToolArtifactRef.from_dict(raw_artifact_ref) if raw_artifact_ref is not None else None,
-        )
+        return _decode_canonical_message(data)
 
 
 @dataclass(slots=True)
@@ -279,8 +242,8 @@ class CacheUsageStatus(StrEnum):
 
 
 TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.token-usage.v1"
-TASK_TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.task-token-usage.v2"
-MODEL_CALL_SCHEMA_VERSION = "vv-agent.model-call.v1"
+TASK_TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.task-token-usage.v3"
+MODEL_CALL_SCHEMA_VERSION = "vv-agent.model-call.v2"
 
 
 class ModelCallOperation(StrEnum):
@@ -489,7 +452,6 @@ class ModelCallRecord:
     status: ModelCallStatus
     usage: TokenUsage
     error_code: str | None = None
-    _kernel: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.call_id = _required_non_empty_string(self.call_id, "call_id")
@@ -498,8 +460,7 @@ class ModelCallRecord:
             raise ValueError("attempt must be between 1 and 4294967295")
         if not isinstance(self.operation, ModelCallOperation):
             self.operation = ModelCallOperation(self.operation)
-        if self.operation is ModelCallOperation.OUTPUT_REPAIR and not self._kernel:
-            raise ValueError("output_repair requires kernel model-call schema")
+        pass
         if isinstance(self.cycle_index, bool) or not isinstance(self.cycle_index, int) or not 1 <= self.cycle_index <= _MAX_U32:
             raise ValueError("cycle_index must be between 1 and 4294967295")
         self.backend = _required_non_empty_string(self.backend, "backend")
@@ -516,7 +477,7 @@ class ModelCallRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            **({"schema_version": "vv-agent.model-call.v2"} if self._kernel else {}),
+            **({"schema_version": "vv-agent.model-call.v2"}),
             "call_id": self.call_id,
             "operation_id": self.operation_id,
             "attempt": self.attempt,
@@ -530,11 +491,11 @@ class ModelCallRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> ModelCallRecord:
+    def from_dict(cls, data: dict[str, Any]) -> ModelCallRecord:
         _require_exact_keys(
             data,
             {
-                *({"schema_version"} if _kernel else set()),
+                *({"schema_version"}),
                 "call_id",
                 "operation_id",
                 "attempt",
@@ -548,13 +509,12 @@ class ModelCallRecord:
             },
             "ModelCallRecord",
         )
-        if _kernel and data["schema_version"] != "vv-agent.model-call.v2":
+        if data["schema_version"] != "vv-agent.model-call.v2":
             raise ValueError("unsupported kernel model-call schema")
         nested = data["usage"]
         if not isinstance(nested, dict):
             raise TypeError("ModelCallRecord usage must be an object")
         return cls(
-            _kernel=_kernel,
             call_id=data["call_id"],
             operation_id=data["operation_id"],
             attempt=data["attempt"],
@@ -617,7 +577,6 @@ class TaskTokenUsage:
     reasoning_tokens: int | None = 0
     cache_usage: CacheUsage = field(default_factory=lambda: CacheUsage(source="aggregate"))
     model_calls: list[ModelCallRecord] = field(default_factory=list)
-    _kernel: bool = field(default=False, repr=False, compare=False)
 
     def add_model_call(self, model_call: ModelCallRecord) -> None:
         if not isinstance(model_call, ModelCallRecord):
@@ -641,7 +600,7 @@ class TaskTokenUsage:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "vv-agent.task-token-usage.v3" if self._kernel else TASK_TOKEN_USAGE_SCHEMA_VERSION,
+            "schema_version": "vv-agent.task-token-usage.v3",
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
@@ -651,7 +610,7 @@ class TaskTokenUsage:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> TaskTokenUsage:
+    def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsage:
         _require_exact_keys(
             data,
             {
@@ -665,16 +624,16 @@ class TaskTokenUsage:
             },
             "TaskTokenUsage",
         )
-        if data["schema_version"] != ("vv-agent.task-token-usage.v3" if _kernel else TASK_TOKEN_USAGE_SCHEMA_VERSION):
+        if data["schema_version"] != ("vv-agent.task-token-usage.v3"):
             raise ValueError(f"unsupported TaskTokenUsage schema: {data['schema_version']!r}")
         model_calls = data["model_calls"]
         if not isinstance(model_calls, list):
             raise TypeError("TaskTokenUsage model_calls must be a list")
-        usage = cls(_kernel=_kernel)
+        usage = cls()
         for item in model_calls:
             if not isinstance(item, dict):
                 raise TypeError("TaskTokenUsage model call must be an object")
-            usage.add_model_call(ModelCallRecord.from_dict(item, _kernel=_kernel))
+            usage.add_model_call(ModelCallRecord.from_dict(item))
         expected = usage.to_dict()
         if data != expected:
             raise ValueError("TaskTokenUsage aggregate does not match model_calls")
@@ -1462,11 +1421,9 @@ class AgentResult:
     partial_output: str | None = None
     budget_usage: BudgetUsageSnapshot | None = None
     budget_exhaustion: BudgetExhaustion | None = None
-    checkpoint_key: str | None = None
-    resume_observations: list[ResumeObservation] = field(default_factory=list)
     error_code: str | None = None
-    _kernel_session_id: str | None = field(default=None, repr=False, compare=False)
-    _kernel_turn_id: str | None = field(default=None, repr=False, compare=False)
+    session_id: str | None = field(default=None, repr=False, compare=False)
+    turn_id: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.error is not None:
@@ -1483,22 +1440,6 @@ class AgentResult:
                     raise ValueError("AgentResult error object is invalid")
             else:
                 raise TypeError("AgentResult error must be a typed error object or None")
-        if not isinstance(self.resume_observations, list) or not all(
-            isinstance(item, ResumeObservation) for item in self.resume_observations
-        ):
-            raise TypeError("AgentResult resume_observations must contain ResumeObservation values")
-        unique: dict[tuple[str, str, int], ResumeObservation] = {}
-        for observation in self.resume_observations:
-            key = (
-                observation.operation_id,
-                observation.operation_kind.value,
-                observation.cycle_index,
-            )
-            previous = unique.get(key)
-            if previous is not None and previous != observation:
-                raise ValueError("AgentResult resume_observations contains conflicting identities")
-            unique[key] = observation
-        self.resume_observations = [unique[key] for key in sorted(unique)]
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -1523,15 +1464,10 @@ class AgentResult:
             "error": error,
             "shared_state": self.shared_state,
             "token_usage": self.token_usage.to_dict(),
-            "checkpoint_key": self.checkpoint_key,
-            "resume_observations": [observation.to_dict() for observation in self.resume_observations],
         }
-        if self._kernel_session_id is not None:
-            payload.pop("checkpoint_key")
-            payload.pop("resume_observations")
-            payload["session_id"] = _required_non_empty_string(self._kernel_session_id, "session_id")
-            payload["turn_id"] = _required_non_empty_string(self._kernel_turn_id, "turn_id")
-            canonical_json_bytes(self.shared_state)
+        payload["session_id"] = _required_non_empty_string(self.session_id, "session_id")
+        payload["turn_id"] = _required_non_empty_string(self.turn_id, "turn_id")
+        canonical_json_bytes(self.shared_state)
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
         if self.budget_exhaustion is not None:
@@ -1541,7 +1477,7 @@ class AgentResult:
         return payload
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, _kernel: bool = False) -> AgentResult:
+    def from_dict(cls, data: dict[str, Any]) -> AgentResult:
         required_fields = {
             "status",
             "completion_reason",
@@ -1554,13 +1490,9 @@ class AgentResult:
             "error",
             "shared_state",
             "token_usage",
-            "checkpoint_key",
-            "resume_observations",
         }
         optional_fields = {"budget_usage", "budget_exhaustion", "error_code"}
-        if _kernel:
-            required_fields -= {"checkpoint_key", "resume_observations"}
-            required_fields |= {"session_id", "turn_id"}
+        required_fields |= {"session_id", "turn_id"}
         if not isinstance(data, dict):
             raise TypeError("AgentResult must be an object")
         actual_fields = set(data)
@@ -1577,7 +1509,7 @@ class AgentResult:
         token_usage_raw = data["token_usage"]
         if not isinstance(token_usage_raw, dict):
             raise TypeError("AgentResult field 'token_usage' must be an object")
-        token_usage = TaskTokenUsage.from_dict(token_usage_raw, _kernel=_kernel)
+        token_usage = TaskTokenUsage.from_dict(token_usage_raw)
         completion_reason_raw = data["completion_reason"]
         if completion_reason_raw is not None and not isinstance(completion_reason_raw, str):
             raise TypeError("AgentResult field 'completion_reason' must be a string or None")
@@ -1593,12 +1525,6 @@ class AgentResult:
         budget_exhaustion_raw = data.get("budget_exhaustion")
         if "budget_exhaustion" in data and not isinstance(budget_exhaustion_raw, dict):
             raise TypeError("AgentResult field 'budget_exhaustion' must be an object")
-        checkpoint_key = None if _kernel else data["checkpoint_key"]
-        if checkpoint_key is not None and not isinstance(checkpoint_key, str):
-            raise TypeError("AgentResult field 'checkpoint_key' must be a string or None")
-        resume_observations_raw = [] if _kernel else data["resume_observations"]
-        if not isinstance(resume_observations_raw, list):
-            raise TypeError("AgentResult field 'resume_observations' must be a list")
         error_code = data.get("error_code")
         if "error_code" in data and not isinstance(error_code, str):
             raise TypeError("AgentResult field 'error_code' must be a string")
@@ -1625,14 +1551,13 @@ class AgentResult:
             raise TypeError("AgentResult field 'cycles' must be a list")
         if not isinstance(data["shared_state"], dict):
             raise TypeError("AgentResult field 'shared_state' must be an object")
-        if _kernel:
-            if data["status"] not in {"pending", "running", "suspended", "wait_user", "completed", "failed", "max_cycles"}:
-                raise ValueError("invalid kernel AgentResult status")
-            canonical_json_bytes(data["shared_state"])
+        if data["status"] not in {"pending", "running", "suspended", "wait_user", "completed", "failed", "max_cycles"}:
+            raise ValueError("invalid kernel AgentResult status")
+        canonical_json_bytes(data["shared_state"])
 
         result = cls(
-            _kernel_session_id=_required_non_empty_string(data["session_id"], "session_id") if _kernel else None,
-            _kernel_turn_id=_required_non_empty_string(data["turn_id"], "turn_id") if _kernel else None,
+            session_id=_required_non_empty_string(data["session_id"], "session_id"),
+            turn_id=_required_non_empty_string(data["turn_id"], "turn_id"),
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
             completion_tool_name=completion_tool_name,
@@ -1646,8 +1571,6 @@ class AgentResult:
             token_usage=token_usage,
             budget_usage=(BudgetUsageSnapshot.from_dict(budget_usage_raw) if budget_usage_raw is not None else None),
             budget_exhaustion=(BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None),
-            checkpoint_key=checkpoint_key,
-            resume_observations=[ResumeObservation.from_dict(item) for item in resume_observations_raw],
             error_code=error_code,
         )
         if result.to_dict() != data:

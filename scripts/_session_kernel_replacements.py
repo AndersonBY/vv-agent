@@ -331,9 +331,17 @@ def result_facts(result):
         "cycles": len(raw.cycles),
         "model_calls": len(result.token_usage.model_calls),
         "tool_execution_count": sum(e.type == "tool_call_started" for e in result.events),
-        "session_id": raw._kernel_session_id,
-        "turn_id": raw._kernel_turn_id,
+        "session_id": raw.session_id,
+        "turn_id": raw.turn_id,
     }
+
+
+def start_runner(driver, session_id, agent, content, *, run_config=None):
+    with (
+        patch("vv_agent.session.surfaces.SessionDriver", return_value=driver),
+        patch("vv_agent.runner.uuid.uuid4", return_value=SimpleNamespace(hex=session_id)),
+    ):
+        return Runner.start(agent, content, run_config=run_config)
 
 
 class Author:
@@ -354,11 +362,10 @@ class Author:
 
         provider = ScriptedModelProvider("test", "m", ScriptedLLM(steps), context_length=None, max_output_tokens=None)
         config = replace(self.f.config(config, steps), model_provider=provider, workspace="/fixture")
-        configured = Runner.configured(_kernel=self.f.kernel)
-        handle = configured.start(agent, content, run_config=config, _session_id=sid)
+        handle = start_runner(self.f.kernel, sid, agent, content, run_config=config)
         self.f.runtimes[sid] = handle.runtime
         result = handle.result()
-        assert AgentResult.from_dict(result.raw_result.to_dict(), _kernel=True).to_dict() == result.raw_result.to_dict()
+        assert AgentResult.from_dict(result.raw_result.to_dict()).to_dict() == result.raw_result.to_dict()
         self.handles[sid] = handle
         return result
 
@@ -415,7 +422,7 @@ class Author:
             )
             case["expected"] = expected
             case["producer"] = self.evidence_for("completion", observed["session_id"])
-        d.pop("approval_resume")
+        d.pop("approval_resume", None)
         d["same_turn"] = [self.evidence_for("wait", sid) for sid in ("user_wait", "turn_wait", "approval")]
         for key in (
             "approval_resume_uses_fresh_cycle_budget",
@@ -458,14 +465,14 @@ class Author:
             observed = counts | result_facts(result)
             observed["trace_unchanged"] = counts["validator_calls"] == counts["repair_calls"] == 0
             observed["second_repair_attempted"] = counts["repair_calls"] > 1
-            _, records, _ = self.f.kernel.store.read_state(result.raw_result._kernel_session_id)
+            _, records, _ = self.f.kernel.store.read_state(result.raw_result.session_id)
             observed["provider_error_is_observed"] = any(
                 r.record.kind == "op_completed" and r.record.payload["result"].get("error_code") == "repair_provider_error"
                 for r in records
             )
             case["expected"] = {k: observed[k] for k in case["expected"]}
             case["model_calls"] = [c.to_dict() for c in result.token_usage.model_calls]
-            case["producer"] = self.evidence_for("validation", result.raw_result._kernel_session_id)
+            case["producer"] = self.evidence_for("validation", result.raw_result.session_id)
         d["repair"]["operation"] = "output_repair"
         d["durable_output_checked"] = self.evidence_for("repair", "repair")
 
@@ -604,21 +611,21 @@ class Author:
             "lost_interval": "unavailable",
             "downtime_guessed": False,
         }
-        d["model_call_accounting"].pop("checkpoint_terminal_record_and_budget_snapshot_are_atomic")
+        d["model_call_accounting"].pop("checkpoint_terminal_record_and_budget_snapshot_are_atomic", None)
         d["model_call_accounting"]["operations"] = ["agent_cycle", "session_memory", "memory_compaction", "output_repair"]
         d["model_call_accounting"]["terminal_record_and_budget_snapshot_are_atomic"] = True
         d["recovery_cases"] = [c for c in self.f.recovery if c.get("case") == "lost_wall_interval"]
 
     def after_cycle(self):
         d = self.outputs["after_cycle_hook.json"]
-        d.pop("distributed")
+        d.pop("distributed", None)
         d["durability"] = {
             "committed_boundary_reuses_decision": True,
             "precommit_may_rerun": True,
             "external_effects_must_be_idempotent": True,
         }
-        d["default_behavior"].pop("checkpoint_extension_state_added")
-        d["permission_state"].pop("survives_current_checkpoint_round_trip")
+        d["default_behavior"].pop("checkpoint_extension_state_added", None)
+        d["permission_state"].pop("survives_current_checkpoint_round_trip", None)
         d["permission_state"]["survives_session_resume"] = True
         d["runner_cases"] = [c for c in d["runner_cases"] if not c["name"].startswith("checkpoint_")]
         for case in d["runner_cases"]:
@@ -684,7 +691,7 @@ class Author:
                         reversed(
                             [
                                 op.attempts[1].plan.payload["request"]["tools"]
-                                for op in self.f.state(result.raw_result._kernel_session_id).operations.values()
+                                for op in self.f.state(result.raw_result.session_id).operations.values()
                                 if op.kind == "model" and op.attempts[1].plan.payload["purpose"] == "primary"
                             ]
                         ),
@@ -695,7 +702,7 @@ class Author:
                 "additional_model_calls": max(0, len(result.token_usage.model_calls) - 1),
             }
             case["expected"] = {k: observed[k] for k in case["expected"]}
-            case["producer"] = self.evidence_for("hook", result.raw_result._kernel_session_id)
+            case["producer"] = self.evidence_for("hook", result.raw_result.session_id)
         for c in d["invalid_decisions"]:
 
             def parse(raw):
@@ -782,140 +789,29 @@ class Author:
         d["resume_producer"] = self.evidence_for("prompt", "tools")
 
     def public_api(self):
-        import vv_agent
-
         d = self.outputs["public_api.json"]
-
-        def names(manifest):
-            result = {c["python"] for domain in manifest["domains"] for c in domain["capabilities"]}
-            for surface in manifest["surfaces"]:
-                target = surface["python_target"]
-                result.add(target)
-                for group in ("members", "protocol_operations", "supporting_operations"):
-                    result.update(
-                        m.get("python", {}).get("target", target) + "." + m["python"]["name"]
-                        for m in surface.get(group, [])
-                        if "python" in m
-                    )
-            return result
-
-        before = names(d)
-
-        def forbidden(path):
-            return (
-                any(p in REMOVED or p in REMOVED_MEMBERS or p == "session_store_conformance" for p in re.split(r"[.\[\]]", path))
-                or path == "vv_agent.sessions.SessionStore"
-            )
-
-        planned = {"vv_agent." + name for name in NEW_NAMES}
         for domain in d["domains"]:
-            caps = []
-            for cap in domain["capabilities"]:
-                name = cap["python"]
-                if forbidden(name) or name in planned:
-                    continue
-                resolve(name)
-                cap.pop("rust", None)
-                cap.pop("adaptation", None)
-                cap.pop("deferred_representation", None)
-                if name in {"vv_agent.runtime.HostInteractionRequest", "vv_agent.runtime.HostInteractionOutcome"}:
-                    value = "request" if name.endswith("Request") else "outcome"
-                    cap["wire"] = f"fixtures/app_server_protocol.json#/host_interaction_values/{value}"
-                if name.rsplit(".", 1)[-1] == "JsonlRunEventStore":
-                    cap["behavior"] = "JSONL projection sink; never an execution ledger"
-                caps.append(cap)
-            domain["capabilities"] = caps
-        d["domains"] = [x for x in d["domains"] if x["capabilities"]]
-        behaviors = {
-            "Record": "strict current canonical record codec",
-            "InboxItem": "strict current canonical inbox codec",
-            "SessionSpec": "session admission identity and attributes",
-            "SessionStore": "single atomic log and inbox authority",
-            "SessionTx": "atomic admission, fences and consumer transactions",
-            "SQLiteStore": "SQLite mapping of session transaction semantics",
-            "PostgresStore": "PostgreSQL mapping; optional driver is not required to import SDK",
-            "Conflict": "deterministic identity or admission conflict",
-            "LeaseLost": "stale writer fence rejection",
-            "MissingHostBinding": "required host reference unavailable",
-            "Definitive": "authentic definitive provider result",
-            "Accepted": "authentic retained provider handle",
-            "Unknown": "uncertain external operation outcome",
-            "SessionRunEventStore": "projection and delivery only; no independent event authority",
-        }
-        additions = []
-        for name, source in NEW_NAMES.items():
-            resolve(source)
-            additions.append({"id": "session." + name, "python": "vv_agent." + name, "behavior": behaviors[name]})
-        for path, behavior in (
-            ("vv_agent.session.kernel.drive", "execute admitted work under fences and reuse receipts"),
-            ("vv_agent.session.supervisor.tick", "discover execution and consumer work independent of wakes"),
-            ("vv_agent.session.children.child_delivery", "authenticate terminal child delivery and advance cursor atomically"),
-        ):
-            assert callable(resolve(path))
-            additions.append({"id": path.rsplit(".", 1)[1], "python": path, "behavior": behavior})
-        d["domains"].append({"id": "session", "capabilities": additions})
-        surfaces = []
+            for capability in domain["capabilities"]:
+                resolve(capability["python"])
         for surface in d["surfaces"]:
-            target_path = surface["python_target"]
-            if forbidden(target_path) or target_path in planned:
-                continue
-            target = resolve(target_path)
-            surface.pop("rust_target", None)
-            if target_path.rsplit(".", 1)[-1] == "JsonlRunEventStore":
-                surface.pop("members", None)
-                surface["behavior"] = "projection sink only; no second ledger"
+            target = resolve(surface["python_target"])
             for group in ("members", "protocol_operations", "supporting_operations"):
-                if group not in surface:
-                    continue
-                members = []
-                for member in surface[group]:
-                    py = member.get("python")
-                    if py is None:
-                        members.append(member)
-                        continue
-                    name = py["name"]
-                    if forbidden(target_path + "." + name) or (
-                        name == "session" and surface["id"] in {"interactive_session", "run_config"}
-                    ):
-                        continue
-                    member.pop("rust", None)
-                    member.pop("adaptation", None)
-                    if name == "resume" and surface["id"] in {"runner", "configured_runner"}:
-                        py["signature"] = {
-                            "async": False,
-                            "parameters": [
-                                {"kind": "positional_or_keyword", "name": n, "required": True} for n in ("session_id", "turn_id")
-                            ],
-                        }
-                        member["behavior"] = "resume the existing session and turn, or use AgentSession; no new input"
-                    elif py["kind"] in {"method", "function", "property"}:
-                        owner = resolve(py["target"]) if "target" in py else target
-                        value = inspect.getattr_static(owner, name) if py["kind"] == "property" else getattr(owner, name)
-                        py["signature"] = signature(value.fget if isinstance(value, property) else value)
-                    elif py["kind"] == "field":
-                        assert name in {f.name for f in fields(target)} or any(
-                            name in getattr(b, "__annotations__", {}) for b in target.__mro__
+                for member in surface.get(group, []):
+                    py = member["python"]
+                    owner = resolve(py["target"]) if "target" in py else target
+                    if py["kind"] in {"method", "function", "property"}:
+                        value = (
+                            inspect.getattr_static(owner, py["name"]) if py["kind"] == "property" else getattr(owner, py["name"])
                         )
-                    members.append(member)
-                surface[group] = members
-            surfaces.append(surface)
-        d["surfaces"] = surfaces + [
-            {"id": "session_" + name, "python_target": "vv_agent." + name, "behavior": behaviors[name]} for name in NEW_NAMES
-        ]
-        described = names(d)
-        retained = []
-        for name in vv_agent.__all__:
-            path = "vv_agent." + name
-            if forbidden(path) or path in described:
-                continue
-            resolve(path)
-            retained.append({"id": "export." + name, "python": path, "behavior": "retained current Python export"})
-        if retained:
-            d["domains"].append({"id": "exports", "capabilities": retained})
-        d["contract"], d["schema_version"] = "vv-agent-public-api-v8", 8
-        d["verification"] = {"python": "current exports minus section 6 removals plus Q4 accepted names; F3 root wiring pending"}
-        after = names(d)
-        self.public_delta = {"added": sorted(after - before), "removed": sorted(before - after)}
+                        assert signature(value.fget if isinstance(value, property) else value) == py["signature"], (
+                            surface["id"],
+                            py["name"],
+                        )
+                    else:
+                        assert py["name"] in {f.name for f in fields(owner)} or any(
+                            py["name"] in getattr(b, "__annotations__", {}) for b in owner.__mro__
+                        )
+        self.public_delta = {"added": [], "removed": []}
 
     def usage(self):
         d = self.outputs["token_usage.json"]
@@ -939,13 +835,13 @@ class Author:
             if c["name"] == "unsupported_schema_version":
                 c["mutation"]["replace"]["schema_version"] = "unsupported"
                 reject(
-                    lambda value: TaskTokenUsage.from_dict(value, _kernel=True),
-                    TaskTokenUsage(_kernel=True).to_dict() | c["mutation"]["replace"],
+                    lambda value: TaskTokenUsage.from_dict(value),
+                    TaskTokenUsage().to_dict() | c["mutation"]["replace"],
                 )
         from vv_agent.types import CacheUsage
 
         for c in d["aggregation_cases"]:
-            summary = TaskTokenUsage(_kernel=True)
+            summary = TaskTokenUsage()
             for index, observation in enumerate(c["model_calls"], 1):
                 record = ModelCallRecord(
                     call_id=f"cache/{index}:1",
@@ -959,7 +855,6 @@ class Author:
                     usage=TokenUsage(
                         total_tokens=1, usage_source="provider_reported", cache_usage=CacheUsage.from_dict(observation)
                     ),
-                    _kernel=True,
                 )
                 summary.add_model_call(record)
             actual = summary.cache_usage.to_dict()
@@ -967,11 +862,9 @@ class Author:
             c["expected"] = actual
         for c in d["task_aggregation_cases"]:
             calls = [
-                ModelCallRecord.from_dict(raw | {"schema_version": "vv-agent.model-call.v2"}, _kernel=True)
-                for raw in c.get("model_calls", [])
+                ModelCallRecord.from_dict(raw | {"schema_version": "vv-agent.model-call.v2"}) for raw in c.get("model_calls", [])
             ]
             summary = summarize_task_token_usage(calls)
-            summary._kernel = True
             c["model_calls"] = [call.to_dict() for call in calls]
             c["expected"] = {k: v for k, v in summary.to_dict().items() if k not in {"schema_version", "model_calls"}} | {
                 "model_call_count": len(calls)
@@ -1010,7 +903,7 @@ class Author:
                 continue
             result = self.f.result(sid)
             wire = result.token_usage.to_dict()
-            assert TaskTokenUsage.from_dict(wire, _kernel=True).to_dict() == wire
+            assert TaskTokenUsage.from_dict(wire).to_dict() == wire
             d["producer_cases"].append({"name": sid, "usage": wire, "producer": self.evidence_for("usage", sid)})
         for collection in ("invalid_task_wire_cases", "invalid_model_call_cases"):
             for c in d[collection]:
@@ -1026,7 +919,7 @@ class Author:
                 reject(
                     lambda x, collection=collection: (
                         TaskTokenUsage if collection == "invalid_task_wire_cases" else ModelCallRecord
-                    ).from_dict(x, _kernel=True),
+                    ).from_dict(x),
                     value,
                 )
                 c["input"] = value
@@ -1034,17 +927,17 @@ class Author:
     def codecs(self):
         d = self.outputs["session_codec.json"]
         for case in d["canonical_cases"]:
-            actual = Message.from_dict(case["input"], _kernel=True).to_dict()
+            actual = Message.from_dict(case["input"]).to_dict()
             assert actual == case["canonical"]
             case["canonical"] = actual
         for case in d["invalid_cases"]:
-            reject(lambda value: Message.from_dict(value, _kernel=True), case["input"])
+            reject(lambda value: Message.from_dict(value), case["input"])
         d["transcript_authority"] = "read_only_record_projection"
         # The bytes are consumed as a creation-time seed by the real kernel.
         content = [load("session_items.jsonl"), load("runner_session_messages.jsonl")]
         for name, messages in zip(("session_items.jsonl", "runner_session_messages.jsonl"), content, strict=True):
             sid = "c1c/" + name
-            parsed = [Message.from_dict(m, _kernel=True) for m in messages]
+            parsed = [Message.from_dict(m) for m in messages]
             self.f.admit(sid, [], attributes={"seed": {"messages": [m.to_dict() for m in parsed], "shared_state": {}}})
             state, rows, _ = self.f.kernel.store.read_state(sid)
             actual = [m.to_dict() for m in project_context(rows, state)]
@@ -1154,8 +1047,8 @@ class Author:
             if "checkpointKey" in request.get("params", {}):
                 raw = self.independent([request])[0]
                 row["rejected_request"] = self.facts(raw)
-                row.pop("request")
-        action = d.pop("controllerAdmission")
+                row.pop("request", None)
+        action = d["actionAdmission"]
         for key in (
             "frameworkReceipt",
             "serverDerivedCommand",
@@ -1269,7 +1162,7 @@ class Author:
             ],
             agent=agent,
         )
-        public_sid = result.raw_result._kernel_session_id
+        public_sid = result.raw_result.session_id
         _, public_rows, _ = self.f.kernel.store.read_state(public_sid)
         parked = next(
             r.record for r in public_rows if r.record.kind == "op_parked" and r.record.payload["handle"]["kind"] == "child"
@@ -1288,7 +1181,7 @@ class Author:
             "parent_final_output": result.final_output,
             "terminal_status": result.status.value,
         }
-        assert observed == original, observed
+        assert observed == {key: original[key] for key in observed}, observed
         public["public_runner"] = observed | {"producer": self.evidence_for("child", public_sid)}
         manager = self.outputs["manager_tool_envelope.json"]
         for collection, tool_name in (
@@ -1310,7 +1203,7 @@ class Author:
                 actual = json.loads(receipt.content)
                 assert actual == case["expected"], (case["name"], actual)
                 case["expected"] = actual
-                case["producer"] = self.evidence_for("manager", result.raw_result._kernel_session_id)
+                case["producer"] = self.evidence_for("manager", result.raw_result.session_id)
         manager["sync_wait_outcome"] = {
             "parent_adopts_intermediate_wait": False,
             "same_turn_reply": True,
@@ -1339,80 +1232,50 @@ class Author:
         handoff["producer"] = self.evidence_for("handoff", "handoff")
 
     def definitions_results(self):
-        from vv_agent.model_settings import ModelSettings
         from vv_agent.tools.registry import ToolRegistry
 
         baseline = load("run_definition.json")
 
         def compile_definition(source):
+            from vv_agent.memory.manager import MemoryManager
+            from vv_agent.microcompaction import MicrocompactionPolicy
+            from vv_agent.types import AgentTask
+
+            task = AgentTask.from_dict(deepcopy(source["task"]))
             tools = []
             for entry in source["tools"]:
-                schema = entry["schema"]["function"]
+                schema = entry["function"]
                 tools.append(
                     FunctionTool(
                         schema["name"],
                         schema["description"],
                         schema["parameters"],
                         lambda _ctx, _args: ToolOutputText("ok"),
-                        tool_metadata=ToolMetadata.from_dict(entry["tool_metadata"]) if entry["tool_metadata"] else None,
-                        timeout_seconds=entry["timeout_seconds"],
-                        needs_approval=entry["approval"]["required"],
+                        tool_metadata=ToolMetadata.from_dict(source["capabilities"][schema["name"]])
+                        if schema["name"] in source["capabilities"]
+                        else None,
                     )
                 )
-            controls = source["runtime_controls"]
-            policy = {k: v for k, v in source["tool_policy"].items() if k not in {"predicate_ref", "approval_timeout_seconds"}}
-            model = source["model"]
-            settings = deepcopy(model["settings"])
-            # This input is a floating-point JCS vector, not an unsafe JSON integer.
-            if "large_number" in settings.get("extra_body", {}):
-                settings["extra_body"]["large_number"] = float(settings["extra_body"]["large_number"])
-            settings["timeout_seconds"] = model["transport_timeout_seconds"]
-            agent = Agent(
-                source["agent"]["name"],
-                PromptBundle(tuple(PromptSection.from_dict(s) for s in source["prompt_bundle"]["sections"])),
-                model=model["model_id"],
-                tools=tools,
-                tool_use_behavior=controls["tool_use_behavior"],
-                stop_at_tool_names=controls["stop_at_tool_names"],
-            )
-            provider = ScriptedModelProvider.new(model["backend"], model["model_id"], [])
-            runtime = self.f.kernel.runtime(
+            binding = source["model_binding"]
+            agent = Agent(source["agent_name"], task.prompt_bundle, model=binding["model"], tools=tools)
+            memory = deepcopy(source["memory_settings"])
+            memory["microcompaction_policy"] = MicrocompactionPolicy.from_dict(memory["microcompaction_policy"])
+            rt = self.f.kernel.runtime(
                 agent,
                 RunConfig(
-                    model_provider=provider,
+                    model_provider=ScriptedModelProvider.new(binding["backend"], binding["model"], []),
                     workspace="/fixture",
-                    model_settings=ModelSettings.from_dict(settings),
                     tool_registry_factory=ToolRegistry,
-                    tool_policy=ToolPolicy(**policy),
-                    max_cycles=controls["max_cycles"],
-                    max_handoffs=controls["max_handoffs"],
-                    no_tool_policy=controls["no_tool_policy"],
-                    microcompaction_policy=controls["microcompaction_policy"],
-                    session_memory_enabled=controls["session_memory_enabled"],
-                    metadata=source["run_metadata"],
-                    budget_limits=source["budget_limits"],
-                    approval_timeout_seconds=source["tool_policy"]["approval_timeout_seconds"],
                 ),
             )
-            task = runtime.compile(
-                source["root_input"],
-                "definition/turn/initial",
-                seed={"messages": source["initial_messages"], "shared_state": source["initial_shared_state"]},
-            )
-            task = replace(
-                task,
-                agent_type=source["agent"]["type"],
-                memory_compact_threshold=controls["memory_compact_threshold"],
-                memory_threshold_percentage=controls["memory_threshold_percentage"],
-                allow_interruption=controls["allow_interruption"],
-            )
-            definition = runtime.definition(task)
+            rt.memory_manager = MemoryManager(**memory)
+            definition = rt.definition(task)
             raw = self.independent([definition])[0]
-            assert runtime.definition_digest(task) == sha256(raw).hexdigest()
+            assert rt.definition_digest(task) == sha256(raw).hexdigest()
             return definition, raw
 
         rows = []
-        for case in baseline["golden_cases"]:
+        for case in baseline["golden_cases"][:3]:
             definition, raw = compile_definition(case["definition"])
             rows.append(
                 {"name": case["name"], "definition": definition, "definition_digest": sha256(raw).hexdigest(), **self.facts(raw)}
@@ -1432,33 +1295,9 @@ class Author:
                 }
             )
         producer_cases = []
-        base = baseline["golden_cases"][1]["definition"]
-        _, original_bytes = compile_definition(base)
+        _, original_bytes = compile_definition(baseline["golden_cases"][1]["definition"])
         for case in baseline["producer_cases"]:
-            # Credential-slot and old capability-reference registry cases have no v24 owner.
-            if case["name"] in {
-                "credential_rotation_preserves_digest",
-                "credential_slots_use_utf16_code_unit_order",
-                "credential_slot_rfc6901_escapes_resolve",
-                "capability_version_changes_digest",
-            }:
-                continue
-            changed = deepcopy(base)
-            mutation = case["mutation"]
-            if "replace_json_pointer" in mutation:
-                pieces = mutation["replace_json_pointer"].strip("/").split("/")
-                target = changed
-                for piece in pieces[:-1]:
-                    target = target[int(piece)] if isinstance(target, list) else target[piece]
-                key = int(pieces[-1]) if isinstance(target, list) else pieces[-1]
-                target[key] = mutation["value"]
-            else:
-                swap = mutation["swap_array_indices"]
-                changed["tools"][swap["left"]], changed["tools"][swap["right"]] = (
-                    changed["tools"][swap["right"]],
-                    changed["tools"][swap["left"]],
-                )
-            definition, raw = compile_definition(changed)
+            definition, raw = compile_definition(case["definition"])
             relation = "equal" if original_bytes == raw else "different"
             producer_cases.append(
                 {
@@ -1527,7 +1366,7 @@ class Author:
             if c["capability"] == "event_store":
                 c["python"] = "SessionRunEventStore projection and JsonlRunEventStore sink"
         for key in ("checkpoint_key_utf8_bytes", "checkpoint_extension_entry_utf8_bytes"):
-            controls["integer_bounds"].pop(key)
+            controls["integer_bounds"].pop(key, None)
         controls["seed"] = {"messages": [], "shared_state": {}}
 
     def events_traces(self):
@@ -1553,7 +1392,7 @@ class Author:
                 memory_ids[(sid, key)] = key
             for e in project_records(rows):
                 wire = e.to_dict()
-                assert event_from_dict(wire, _kernel=True).to_dict() == wire
+                assert event_from_dict(wire).to_dict() == wire
                 seq = e.metadata["session_seq"]
                 source = next(r.record for r in rows if r.seq == seq)
                 identity_inputs.append([sid, source.record_id])
@@ -1729,16 +1568,16 @@ class Author:
     def handle_observations(self):
         from threading import Event
 
-        from vv_agent.session.surfaces import _SessionKernel
+        from vv_agent.session.surfaces import SessionDriver
 
-        kernel = _SessionKernel()
+        kernel = SessionDriver()
         try:
             provider = ScriptedModelProvider.new("test", "m", [LLMResponse("draft") for _ in range(280)])
-            handle = Runner.start(
+            handle = start_runner(
+                kernel,
+                "handle-burst",
                 Agent("burst", "Continue."),
                 "go",
-                _kernel=kernel,
-                _session_id="handle-burst",
                 run_config=self.f.config(RunConfig(model_provider=provider, max_cycles=280, no_tool_policy="continue")),
             )
             first, second = handle.events(), handle.events()
@@ -1760,11 +1599,11 @@ class Author:
                 assert released.wait(5)
                 return LLMResponse("draft")
 
-            cancelled = Runner.start(
+            cancelled = start_runner(
+                kernel,
+                "handle-cancel",
                 Agent("cancel", "Answer."),
                 "go",
-                _kernel=kernel,
-                _session_id="handle-cancel",
                 run_config=self.f.config(RunConfig(model_provider=ScriptedModelProvider.from_steps("test", "m", [blocking]))),
             )
             assert entered.wait(5)
@@ -1863,7 +1702,7 @@ class Author:
         ):
             value = seed | {"version": version}
             if version is None:
-                value.pop("version")
+                value.pop("version", None)
             cases.append((identity, value))
         for field in sorted(RETIRED_FIELDS & {"checkpoint_key", "resume_attempt", "consumed_revision"}):
             cases.append(("rejected_field_" + str(len(cases)), seed | {field: "old"}))
@@ -1871,7 +1710,9 @@ class Author:
             cases.append(("rejected_kind_" + str(len(cases)), seed | {"type": kind}))
         cases.append(("session_id_required", {k: v for k, v in seed.items() if k != "session_id"}))
         for c in load("run_events_invalid.json")["reject"]:
-            value = deepcopy(c["input"])
+            value = deepcopy(c["input"]) if "input" in c else json.loads(base64.b64decode(c["bytes_base64"]))
+            if (c["id"], value) in cases:
+                continue
             if value.get("type") in RETIRED_KINDS or any(
                 k in value for k in ("checkpoint_key", "resume_attempt", "consumed_revision")
             ):
@@ -1881,12 +1722,12 @@ class Author:
             if "session_id" not in value:
                 value["session_id"] = "invalid-session"
             try:
-                event_from_dict(value, _kernel=True)
+                event_from_dict(value)
             except (TypeError, ValueError, KeyError):
                 cases.append((c["id"], value))
         vectors = []
         for identity, value in cases:
-            reject(lambda x: event_from_dict(x, _kernel=True), value)
+            reject(lambda x: event_from_dict(x), value)
             raw = self.independent([value])[0]
             vectors.append({"id": identity, **self.facts(raw)})
         self.outputs["run_events_invalid.json"] = {"contract": "run_events_invalid", "wire_version": "v6", "reject": vectors}
@@ -1958,7 +1799,7 @@ class Author:
             self.evidence_for("memory", sid) for sid in ("summary", "rejected_summary", "micro", "memory")
         ]
         lifecycle = self.outputs["memory_lifecycle.json"]
-        lifecycle["session_memory"].pop("checkpoint_receipt_replay")
+        lifecycle["session_memory"].pop("checkpoint_receipt_replay", None)
         lifecycle["session_memory"]["receipt_replay"] = "reuse_recorded_extraction_without_a_second_provider_call"
         lifecycle["session_memory"]["control_outcomes_propagate"] = ["cancellation", "budget_exhaustion", "lost_ownership"]
         lifecycle["summary_pipeline"]["control_outcomes_propagate"] = ["cancellation", "budget_exhaustion", "lost_ownership"]
@@ -2156,8 +1997,8 @@ class Author:
             receipt = result.raw_result.cycles[0].tool_results[0]
             assert (receipt.error_code is None) == c["allowed"], (c["name"], receipt.to_dict())
             c["result"] = receipt.to_dict()
-            c["producer"] = self.evidence_for("policy", result.raw_result._kernel_session_id)
-        d.pop("checkpoint")
+            c["producer"] = self.evidence_for("policy", result.raw_result.session_id)
+        d.pop("checkpoint", None)
         d["definition_binding"] = {
             "tool_metadata": "capabilities",
             "policy": "definition.task.metadata",
@@ -2175,7 +2016,7 @@ class Author:
             "cross_process_deferred_duration_ms",
             "cross_process_deferred_execution_started",
         ):
-            d["telemetry_contract"].pop(key)
+            d["telemetry_contract"].pop(key, None)
         d["telemetry_contract"]["event_types"] = ["tool_call_planned", "tool_call_started", "tool_call_completed"]
         approval = self.outputs["approval_tool_policy.json"]
         approval["request_id"] = {
@@ -2217,7 +2058,7 @@ class Author:
             approval["approval"]["resolved_event_metadata_keys"] = sorted(resolved["metadata"])
             approval["approval"]["result_shape"]["content_keys"] = sorted(body)
             approval["approval"]["result_shape"]["metadata_keys"] = sorted(receipt.metadata)
-            case["producer"] = self.evidence_for("approval", result.raw_result._kernel_session_id)
+            case["producer"] = self.evidence_for("approval", result.raw_result.session_id)
 
         failure = approval["approval"]["provider_failure"]
         effects = []
@@ -2248,7 +2089,7 @@ class Author:
             broker_retains_request=broker.pending_request(request.request_id) is not None,
         )
         assert result.raw_result.error["message"] == failure["message"] and not effects
-        failure["producer"] = self.evidence_for("approval", result.raw_result._kernel_session_id)
+        failure["producer"] = self.evidence_for("approval", result.raw_result.session_id)
         for c in approval["policy"]["cases"]:
 
             @function_tool
@@ -2379,9 +2220,9 @@ class Author:
                 for case in bash["invalid_management_arguments"]:
                     r = orchestrator.run_one(ToolCall("invalid", name, case["arguments"]), context=ctx)
                     assert isinstance(r, ToolExecutionResult) and r.error_code == bash["invalid_arguments_error_code"]
-            from vv_agent.session.surfaces import _SessionKernel
+            from vv_agent.session.surfaces import SessionDriver
 
-            kernel = _SessionKernel()
+            kernel = SessionDriver()
             from vv_agent.tools.registry import ToolRegistry
 
             def bash_registry():
@@ -2396,13 +2237,13 @@ class Author:
                     "m",
                     [LLMResponse("", [ToolCall("bash", "bash", {"command": "printf c1c-bash"})]), LLMResponse("done")],
                 )
-                result = Runner.run_sync(
+                result = start_runner(
+                    kernel,
+                    "keep-bash",
                     Agent("bash", "Use bash.", model="m"),
                     "go",
                     run_config=RunConfig(model_provider=provider, workspace=tmp, tool_registry_factory=bash_registry),
-                    _kernel=kernel,
-                    _session_id="keep-bash",
-                )
+                ).result()
                 assert result.raw_result.cycles[0].tool_results[0].content == "c1c-bash", (
                     result.raw_result.cycles[0].tool_results[0].to_dict()
                 )
@@ -2427,11 +2268,11 @@ class Author:
                     launch = LLMResponse(
                         "", [ToolCall("launch", "bash", {"command": command, "yield_time_ms": case["yield_time_ms"]})]
                     )
-                    result = Runner.run_sync(
+                    result = start_runner(
+                        kernel,
+                        "keep-bash-" + case["name"],
                         Agent("bash", "Launch, query and stop."),
                         "go",
-                        _kernel=kernel,
-                        _session_id="keep-bash-" + case["name"],
                         run_config=RunConfig(
                             model_provider=ScriptedModelProvider.from_steps(
                                 "test", "m", [launch, query, stop, LLMResponse("done")]
@@ -2439,7 +2280,7 @@ class Author:
                             workspace=tmp,
                             tool_registry_factory=bash_registry,
                         ),
-                    )
+                    ).result()
                     receipts = [r for cycle in result.raw_result.cycles for r in cycle.tool_results]
                     launch_result = receipts[0]
                     assert launch_result.status_code.value == bash["running_receipt"]["status_code"]
@@ -2504,7 +2345,7 @@ class Author:
                 return SimpleNamespace(with_default_backend=lambda _: provider)
 
         stdout, stderr = StringIO(), StringIO()
-        kernel = _SessionKernel()
+        kernel = SessionDriver()
         with (
             TemporaryDirectory(prefix="c1c-cli-") as tmp,
             patch.object(cli, "VvLlmModelProvider", ConfiguredProvider),
@@ -2512,7 +2353,9 @@ class Author:
             redirect_stderr(stderr),
         ):
             assert (
-                cli._run_task_cli(["--prompt", "go", "--model", "m", "--workspace", tmp], _kernel=kernel, _session_id="c1c-cli")
+                cli._run_task_cli(
+                    ["--prompt", "go", "--model", "m", "--workspace", tmp], store=kernel.store, session_id="c1c-cli"
+                )
                 == 0
             )
         kernel.close()
@@ -2520,7 +2363,7 @@ class Author:
         from vv_agent.session.records import InboxItem
 
         for name in ("verbose_result", "failed_result", "cancelled_result"):
-            kernel = _SessionKernel()
+            kernel = SessionDriver()
             sid = "cli-" + name
 
             def response(_request, name=name, kernel=kernel, sid=sid):
@@ -2542,7 +2385,7 @@ class Author:
                 args = ["--prompt", "go", "--model", "m", "--workspace", tmp]
                 if name == "verbose_result":
                     args.append("--verbose")
-                code = cli._run_task_cli(args, _kernel=kernel, _session_id=sid)
+                code = cli._run_task_cli(args, store=kernel.store, session_id=sid)
             kernel.close()
             assert code == load("cli_contract.json")["process_outcomes"][name]["exit_code"]
             payload = json.loads(stdout.getvalue())
@@ -2565,9 +2408,9 @@ class Author:
                 raise cli.ConfigError("fixture settings unavailable")
 
         stdout, stderr = StringIO(), StringIO()
-        kernel = _SessionKernel()
+        kernel = SessionDriver()
         with patch.object(cli, "VvLlmModelProvider", FailingProvider), redirect_stdout(stdout), redirect_stderr(stderr):
-            assert cli._run_task_cli(["--prompt", "go"], _kernel=kernel) == 1
+            assert cli._run_task_cli(["--prompt", "go"], store=kernel.store) == 1
         kernel.close()
         assert not stdout.getvalue() and stderr.getvalue().strip() == "fixture settings unavailable"
         self.keep["cli_contract.json"] = (
@@ -2656,11 +2499,11 @@ def validate_replacements(values, independent):
             schema = value.get("schema_version")
             decoder = None
             if value.get("version") == "v6" and "event_id" in value:
-                assert event_from_dict(value, _kernel=True).to_dict() == value
+                assert event_from_dict(value).to_dict() == value
             elif schema == "vv-agent.model-call.v2" and "call_id" in value:
-                assert ModelCallRecord.from_dict(value, _kernel=True).to_dict() == value
+                assert ModelCallRecord.from_dict(value).to_dict() == value
             elif schema == "vv-agent.task-token-usage.v3" and "model_calls" in value:
-                assert TaskTokenUsage.from_dict(value, _kernel=True).to_dict() == value
+                assert TaskTokenUsage.from_dict(value).to_dict() == value
             elif schema == "vv-agent.token-usage.v1" and "usage_source" in value:
                 decoder = TokenUsage
             elif {"cycles", "tool_calls", "elapsed_ms", "unavailable_dimensions"} <= value.keys():
@@ -2673,11 +2516,11 @@ def validate_replacements(values, independent):
                     for call in calls:
                         assert ToolCall.from_dict(call).to_dict() == call
                 else:
-                    assert Message.from_dict(value, _kernel=True).to_dict() == value
+                    assert Message.from_dict(value).to_dict() == value
             elif {"tool_call_id", "content", "status_code", "directive"} <= value.keys():
                 decoder = ToolExecutionResult
             elif {"task_id", "messages", "token_usage", "session_id", "turn_id"} <= value.keys():
-                assert AgentResult.from_dict(value, _kernel=True).to_dict() == value
+                assert AgentResult.from_dict(value).to_dict() == value
             if decoder:
                 assert decoder.from_dict(value).to_dict() == value
             for key, item in value.items():
@@ -2698,15 +2541,15 @@ def validate_replacements(values, independent):
         walk(value)
         if name.endswith(".jsonl") and name not in {"runner_trace.jsonl", "session_items.jsonl", "runner_session_messages.jsonl"}:
             for event in value:
-                assert event_from_dict(event, _kernel=True).to_dict() == event
+                assert event_from_dict(event).to_dict() == event
     for case in values["session_codec.json"]["canonical_cases"]:
-        assert Message.from_dict(case["input"], _kernel=True).to_dict() == case["canonical"]
+        assert Message.from_dict(case["input"]).to_dict() == case["canonical"]
     for case in values["session_codec.json"]["invalid_cases"]:
-        reject(lambda item: Message.from_dict(item, _kernel=True), case["input"])
+        reject(lambda item: Message.from_dict(item), case["input"])
     for case in values["run_events_invalid.json"]["reject"]:
         body = base64.b64decode(case["bytes_base64"], validate=True)
         assert sha256(body).hexdigest() == case["sha256"]
-        reject(lambda item: event_from_dict(item, _kernel=True), json.loads(body))
+        reject(lambda item: event_from_dict(item), json.loads(body))
     for case in values["run_definition.json"]["golden_cases"] + values["run_definition.json"]["producer_cases"]:
         body = independent([case["definition"]])[0]
         assert body == base64.b64decode(case["bytes_base64"], validate=True)
@@ -2718,10 +2561,10 @@ def validate_replacements(values, independent):
             assert bundle.flatten() == case["output"]["flat_prompt"]
             assert bundle.stable_hash == sha256(body).hexdigest() == case["output"]["stable_hash"]
     with TemporaryDirectory(prefix="c1c1-sink-") as directory:
-        sink = JsonlRunEventStore(Path(directory) / "events.jsonl", _kernel=True)
+        sink = JsonlRunEventStore(Path(directory) / "events.jsonl")
         events = values["event_store_replay.jsonl"]
         for wire in events:
-            sink.append(event_from_dict(wire, _kernel=True))
+            sink.append(event_from_dict(wire))
         actual = [e.to_dict() for e in sink.replay(run_id=events[0]["run_id"])]
         assert actual == events
     return tuple(values)

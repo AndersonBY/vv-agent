@@ -154,3 +154,82 @@ def derive_controller_command_id(thread_id: str, turn_id: str, action_id: str) -
     canonical = canonical_json_bytes(payload, "controller_command_id")
     framed = CONTROLLER_COMMAND_ID_DOMAIN.encode("utf-8") + b"\x00" + len(canonical).to_bytes(8, "big") + canonical
     return hashlib.sha256(framed).hexdigest()
+
+
+HOST_OUTCOME_SCHEMA = "vv-agent.host-interaction-outcome.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HostInteractionOutcome:
+    interaction_id: str
+    logical_cycle: int
+    checkpoint_revision: int
+    status: str
+    outbox_state: str
+    record_id: str
+    notification_id: str
+    notification_payload_digest: str
+    notification_outbox_action: str
+    notification_outbox_destination: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "interaction_id", _text(self.interaction_id, "interaction_id"))
+        object.__setattr__(self, "logical_cycle", _integer(self.logical_cycle, "logical_cycle", minimum=1))
+        object.__setattr__(self, "checkpoint_revision", _integer(self.checkpoint_revision, "checkpoint_revision"))
+        if self.status not in {"admitted", "replayed"}:
+            raise ValueError("host interaction outcome status must be admitted or replayed")
+        if self.outbox_state != "pending":
+            raise ValueError("host interaction outcome outbox_state must be pending")
+        object.__setattr__(self, "record_id", _text(self.record_id, "record_id"))
+        object.__setattr__(self, "notification_id", _text(self.notification_id, "notification_id"))
+        object.__setattr__(
+            self,
+            "notification_payload_digest",
+            _digest(self.notification_payload_digest, "notification_payload_digest"),
+        )
+        if self.notification_outbox_action != "host_interaction_notification":
+            raise ValueError("host interaction outcome notification_outbox_action is invalid")
+        if self.notification_outbox_destination != "host_interaction_observer":
+            raise ValueError("host interaction outcome notification_outbox_destination is invalid")
+        object.__setattr__(
+            self,
+            "notification_outbox_destination",
+            _text(self.notification_outbox_destination, "notification_outbox_destination"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": HOST_OUTCOME_SCHEMA,
+            "interaction_id": self.interaction_id,
+            "logical_cycle": self.logical_cycle,
+            "checkpoint_revision": self.checkpoint_revision,
+            "status": self.status,
+            "outbox_state": self.outbox_state,
+            "record_id": self.record_id,
+            "notification_id": self.notification_id,
+            "notification_payload_digest": self.notification_payload_digest,
+            "notification_outbox_action": self.notification_outbox_action,
+            "notification_outbox_destination": self.notification_outbox_destination,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> HostInteractionOutcome:
+        if not isinstance(payload, Mapping):
+            raise ValueError("host interaction outcome must be an object")
+        fields = {
+            "schema_version",
+            "interaction_id",
+            "logical_cycle",
+            "checkpoint_revision",
+            "status",
+            "outbox_state",
+            "record_id",
+            "notification_id",
+            "notification_payload_digest",
+            "notification_outbox_action",
+            "notification_outbox_destination",
+        }
+        _strict_fields(payload, fields, "host interaction outcome")
+        if payload["schema_version"] != HOST_OUTCOME_SCHEMA:
+            raise ValueError("unsupported host interaction outcome schema")
+        return cls(**{field: payload[field] for field in fields if field != "schema_version"})

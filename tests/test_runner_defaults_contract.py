@@ -11,6 +11,7 @@ from vv_agent import (
     Agent,
     ModelRef,
     ModelSettings,
+    RetrySettings,
     RunConfig,
     Runner,
     ScriptedModelProvider,
@@ -102,6 +103,7 @@ def test_configured_runner_uses_shared_provider_model_and_settings_precedence(tm
         top_p=0.3,
         max_tokens=200,
         parallel_tool_calls=False,
+        retry=RetrySettings(max_attempts=1, backoff_seconds=0),
         extra_body={
             "winner": "run",
             "provider_only": True,
@@ -204,10 +206,8 @@ def test_configured_runner_start_and_resume_preserve_runner_defaults(tmp_path: P
     handle = runner.start(agent, "write")
     interrupted = handle.result(timeout=2)
     assert interrupted.status == AgentStatus.WAIT_USER
-    state = interrupted.into_state()
-    state.approve(state.pending_approval_ids()[0])
-
-    resumed = handle.resume(state)
+    handle.approve(interrupted.metadata["session_waits"][0]["request_id"], "approve")
+    resumed = handle.resume()
 
     assert resumed is not None
     assert resumed.status == AgentStatus.COMPLETED
@@ -278,7 +278,11 @@ def test_resume_uses_the_runner_that_created_the_state(tmp_path: Path) -> None:
     interrupted = origin.run_sync(agent, "choose")
     assert interrupted.status == AgentStatus.WAIT_USER
 
-    resumed = receiving.resume(interrupted.into_state(), input="blue")
+    sid, tid = interrupted.raw_result.session_id, interrupted.raw_result.turn_id
+    assert sid is not None and tid is not None
+    owner = interrupted._session_driver
+    owner.answer(sid, owner.handles[-1].runtime, "blue", "reply")
+    resumed = receiving.resume(sid, tid)
 
     assert resumed.status == AgentStatus.COMPLETED
     assert resumed.final_output == "selected blue"

@@ -1,0 +1,137 @@
+[
+  {
+    "record_id": "turn/thread_1/turn/turn_1/started",
+    "fixture": "session_codec_vectors.json",
+    "vector_index": 45,
+    "generated_file_count": 45,
+    "matching_files": [
+      "after_cycle_hook.json",
+      "app_server_observable.json",
+      "app_server_protocol.json",
+      "approval_tool_policy.json",
+      "bounded_tool_result.json",
+      "budget_events.jsonl",
+      "completion_policy.json",
+      "configured_sub_agent.json",
+      "configured_sub_agent_events.jsonl",
+      "event_store_replay.jsonl",
+      "handoff_contract.json",
+      "llm_stream_projection.json",
+      "manager_tool_envelope.json",
+      "memory_lifecycle.json",
+      "memory_local.json",
+      "output_validation.json",
+      "prompt_bundle.json",
+      "public_api.json",
+      "public_configured_sub_agent.json",
+      "result_public.json",
+      "run_budget.json",
+      "run_config_controls.json",
+      "run_definition.json",
+      "run_events.jsonl",
+      "run_events_invalid.json",
+      "run_handle.json",
+      "runner_events.jsonl",
+      "runner_session_messages.jsonl",
+      "runner_terminal.json",
+      "runner_trace.jsonl",
+      "runner_trace_spans.json",
+      "session_codec.json",
+      "session_compaction.json",
+      "session_inbox.jsonl",
+      "session_inbox.schema.json",
+      "session_invalid.json",
+      "session_items.jsonl",
+      "session_record.schema.json",
+      "session_recovery.json",
+      "session_semantics.json",
+      "token_usage.json",
+      "tool_metadata.json"
+    ],
+    "different_files": [
+      "session_codec_vectors.json",
+      "session_projection.json",
+      "session_records.jsonl"
+    ],
+    "recorded_task_limits": {
+      "model_context_window": 128000,
+      "model_max_output_tokens": 16384
+    },
+    "vendored_memory_settings": {
+      "model_context_window": 279000,
+      "model_max_output_tokens": null,
+      "reserved_output_tokens": 16000,
+      "autocompact_buffer_tokens": 13000
+    },
+    "producer_memory_settings": {
+      "model_context_window": 128000,
+      "model_max_output_tokens": 16384,
+      "reserved_output_tokens": 16000,
+      "autocompact_buffer_tokens": 13000
+    },
+    "vendored_definition_digest": "f8344da8305b0da821ad995470c4b2c300184e5af078b1805404fddeb1375cb9",
+    "producer_definition_digest": "193a76ae91aa609060075409373e33d6eba1ca6ccb8d6692e294e988e1b935e7",
+    "root_cause": "App Server SessionDriver resolved provider limits into task metadata but left MemoryManager on default limits (279000/null).",
+    "src_fix_location": "src/vv_agent/session/surfaces.py:SessionDriver.runtime",
+    "pointers": [
+      "/vectors/45/wire/payload/definition/memory_settings/model_context_window",
+      "/vectors/45/wire/payload/definition/memory_settings/model_max_output_tokens",
+      "/vectors/45/wire/payload/definition_digest"
+    ],
+    "normative_basis": "Contract v24 docs/session-kernel.md: frozen definition and exact definition_digest; docs/model-call-accounting.md: provider model limits; reviewer evidence-correction ruling for 24.0.1.",
+    "file_evidence": [
+      {
+        "file": "session_codec_vectors.json",
+        "record_id": "turn/thread_1/turn/turn_1/started",
+        "pointer": "/vectors/45/wire",
+        "changed_fields": [
+          "payload.definition.memory_settings.model_context_window",
+          "payload.definition.memory_settings.model_max_output_tokens",
+          "payload.definition_digest",
+          "bytes_base64",
+          "sha256"
+        ]
+      },
+      {
+        "file": "session_records.jsonl",
+        "record_id": "turn/thread_1/turn/turn_1/started",
+        "line": 46,
+        "changed_fields": [
+          "payload.definition.memory_settings.model_context_window",
+          "payload.definition.memory_settings.model_max_output_tokens",
+          "payload.definition_digest"
+        ]
+      },
+      {
+        "file": "session_projection.json",
+        "records": [
+          {
+            "pointer": "/source_records/thread_2/2/wire",
+            "record_id": "turn/thread_2/turn/turn_1/started"
+          },
+          {
+            "pointer": "/source_records/thread_3/0/wire",
+            "record_id": "turn/thread_3/turn/turn_1/started"
+          }
+        ],
+        "changed_fields": [
+          "payload.definition.memory_settings.model_context_window",
+          "payload.definition.memory_settings.model_max_output_tokens",
+          "payload.definition_digest"
+        ]
+      }
+    ],
+    "corrected_release": "24.0.1",
+    "candidate_generation": {
+      "files": 45,
+      "deterministic_generations": 2,
+      "directory_diff": "empty",
+      "vendored_matches": 42,
+      "vendored_differences": [
+        "session_codec_vectors.json",
+        "session_projection.json",
+        "session_records.jsonl"
+      ]
+    }
+  }
+]

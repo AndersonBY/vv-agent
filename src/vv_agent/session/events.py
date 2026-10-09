@@ -40,7 +40,7 @@ class SessionRunEventStore:
                         payload = event.to_dict() | {"parent_run_id": resolved.run_id}
                         from vv_agent.events import event_from_dict
 
-                        yield event_from_dict(payload, _kernel=True)
+                        yield event_from_dict(payload)
 
     def batch(self, tx: SessionTx, *, limit: int = 256) -> tuple[ConsumerBatch, list[RunEvent]] | None:
         batch = tx.consumer_batch(self.session_id, self.consumer, limit=limit)

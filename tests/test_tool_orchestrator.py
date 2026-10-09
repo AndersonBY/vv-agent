@@ -5,7 +5,6 @@ from typing import Any, cast
 import pytest
 from support import require_tool_result
 
-from vv_agent.checkpoint import CheckpointError
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools import ToolContext
 from vv_agent.tools.executor import ToolExposure
@@ -234,14 +233,13 @@ def test_orchestrator_propagates_cancelled_error(tmp_path) -> None:
     ]
 
 
-@pytest.mark.parametrize("code", ["checkpoint_cancel_requested", "checkpoint_lease_lost"])
-def test_orchestrator_propagates_checkpoint_control_errors(tmp_path, code: str) -> None:
+def test_orchestrator_cancellation_before_dispatch_does_not_run_handler(tmp_path) -> None:
     @function_tool
     def controlled() -> str:
         return "unexpected"
 
     def mark_started(_call: ToolCall) -> None:
-        raise CheckpointError("checkpoint control", code=code)
+        raise CancelledError("dispatch cancelled")
 
     context = ToolContext(
         workspace=tmp_path,
@@ -252,12 +250,11 @@ def test_orchestrator_propagates_checkpoint_control_errors(tmp_path, code: str) 
     )
     events = []
 
-    with pytest.raises(CheckpointError) as error:
+    with pytest.raises(CancelledError, match="dispatch cancelled"):
         ToolOrchestrator.from_tools([controlled]).run_one(
             ToolCall(id="call-controlled", name="controlled", arguments={}),
             context=context,
             event_sink=events.append,
         )
 
-    assert error.value.code == code
     assert [event.type for event in events] == ["tool_call_planned"]

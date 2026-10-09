@@ -1,451 +1,7 @@
 {
-  "version": "memory_lifecycle",
-  "summary_route": {
-    "backend": "memory-backend",
-    "model": "memory-model",
-    "request_model": "memory-model",
-    "resolution_count": 1
-  },
-  "session_extraction_route": {
-    "backend": "session-memory-backend",
-    "model": "session-memory-model",
-    "request_model": "session-memory-model",
-    "resolution_count": 1
-  },
-  "capacity_contract": {
-    "configured_default_threshold": 250000,
-    "unknown_context_window_strategy": {
-      "planning_prompt_capacity": "configured_threshold > 0 ? configured_threshold : configured_default_threshold",
-      "model_context_window": "min(planning_prompt_capacity + reserved_output_tokens + autocompact_buffer_tokens, u64_max)",
-      "default_model_context_window": 279000
-    },
-    "context_window_resolution": {
-      "precedence": [
-        "positive_task_metadata.model_context_window",
-        "resolved_model.context_length",
-        "derived_planning_context"
-      ],
-      "non_positive_task_metadata_is_absent": true,
-      "cases": [
-        {
-          "name": "zero_metadata_uses_resolved_capability",
-          "input": {
-            "task_metadata_model_context_window": 0,
-            "resolved_model_context_window": 64000
-          },
-          "expected_model_context_window": 64000
-        },
-        {
-          "name": "zero_metadata_without_resolved_capability_uses_derived_planning_context",
-          "input": {
-            "task_metadata_model_context_window": 0,
-            "resolved_model_context_window": null,
-            "configured_threshold": 250000,
-            "reserved_output_tokens": 16000,
-            "autocompact_buffer_tokens": 13000
-          },
-          "expected_model_context_window": 279000
-        }
-      ]
-    },
-    "reserved_output_tokens_fallback": 16000,
-    "autocompact_buffer_tokens_default": 13000,
-    "microcompact_trigger_ratio_default": 0.75,
-    "microcompact_target_ratio_default": 0.6,
-    "microcompact_ratio_constraints": {
-      "target_ratio": "0 < target_ratio < trigger_ratio",
-      "trigger_ratio": "trigger_ratio <= 1"
-    },
-    "resolved_model_max_output_is_capability_not_request_default": true,
-    "reserved_output_precedence": [
-      "effective_model_settings.max_tokens",
-      "task_metadata.reserved_output_tokens",
-      "framework_fallback"
-    ],
-    "reserved_output_source_values": [
-      "model_settings",
-      "task_metadata",
-      "framework_fallback",
-      "framework_fallback_capped_by_model_capability"
-    ],
-    "formula": {
-      "derived_prompt_capacity": "max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)",
-      "effective_threshold": "configured_threshold > 0 ? min(configured_threshold, derived_prompt_capacity) : derived_prompt_capacity",
-      "microcompact_threshold": "floor(effective_threshold * microcompact_trigger_ratio)",
-      "microcompact_target": "floor(effective_threshold * microcompact_target_ratio)",
-      "known_zero_capacity_stays_zero": true
-    },
-    "cases": [
-      {
-        "name": "kimi_k3_uses_full_configured_ceiling",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 1048576,
-          "effective_model_max_tokens": null,
-          "task_metadata_reserved_output_tokens": null,
-          "model_max_output_tokens": 1048576,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 16000,
-          "reserved_output_source": "framework_fallback",
-          "effective_threshold": 250000,
-          "microcompact_threshold": 187500,
-          "microcompact_target": 150000
-        }
-      },
-      {
-        "name": "deepseek_v4_pro_uses_full_configured_ceiling",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 1000000,
-          "effective_model_max_tokens": null,
-          "task_metadata_reserved_output_tokens": null,
-          "model_max_output_tokens": 384000,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 16000,
-          "reserved_output_source": "framework_fallback",
-          "effective_threshold": 250000,
-          "microcompact_threshold": 187500,
-          "microcompact_target": 150000
-        }
-      },
-      {
-        "name": "explicit_request_limit_wins",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 256000,
-          "effective_model_max_tokens": 4096,
-          "task_metadata_reserved_output_tokens": 32000,
-          "model_max_output_tokens": 256000,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 4096,
-          "reserved_output_source": "model_settings",
-          "effective_threshold": 238904,
-          "microcompact_threshold": 179178,
-          "microcompact_target": 143342
-        }
-      },
-      {
-        "name": "explicit_host_reserve_wins_without_request_limit",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 256000,
-          "effective_model_max_tokens": null,
-          "task_metadata_reserved_output_tokens": 32768,
-          "model_max_output_tokens": 256000,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 32768,
-          "reserved_output_source": "task_metadata",
-          "effective_threshold": 210232,
-          "microcompact_threshold": 157674,
-          "microcompact_target": 126139
-        }
-      },
-      {
-        "name": "explicit_request_limit_is_not_capped_by_smaller_model_capability",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 64000,
-          "effective_model_max_tokens": 24000,
-          "task_metadata_reserved_output_tokens": null,
-          "model_max_output_tokens": 4096,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 24000,
-          "reserved_output_source": "model_settings",
-          "effective_threshold": 27000,
-          "microcompact_threshold": 20250,
-          "microcompact_target": 16200
-        }
-      },
-      {
-        "name": "explicit_host_reserve_is_not_capped_by_smaller_model_capability",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 64000,
-          "effective_model_max_tokens": null,
-          "task_metadata_reserved_output_tokens": 24000,
-          "model_max_output_tokens": 4096,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 24000,
-          "reserved_output_source": "task_metadata",
-          "effective_threshold": 27000,
-          "microcompact_threshold": 20250,
-          "microcompact_target": 16200
-        }
-      },
-      {
-        "name": "fallback_is_capped_by_smaller_model_capability",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 32000,
-          "effective_model_max_tokens": null,
-          "task_metadata_reserved_output_tokens": null,
-          "model_max_output_tokens": 8192,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 8192,
-          "reserved_output_source": "framework_fallback_capped_by_model_capability",
-          "effective_threshold": 10808,
-          "microcompact_threshold": 8106,
-          "microcompact_target": 6484
-        }
-      },
-      {
-        "name": "known_zero_capacity_stays_zero",
-        "input": {
-          "configured_threshold": 250000,
-          "model_context_window": 10000,
-          "effective_model_max_tokens": 10000,
-          "task_metadata_reserved_output_tokens": null,
-          "model_max_output_tokens": 10000,
-          "autocompact_buffer_tokens": 13000
-        },
-        "expected": {
-          "reserved_output_tokens": 10000,
-          "reserved_output_source": "model_settings",
-          "effective_threshold": 0,
-          "microcompact_threshold": 0,
-          "microcompact_target": 0
-        }
-      }
-    ]
-  },
-  "compaction_events": {
-    "started": {
-      "trigger_values": [
-        "micro_threshold",
-        "full_threshold",
-        "prompt_too_long"
-      ],
-      "producer_fields": [
-        "trigger",
-        "configured_threshold",
-        "effective_threshold",
-        "microcompact_threshold",
-        "microcompact_target",
-        "candidate_count",
-        "estimated_reclaimable_tokens",
-        "model_context_window",
-        "model_max_output_tokens",
-        "reserved_output_tokens",
-        "reserved_output_source",
-        "autocompact_buffer_tokens"
-      ],
-      "candidate_count_semantics": "number_of_oldest_first_candidates_selected_by_the_single_plan",
-      "estimated_reclaimable_tokens_semantics": "estimated_prompt_token_reduction_if_every_selected_archive_succeeds"
-    },
-    "completed": {
-      "mode_values": [
-        "none",
-        "micro",
-        "structural",
-        "summary",
-        "emergency"
-      ],
-      "producer_fields": [
-        "mode",
-        "changed",
-        "archived_count",
-        "reclaimed_tokens",
-        "artifact_failure_count"
-      ],
-      "archived_count_semantics": "selected_results_successfully_persisted_and_replaced",
-      "reclaimed_tokens_semantics": "actual_prompt_token_reduction_after_successful_replacements",
-      "artifact_failure_count_semantics": "selected_results_left_inline_because_archive_persistence_failed",
-      "changed_is_content_aware": true,
-      "mode_is_strongest_applied_stage": true,
-      "mode_semantics": {
-        "none": "no_change",
-        "micro": "only_archive_backed_result_replacement",
-        "structural": "information_preserving_cleanup_or_warning_only",
-        "summary": "accepted_prefix_summary_and_raw_tail",
-        "emergency": "accepted_resummary_with_smaller_raw_tail_target"
-      }
-    },
-    "microcompact_planning": {
-      "single_plan_and_apply_pass_per_cycle": true,
-      "candidate_required_for_micro_threshold_trigger": true,
-      "micro_threshold_without_candidate_event_count": 0,
-      "full_or_prompt_too_long_trigger_may_start_without_micro_candidate": true,
-      "candidate_order": "oldest_first",
-      "stop_condition": "actual_post_replacement_usage_at_or_below_microcompact_target_or_candidates_exhausted",
-      "planned_estimates_do_not_satisfy_target": true,
-      "reclaimed_tokens_per_candidate": "actual_original_message_tokens_minus_actual_replacement_message_tokens",
-      "recalculate_actual_usage_after_each_successful_replacement": true,
-      "archive_before_replace": true,
-      "archive_failure_preserves_original": true,
-      "existing_artifact_requires_utf8_size_and_sha256_validation": true,
-      "existing_artifact_validation_failure_preserves_original": true,
-      "archive_failure_does_not_stop_later_candidates": true
-    },
-    "simultaneous_warning_and_microcompact": {
-      "order": [
-        "microcompact_eligible_old_tool_results",
-        "recalculate_effective_length",
-        "append_memory_warning_only_if_post_microcompact_length_remains_eligible"
-      ],
-      "warning_uses_post_microcompact_length": true,
-      "warning_must_not_prevent_eligible_microcompact": true
-    },
-    "provider_and_journal_share_event_identity": [
-      "event_id",
-      "created_at"
-    ],
-    "missing_or_unknown_fields_are_rejected": true,
-    "unknown_enum_values_are_rejected": true,
-    "task_semantics_are_not_inspected": true,
-    "tool_result_format_is_not_inspected": true
-  },
-  "provider_attempts": {
-    "prompt_too_long_failures_before_success": 2,
-    "started_count": 2,
-    "completed_count": 2,
-    "strategies": [
-      {
-        "attempt": 1,
-        "strategy": "forced",
-        "drop_ratio": null
-      },
-      {
-        "attempt": 2,
-        "strategy": "emergency",
-        "drop_ratio": 0.4,
-        "requires_summary": true,
-        "drops_without_summary": false,
-        "keep_recent_messages_formula": "max(1, floor(keep_recent_messages * (1 - clamp(drop_ratio, 0, 0.95))))"
-      }
-    ],
-    "result_metadata": {
-      "phase": "before"
-    },
-    "before_error": {
-      "stage": "before_compact",
-      "error": "before exploded"
-    },
-    "after_error": {
-      "stage": "after_compact",
-      "error": "after exploded"
-    }
-  },
-  "session_memory": {
-    "enabled_by_default": false,
-    "explicit_control": "session_memory_enabled",
-    "accepted_aliases": [],
-    "seed_implies_enabled": false,
-    "existing_storage_implies_enabled": false,
-    "parent_value_inherited_by_child": false,
-    "gate_cases": [
-      {
-        "name": "explicitly_enabled",
-        "control": true,
-        "provided_context": "fresh decision",
-        "stored_entries_present": true,
-        "expected": {
-          "context_sections_rendered": 1,
-          "storage_reads_allowed": true,
-          "storage_writes_allowed": true,
-          "session_memory_model_dispatches_allowed": true
-        }
-      },
-      {
-        "name": "explicitly_disabled_ignores_all_memory_inputs",
-        "control": false,
-        "provided_context": "must not be rendered",
-        "seed_entries_present": true,
-        "stored_entries_present": true,
-        "expected": {
-          "context_sections_rendered": 0,
-          "storage_read_count": 0,
-          "storage_write_count": 0,
-          "session_memory_model_dispatch_count": 0
-        }
-      },
-      {
-        "name": "omitted_control_uses_disabled_default",
-        "control": "omitted",
-        "provided_context": "must not be rendered",
-        "seed_entries_present": true,
-        "stored_entries_present": true,
-        "expected": {
-          "context_sections_rendered": 0,
-          "storage_read_count": 0,
-          "storage_write_count": 0,
-          "session_memory_model_dispatch_count": 0
-        }
-      },
-      {
-        "name": "child_does_not_inherit_enabled_parent",
-        "parent_control": true,
-        "child_control": "omitted",
-        "expected": {
-          "child_effective_control": false,
-          "child_context_sections_rendered": 0,
-          "child_storage_read_count": 0,
-          "child_storage_write_count": 0,
-          "child_session_memory_model_dispatch_count": 0
-        }
-      }
-    ],
-    "stale_fact": "stale decision",
-    "fresh_fact": "fresh decision",
-    "block_count": 1,
-    "initialized_after_compaction": true,
-    "baseline_includes_injected_context": true,
-    "invalid_output_diagnostic": {
-      "type": "diagnostic",
-      "level": "warning",
-      "code": "session_memory_output_invalid",
-      "details_required": [
-        "reason",
-        "backend",
-        "model"
-      ],
-      "reason_values": [
-        "empty_output",
-        "json_array_missing",
-        "no_valid_entries"
-      ],
-      "forbidden_details": [
-        "prompt",
-        "output",
-        "messages",
-        "error_text"
-      ]
-    },
-    "checkpoint_receipt_replay": {
-      "new_model_dispatches": 0,
-      "new_model_call_records": 0,
-      "new_budget_increment": 0,
-      "derived_mutation_is_reapplied": true,
-      "entry_merge_uses_canonical_category_and_content_key": true,
-      "extraction_baseline_advances_after_merge": true,
-      "replay_is_idempotent": true
-    },
-    "control_outcomes_propagate": [
-      "cancellation",
-      "budget_exhaustion",
-      "checkpoint_ambiguity",
-      "checkpoint_integrity_failure"
-    ],
-    "baseline_includes_summary_and_raw_tail": true,
-    "on_compaction_requires_accepted_summary": true
-  },
   "artifacts": {
-    "logical_root": ".vv-agent/artifacts/",
-    "written_through_effective_workspace_backend": true,
     "immutable": true,
+    "logical_root": ".vv-agent/artifacts/",
     "microcompact_requires_success": true,
     "model_visible_marker_fields": [
       "tool_name",
@@ -461,11 +17,1387 @@
       "total_chars",
       "truncated_chars"
     ],
-    "survives_summary": true,
+    "summary_references_require_recovery_surface": true,
     "survives_recompression": true,
-    "summary_references_require_recovery_surface": true
+    "survives_summary": true,
+    "written_through_effective_workspace_backend": true
+  },
+  "capacity_contract": {
+    "autocompact_buffer_tokens_default": 13000,
+    "cases": [
+      {
+        "expected": {
+          "effective_threshold": 250000,
+          "microcompact_target": 150000,
+          "microcompact_threshold": 187500,
+          "reserved_output_source": "framework_fallback",
+          "reserved_output_tokens": 16000
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": null,
+          "model_context_window": 1048576,
+          "model_max_output_tokens": 1048576,
+          "task_metadata_reserved_output_tokens": null
+        },
+        "name": "kimi_k3_uses_full_configured_ceiling"
+      },
+      {
+        "expected": {
+          "effective_threshold": 250000,
+          "microcompact_target": 150000,
+          "microcompact_threshold": 187500,
+          "reserved_output_source": "framework_fallback",
+          "reserved_output_tokens": 16000
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": null,
+          "model_context_window": 1000000,
+          "model_max_output_tokens": 384000,
+          "task_metadata_reserved_output_tokens": null
+        },
+        "name": "deepseek_v4_pro_uses_full_configured_ceiling"
+      },
+      {
+        "expected": {
+          "effective_threshold": 238904,
+          "microcompact_target": 143342,
+          "microcompact_threshold": 179178,
+          "reserved_output_source": "model_settings",
+          "reserved_output_tokens": 4096
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": 4096,
+          "model_context_window": 256000,
+          "model_max_output_tokens": 256000,
+          "task_metadata_reserved_output_tokens": 32000
+        },
+        "name": "explicit_request_limit_wins"
+      },
+      {
+        "expected": {
+          "effective_threshold": 210232,
+          "microcompact_target": 126139,
+          "microcompact_threshold": 157674,
+          "reserved_output_source": "task_metadata",
+          "reserved_output_tokens": 32768
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": null,
+          "model_context_window": 256000,
+          "model_max_output_tokens": 256000,
+          "task_metadata_reserved_output_tokens": 32768
+        },
+        "name": "explicit_host_reserve_wins_without_request_limit"
+      },
+      {
+        "expected": {
+          "effective_threshold": 27000,
+          "microcompact_target": 16200,
+          "microcompact_threshold": 20250,
+          "reserved_output_source": "model_settings",
+          "reserved_output_tokens": 24000
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": 24000,
+          "model_context_window": 64000,
+          "model_max_output_tokens": 4096,
+          "task_metadata_reserved_output_tokens": null
+        },
+        "name": "explicit_request_limit_is_not_capped_by_smaller_model_capability"
+      },
+      {
+        "expected": {
+          "effective_threshold": 27000,
+          "microcompact_target": 16200,
+          "microcompact_threshold": 20250,
+          "reserved_output_source": "task_metadata",
+          "reserved_output_tokens": 24000
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": null,
+          "model_context_window": 64000,
+          "model_max_output_tokens": 4096,
+          "task_metadata_reserved_output_tokens": 24000
+        },
+        "name": "explicit_host_reserve_is_not_capped_by_smaller_model_capability"
+      },
+      {
+        "expected": {
+          "effective_threshold": 10808,
+          "microcompact_target": 6484,
+          "microcompact_threshold": 8106,
+          "reserved_output_source": "framework_fallback_capped_by_model_capability",
+          "reserved_output_tokens": 8192
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": null,
+          "model_context_window": 32000,
+          "model_max_output_tokens": 8192,
+          "task_metadata_reserved_output_tokens": null
+        },
+        "name": "fallback_is_capped_by_smaller_model_capability"
+      },
+      {
+        "expected": {
+          "effective_threshold": 0,
+          "microcompact_target": 0,
+          "microcompact_threshold": 0,
+          "reserved_output_source": "model_settings",
+          "reserved_output_tokens": 10000
+        },
+        "input": {
+          "autocompact_buffer_tokens": 13000,
+          "configured_threshold": 250000,
+          "effective_model_max_tokens": 10000,
+          "model_context_window": 10000,
+          "model_max_output_tokens": 10000,
+          "task_metadata_reserved_output_tokens": null
+        },
+        "name": "known_zero_capacity_stays_zero"
+      }
+    ],
+    "configured_default_threshold": 250000,
+    "context_window_resolution": {
+      "cases": [
+        {
+          "expected_model_context_window": 64000,
+          "input": {
+            "resolved_model_context_window": 64000,
+            "task_metadata_model_context_window": 0
+          },
+          "name": "zero_metadata_uses_resolved_capability"
+        },
+        {
+          "expected_model_context_window": 279000,
+          "input": {
+            "autocompact_buffer_tokens": 13000,
+            "configured_threshold": 250000,
+            "reserved_output_tokens": 16000,
+            "resolved_model_context_window": null,
+            "task_metadata_model_context_window": 0
+          },
+          "name": "zero_metadata_without_resolved_capability_uses_derived_planning_context"
+        }
+      ],
+      "non_positive_task_metadata_is_absent": true,
+      "precedence": [
+        "positive_task_metadata.model_context_window",
+        "resolved_model.context_length",
+        "derived_planning_context"
+      ]
+    },
+    "formula": {
+      "derived_prompt_capacity": "max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)",
+      "effective_threshold": "configured_threshold > 0 ? min(configured_threshold, derived_prompt_capacity) : derived_prompt_capacity",
+      "known_zero_capacity_stays_zero": true,
+      "microcompact_target": "floor(effective_threshold * microcompact_target_ratio)",
+      "microcompact_threshold": "floor(effective_threshold * microcompact_trigger_ratio)"
+    },
+    "microcompact_ratio_constraints": {
+      "target_ratio": "0 < target_ratio < trigger_ratio",
+      "trigger_ratio": "trigger_ratio <= 1"
+    },
+    "microcompact_target_ratio_default": 0.6,
+    "microcompact_trigger_ratio_default": 0.75,
+    "reserved_output_precedence": [
+      "effective_model_settings.max_tokens",
+      "task_metadata.reserved_output_tokens",
+      "framework_fallback"
+    ],
+    "reserved_output_source_values": [
+      "model_settings",
+      "task_metadata",
+      "framework_fallback",
+      "framework_fallback_capped_by_model_capability"
+    ],
+    "reserved_output_tokens_fallback": 16000,
+    "resolved_model_max_output_is_capability_not_request_default": true,
+    "unknown_context_window_strategy": {
+      "default_model_context_window": 279000,
+      "model_context_window": "min(planning_prompt_capacity + reserved_output_tokens + autocompact_buffer_tokens, u64_max)",
+      "planning_prompt_capacity": "configured_threshold > 0 ? configured_threshold : configured_default_threshold"
+    }
+  },
+  "compaction_events": {
+    "completed": {
+      "archived_count_semantics": "selected_results_successfully_persisted_and_replaced",
+      "artifact_failure_count_semantics": "selected_results_left_inline_because_archive_persistence_failed",
+      "changed_is_content_aware": true,
+      "mode_is_strongest_applied_stage": true,
+      "mode_semantics": {
+        "emergency": "accepted_resummary_with_smaller_raw_tail_target",
+        "micro": "only_archive_backed_result_replacement",
+        "none": "no_change",
+        "structural": "information_preserving_cleanup_or_warning_only",
+        "summary": "accepted_prefix_summary_and_raw_tail"
+      },
+      "mode_values": [
+        "none",
+        "micro",
+        "structural",
+        "summary",
+        "emergency"
+      ],
+      "producer_fields": [
+        "mode",
+        "changed",
+        "archived_count",
+        "reclaimed_tokens",
+        "artifact_failure_count"
+      ],
+      "reclaimed_tokens_semantics": "actual_prompt_token_reduction_after_successful_replacements"
+    },
+    "microcompact_planning": {
+      "archive_before_replace": true,
+      "archive_failure_does_not_stop_later_candidates": true,
+      "archive_failure_preserves_original": true,
+      "candidate_order": "oldest_first",
+      "candidate_required_for_micro_threshold_trigger": true,
+      "existing_artifact_requires_utf8_size_and_sha256_validation": true,
+      "existing_artifact_validation_failure_preserves_original": true,
+      "full_or_prompt_too_long_trigger_may_start_without_micro_candidate": true,
+      "micro_threshold_without_candidate_event_count": 0,
+      "planned_estimates_do_not_satisfy_target": true,
+      "recalculate_actual_usage_after_each_successful_replacement": true,
+      "reclaimed_tokens_per_candidate": "actual_original_message_tokens_minus_actual_replacement_message_tokens",
+      "single_plan_and_apply_pass_per_cycle": true,
+      "stop_condition": "actual_post_replacement_usage_at_or_below_microcompact_target_or_candidates_exhausted"
+    },
+    "missing_or_unknown_fields_are_rejected": true,
+    "provider_and_journal_share_event_identity": [
+      "event_id",
+      "created_at"
+    ],
+    "simultaneous_warning_and_microcompact": {
+      "order": [
+        "microcompact_eligible_old_tool_results",
+        "recalculate_effective_length",
+        "append_memory_warning_only_if_post_microcompact_length_remains_eligible"
+      ],
+      "warning_must_not_prevent_eligible_microcompact": true,
+      "warning_uses_post_microcompact_length": true
+    },
+    "started": {
+      "candidate_count_semantics": "number_of_oldest_first_candidates_selected_by_the_single_plan",
+      "estimated_reclaimable_tokens_semantics": "estimated_prompt_token_reduction_if_every_selected_archive_succeeds",
+      "producer_fields": [
+        "trigger",
+        "configured_threshold",
+        "effective_threshold",
+        "microcompact_threshold",
+        "microcompact_target",
+        "candidate_count",
+        "estimated_reclaimable_tokens",
+        "model_context_window",
+        "model_max_output_tokens",
+        "reserved_output_tokens",
+        "reserved_output_source",
+        "autocompact_buffer_tokens"
+      ],
+      "trigger_values": [
+        "micro_threshold",
+        "full_threshold",
+        "prompt_too_long"
+      ]
+    },
+    "task_semantics_are_not_inspected": true,
+    "tool_result_format_is_not_inspected": true,
+    "unknown_enum_values_are_rejected": true
+  },
+  "emergency_cases": [
+    {
+      "expected": {
+        "changed": true,
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "\u68c0\u67e5\u90e8\u7f72\u914d\u7f6e",
+            "role": "user"
+          },
+          {
+            "content": "\u914d\u7f6e\u5f85\u68c0\u67e5",
+            "role": "assistant"
+          }
+        ],
+        "mode": "emergency",
+        "raw_tail": [
+          {
+            "content": "\u68c0\u67e5\u90e8\u7f72\u914d\u7f6e",
+            "role": "user"
+          },
+          {
+            "content": "\u914d\u7f6e\u5f85\u68c0\u67e5",
+            "role": "assistant"
+          }
+        ],
+        "summary_calls": 1,
+        "workspace_file_reads": 0,
+        "workspace_file_stats": 0
+      },
+      "expected_summary_input": {
+        "conversation_prefix": [
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "run_tests"
+                },
+                "id": "c5",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "12 passed",
+            "role": "tool",
+            "tool_call_id": "c5"
+          }
+        ],
+        "previous_summary": [
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "role": "user"
+          }
+        ]
+      },
+      "input": {
+        "cycle_index": 1000,
+        "drop_ratio": 0.4,
+        "emergency_keep": 2,
+        "force": true,
+        "keep_recent_messages": 4,
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "run_tests"
+                },
+                "id": "c5",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "12 passed",
+            "role": "tool",
+            "tool_call_id": "c5"
+          },
+          {
+            "content": "\u68c0\u67e5\u90e8\u7f72\u914d\u7f6e",
+            "role": "user"
+          },
+          {
+            "content": "\u914d\u7f6e\u5f85\u68c0\u67e5",
+            "role": "assistant"
+          }
+        ],
+        "summary_response": "{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}"
+      },
+      "name": "emergency_resummarizes_more_tail",
+      "token_estimator": {
+        "candidate_messages": 600,
+        "input_messages": 1000
+      }
+    },
+    {
+      "expected": {
+        "changed": false,
+        "error": "CompactionExhaustedError",
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"path\":\"a.py\"}",
+                  "name": "read_file"
+                },
+                "id": "p1",
+                "type": "function"
+              },
+              {
+                "function": {
+                  "arguments": "{\"path\":\"b.py\"}",
+                  "name": "read_file"
+                },
+                "id": "p2",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "a",
+            "role": "tool",
+            "tool_call_id": "p1"
+          },
+          {
+            "content": "b",
+            "role": "tool",
+            "tool_call_id": "p2"
+          }
+        ],
+        "summary_calls": 0
+      },
+      "input": {
+        "drop_ratio": 0.4,
+        "emergency_keep": 1,
+        "keep_recent_messages": 2,
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"path\":\"a.py\"}",
+                  "name": "read_file"
+                },
+                "id": "p1",
+                "type": "function"
+              },
+              {
+                "function": {
+                  "arguments": "{\"path\":\"b.py\"}",
+                  "name": "read_file"
+                },
+                "id": "p2",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "a",
+            "role": "tool",
+            "tool_call_id": "p1"
+          },
+          {
+            "content": "b",
+            "role": "tool",
+            "tool_call_id": "p2"
+          }
+        ]
+      },
+      "name": "emergency_exhausted_atomic_tail"
+    },
+    {
+      "expected": {
+        "changed": false,
+        "error": "CompactionExhaustedError",
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "run_tests"
+                },
+                "id": "c5",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "12 passed",
+            "role": "tool",
+            "tool_call_id": "c5"
+          },
+          {
+            "content": "\u68c0\u67e5\u90e8\u7f72\u914d\u7f6e",
+            "role": "user"
+          },
+          {
+            "content": "\u914d\u7f6e\u5f85\u68c0\u67e5",
+            "role": "assistant"
+          }
+        ],
+        "summary_calls": 1
+      },
+      "input": {
+        "cycle_index": 1000,
+        "drop_ratio": 0.4,
+        "emergency_keep": 2,
+        "force": true,
+        "keep_recent_messages": 4,
+        "messages": [
+          {
+            "content": "\u7cfb\u7edf\u6307\u4ee4",
+            "role": "system"
+          },
+          {
+            "content": "<Original User Request>\n\u6392\u67e5\u767b\u5f55\u5931\u8d25\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"\u5b9a\u4f4d token \u5355\u4f4d\u9519\u8bef\uff1b\u5df2\u4fee\u6539\uff0c\u5f85\u9a8c\u8bc1\u3002\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"\u6392\u67e5\u767b\u5f55\u5931\u8d25\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "encoding": "utf-8",
+                      "media_type": "text/plain",
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+                      "size_bytes": 26
+                    },
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "cursors": [
+                  {
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "offset_chars": 20,
+                      "path": "logs/output.txt",
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    },
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file"
+                  }
+                ]
+              }
+            },
+            "name": "memory_summary",
+            "role": "user"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "run_tests"
+                },
+                "id": "c5",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "12 passed",
+            "role": "tool",
+            "tool_call_id": "c5"
+          },
+          {
+            "content": "\u68c0\u67e5\u90e8\u7f72\u914d\u7f6e",
+            "role": "user"
+          },
+          {
+            "content": "\u914d\u7f6e\u5f85\u68c0\u67e5",
+            "role": "assistant"
+          }
+        ],
+        "summary_response": ""
+      },
+      "name": "emergency_failed_summary_exhausted"
+    }
+  ],
+  "logged_internal_calls": [
+    {
+      "name": "summary",
+      "producer": {
+        "records": [
+          "session/summary/created",
+          "input/initial/applied",
+          "turn/summary/turn/initial/started",
+          "usage/active/summary/turn/initial/1/1",
+          "turn/summary/turn/initial/boundary/memory_started/df4919cddfe4685111191e98acb8ce2b890dcb3bd522f3b470764db400369aca",
+          "usage/active/summary/turn/initial/1/2",
+          "op/summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1/1/planned",
+          "usage/active/summary/turn/initial/1/3",
+          "op/summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1/1/started",
+          "usage/active/summary/turn/initial/1/4",
+          "op/summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1/1/result",
+          "usage/active/summary/turn/initial/1/5",
+          "compact/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1",
+          "usage/active/summary/turn/initial/1/6",
+          "turn/summary/turn/initial/boundary/memory_completed/df4919cddfe4685111191e98acb8ce2b890dcb3bd522f3b470764db400369aca",
+          "usage/active/summary/turn/initial/1/7",
+          "op/summary/turn/initial/model/primary/1/1/planned",
+          "usage/active/summary/turn/initial/1/8",
+          "op/summary/turn/initial/model/primary/1/1/started",
+          "usage/active/summary/turn/initial/1/9",
+          "op/summary/turn/initial/model/primary/1/1/result",
+          "usage/active/summary/turn/initial/1/10",
+          "turn/summary/turn/initial/ended"
+        ],
+        "session_id": "summary"
+      },
+      "usage": {
+        "cache_usage": {
+          "read_input_tokens": null,
+          "source": "aggregate",
+          "status": "accounting_missing",
+          "uncached_input_tokens": null,
+          "write_input_tokens": null
+        },
+        "input_tokens": null,
+        "model_calls": [
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "memory_compaction",
+            "operation_id": "summary/turn/initial/model/compaction/37ed79553d0119d91cdda1f2247a817d2f758f80d679d625a5aa626af1c30f0a/summary/1",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          },
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "summary/turn/initial/model/primary/1/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operation_id": "summary/turn/initial/model/primary/1",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          }
+        ],
+        "output_tokens": null,
+        "reasoning_tokens": null,
+        "schema_version": "vv-agent.task-token-usage.v3",
+        "total_tokens": null
+      }
+    },
+    {
+      "name": "rejected_summary",
+      "producer": {
+        "records": [
+          "session/rejected_summary/created",
+          "input/initial/applied",
+          "turn/rejected_summary/turn/initial/started",
+          "usage/active/rejected_summary/turn/initial/1/1",
+          "turn/rejected_summary/turn/initial/boundary/memory_started/f6cf1f7066c537ac748ade3d314909a635a2ced422948885bc1df1eeedf9467c",
+          "usage/active/rejected_summary/turn/initial/1/2",
+          "op/rejected_summary/turn/initial/model/compaction/f83ce001eb0edba352dcd26223cf72c537c086e0445df9dada771c069083e249/summary/1/1/planned",
+          "usage/active/rejected_summary/turn/initial/1/3",
+          "op/rejected_summary/turn/initial/model/compaction/f83ce001eb0edba352dcd26223cf72c537c086e0445df9dada771c069083e249/summary/1/1/started",
+          "usage/active/rejected_summary/turn/initial/1/4",
+          "op/rejected_summary/turn/initial/model/compaction/f83ce001eb0edba352dcd26223cf72c537c086e0445df9dada771c069083e249/summary/1/1/result",
+          "usage/active/rejected_summary/turn/initial/1/5",
+          "turn/rejected_summary/turn/initial/boundary/memory_completed/f6cf1f7066c537ac748ade3d314909a635a2ced422948885bc1df1eeedf9467c",
+          "usage/active/rejected_summary/turn/initial/1/6",
+          "op/rejected_summary/turn/initial/model/primary/1/1/planned",
+          "usage/active/rejected_summary/turn/initial/1/7",
+          "op/rejected_summary/turn/initial/model/primary/1/1/started",
+          "usage/active/rejected_summary/turn/initial/1/8",
+          "op/rejected_summary/turn/initial/model/primary/1/1/result",
+          "usage/active/rejected_summary/turn/initial/1/9",
+          "turn/rejected_summary/turn/initial/ended"
+        ],
+        "session_id": "rejected_summary"
+      },
+      "usage": {
+        "cache_usage": {
+          "read_input_tokens": null,
+          "source": "aggregate",
+          "status": "accounting_missing",
+          "uncached_input_tokens": null,
+          "write_input_tokens": null
+        },
+        "input_tokens": null,
+        "model_calls": [
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "rejected_summary/turn/initial/model/compaction/f83ce001eb0edba352dcd26223cf72c537c086e0445df9dada771c069083e249/summary/1/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "memory_compaction",
+            "operation_id": "rejected_summary/turn/initial/model/compaction/f83ce001eb0edba352dcd26223cf72c537c086e0445df9dada771c069083e249/summary/1",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          },
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "rejected_summary/turn/initial/model/primary/1/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operation_id": "rejected_summary/turn/initial/model/primary/1",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          }
+        ],
+        "output_tokens": null,
+        "reasoning_tokens": null,
+        "schema_version": "vv-agent.task-token-usage.v3",
+        "total_tokens": null
+      }
+    },
+    {
+      "name": "memory",
+      "producer": {
+        "records": [
+          "session/memory/created",
+          "input/initial/applied",
+          "turn/memory/turn/initial/started",
+          "usage/active/memory/turn/initial/1/1",
+          "op/memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9/1/planned",
+          "usage/active/memory/turn/initial/1/2",
+          "op/memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9/1/started",
+          "usage/active/memory/turn/initial/1/3",
+          "op/memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9/1/result",
+          "usage/active/memory/turn/initial/1/4",
+          "turn/memory/turn/initial/boundary/session_memory_saved/memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9",
+          "usage/active/memory/turn/initial/1/5",
+          "op/memory/turn/initial/model/primary/1/1/planned",
+          "usage/active/memory/turn/initial/1/6",
+          "op/memory/turn/initial/model/primary/1/1/started",
+          "usage/active/memory/turn/initial/1/7",
+          "op/memory/turn/initial/model/primary/1/1/result",
+          "usage/active/memory/turn/initial/1/8",
+          "turn/memory/turn/initial/ended"
+        ],
+        "session_id": "memory"
+      },
+      "usage": {
+        "cache_usage": {
+          "read_input_tokens": null,
+          "source": "aggregate",
+          "status": "accounting_missing",
+          "uncached_input_tokens": null,
+          "write_input_tokens": null
+        },
+        "input_tokens": null,
+        "model_calls": [
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "session_memory",
+            "operation_id": "memory/turn/initial/model/session_memory/01411261ae026a549aa03473de49f248a8be7675451e5a5f1ea4badb623725e9",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          },
+          {
+            "attempt": 1,
+            "backend": "scripted",
+            "call_id": "memory/turn/initial/model/primary/1/1",
+            "cycle_index": 1,
+            "error_code": null,
+            "model": "m",
+            "operation": "agent_cycle",
+            "operation_id": "memory/turn/initial/model/primary/1",
+            "schema_version": "vv-agent.model-call.v2",
+            "status": "completed",
+            "usage": {
+              "cache_usage": {
+                "read_input_tokens": null,
+                "source": null,
+                "status": "accounting_missing",
+                "uncached_input_tokens": null,
+                "write_input_tokens": null
+              },
+              "input_tokens": null,
+              "output_tokens": null,
+              "provider_usage": {},
+              "reasoning_tokens": null,
+              "schema_version": "vv-agent.token-usage.v1",
+              "total_tokens": null,
+              "usage_source": "accounting_missing"
+            }
+          }
+        ],
+        "output_tokens": null,
+        "reasoning_tokens": null,
+        "schema_version": "vv-agent.task-token-usage.v3",
+        "total_tokens": null
+      }
+    }
+  ],
+  "provider_attempts": {
+    "after_error": {
+      "error": "after exploded",
+      "stage": "after_compact"
+    },
+    "before_error": {
+      "error": "before exploded",
+      "stage": "before_compact"
+    },
+    "completed_count": 2,
+    "prompt_too_long_failures_before_success": 2,
+    "result_metadata": {
+      "phase": "before"
+    },
+    "started_count": 2,
+    "strategies": [
+      {
+        "attempt": 1,
+        "drop_ratio": null,
+        "strategy": "forced"
+      },
+      {
+        "attempt": 2,
+        "drop_ratio": 0.4,
+        "drops_without_summary": false,
+        "keep_recent_messages_formula": "max(1, floor(keep_recent_messages * (1 - clamp(drop_ratio, 0, 0.95))))",
+        "requires_summary": true,
+        "strategy": "emergency"
+      }
+    ]
+  },
+  "session_extraction_route": {
+    "backend": "session-memory-backend",
+    "model": "session-memory-model",
+    "request_model": "session-memory-model",
+    "resolution_count": 1
+  },
+  "session_memory": {
+    "accepted_aliases": [],
+    "baseline_includes_injected_context": true,
+    "baseline_includes_summary_and_raw_tail": true,
+    "block_count": 1,
+    "control_outcomes_propagate": [
+      "cancellation",
+      "budget_exhaustion",
+      "lost_ownership"
+    ],
+    "enabled_by_default": false,
+    "existing_storage_implies_enabled": false,
+    "explicit_control": "session_memory_enabled",
+    "fresh_fact": "fresh decision",
+    "gate_cases": [
+      {
+        "control": true,
+        "expected": {
+          "context_sections_rendered": 1,
+          "session_memory_model_dispatches_allowed": true,
+          "storage_reads_allowed": true,
+          "storage_writes_allowed": true
+        },
+        "name": "explicitly_enabled",
+        "provided_context": "fresh decision",
+        "stored_entries_present": true
+      },
+      {
+        "control": false,
+        "expected": {
+          "context_sections_rendered": 0,
+          "session_memory_model_dispatch_count": 0,
+          "storage_read_count": 0,
+          "storage_write_count": 0
+        },
+        "name": "explicitly_disabled_ignores_all_memory_inputs",
+        "provided_context": "must not be rendered",
+        "seed_entries_present": true,
+        "stored_entries_present": true
+      },
+      {
+        "control": "omitted",
+        "expected": {
+          "context_sections_rendered": 0,
+          "session_memory_model_dispatch_count": 0,
+          "storage_read_count": 0,
+          "storage_write_count": 0
+        },
+        "name": "omitted_control_uses_disabled_default",
+        "provided_context": "must not be rendered",
+        "seed_entries_present": true,
+        "stored_entries_present": true
+      },
+      {
+        "child_control": "omitted",
+        "expected": {
+          "child_context_sections_rendered": 0,
+          "child_effective_control": false,
+          "child_session_memory_model_dispatch_count": 0,
+          "child_storage_read_count": 0,
+          "child_storage_write_count": 0
+        },
+        "name": "child_does_not_inherit_enabled_parent",
+        "parent_control": true
+      }
+    ],
+    "initialized_after_compaction": true,
+    "invalid_output_diagnostic": {
+      "code": "session_memory_output_invalid",
+      "details_required": [
+        "reason",
+        "backend",
+        "model"
+      ],
+      "forbidden_details": [
+        "prompt",
+        "output",
+        "messages",
+        "error_text"
+      ],
+      "level": "warning",
+      "reason_values": [
+        "empty_output",
+        "json_array_missing",
+        "no_valid_entries"
+      ],
+      "type": "diagnostic"
+    },
+    "on_compaction_requires_accepted_summary": true,
+    "parent_value_inherited_by_child": false,
+    "receipt_replay": "reuse_recorded_extraction_without_a_second_provider_call",
+    "seed_implies_enabled": false,
+    "stale_fact": "stale decision"
   },
   "summary_pipeline": {
+    "case_fixture": "memory_local.json#/summary_compaction",
+    "control_outcomes_propagate": [
+      "cancellation",
+      "budget_exhaustion",
+      "lost_ownership"
+    ],
+    "empty_assistant_removal_only_if_no_content_reasoning_image_or_tool_calls": true,
+    "failure_result": "safely_pruned_complete_transcript",
+    "file_recovery": "paths_only_no_automatic_exists_stat_or_read",
+    "force_skips_pruning": true,
+    "malformed_tool_blocks": "do_not_commit; existing_recovery_boundary_owns_validation",
+    "processed_image_stripping": false,
+    "prune_only_case": {
+      "expected": {
+        "archived_count": 1,
+        "changed": true,
+        "messages": [
+          {
+            "content": "system",
+            "role": "system"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "lookup"
+                },
+                "id": "old",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "artifact_ref": {
+              "encoding": "utf-8",
+              "media_type": "text/plain",
+              "path": ".vv-agent/artifacts/run/old.txt",
+              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923",
+              "size_bytes": 2700
+            },
+            "content": "<Tool Result Compact>\ntool_name: lookup\nartifact_path: .vv-agent/artifacts/run/old.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\n\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\n...<snip>...\n\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\n</Tool Result Compact>",
+            "role": "tool",
+            "tool_call_id": "old"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "lookup"
+                },
+                "id": "recent",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60",
+            "role": "tool",
+            "tool_call_id": "recent"
+          }
+        ],
+        "mode": "micro",
+        "reclaimed_tokens": 400,
+        "summary_calls": 0
+      },
+      "input": {
+        "compact_threshold": 1800,
+        "cycle_index": 1000,
+        "existing_artifact_text": "\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60",
+        "force": false,
+        "keep_recent_messages": 2,
+        "messages": [
+          {
+            "content": "system",
+            "role": "system"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "lookup"
+                },
+                "id": "old",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "artifact_ref": {
+              "encoding": "utf-8",
+              "media_type": "text/plain",
+              "path": ".vv-agent/artifacts/run/old.txt",
+              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923",
+              "size_bytes": 2700
+            },
+            "content": "\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60",
+            "role": "tool",
+            "tool_call_id": "old"
+          },
+          {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "lookup"
+                },
+                "id": "recent",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60\u4f60",
+            "role": "tool",
+            "tool_call_id": "recent"
+          }
+        ],
+        "microcompaction_policy": {
+          "keep_recent_cycles": 1,
+          "min_result_chars": 500,
+          "target_ratio": 0.6,
+          "trigger_ratio": 0.75
+        }
+      },
+      "name": "prune_below_full_threshold_keeps_all_pairs",
+      "token_estimator": {
+        "candidate_messages": 1600,
+        "input_messages": 2000,
+        "old_result": 800,
+        "replacement_result": 400
+      }
+    },
+    "second_pruner": false,
+    "session_memory_on_compaction": "only_after_accepted_replacement",
     "stages": [
       "prepare_shared_message_view",
       "select_atomic_raw_tail",
@@ -474,653 +1406,16 @@
       "validate_summary_and_merge_evidence",
       "commit_only_if_smaller_and_within_budget"
     ],
-    "force_skips_pruning": true,
-    "second_pruner": false,
-    "processed_image_stripping": false,
-    "empty_assistant_removal_only_if_no_content_reasoning_image_or_tool_calls": true,
-    "malformed_tool_blocks": "do_not_commit; existing_recovery_boundary_owns_validation",
-    "failure_result": "safely_pruned_complete_transcript",
-    "file_recovery": "paths_only_no_automatic_exists_stat_or_read",
     "summary_event_limit_applies_to": "summary_output_only_never_input",
     "summary_input_overflow": "fail_preserve_history_no_chunking",
-    "session_memory_on_compaction": "only_after_accepted_replacement",
-    "token_baseline": "summary_plus_raw_tail",
     "system_prompt": "frozen",
-    "control_outcomes_propagate": [
-      "cancellation",
-      "budget_exhaustion",
-      "checkpoint_ambiguity",
-      "checkpoint_integrity_failure"
-    ],
-    "case_fixture": "memory_local.json#summary_compaction",
-    "prune_only_case": {
-      "name": "prune_below_full_threshold_keeps_all_pairs",
-      "input": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "system"
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "old",
-                "type": "function",
-                "function": {
-                  "name": "lookup",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
-            "tool_call_id": "old",
-            "artifact_ref": {
-              "path": ".vv-agent/artifacts/run/old.txt",
-              "media_type": "text/plain",
-              "encoding": "utf-8",
-              "size_bytes": 2700,
-              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923"
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "recent",
-                "type": "function",
-                "function": {
-                  "name": "lookup",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
-            "tool_call_id": "recent"
-          }
-        ],
-        "force": false,
-        "cycle_index": 1000,
-        "compact_threshold": 1800,
-        "keep_recent_messages": 2,
-        "microcompaction_policy": {
-          "trigger_ratio": 0.75,
-          "target_ratio": 0.6,
-          "keep_recent_cycles": 1,
-          "min_result_chars": 500
-        },
-        "existing_artifact_text": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你"
-      },
-      "token_estimator": {
-        "input_messages": 2000,
-        "candidate_messages": 1600,
-        "old_result": 800,
-        "replacement_result": 400
-      },
-      "expected": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "system"
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "old",
-                "type": "function",
-                "function": {
-                  "name": "lookup",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "<Tool Result Compact>\ntool_name: lookup\nartifact_path: .vv-agent/artifacts/run/old.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\n你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你\n...<snip>...\n你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你\n</Tool Result Compact>",
-            "tool_call_id": "old",
-            "artifact_ref": {
-              "path": ".vv-agent/artifacts/run/old.txt",
-              "media_type": "text/plain",
-              "encoding": "utf-8",
-              "size_bytes": 2700,
-              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923"
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "recent",
-                "type": "function",
-                "function": {
-                  "name": "lookup",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
-            "tool_call_id": "recent"
-          }
-        ],
-        "mode": "micro",
-        "changed": true,
-        "archived_count": 1,
-        "reclaimed_tokens": 400,
-        "summary_calls": 0
-      }
-    }
+    "token_baseline": "summary_plus_raw_tail"
   },
-  "emergency_cases": [
-    {
-      "name": "emergency_resummarizes_more_tail",
-      "input": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "c5",
-                "type": "function",
-                "function": {
-                  "name": "run_tests",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "12 passed",
-            "tool_call_id": "c5"
-          },
-          {
-            "role": "user",
-            "content": "检查部署配置"
-          },
-          {
-            "role": "assistant",
-            "content": "配置待检查"
-          }
-        ],
-        "keep_recent_messages": 4,
-        "force": true,
-        "cycle_index": 1000,
-        "summary_response": "{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
-        "drop_ratio": 0.4,
-        "emergency_keep": 2
-      },
-      "expected_summary_input": {
-        "previous_summary": [
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary"
-          }
-        ],
-        "conversation_prefix": [
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "c5",
-                "type": "function",
-                "function": {
-                  "name": "run_tests",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "12 passed",
-            "tool_call_id": "c5"
-          }
-        ]
-      },
-      "expected": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "user",
-            "content": "检查部署配置"
-          },
-          {
-            "role": "assistant",
-            "content": "配置待检查"
-          }
-        ],
-        "changed": true,
-        "summary_calls": 1,
-        "raw_tail": [
-          {
-            "role": "user",
-            "content": "检查部署配置"
-          },
-          {
-            "role": "assistant",
-            "content": "配置待检查"
-          }
-        ],
-        "workspace_file_reads": 0,
-        "workspace_file_stats": 0,
-        "mode": "emergency"
-      },
-      "token_estimator": {
-        "input_messages": 1000,
-        "candidate_messages": 600
-      }
-    },
-    {
-      "name": "emergency_exhausted_atomic_tail",
-      "input": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "p1",
-                "type": "function",
-                "function": {
-                  "name": "read_file",
-                  "arguments": "{\"path\":\"a.py\"}"
-                }
-              },
-              {
-                "id": "p2",
-                "type": "function",
-                "function": {
-                  "name": "read_file",
-                  "arguments": "{\"path\":\"b.py\"}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "a",
-            "tool_call_id": "p1"
-          },
-          {
-            "role": "tool",
-            "content": "b",
-            "tool_call_id": "p2"
-          }
-        ],
-        "keep_recent_messages": 2,
-        "drop_ratio": 0.4,
-        "emergency_keep": 1
-      },
-      "expected": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "p1",
-                "type": "function",
-                "function": {
-                  "name": "read_file",
-                  "arguments": "{\"path\":\"a.py\"}"
-                }
-              },
-              {
-                "id": "p2",
-                "type": "function",
-                "function": {
-                  "name": "read_file",
-                  "arguments": "{\"path\":\"b.py\"}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "a",
-            "tool_call_id": "p1"
-          },
-          {
-            "role": "tool",
-            "content": "b",
-            "tool_call_id": "p2"
-          }
-        ],
-        "changed": false,
-        "summary_calls": 0,
-        "error": "CompactionExhaustedError"
-      }
-    },
-    {
-      "name": "emergency_failed_summary_exhausted",
-      "input": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "c5",
-                "type": "function",
-                "function": {
-                  "name": "run_tests",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "12 passed",
-            "tool_call_id": "c5"
-          },
-          {
-            "role": "user",
-            "content": "检查部署配置"
-          },
-          {
-            "role": "assistant",
-            "content": "配置待检查"
-          }
-        ],
-        "keep_recent_messages": 4,
-        "force": true,
-        "cycle_index": 1000,
-        "summary_response": "",
-        "drop_ratio": 0.4,
-        "emergency_keep": 2
-      },
-      "expected": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "系统指令"
-          },
-          {
-            "role": "user",
-            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
-            "name": "memory_summary",
-            "metadata": {
-              "_vv_agent_compaction": {
-                "artifacts": [
-                  {
-                    "tool_call_id": "c1",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"auth.py\"}",
-                    "artifact_ref": {
-                      "path": ".vv-agent/artifacts/run/c1-H.txt",
-                      "media_type": "text/plain",
-                      "encoding": "utf-8",
-                      "size_bytes": 26,
-                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
-                    }
-                  }
-                ],
-                "cursors": [
-                  {
-                    "tool_call_id": "c2",
-                    "tool_name": "read_file",
-                    "arguments": "{\"path\":\"logs/output.txt\"}",
-                    "cursor": {
-                      "kind": "read_file",
-                      "path": "logs/output.txt",
-                      "offset_chars": 20,
-                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-              {
-                "id": "c5",
-                "type": "function",
-                "function": {
-                  "name": "run_tests",
-                  "arguments": "{}"
-                }
-              }
-            ]
-          },
-          {
-            "role": "tool",
-            "content": "12 passed",
-            "tool_call_id": "c5"
-          },
-          {
-            "role": "user",
-            "content": "检查部署配置"
-          },
-          {
-            "role": "assistant",
-            "content": "配置待检查"
-          }
-        ],
-        "changed": false,
-        "summary_calls": 1,
-        "error": "CompactionExhaustedError"
-      }
-    }
-  ]
+  "summary_route": {
+    "backend": "memory-backend",
+    "model": "memory-model",
+    "request_model": "memory-model",
+    "resolution_count": 1
+  },
+  "version": "memory_lifecycle"
 }

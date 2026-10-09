@@ -165,7 +165,7 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     from vv_agent.events import event_from_dict
 
     object.__setattr__(event, "version", "v6")
-    provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}}, _kernel=True)
+    provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}})
     metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
     object.__setattr__(event, "version", "v6")
     payload = event.to_dict() | {"metadata": metadata}

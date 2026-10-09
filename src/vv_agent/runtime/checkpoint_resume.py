@@ -30,7 +30,7 @@ from vv_agent.checkpoint import (
     compute_run_definition_digest,
 )
 from vv_agent.deferred import AcceptDeferredDecision
-from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
+from vv_agent.event_store import _RunEventSink
 from vv_agent.events import (
     CheckpointCreatedEvent,
     CheckpointResumedEvent,
@@ -166,7 +166,7 @@ class CheckpointResumeController:
         extensions: list[Any],
         reconciliation_provider: ReconciliationProvider | None,
         event_sink: Callable[[RunEvent], None],
-        event_store: RunEventStore | None = None,
+        event_store: _RunEventSink | None = None,
         lease_duration_ms: int = DEFAULT_CHECKPOINT_LEASE_MS,
         deadline_unix_ms: int | None = None,
         preloaded_checkpoint: Checkpoint | None = None,
@@ -439,7 +439,6 @@ class CheckpointResumeController:
         self._validate_existing_definition(existing)
         if existing.terminal_result is not None:
             replay = hydrate_checkpoint_result(self.store, existing, existing.terminal_result)
-            replay.checkpoint_key = key
             self.checkpoint = existing
             self.terminal_replay = replay
             self._deliver_pending_outbox()
@@ -631,7 +630,6 @@ class CheckpointResumeController:
             shared_state=shared_state,
             token_usage=token_usage,
             budget_usage=deepcopy(budget_usage if budget_usage is not None else checkpoint.budget_usage),
-            checkpoint_key=checkpoint.checkpoint_key,
         )
 
     def complete_model(
@@ -1230,7 +1228,6 @@ class CheckpointResumeController:
             AgentStatus.HOST_INTERACTION,
             AgentStatus.SUSPENDED,
         }:
-            result.checkpoint_key = self.checkpoint_key
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)
         if checkpoint is None:
@@ -1287,7 +1284,6 @@ class CheckpointResumeController:
                 code="checkpoint_terminal_unresolved_operation",
             )
         terminal = deepcopy(result)
-        terminal.checkpoint_key = checkpoint.checkpoint_key
         terminal.token_usage = summarize_task_token_usage(checkpoint.model_calls)
         if checkpoint.history["sequence"] and checkpoint.cycles:
             first_retained = checkpoint.cycles[0].index
@@ -1800,8 +1796,6 @@ class CheckpointResumeController:
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
-            checkpoint_key=checkpoint.checkpoint_key,
-            resume_observations=[observation],
         )
         raise CheckpointReconciliationRequired(result)
 
@@ -1916,8 +1910,6 @@ class CheckpointResumeController:
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
-            checkpoint_key=checkpoint.checkpoint_key,
-            resume_observations=[observation],
         )
         if checkpoint.claim_token is None:
             raise CheckpointError(
@@ -2287,27 +2279,14 @@ class CheckpointResumeController:
                 checkpoint.revision = authoritative.revision
 
     def _deliver_event(self, pending: EventOutboxEntry, event: RunEvent) -> EventCursor:
-        if isinstance(self.event_store, IdempotentRunEventStore):
-            cursor = self.event_store.append_once(
-                pending.event_id,
-                pending.payload_digest,
-                event,
-            )
-            if not isinstance(cursor, EventCursor):
-                raise CheckpointError(
-                    "idempotent event store returned an invalid cursor",
-                    code="event_cursor_invalid",
-                )
-        else:
-            if self.event_store is not None:
-                self.event_store.append(event)
-            cursor = EventCursor(
-                store_ref={"id": "events.raw-sink", "version": "1"},
-                value={"event_id": pending.event_id},
-                last_event_id=pending.event_id,
-            )
+        if self.event_store is not None:
+            self.event_store.append(event)
         self.event_sink(event)
-        return cursor
+        return EventCursor(
+            store_ref={"id": "events.raw-sink", "version": "1"},
+            value={"event_id": pending.event_id},
+            last_event_id=pending.event_id,
+        )
 
     def _checkpoint_created_event(self, checkpoint_key: str) -> CheckpointCreatedEvent:
         return CheckpointCreatedEvent(

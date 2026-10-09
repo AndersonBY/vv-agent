@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import time
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -74,6 +76,11 @@ class Runtime:
     heartbeat_seconds: float = 0.25
     poll_ms: int = 1000
     cancellation_grace: float = 0.25
+    lease_retry_attempts: int = 5
+    lease_retry_base_seconds: float = 0.01
+    lease_retry_cap_seconds: float = 0.5
+    lease_retry_jitter: Callable[[float, float], float] = random.uniform
+    lease_retry_sleep: Callable[[float], None] = time.sleep
     model_timeout: float = 300
     tool_timeout: float = 300
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None
@@ -81,6 +88,17 @@ class Runtime:
     memory_manager: MemoryManager = field(default_factory=MemoryManager)
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.lease_retry_attempts, bool)
+            or not isinstance(self.lease_retry_attempts, int)
+            or self.lease_retry_attempts < 1
+        ):
+            raise ValueError("lease_retry_attempts must be a positive integer")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in (self.lease_retry_base_seconds, self.lease_retry_cap_seconds)
+        ) or not 0 < self.lease_retry_base_seconds <= self.lease_retry_cap_seconds < float("inf"):
+            raise ValueError("lease retry delays must be finite, positive, and base <= cap")
         if not 0 < self.heartbeat_seconds <= 1 or self.ttl_ms <= self.heartbeat_seconds * 2000:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
         from vv_agent.runner import Runner
@@ -141,9 +159,9 @@ class Runtime:
     @cached_property
     def delegated_tools(self) -> set[str]:
         names = {
-            t.name
-            for t in self.agent.tools
-            if isinstance(t, FunctionTool) and t.metadata.get("mode") in {"agent_as_tool", "background_task"}
+            name
+            for name in self.registry.list_tool_names()
+            if self.registry.get_executor(name).metadata.get("mode") in {"agent_as_tool", "background_task"}
         }
         names.update(t.tool_name for t in self.agent.handoffs if t.tool_name)
         if self.agent.sub_agents:
@@ -181,6 +199,11 @@ class Runtime:
             heartbeat_seconds=self.heartbeat_seconds,
             poll_ms=self.poll_ms,
             cancellation_grace=self.cancellation_grace,
+            lease_retry_attempts=self.lease_retry_attempts,
+            lease_retry_base_seconds=self.lease_retry_base_seconds,
+            lease_retry_cap_seconds=self.lease_retry_cap_seconds,
+            lease_retry_jitter=self.lease_retry_jitter,
+            lease_retry_sleep=self.lease_retry_sleep,
             model_timeout=self.model_timeout,
             tool_timeout=self.tool_timeout,
             memory_manager=replace(self.memory_manager),
@@ -305,7 +328,7 @@ class Runtime:
                 tool_policy=policy,
                 **(
                     {
-                        "initial_messages": [Message.from_dict(copy_json(m), _kernel=True) for m in seed["messages"]],
+                        "initial_messages": [Message.from_dict(copy_json(m)) for m in seed["messages"]],
                         "shared_state": copy_json(seed["shared_state"]),
                     }
                     if seed is not None
@@ -528,7 +551,7 @@ class Runtime:
 def request_from_dict(value: dict[str, Any]) -> LlmRequest:
     return LlmRequest(
         model=value["model"],
-        messages=[Message.from_dict(m, _kernel=True) for m in value["messages"]],
+        messages=[Message.from_dict(m) for m in value["messages"]],
         tools=value["tools"],
         metadata=value["metadata"],
         prompt_bundle=PromptBundle.from_dict(value["prompt_bundle"]) if value["prompt_bundle"] else None,

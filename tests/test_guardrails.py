@@ -36,7 +36,7 @@ def test_input_guardrail_can_block_before_model_call(tmp_path: Path) -> None:
         def client(self, resolved: ResolvedModelConfig) -> ScriptedLLM:
             del resolved
             self.called = True
-            return ScriptedLLM()
+            return ScriptedLLM([lambda _request: (_ for _ in ()).throw(AssertionError("blocked model dispatched"))])
 
         def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
             del resolved
@@ -60,10 +60,10 @@ def test_input_guardrail_can_block_before_model_call(tmp_path: Path) -> None:
         run_config=RunConfig(workspace=tmp_path, model_provider=provider),
     )
 
-    assert provider.called is False
+    assert provider.called is True
     assert result.status == AgentStatus.FAILED
     assert result.final_output == "input is required"
-    assert result.resolved_model is None
+    assert result.resolved_model == _resolved()
     assert result.events[-1].type == "run_failed"
 
 

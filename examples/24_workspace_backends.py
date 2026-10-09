@@ -14,16 +14,10 @@ from __future__ import annotations
 
 import os
 import sys
-import uuid
 from pathlib import Path
-from typing import Any
 
-from vv_agent.config import build_vv_llm_from_local_settings
+from vv_agent import Agent, ModelProvider, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.events import DiagnosticEvent, RunEvent
-from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime
-from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentTask
 from vv_agent.workspace import (
     FileInfo,
     LocalWorkspaceBackend,
@@ -103,7 +97,7 @@ def _build_and_run(
     label: str,
     workspace_backend: WorkspaceBackend | None,
     workspace: Path,
-    llm_client: Any,
+    model_provider: ModelProvider,
     model_id: str,
     verbose: bool,
     prompt: str,
@@ -112,32 +106,20 @@ def _build_and_run(
     print(f"[demo] {label}")
     print(f"{'=' * 60}")
 
-    runtime = AgentRuntime(
-        llm_client=llm_client,
-        tool_registry=build_default_registry(),
-        default_workspace=workspace,
-        event_handler=event_handler if verbose else None,
-        workspace_backend=workspace_backend,
+    agent = Agent("workspace-demo", "Use workspace tools to complete tasks.", model=model_id)
+    result = Runner.run_sync(
+        agent,
+        prompt,
+        run_config=RunConfig(
+            model_provider=model_provider,
+            workspace=workspace,
+            workspace_backend=workspace_backend,
+            stream=event_handler if verbose else None,
+            max_cycles=5,
+        ),
     )
-
-    system_prompt = build_system_prompt(
-        "You are a helpful agent. Use workspace tools to complete tasks.",
-        language="zh-CN",
-        allow_interruption=True,
-        use_workspace=True,
-    )
-
-    task = AgentTask(
-        task_id=f"ws_backend_{uuid.uuid4().hex[:8]}",
-        model=model_id,
-        system_prompt=system_prompt,
-        user_prompt=prompt,
-        max_cycles=5,
-    )
-
-    result = runtime.run(task, workspace=workspace)
     print(f"\n  状态: {result.status.value}")
-    print(f"  回答: {result.final_answer}")
+    print(f"  回答: {result.final_output}")
 
 
 # ---------------------------------------------------------------------------
@@ -182,15 +164,10 @@ def main() -> None:
 
     workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, resolved = build_vv_llm_from_local_settings(
-        settings_file,
-        backend=backend_name,
-        model=model,
-    )
     common = dict(
         workspace=workspace,
-        llm_client=llm,
-        model_id=resolved.model_id,
+        model_provider=VvLlmModelProvider(settings_file=settings_file, default_backend=backend_name),
+        model_id=model,
         verbose=verbose,
     )
 

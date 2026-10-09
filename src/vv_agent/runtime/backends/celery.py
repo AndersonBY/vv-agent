@@ -247,7 +247,6 @@ class CeleryBackend:
                     token_usage=summarize_task_token_usage(current.model_calls),
                     budget_usage=deepcopy(current.budget_usage),
                     wait_reason=wait_reason,
-                    checkpoint_key=current.checkpoint_key,
                 )
             if decision.envelope is None:
                 raise CheckpointError("distributed advance returned no next envelope", code="checkpoint_store_conflict")
@@ -368,7 +367,6 @@ class CeleryBackend:
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
-            checkpoint_key=checkpoint.checkpoint_key,
         )
 
     @staticmethod
@@ -393,7 +391,6 @@ class CeleryBackend:
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
-            checkpoint_key=checkpoint.checkpoint_key,
         )
 
     def execute(

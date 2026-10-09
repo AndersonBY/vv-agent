@@ -1,58 +1,47 @@
 {
-  "contract": "vv-agent-public-api-v7",
+  "contract": "vv-agent-public-api-v8",
   "domains": [
     {
       "capabilities": [
         {
           "id": "agent.definition",
-          "python": "vv_agent.Agent",
-          "rust": "vv_agent::Agent"
+          "python": "vv_agent.Agent"
         },
         {
           "id": "agent.sub_agent_config",
-          "python": "vv_agent.SubAgentConfig",
-          "rust": "vv_agent::SubAgentConfig"
+          "python": "vv_agent.SubAgentConfig"
         },
         {
           "id": "agent.run_context",
-          "python": "vv_agent.RunContext",
-          "rust": "vv_agent::RunContext"
+          "python": "vv_agent.RunContext"
         },
         {
           "id": "agent.tool_use_behavior",
-          "python": "vv_agent.agent.ToolUseBehavior",
-          "rust": "vv_agent::agent::ToolUseBehavior"
+          "python": "vv_agent.agent.ToolUseBehavior"
         },
         {
           "id": "agent.no_tool_policy",
-          "python": "vv_agent.NoToolPolicy",
-          "rust": "vv_agent::NoToolPolicy"
+          "python": "vv_agent.NoToolPolicy"
         },
         {
           "id": "agent.handoff",
-          "python": "vv_agent.Handoff",
-          "rust": "vv_agent::Handoff"
+          "python": "vv_agent.Handoff"
         },
         {
           "id": "agent.background_task",
-          "python": "vv_agent.BackgroundAgentTask",
-          "rust": "vv_agent::BackgroundAgentTask"
+          "python": "vv_agent.BackgroundAgentTask"
         },
         {
           "id": "agent.prompt_bundle",
-          "python": "vv_agent.PromptBundle",
-          "rust": "vv_agent::PromptBundle"
+          "python": "vv_agent.PromptBundle"
         },
         {
           "id": "agent.prompt_section",
-          "python": "vv_agent.PromptSection",
-          "rust": "vv_agent::PromptSection"
+          "python": "vv_agent.PromptSection"
         },
         {
-          "adaptation": "Python names the value GuardrailResult; Rust names it GuardrailOutcome.",
           "id": "agent.guardrail_outcome",
-          "python": "vv_agent.GuardrailResult",
-          "rust": "vv_agent::GuardrailOutcome"
+          "python": "vv_agent.GuardrailResult"
         }
       ],
       "id": "agent"
@@ -61,14 +50,11 @@
       "capabilities": [
         {
           "id": "runner.facade",
-          "python": "vv_agent.Runner",
-          "rust": "vv_agent::Runner"
+          "python": "vv_agent.Runner"
         },
         {
-          "adaptation": "Python returns a configured facade; Rust uses a builder.",
           "id": "runner.configured",
-          "python": "vv_agent.ConfiguredRunner",
-          "rust": "vv_agent::runner::RunnerBuilder"
+          "python": "vv_agent.ConfiguredRunner"
         }
       ],
       "id": "runner"
@@ -77,108 +63,67 @@
       "capabilities": [
         {
           "id": "run_config.options",
-          "python": "vv_agent.RunConfig",
-          "rust": "vv_agent::RunConfig"
+          "python": "vv_agent.RunConfig"
         },
         {
           "id": "run_config.no_tool_policy",
-          "python": "vv_agent.NoToolPolicy",
-          "rust": "vv_agent::NoToolPolicy"
+          "python": "vv_agent.NoToolPolicy"
         },
         {
           "id": "run_config.tool_policy",
-          "python": "vv_agent.ToolPolicy",
-          "rust": "vv_agent::ToolPolicy"
+          "python": "vv_agent.ToolPolicy"
         },
         {
           "id": "run_config.approval_policy",
-          "python": "vv_agent.ApprovalPolicy",
-          "rust": "vv_agent::ApprovalPolicy"
+          "python": "vv_agent.ApprovalPolicy"
         },
         {
           "id": "run_config.cancellation",
-          "python": "vv_agent.runtime.CancellationToken",
-          "rust": "vv_agent::CancellationToken"
+          "python": "vv_agent.runtime.CancellationToken"
         },
         {
           "id": "run_config.approval_broker",
-          "python": "vv_agent.ApprovalBroker",
-          "rust": "vv_agent::ApprovalBroker"
+          "python": "vv_agent.ApprovalBroker"
         },
         {
           "id": "run_config.context_provider",
-          "python": "vv_agent.ContextProvider",
-          "rust": "vv_agent::ContextProvider"
+          "python": "vv_agent.ContextProvider"
         },
         {
           "id": "run_config.after_cycle_hook",
-          "python": "vv_agent.AfterCycleHook",
-          "rust": "vv_agent::AfterCycleHook"
+          "python": "vv_agent.AfterCycleHook"
         },
         {
           "id": "run_config.after_cycle_snapshot",
-          "python": "vv_agent.AfterCycleSnapshot",
-          "rust": "vv_agent::AfterCycleSnapshot"
+          "python": "vv_agent.AfterCycleSnapshot"
         },
         {
           "id": "run_config.after_cycle_decision",
-          "python": "vv_agent.AfterCycleDecision",
-          "rust": "vv_agent::AfterCycleDecision"
+          "python": "vv_agent.AfterCycleDecision"
         },
         {
           "id": "run_config.after_cycle_action",
-          "python": "vv_agent.AfterCycleAction",
-          "rust": "vv_agent::AfterCycleAction"
+          "python": "vv_agent.AfterCycleAction"
         },
         {
           "id": "run_config.native_cycle_outcome",
-          "python": "vv_agent.NativeCycleOutcome",
-          "rust": "vv_agent::NativeCycleOutcome"
+          "python": "vv_agent.NativeCycleOutcome"
         },
         {
           "id": "run_config.native_cycle_outcome_kind",
-          "python": "vv_agent.NativeCycleOutcomeKind",
-          "rust": "vv_agent::NativeCycleOutcomeKind"
+          "python": "vv_agent.NativeCycleOutcomeKind"
         },
         {
           "id": "run_config.run_budget_limits",
-          "python": "vv_agent.RunBudgetLimits",
-          "rust": "vv_agent::RunBudgetLimits"
+          "python": "vv_agent.RunBudgetLimits"
         },
         {
           "id": "run_config.host_cost_meter",
-          "python": "vv_agent.HostCostMeter",
-          "rust": "vv_agent::HostCostMeter"
+          "python": "vv_agent.HostCostMeter"
         },
         {
           "id": "run_config.unavailable_metric_policy",
-          "python": "vv_agent.UnavailableMetricPolicy",
-          "rust": "vv_agent::UnavailableMetricPolicy"
-        },
-        {
-          "id": "run_config.checkpoint_config",
-          "python": "vv_agent.CheckpointConfig",
-          "rust": "vv_agent::CheckpointConfig"
-        },
-        {
-          "id": "checkpoint_config.capability_refs",
-          "python": "vv_agent.CheckpointConfig.capability_refs",
-          "rust": "vv_agent::CheckpointConfig::capability_refs"
-        },
-        {
-          "id": "checkpoint_config.credential_slots",
-          "python": "vv_agent.CheckpointConfig.credential_slots",
-          "rust": "vv_agent::CheckpointConfig::credential_slots"
-        },
-        {
-          "id": "run_config.checkpoint_extension",
-          "python": "vv_agent.CheckpointExtension",
-          "rust": "vv_agent::CheckpointExtension"
-        },
-        {
-          "id": "run_config.reconciliation_provider",
-          "python": "vv_agent.ReconciliationProvider",
-          "rust": "vv_agent::ReconciliationProvider"
+          "python": "vv_agent.UnavailableMetricPolicy"
         }
       ],
       "id": "run_config"
@@ -187,123 +132,87 @@
       "capabilities": [
         {
           "id": "result.public",
-          "python": "vv_agent.RunResult",
-          "rust": "vv_agent::RunResult"
-        },
-        {
-          "id": "result.resume_state",
-          "python": "vv_agent.RunState",
-          "rust": "vv_agent::RunState"
-        },
-        {
-          "id": "result.approval_snapshot",
-          "python": "vv_agent.ApprovalSnapshot",
-          "rust": "vv_agent::ApprovalSnapshot"
+          "python": "vv_agent.RunResult"
         },
         {
           "id": "result.runtime_result",
-          "python": "vv_agent.types.AgentResult",
-          "rust": "vv_agent::AgentResult"
+          "python": "vv_agent.types.AgentResult"
         },
         {
           "id": "result.status",
-          "python": "vv_agent.AgentStatus",
-          "rust": "vv_agent::AgentStatus"
+          "python": "vv_agent.AgentStatus"
         },
         {
           "id": "result.completion_reason",
-          "python": "vv_agent.CompletionReason",
-          "rust": "vv_agent::CompletionReason"
+          "python": "vv_agent.CompletionReason"
         },
         {
           "id": "result.usage_source",
-          "python": "vv_agent.UsageSource",
-          "rust": "vv_agent::UsageSource"
+          "python": "vv_agent.UsageSource"
         },
         {
           "id": "result.cache_usage_status",
-          "python": "vv_agent.CacheUsageStatus",
-          "rust": "vv_agent::CacheUsageStatus"
+          "python": "vv_agent.CacheUsageStatus"
         },
         {
           "id": "result.cache_usage",
-          "python": "vv_agent.CacheUsage",
-          "rust": "vv_agent::CacheUsage"
+          "python": "vv_agent.CacheUsage"
         },
         {
           "id": "result.token_usage",
-          "python": "vv_agent.TokenUsage",
-          "rust": "vv_agent::TokenUsage"
+          "python": "vv_agent.TokenUsage"
         },
         {
           "id": "result.model_call_operation",
-          "python": "vv_agent.ModelCallOperation",
-          "rust": "vv_agent::ModelCallOperation"
+          "python": "vv_agent.ModelCallOperation"
         },
         {
           "id": "result.model_call_status",
-          "python": "vv_agent.ModelCallStatus",
-          "rust": "vv_agent::ModelCallStatus"
+          "python": "vv_agent.ModelCallStatus"
         },
         {
           "id": "result.model_call_record",
-          "python": "vv_agent.ModelCallRecord",
-          "rust": "vv_agent::ModelCallRecord"
+          "python": "vv_agent.ModelCallRecord"
         },
         {
           "id": "result.task_token_usage",
-          "python": "vv_agent.TaskTokenUsage",
-          "rust": "vv_agent::TaskTokenUsage"
+          "python": "vv_agent.TaskTokenUsage"
         },
         {
           "id": "result.task_token_usage_totals",
-          "python": "vv_agent.TaskTokenUsageTotals",
-          "rust": "vv_agent::TaskTokenUsageTotals"
+          "python": "vv_agent.TaskTokenUsageTotals"
         },
         {
           "id": "result.host_cost",
-          "python": "vv_agent.HostCost",
-          "rust": "vv_agent::HostCost"
+          "python": "vv_agent.HostCost"
         },
         {
           "id": "result.budget_dimension",
-          "python": "vv_agent.BudgetDimension",
-          "rust": "vv_agent::BudgetDimension"
+          "python": "vv_agent.BudgetDimension"
         },
         {
           "id": "result.budget_enforcement_boundary",
-          "python": "vv_agent.BudgetEnforcementBoundary",
-          "rust": "vv_agent::BudgetEnforcementBoundary"
+          "python": "vv_agent.BudgetEnforcementBoundary"
         },
         {
           "id": "result.budget_exhaustion_reason",
-          "python": "vv_agent.BudgetExhaustionReason",
-          "rust": "vv_agent::BudgetExhaustionReason"
+          "python": "vv_agent.BudgetExhaustionReason"
         },
         {
           "id": "result.budget_unavailable_reason",
-          "python": "vv_agent.BudgetUnavailableReason",
-          "rust": "vv_agent::BudgetUnavailableReason"
+          "python": "vv_agent.BudgetUnavailableReason"
         },
         {
           "id": "result.budget_unavailable_dimension",
-          "python": "vv_agent.BudgetUnavailableDimension",
-          "rust": "vv_agent::BudgetUnavailableDimension"
+          "python": "vv_agent.BudgetUnavailableDimension"
         },
         {
           "id": "result.budget_usage_snapshot",
-          "python": "vv_agent.BudgetUsageSnapshot",
-          "rust": "vv_agent::BudgetUsageSnapshot"
+          "python": "vv_agent.BudgetUsageSnapshot"
         },
         {
           "id": "result.budget_exhaustion",
-          "python": "vv_agent.BudgetExhaustion",
-          "rust": "vv_agent::BudgetExhaustion"
-        },
-        {
-          "id": "result.resume_observations",
-          "python": "list[vv_agent.ResumeObservation]",
-          "rust": "Vec<vv_agent::ResumeObservation>"
+          "python": "vv_agent.BudgetExhaustion"
         }
       ],
       "id": "result"
@@ -312,18 +221,15 @@
       "capabilities": [
         {
           "id": "run_handle.live",
-          "python": "vv_agent.RunHandle",
-          "rust": "vv_agent::RunHandle"
+          "python": "vv_agent.RunHandle"
         },
         {
           "id": "run_handle.snapshot",
-          "python": "vv_agent.RunHandleState",
-          "rust": "vv_agent::RunHandleState"
+          "python": "vv_agent.RunHandleState"
         },
         {
           "id": "run_handle.status",
-          "python": "vv_agent.run_handle.RunHandleStatus",
-          "rust": "vv_agent::RunHandleStatus"
+          "python": "vv_agent.run_handle.RunHandleStatus"
         }
       ],
       "id": "run_handle"
@@ -331,36 +237,28 @@
     {
       "capabilities": [
         {
-          "adaptation": "Python calls the embedded session AgentSession; Rust calls it InteractiveSession.",
           "id": "interactive.session",
-          "python": "vv_agent.AgentSession",
-          "rust": "vv_agent::InteractiveSession"
+          "python": "vv_agent.AgentSession"
         },
         {
           "id": "interactive.options",
-          "python": "vv_agent.AgentSessionOptions",
-          "rust": "vv_agent::InteractiveSessionOptions"
+          "python": "vv_agent.AgentSessionOptions"
         },
         {
           "id": "interactive.state",
-          "python": "vv_agent.AgentSessionState",
-          "rust": "vv_agent::InteractiveSessionState"
+          "python": "vv_agent.AgentSessionState"
         },
         {
           "id": "interactive.client",
-          "python": "vv_agent.InteractiveAgentClient",
-          "rust": "vv_agent::InteractiveAgentClient"
+          "python": "vv_agent.InteractiveAgentClient"
         },
         {
           "id": "interactive.event",
-          "python": "vv_agent.interactive.AgentSessionEvent",
-          "rust": "vv_agent::InteractiveSessionEvent"
+          "python": "vv_agent.interactive.AgentSessionEvent"
         },
         {
-          "adaptation": "The languages expose their native session error hierarchy.",
           "id": "interactive.error",
-          "python": "vv_agent.interactive.AgentSessionEventGapError",
-          "rust": "vv_agent::InteractiveSessionError"
+          "python": "vv_agent.interactive.AgentSessionEventGapError"
         }
       ],
       "id": "interactive"
@@ -369,69 +267,55 @@
       "capabilities": [
         {
           "id": "app_server.server",
-          "python": "vv_agent.AppServer",
-          "rust": "vv_agent::app_server::AppServer"
+          "python": "vv_agent.AppServer"
         },
         {
           "id": "app_server.host",
-          "python": "vv_agent.AppServerHost",
-          "rust": "vv_agent::AppServerHost"
+          "python": "vv_agent.AppServerHost"
         },
         {
           "id": "app_server.default_host",
-          "python": "vv_agent.DefaultAppServerHost",
-          "rust": "vv_agent::DefaultAppServerHost"
+          "python": "vv_agent.DefaultAppServerHost"
         },
         {
           "id": "app_server.client",
-          "python": "vv_agent.app_server.AppServerClient",
-          "rust": "vv_agent::app_server::client::AppServerClient"
+          "python": "vv_agent.app_server.AppServerClient"
         },
         {
           "id": "app_server.client_error",
-          "python": "vv_agent.app_server.AppServerClientError",
-          "rust": "vv_agent::app_server::client::AppServerClientError"
+          "python": "vv_agent.app_server.AppServerClientError"
         },
         {
           "id": "app_server.processor",
-          "python": "vv_agent.app_server.MessageProcessor",
-          "rust": "vv_agent::app_server::processor::MessageProcessor"
+          "python": "vv_agent.app_server.MessageProcessor"
         },
         {
-          "adaptation": "Python names the sender facade OutgoingRouter; Rust names it OutgoingMessageSender.",
           "id": "app_server.outgoing_router",
-          "python": "vv_agent.app_server.OutgoingRouter",
-          "rust": "vv_agent::app_server::outgoing::OutgoingMessageSender"
+          "python": "vv_agent.app_server.OutgoingRouter"
         },
         {
           "id": "app_server.transport",
-          "python": "vv_agent.app_server.transport.AppServerTransport",
-          "rust": "vv_agent::app_server::transport::AppServerTransport"
+          "python": "vv_agent.app_server.transport.AppServerTransport"
         },
         {
           "id": "app_server.channel_transport",
-          "python": "vv_agent.app_server.ChannelTransport",
-          "rust": "vv_agent::app_server::transport::channel::ChannelTransport"
+          "python": "vv_agent.app_server.ChannelTransport"
         },
         {
           "id": "app_server.stdio_transport",
-          "python": "vv_agent.app_server.StdioJsonlTransport",
-          "rust": "vv_agent::app_server::transport::stdio::StdioJsonlTransport"
+          "python": "vv_agent.app_server.StdioJsonlTransport"
         },
         {
           "id": "app_server.jsonrpc_message",
-          "python": "vv_agent.app_server.JsonRpcMessage",
-          "rust": "vv_agent::app_server::protocol::JsonRpcMessage"
+          "python": "vv_agent.app_server.JsonRpcMessage"
         },
         {
           "id": "app_server.turn_resume_params",
-          "python": "vv_agent.app_server.TurnResumeParams",
-          "rust": "vv_agent::app_server::protocol::TurnResumeParams"
+          "python": "vv_agent.app_server.TurnResumeParams"
         },
         {
           "id": "app_server.turn_resume_response",
-          "python": "vv_agent.app_server.TurnResumeResponse",
-          "rust": "vv_agent::app_server::protocol::TurnResumeResponse"
+          "python": "vv_agent.app_server.TurnResumeResponse"
         }
       ],
       "id": "app_server"
@@ -440,127 +324,90 @@
       "capabilities": [
         {
           "id": "tools.public_tool",
-          "python": "vv_agent.Tool",
-          "rust": "vv_agent::Tool"
+          "python": "vv_agent.Tool"
         },
         {
           "id": "tools.function_tool",
-          "python": "vv_agent.FunctionTool",
-          "rust": "vv_agent::FunctionTool"
+          "python": "vv_agent.FunctionTool"
         },
         {
           "id": "tools.registry",
-          "python": "vv_agent.ToolRegistry",
-          "rust": "vv_agent::ToolRegistry"
+          "python": "vv_agent.ToolRegistry"
         },
         {
           "id": "tools.executor",
-          "python": "vv_agent.tools.ToolExecutor",
-          "rust": "vv_agent::ToolExecutor"
+          "python": "vv_agent.tools.ToolExecutor"
         },
         {
           "id": "tools.spec",
-          "python": "vv_agent.tools.ToolSpec",
-          "rust": "vv_agent::ToolSpec"
+          "python": "vv_agent.tools.ToolSpec"
         },
         {
           "id": "tools.context",
-          "python": "vv_agent.ToolContext",
-          "rust": "vv_agent::ToolContext"
-        },
-        {
-          "id": "tools.context_defer",
-          "python": "vv_agent.ToolContext.defer",
-          "rust": "vv_agent::ToolContext::defer"
+          "python": "vv_agent.ToolContext"
         },
         {
           "id": "tools.orchestrator",
-          "python": "vv_agent.tools.ToolOrchestrator",
-          "rust": "vv_agent::ToolOrchestrator"
+          "python": "vv_agent.tools.ToolOrchestrator"
         },
         {
           "id": "tools.exposure",
-          "python": "vv_agent.ToolExposure",
-          "rust": "vv_agent::ToolExposure"
+          "python": "vv_agent.ToolExposure"
         },
         {
           "id": "tools.output",
-          "python": "vv_agent.ToolOutput",
-          "rust": "vv_agent::ToolOutput"
+          "python": "vv_agent.ToolOutput"
         },
         {
           "id": "tools.execution_result",
-          "python": "vv_agent.ToolExecutionResult",
-          "rust": "vv_agent::ToolExecutionResult"
+          "python": "vv_agent.ToolExecutionResult"
         },
         {
           "id": "tools.result_status",
           "python": "vv_agent.ToolResultStatus",
-          "rust": "vv_agent::ToolResultStatus",
           "values": [
             "SUCCESS",
             "ERROR",
             "WAIT_RESPONSE",
             "RUNNING",
             "PENDING_COMPRESS"
-          ],
-          "deferred_representation": "ToolCallOutcome.Deferred(handle)"
-        },
-        {
-          "id": "tools.deferred_handle",
-          "python": "vv_agent.DeferredToolHandle",
-          "rust": "vv_agent::DeferredToolHandle"
-        },
-        {
-          "id": "tools.tool_call_outcome",
-          "python": "vv_agent.ToolCallOutcome",
-          "rust": "vv_agent::ToolCallOutcome"
+          ]
         },
         {
           "id": "tools.message",
-          "python": "vv_agent.Message",
-          "rust": "vv_agent::Message"
+          "python": "vv_agent.Message"
         },
         {
           "id": "tools.artifact_ref",
-          "python": "vv_agent.ToolArtifactRef",
-          "rust": "vv_agent::ToolArtifactRef"
+          "python": "vv_agent.ToolArtifactRef"
         },
         {
           "id": "tools.result_cursor",
-          "python": "vv_agent.ToolResultCursor",
-          "rust": "vv_agent::ToolResultCursor"
+          "python": "vv_agent.ToolResultCursor"
         },
         {
-          "adaptation": "Python adapts registry handlers; Rust adapts ToolSpec values.",
           "id": "tools.spec_executor",
-          "python": "vv_agent.tools.RegistryToolExecutor",
-          "rust": "vv_agent::ToolSpecExecutor"
+          "python": "vv_agent.tools.RegistryToolExecutor"
         },
         {
           "id": "tools.not_found_error",
-          "python": "vv_agent.tools.ToolNotFoundError",
-          "rust": "vv_agent::ToolNotFoundError"
+          "python": "vv_agent.tools.ToolNotFoundError"
         },
         {
           "id": "tools.idempotency",
-          "python": "vv_agent.ToolIdempotency",
-          "rust": "vv_agent::ToolIdempotency"
+          "python": "vv_agent.ToolIdempotency"
         },
         {
           "id": "tools.metadata",
-          "python": "vv_agent.ToolMetadata",
-          "rust": "vv_agent::ToolMetadata"
+          "python": "vv_agent.ToolMetadata"
         },
         {
           "id": "tools.side_effect",
-          "python": "vv_agent.ToolSideEffect",
-          "rust": "vv_agent::ToolSideEffect"
+          "python": "vv_agent.ToolSideEffect"
         },
         {
           "id": "tools.result_retention",
-          "python": "vv_agent.ToolResultRetention",
-          "rust": "vv_agent::ToolResultRetention"
+          "python": "vv_agent.ToolResultRetention"
         }
       ],
       "id": "tools"
@@ -569,39 +416,31 @@
       "capabilities": [
         {
           "id": "workspace.backend",
-          "python": "vv_agent.workspace.WorkspaceBackend",
-          "rust": "vv_agent::WorkspaceBackend"
+          "python": "vv_agent.workspace.WorkspaceBackend"
         },
         {
           "id": "workspace.local",
-          "python": "vv_agent.workspace.LocalWorkspaceBackend",
-          "rust": "vv_agent::LocalWorkspaceBackend"
+          "python": "vv_agent.workspace.LocalWorkspaceBackend"
         },
         {
           "id": "workspace.memory",
-          "python": "vv_agent.workspace.MemoryWorkspaceBackend",
-          "rust": "vv_agent::MemoryWorkspaceBackend"
+          "python": "vv_agent.workspace.MemoryWorkspaceBackend"
         },
         {
           "id": "workspace.s3",
-          "python": "vv_agent.workspace.S3WorkspaceBackend",
-          "rust": "vv_agent::S3WorkspaceBackend"
+          "python": "vv_agent.workspace.S3WorkspaceBackend"
         },
         {
           "id": "workspace.file_info",
-          "python": "vv_agent.workspace.FileInfo",
-          "rust": "vv_agent::FileInfo"
+          "python": "vv_agent.workspace.FileInfo"
         },
         {
           "id": "workspace.discovery_filter",
-          "python": "vv_agent.workspace.DiscoveryFilteredWorkspaceBackend",
-          "rust": "vv_agent::DiscoveryFilteredWorkspaceBackend"
+          "python": "vv_agent.workspace.DiscoveryFilteredWorkspaceBackend"
         },
         {
-          "adaptation": "Both errors report the same portable-regex contract using native naming.",
           "id": "workspace.portable_regex_error",
-          "python": "vv_agent.workspace.InvalidPortableRegexError",
-          "rust": "vv_agent::PortableRegexError"
+          "python": "vv_agent.workspace.InvalidPortableRegexError"
         }
       ],
       "id": "workspace"
@@ -610,68 +449,55 @@
       "capabilities": [
         {
           "id": "memory.manager",
-          "python": "vv_agent.memory.MemoryManager",
-          "rust": "vv_agent::MemoryManager"
+          "python": "vv_agent.memory.MemoryManager"
         },
         {
           "id": "memory.microcompaction_policy",
-          "python": "vv_agent.MicrocompactionPolicy",
-          "rust": "vv_agent::MicrocompactionPolicy"
+          "python": "vv_agent.MicrocompactionPolicy"
         },
         {
           "id": "memory.provider",
-          "python": "vv_agent.memory.MemoryProvider",
-          "rust": "vv_agent::MemoryProvider"
+          "python": "vv_agent.memory.MemoryProvider"
         },
         {
           "id": "memory.provider_result",
-          "python": "vv_agent.memory.MemoryProviderResult",
-          "rust": "vv_agent::MemoryProviderResult"
+          "python": "vv_agent.memory.MemoryProviderResult"
         },
         {
           "id": "memory.session",
-          "python": "vv_agent.memory.SessionMemory",
-          "rust": "vv_agent::SessionMemory"
+          "python": "vv_agent.memory.SessionMemory"
         },
         {
           "id": "memory.session_config",
-          "python": "vv_agent.memory.SessionMemoryConfig",
-          "rust": "vv_agent::SessionMemoryConfig"
+          "python": "vv_agent.memory.SessionMemoryConfig"
         },
         {
           "id": "memory.session_entry",
-          "python": "vv_agent.memory.SessionMemoryEntry",
-          "rust": "vv_agent::SessionMemoryEntry"
+          "python": "vv_agent.memory.SessionMemoryEntry"
         },
         {
           "id": "memory.session_state",
-          "python": "vv_agent.memory.SessionMemoryState",
-          "rust": "vv_agent::SessionMemoryState"
+          "python": "vv_agent.memory.SessionMemoryState"
         },
         {
           "id": "memory.search_request",
-          "python": "vv_agent.memory.MemorySearchRequest",
-          "rust": "vv_agent::MemorySearchRequest"
+          "python": "vv_agent.memory.MemorySearchRequest"
         },
         {
           "id": "memory.search_result",
-          "python": "vv_agent.memory.MemorySearchResult",
-          "rust": "vv_agent::MemorySearchResult"
+          "python": "vv_agent.memory.MemorySearchResult"
         },
         {
           "id": "memory.save_request",
-          "python": "vv_agent.memory.MemorySaveRequest",
-          "rust": "vv_agent::MemorySaveRequest"
+          "python": "vv_agent.memory.MemorySaveRequest"
         },
         {
           "id": "memory.save_result",
-          "python": "vv_agent.memory.MemorySaveResult",
-          "rust": "vv_agent::MemorySaveResult"
+          "python": "vv_agent.memory.MemorySaveResult"
         },
         {
           "id": "memory.compaction_exhausted",
-          "python": "vv_agent.memory.CompactionExhaustedError",
-          "rust": "vv_agent::CompactionExhaustedError"
+          "python": "vv_agent.memory.CompactionExhaustedError"
         }
       ],
       "id": "memory"
@@ -680,43 +506,35 @@
       "capabilities": [
         {
           "id": "skills.properties",
-          "python": "vv_agent.skills.SkillProperties",
-          "rust": "vv_agent::skills::SkillProperties"
+          "python": "vv_agent.skills.SkillProperties"
         },
         {
           "id": "skills.loaded",
-          "python": "vv_agent.skills.LoadedSkill",
-          "rust": "vv_agent::skills::LoadedSkill"
+          "python": "vv_agent.skills.LoadedSkill"
         },
         {
           "id": "skills.entry",
-          "python": "vv_agent.skills.SkillEntry",
-          "rust": "vv_agent::skills::SkillEntry"
+          "python": "vv_agent.skills.SkillEntry"
         },
         {
           "id": "skills.error",
-          "python": "vv_agent.skills.SkillError",
-          "rust": "vv_agent::skills::SkillError"
+          "python": "vv_agent.skills.SkillError"
         },
         {
           "id": "skills.parse_error",
-          "python": "vv_agent.skills.SkillParseError",
-          "rust": "vv_agent::skills::SkillParseError"
+          "python": "vv_agent.skills.SkillParseError"
         },
         {
           "id": "skills.validation_error",
-          "python": "vv_agent.skills.SkillValidationError",
-          "rust": "vv_agent::skills::SkillValidationError"
+          "python": "vv_agent.skills.SkillValidationError"
         },
         {
           "id": "skills.validation_diagnostics",
-          "python": "vv_agent.skills.ValidationDiagnostics",
-          "rust": "vv_agent::skills::ValidationDiagnostics"
+          "python": "vv_agent.skills.ValidationDiagnostics"
         },
         {
           "id": "skills.validation_mode",
-          "python": "vv_agent.skills.ValidationMode",
-          "rust": "vv_agent::skills::ValidationMode"
+          "python": "vv_agent.skills.ValidationMode"
         }
       ],
       "id": "skills"
@@ -725,30 +543,23 @@
       "capabilities": [
         {
           "id": "tracing.span",
-          "python": "vv_agent.Span",
-          "rust": "vv_agent::Span"
+          "python": "vv_agent.Span"
         },
         {
           "id": "tracing.sink",
-          "python": "vv_agent.TraceSink",
-          "rust": "vv_agent::TraceSink"
+          "python": "vv_agent.TraceSink"
         },
         {
           "id": "tracing.jsonl_exporter",
-          "python": "vv_agent.JsonlTraceExporter",
-          "rust": "vv_agent::JsonlTraceExporter"
+          "python": "vv_agent.JsonlTraceExporter"
         },
         {
-          "adaptation": "Python exports a concrete event class; Rust exports a RunEventPayload variant.",
           "id": "events.tool_call_planned",
-          "python": "vv_agent.ToolCallPlannedEvent",
-          "rust": "vv_agent::RunEventPayload::ToolCallPlanned"
+          "python": "vv_agent.ToolCallPlannedEvent"
         },
         {
-          "adaptation": "Python exports a concrete event class; Rust exports a RunEventPayload variant.",
           "id": "events.diagnostic",
-          "python": "vv_agent.DiagnosticEvent",
-          "rust": "vv_agent::RunEventPayload::Diagnostic"
+          "python": "vv_agent.DiagnosticEvent"
         }
       ],
       "id": "tracing"
@@ -756,66 +567,52 @@
     {
       "capabilities": [
         {
-          "adaptation": "The acronyms follow each language's naming convention.",
           "id": "llm_bridge.client",
-          "python": "vv_agent.llm.LLMClient",
-          "rust": "vv_agent::LlmClient"
+          "python": "vv_agent.llm.LLMClient"
         },
         {
           "id": "llm_bridge.request",
-          "python": "vv_agent.llm.LlmRequest",
-          "rust": "vv_agent::LlmRequest"
+          "python": "vv_agent.llm.LlmRequest"
         },
         {
           "id": "llm_bridge.error",
-          "python": "vv_agent.llm.LlmError",
-          "rust": "vv_agent::LlmError"
+          "python": "vv_agent.llm.LlmError"
         },
         {
           "id": "llm_bridge.endpoint",
-          "python": "vv_agent.llm.EndpointTarget",
-          "rust": "vv_agent::EndpointTarget"
+          "python": "vv_agent.llm.EndpointTarget"
         },
         {
-          "adaptation": "Python exposes ScriptedLLM; Rust exposes ScriptedLlmClient.",
           "id": "llm_bridge.scripted",
-          "python": "vv_agent.llm.ScriptedLLM",
-          "rust": "vv_agent::ScriptedLlmClient"
+          "python": "vv_agent.llm.ScriptedLLM"
         },
         {
           "id": "llm_bridge.vv_llm_client",
-          "python": "vv_agent.VvLlmClient",
-          "rust": "vv_agent::VvLlmClient"
+          "python": "vv_agent.VvLlmClient"
         },
         {
           "id": "llm_bridge.model_provider",
-          "python": "vv_agent.ModelProvider",
-          "rust": "vv_agent::ModelProvider"
+          "python": "vv_agent.ModelProvider"
         },
         {
           "id": "llm_bridge.model_ref",
-          "python": "vv_agent.ModelRef",
-          "rust": "vv_agent::ModelRef"
+          "python": "vv_agent.ModelRef"
         },
         {
           "id": "llm_bridge.model_settings",
-          "python": "vv_agent.ModelSettings",
-          "rust": "vv_agent::ModelSettings"
+          "python": "vv_agent.ModelSettings"
         },
         {
           "id": "llm_bridge.response_format",
-          "python": "vv_agent.ResponseFormat",
-          "rust": "vv_agent::ResponseFormat"
+          "python": "vv_agent.ResponseFormat"
         },
         {
           "id": "llm_bridge.retry_settings",
-          "python": "vv_agent.RetrySettings",
-          "rust": "vv_agent::RetrySettings"
+          "python": "vv_agent.RetrySettings"
         },
         {
           "id": "llm_bridge.tool_choice",
-          "python": "vv_agent.ToolChoice",
-          "rust": "vv_agent::ToolChoice"
+          "python": "vv_agent.ToolChoice"
         }
       ],
       "id": "llm_bridge"
@@ -823,263 +620,535 @@
     {
       "capabilities": [
         {
-          "adaptation": "Python defines the backend protocol; Rust uses a backend enum.",
-          "id": "runtime_backend.execution",
-          "python": "vv_agent.runtime.backends.ExecutionBackend",
-          "rust": "vv_agent::RuntimeExecutionBackend"
-        },
-        {
-          "id": "runtime_backend.inline",
-          "python": "vv_agent.runtime.backends.InlineBackend",
-          "rust": "vv_agent::InlineBackend"
-        },
-        {
-          "id": "runtime_backend.thread",
-          "python": "vv_agent.runtime.backends.ThreadBackend",
-          "rust": "vv_agent::ThreadBackend"
-        },
-        {
-          "adaptation": "Python integrates Celery; Rust exposes the distributed backend used by Apalis adapters.",
-          "id": "runtime_backend.distributed",
-          "python": "vv_agent.runtime.backends.celery.CeleryBackend",
-          "rust": "vv_agent::DistributedBackend"
-        },
-        {
-          "id": "runtime_backend.distributed_run_handle",
-          "python": "vv_agent.runtime.backends.distributed.DistributedRunHandle",
-          "rust": "vv_agent::DistributedRunHandle"
-        },
-        {
-          "id": "runtime_backend.distributed_delivery_outcome",
-          "python": "vv_agent.runtime.backends.distributed.DistributedDeliveryOutcome",
-          "rust": "vv_agent::DistributedDeliveryOutcome"
-        },
-        {
-          "id": "runtime_backend.distributed_advance_decision",
-          "python": "vv_agent.runtime.backends.distributed.DistributedAdvanceDecision",
-          "rust": "vv_agent::DistributedAdvanceDecision"
-        },
-        {
-          "adaptation": "Python enqueues through Celery and Rust enqueues through an Apalis-compatible sink; neither waits for completion.",
-          "id": "runtime_backend.distributed_start",
-          "python": "vv_agent.runtime.backends.celery.CeleryBackend.start",
-          "rust": "vv_agent::DistributedBackend::start"
-        },
-        {
-          "adaptation": "Each implementation reloads the authoritative checkpoint once and returns one scheduler decision.",
-          "id": "runtime_backend.distributed_advance",
-          "python": "vv_agent.runtime.backends.celery.CeleryBackend.advance",
-          "rust": "vv_agent::DistributedBackend::advance"
-        },
-        {
-          "id": "runtime_backend.envelope",
-          "python": "vv_agent.runtime.backends.distributed.DistributedRunEnvelope",
-          "rust": "vv_agent::DistributedRunEnvelope"
-        },
-        {
-          "id": "runtime_backend.capability_registry",
-          "python": "vv_agent.runtime.backends.distributed.DistributedCapabilityRegistry",
-          "rust": "vv_agent::DistributedCapabilityRegistry"
-        },
-        {
-          "id": "runtime_backend.capability_ref",
-          "python": "vv_agent.runtime.backends.distributed.CapabilityRef",
-          "rust": "vv_agent::CapabilityRef"
-        },
-        {
-          "id": "runtime_backend.recipe",
-          "python": "vv_agent.runtime.backends.distributed.RuntimeRecipe",
-          "rust": "vv_agent::RuntimeRecipe"
-        },
-        {
-          "id": "runtime_backend.agent_runtime",
-          "python": "vv_agent.runtime.AgentRuntime",
-          "rust": "vv_agent::AgentRuntime"
-        },
-        {
-          "id": "runtime_backend.tool_call_runner",
-          "python": "vv_agent.runtime.ToolCallRunner",
-          "rust": "vv_agent::ToolCallRunner"
-        },
-        {
-          "id": "runtime_backend.checkpoint",
-          "python": "vv_agent.runtime.Checkpoint",
-          "rust": "vv_agent::Checkpoint"
-        },
-        {
-          "id": "runtime_backend.checkpoint_store",
-          "python": "vv_agent.runtime.CheckpointStore",
-          "rust": "vv_agent::CheckpointStore"
-        },
-        {
-          "id": "runtime_backend.in_memory_checkpoint_store",
-          "python": "vv_agent.runtime.InMemoryCheckpointStore",
-          "rust": "vv_agent::InMemoryCheckpointStore"
-        },
-        {
-          "id": "runtime_backend.sqlite_checkpoint_store",
-          "python": "vv_agent.runtime.stores.sqlite.SqliteCheckpointStore",
-          "rust": "vv_agent::SqliteCheckpointStore"
-        },
-        {
-          "id": "runtime_backend.redis_checkpoint_store",
-          "python": "vv_agent.runtime.stores.redis.RedisCheckpointStore",
-          "rust": "vv_agent::RedisCheckpointStore"
-        },
-        {
-          "id": "runtime_backend.idempotent_event_store",
-          "python": "vv_agent.IdempotentRunEventStore",
-          "rust": "vv_agent::IdempotentRunEventStore"
-        },
-        {
-          "id": "runtime_backend.operation_journal",
-          "python": "vv_agent.runtime.OperationJournalEntry",
-          "rust": "vv_agent::OperationJournalEntry"
-        },
-        {
-          "id": "runtime_backend.controller_command",
-          "python": "vv_agent.runtime.ControllerCommand",
-          "rust": "vv_agent::ControllerCommand",
-          "signature": "CheckpointStore.admit_controller_command(command)",
-          "return": "ControllerCommandReceipt",
-          "wire": "fixtures/controller_command.json#request_wire",
-          "deferred_resolution_is_separate": true,
-          "terminal_successor_is_separate": true
-        },
-        {
-          "id": "runtime_backend.controller_command_receipt",
-          "python": "vv_agent.runtime.ControllerCommandReceipt",
-          "rust": "vv_agent::ControllerCommandReceipt",
-          "wire": "fixtures/controller_command.json#receipt_wire",
-          "visibility": "framework_public",
-          "app_server_projection": ["actionId", "accepted", "status", "waitReason"],
-          "internal_receipt_fields_not_app_server": ["handle", "commandDigest", "resultingRevision", "outboxState", "leaseOwner"]
-        },
-        {
-          "id": "runtime_backend.reap_controller_command_wakes",
-          "python": "vv_agent.runtime.CheckpointStore.reap_controller_command_wakes",
-          "rust": "vv_agent::CheckpointStore::reap_controller_command_wakes",
-          "signature": "reap_controller_command_wakes(checkpoint_key, now_ms)",
-          "return": "list[controller command wake outbox records]",
-          "contract": "fixtures/checkpoint_store.json#controller_command_wake_reaper"
-        },
-        {
           "id": "runtime_backend.host_interaction_request",
           "python": "vv_agent.runtime.HostInteractionRequest",
-          "rust": "vv_agent::HostInteractionRequest",
-          "wire": "fixtures/controller_command.json#host_interaction_producer.request_wire"
+          "wire": "fixtures/app_server_protocol.json#/host_interaction_values/request"
         },
         {
           "id": "runtime_backend.host_interaction_outcome",
           "python": "vv_agent.runtime.HostInteractionOutcome",
-          "rust": "vv_agent::HostInteractionOutcome",
-          "wire": "fixtures/controller_command.json#host_interaction_producer.outcome_wire"
-        },
-        {
-          "id": "runtime_backend.produce_host_interaction",
-          "python": "vv_agent.runtime.DistributedBackend.produce_host_interaction",
-          "rust": "vv_agent::DistributedBackend::produce_host_interaction",
-          "signature": "produce_host_interaction(request)",
-          "return": "HostInteractionOutcome",
-          "requires_active_claim": true,
-          "claim_release_same_cas": true,
-          "external_effect_inside_transaction": false
-        },
-        {
-          "id": "runtime_backend.resolve_controller_command",
-          "python": "vv_agent.runtime.DistributedBackend.resolve_controller_command",
-          "rust": "vv_agent::DistributedBackend::resolve_controller_command",
-          "signature": "resolve_controller_command(command)",
-          "return": "ControllerCommandResolution",
-          "wire": "fixtures/controller_command.json#resolution_wire",
-          "request": "fixtures/controller_command.json#request_wire",
-          "store_admission": "CheckpointStore.admit_controller_command(command)",
-          "handle_source": "command.handle; no duplicate handle parameter",
-          "response_record": "fixtures/controller_command.json#host_interaction_record",
-          "resolution_wire_pointer": "fixtures/controller_command.json#resolution_wire",
-          "wake_decision": "fixtures/distributed_run_driver.json#decision_fields.wake_after_controller_command"
-        },
-        {
-          "id": "runtime_backend.claim_and_consume_host_interaction_response",
-          "python": "vv_agent.runtime.DistributedBackend.claim_and_consume_host_interaction_response",
-          "rust": "vv_agent::DistributedBackend::claim_and_consume_host_interaction_response",
-          "signature": "claim_and_consume_host_interaction_response(envelope)",
-          "return": "HostInteractionRecoveryResult",
-          "wire": "fixtures/controller_command.json#host_interaction_recovery_wire",
-          "result_wire": "fixtures/controller_command.json#host_interaction_recovery_result",
-          "store_method": "CheckpointStore.claim_and_consume_host_interaction_response(envelope)",
-          "handle_source": "envelope identities; no duplicate handle parameter",
-          "response_record": "fixtures/controller_command.json#host_interaction_record",
-          "claim_mode": "recovery",
-          "resume_attempt": "successful combined recovery claim increments authoritative value once and propagates it to the consumed event and next envelope",
-          "requires_checkpoint_execution_claim": true,
-          "record_only_claim_forbidden": true,
-          "hard_recovery_barrier": ["resolved_pending", "resolved_claimed"],
-          "model_or_tool_allowed_after": "the combined CAS commits"
-        },
-        {
-          "id": "runtime_backend.controller_command_resolution",
-          "python": "vv_agent.runtime.ControllerCommandResolution",
-          "rust": "vv_agent::ControllerCommandResolution",
-          "closed": true,
-          "wire": "fixtures/controller_command.json#resolution_wire",
-          "closed_return_variants": {
-            "discriminator": "kind",
-            "unknown_fields": "reject",
-            "variants": {
-              "applied": {"required": ["kind", "receipt", "wake"]},
-              "replayed": {"required": ["kind", "receipt", "wake"]},
-              "rejected": {"required": ["kind", "error"], "forbidden": ["receipt", "wake"]}
-            }
-          }
-        },
-        {
-          "id": "runtime_backend.resolve_deferred",
-          "python": "vv_agent.runtime.CheckpointStore.resolve_deferred",
-          "rust": "vv_agent::CheckpointStore::resolve_deferred",
-          "signature": "resolve_deferred(handle, result)",
-          "return": "DeferredResolveDecision",
-          "closed_return_variants": {
-            "discriminator": "kind",
-            "unknown_fields": "reject",
-            "variants": {
-              "applied_ready": {
-                "required": ["kind", "receipt"]
-              },
-              "applied_waiting": {
-                "required": ["kind", "receipt"]
-              },
-              "replayed": {
-                "required": ["kind", "receipt"]
-              },
-              "not_admitted": {
-                "required": ["kind", "retryable_error"],
-                "forbidden": ["receipt"]
-              },
-              "reconciliation_required": {
-                "required": ["kind"],
-                "forbidden": ["receipt"]
-              }
-            }
-          },
-          "errors": [
-            "deferred_resolution_conflict",
-            "deferred_resolution_stale",
-            "deferred_resolution_result_invalid",
-            "deferred_checkpoint_claimed"
-          ],
-          "decision_error_codes": [
-            "deferred_resolution_not_admitted"
-          ],
-          "retryable_decision_error_codes": [
-            "deferred_resolution_not_admitted"
-          ]
+          "wire": "fixtures/app_server_protocol.json#/host_interaction_values/outcome"
         }
       ],
       "id": "runtime_backend"
+    },
+    {
+      "capabilities": [
+        {
+          "behavior": "strict current canonical record codec",
+          "id": "session.Record",
+          "python": "vv_agent.Record"
+        },
+        {
+          "behavior": "strict current canonical inbox codec",
+          "id": "session.InboxItem",
+          "python": "vv_agent.InboxItem"
+        },
+        {
+          "behavior": "session admission identity and attributes",
+          "id": "session.SessionSpec",
+          "python": "vv_agent.SessionSpec"
+        },
+        {
+          "behavior": "single atomic log and inbox authority",
+          "id": "session.SessionStore",
+          "python": "vv_agent.SessionStore"
+        },
+        {
+          "behavior": "atomic admission, fences and consumer transactions",
+          "id": "session.SessionTx",
+          "python": "vv_agent.SessionTx"
+        },
+        {
+          "behavior": "SQLite mapping of session transaction semantics",
+          "id": "session.SQLiteStore",
+          "python": "vv_agent.SQLiteStore"
+        },
+        {
+          "behavior": "PostgreSQL mapping; optional driver is not required to import SDK",
+          "id": "session.PostgresStore",
+          "python": "vv_agent.PostgresStore"
+        },
+        {
+          "behavior": "deterministic identity or admission conflict",
+          "id": "session.Conflict",
+          "python": "vv_agent.Conflict"
+        },
+        {
+          "behavior": "stale writer fence rejection",
+          "id": "session.LeaseLost",
+          "python": "vv_agent.LeaseLost"
+        },
+        {
+          "behavior": "required host reference unavailable",
+          "id": "session.MissingHostBinding",
+          "python": "vv_agent.MissingHostBinding"
+        },
+        {
+          "behavior": "authentic definitive provider result",
+          "id": "session.Definitive",
+          "python": "vv_agent.Definitive"
+        },
+        {
+          "behavior": "authentic retained provider handle",
+          "id": "session.Accepted",
+          "python": "vv_agent.Accepted"
+        },
+        {
+          "behavior": "uncertain external operation outcome",
+          "id": "session.Unknown",
+          "python": "vv_agent.Unknown"
+        },
+        {
+          "behavior": "projection and delivery only; no independent event authority",
+          "id": "session.SessionRunEventStore",
+          "python": "vv_agent.SessionRunEventStore"
+        },
+        {
+          "behavior": "execute admitted work under fences and reuse receipts",
+          "id": "drive",
+          "python": "vv_agent.session.kernel.drive"
+        },
+        {
+          "behavior": "discover execution and consumer work independent of wakes",
+          "id": "tick",
+          "python": "vv_agent.session.supervisor.tick"
+        },
+        {
+          "behavior": "authenticate terminal child delivery and advance cursor atomically",
+          "id": "child_delivery",
+          "python": "vv_agent.session.children.child_delivery"
+        }
+      ],
+      "id": "session"
+    },
+    {
+      "capabilities": [
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OUTPUT_VALIDATION_FAILED",
+          "python": "vv_agent.OUTPUT_VALIDATION_FAILED"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.AgentResolutionRequest",
+          "python": "vv_agent.AgentResolutionRequest"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.AgentSessionRun",
+          "python": "vv_agent.AgentSessionRun"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.AgentStartedEvent",
+          "python": "vv_agent.AgentStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.AppServerApprovalProvider",
+          "python": "vv_agent.AppServerApprovalProvider"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalDecision",
+          "python": "vv_agent.ApprovalDecision"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalError",
+          "python": "vv_agent.ApprovalError"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalProvider",
+          "python": "vv_agent.ApprovalProvider"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalRequest",
+          "python": "vv_agent.ApprovalRequest"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalRequestedEvent",
+          "python": "vv_agent.ApprovalRequestedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ApprovalResolvedEvent",
+          "python": "vv_agent.ApprovalResolvedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.AssistantDeltaEvent",
+          "python": "vv_agent.AssistantDeltaEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.BackgroundAgentTaskHandle",
+          "python": "vv_agent.BackgroundAgentTaskHandle"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.BackgroundAgentTaskSnapshot",
+          "python": "vv_agent.BackgroundAgentTaskSnapshot"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.BudgetExhaustedEvent",
+          "python": "vv_agent.BudgetExhaustedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.BudgetSnapshotEvent",
+          "python": "vv_agent.BudgetSnapshotEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ConfigError",
+          "python": "vv_agent.ConfigError"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ContextBundle",
+          "python": "vv_agent.ContextBundle"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ContextFragment",
+          "python": "vv_agent.ContextFragment"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ContextRequest",
+          "python": "vv_agent.ContextRequest"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ContextSection",
+          "python": "vv_agent.ContextSection"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.CycleStartedEvent",
+          "python": "vv_agent.CycleStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.EndpointConfig",
+          "python": "vv_agent.EndpointConfig"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.EndpointOption",
+          "python": "vv_agent.EndpointOption"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.EventStoreError",
+          "python": "vv_agent.EventStoreError"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.HandoffCompletedEvent",
+          "python": "vv_agent.HandoffCompletedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.HandoffStartedEvent",
+          "python": "vv_agent.HandoffStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.InteractiveAgentDefinition",
+          "python": "vv_agent.InteractiveAgentDefinition"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.JsonlRunEventStore",
+          "python": "vv_agent.JsonlRunEventStore"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.MemoryCompactCompleted",
+          "python": "vv_agent.MemoryCompactCompleted"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.MemoryCompactStarted",
+          "python": "vv_agent.MemoryCompactStarted"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.MessageProcessor",
+          "python": "vv_agent.MessageProcessor"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelCallCompletedEvent",
+          "python": "vv_agent.ModelCallCompletedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelCallFailedEvent",
+          "python": "vv_agent.ModelCallFailedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelCallStartedEvent",
+          "python": "vv_agent.ModelCallStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelError",
+          "python": "vv_agent.ModelError"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelRetryDuplicateRiskEvent",
+          "python": "vv_agent.ModelRetryDuplicateRiskEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelToolCallProgressEvent",
+          "python": "vv_agent.ModelToolCallProgressEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ModelToolCallStartedEvent",
+          "python": "vv_agent.ModelToolCallStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OperationAmbiguousEvent",
+          "python": "vv_agent.OperationAmbiguousEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutgoingRouter",
+          "python": "vv_agent.OutgoingRouter"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutputRepair",
+          "python": "vv_agent.OutputRepair"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutputRepairRequest",
+          "python": "vv_agent.OutputRepairRequest"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutputValidationContext",
+          "python": "vv_agent.OutputValidationContext"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutputValidationResult",
+          "python": "vv_agent.OutputValidationResult"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.OutputValidator",
+          "python": "vv_agent.OutputValidator"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ReasoningDeltaEvent",
+          "python": "vv_agent.ReasoningDeltaEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ResolvedModelConfig",
+          "python": "vv_agent.ResolvedModelConfig"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunCancelledEvent",
+          "python": "vv_agent.RunCancelledEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunCompletedEvent",
+          "python": "vv_agent.RunCompletedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunConfigResolutionRequest",
+          "python": "vv_agent.RunConfigResolutionRequest"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunEvent",
+          "python": "vv_agent.RunEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunEventReplayQuery",
+          "python": "vv_agent.RunEventReplayQuery"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunFailedEvent",
+          "python": "vv_agent.RunFailedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunHandleController",
+          "python": "vv_agent.RunHandleController"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunStartedEvent",
+          "python": "vv_agent.RunStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.RunStateChangedEvent",
+          "python": "vv_agent.RunStateChangedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ScriptedModelProvider",
+          "python": "vv_agent.ScriptedModelProvider"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.SubRunCompletedEvent",
+          "python": "vv_agent.SubRunCompletedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.SubRunStartedEvent",
+          "python": "vv_agent.SubRunStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolCallCompletedEvent",
+          "python": "vv_agent.ToolCallCompletedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolCallStartedEvent",
+          "python": "vv_agent.ToolCallStartedEvent"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolDirective",
+          "python": "vv_agent.ToolDirective"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolOutputError",
+          "python": "vv_agent.ToolOutputError"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolOutputFile",
+          "python": "vv_agent.ToolOutputFile"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolOutputImage",
+          "python": "vv_agent.ToolOutputImage"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolOutputJson",
+          "python": "vv_agent.ToolOutputJson"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.ToolOutputText",
+          "python": "vv_agent.ToolOutputText"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.TraceProcessor",
+          "python": "vv_agent.TraceProcessor"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.VvLlmModelProvider",
+          "python": "vv_agent.VvLlmModelProvider"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.assemble_context_fragments",
+          "python": "vv_agent.assemble_context_fragments"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.build_default_registry",
+          "python": "vv_agent.build_default_registry"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.build_vv_llm_from_local_settings",
+          "python": "vv_agent.build_vv_llm_from_local_settings"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.collect_context_fragments",
+          "python": "vv_agent.collect_context_fragments"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.create_agent_session",
+          "python": "vv_agent.create_agent_session"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.event_from_dict",
+          "python": "vv_agent.event_from_dict"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.function_tool",
+          "python": "vv_agent.function_tool"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.handoff",
+          "python": "vv_agent.handoff"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.input_guardrail",
+          "python": "vv_agent.input_guardrail"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.load_llm_settings_from_file",
+          "python": "vv_agent.load_llm_settings_from_file"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.output_guardrail",
+          "python": "vv_agent.output_guardrail"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.output_repair",
+          "python": "vv_agent.output_repair"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.output_validator",
+          "python": "vv_agent.output_validator"
+        },
+        {
+          "behavior": "retained current Python export",
+          "id": "export.resolve_model_endpoint",
+          "python": "vv_agent.resolve_model_endpoint"
+        }
+      ],
+      "id": "exports"
     }
   ],
-  "schema_version": 7,
+  "schema_version": 8,
   "surfaces": [
     {
       "id": "agent",
@@ -1091,10 +1160,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "name"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "name"
           }
         },
         {
@@ -1103,10 +1168,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "instructions"
-          },
-          "rust": {
-            "kind": "method",
             "name": "instructions"
           }
         },
@@ -1117,10 +1178,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "model"
           }
         },
         {
@@ -1129,10 +1186,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "model_settings"
-          },
-          "rust": {
-            "kind": "method",
             "name": "model_settings"
           }
         },
@@ -1143,10 +1196,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tools"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "tools"
           }
         },
         {
@@ -1156,54 +1205,33 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "handoffs"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "handoffs"
           }
         },
         {
-          "adaptation": "Python stores the public list directly; Rust configures it through AgentBuilder.",
           "id": "input_guardrails",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "input_guardrails"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "input_guardrail",
-            "target": "vv_agent::agent::AgentBuilder"
           }
         },
         {
-          "adaptation": "Python stores the public list directly; Rust configures it through AgentBuilder.",
           "id": "output_guardrails",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "output_guardrails"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "output_guardrail",
-            "target": "vv_agent::agent::AgentBuilder"
           }
         },
         {
-          "adaptation": "Python stores the target type; Rust exposes its type name and validator.",
           "id": "output_type",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "output_type"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "output_type_name"
           }
         },
         {
@@ -1212,10 +1240,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "hooks"
-          },
-          "rust": {
-            "kind": "method",
             "name": "hooks"
           }
         },
@@ -1226,10 +1250,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "max_cycles"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "max_cycles"
           }
         },
         {
@@ -1238,10 +1258,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "no_tool_policy"
-          },
-          "rust": {
-            "kind": "method",
             "name": "no_tool_policy"
           }
         },
@@ -1252,10 +1268,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tool_policy"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "tool_policy"
           }
         },
         {
@@ -1265,24 +1277,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tool_use_behavior"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "tool_use_behavior"
           }
         },
         {
-          "adaptation": "Rust stores stop names inside the ToolUseBehavior enum variant.",
           "id": "stop_at_tool_names",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "stop_at_tool_names"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "tool_use_behavior"
           }
         },
         {
@@ -1292,10 +1295,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "metadata"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "metadata"
           }
         },
         {
@@ -1304,10 +1303,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "sub_agents"
-          },
-          "rust": {
-            "kind": "method",
             "name": "sub_agents"
           }
         },
@@ -1332,10 +1327,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resolve_instructions"
           }
         },
         {
@@ -1364,10 +1355,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "as_tool"
           }
         },
         {
@@ -1396,15 +1383,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "as_background_task"
           }
         }
       ],
-      "python_target": "vv_agent.Agent",
-      "rust_target": "vv_agent::Agent"
+      "python_target": "vv_agent.Agent"
     },
     {
       "id": "sub_agent_config",
@@ -1416,10 +1398,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model"
           }
         },
         {
@@ -1427,10 +1405,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "description"
-          },
-          "rust": {
             "kind": "field",
             "name": "description"
           }
@@ -1442,10 +1416,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "backend"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "backend"
           }
         },
         {
@@ -1453,10 +1423,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "system_prompt"
-          },
-          "rust": {
             "kind": "field",
             "name": "system_prompt"
           }
@@ -1468,10 +1434,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "max_cycles"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "max_cycles"
           }
         },
         {
@@ -1479,10 +1441,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "session_memory_enabled"
-          },
-          "rust": {
             "kind": "field",
             "name": "session_memory_enabled"
           }
@@ -1494,10 +1452,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "exclude_tools"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "exclude_tools"
           }
         },
         {
@@ -1505,10 +1459,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "metadata"
-          },
-          "rust": {
             "kind": "field",
             "name": "metadata"
           }
@@ -1520,10 +1470,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "denied_side_effects"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "denied_side_effects"
           }
         },
         {
@@ -1531,10 +1477,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "denied_capability_tags"
-          },
-          "rust": {
             "kind": "field",
             "name": "denied_capability_tags"
           }
@@ -1546,10 +1488,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "deny_terminal_tools"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "deny_terminal_tools"
           }
         },
         {
@@ -1559,21 +1497,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "denied_cost_dimensions"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "denied_cost_dimensions"
           }
         }
       ],
-      "python_target": "vv_agent.SubAgentConfig",
-      "rust_target": "vv_agent::SubAgentConfig"
+      "python_target": "vv_agent.SubAgentConfig"
     },
     {
       "id": "runner",
       "members": [
         {
-          "adaptation": "Python exposes a synchronous class facade; Rust exposes an async instance method.",
           "id": "run",
           "kind": "operation",
           "python": {
@@ -1599,10 +1531,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "run"
           }
         },
         {
@@ -1631,138 +1559,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "start"
           }
         },
         {
-          "adaptation": "Both implementations prepare a durable checkpoint, enqueue cycle 1, and return a passive DistributedRunHandle without waiting.",
-          "id": "start_distributed",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "start_distributed",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "agent",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "input",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "run_config",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "continuation",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "start_admission",
-                  "required": false
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "start_distributed"
-          }
-        },
-        {
-          "adaptation": "Both implementations accept an already-compiled AgentTask, preserve its prepared runtime fields, do not re-run compile-time producers, and return a passive handle without waiting; language-level calling conventions may differ.",
-          "id": "start_distributed_compiled",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "start_distributed_compiled",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "agent",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "task",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "run_config",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "continuation",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "start_admission",
-                  "required": false
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "start_distributed_compiled"
-          }
-        },
-        {
-          "adaptation": "Both implementations consume a finalize_required decision in a separate bounded framework finalizer.",
-          "id": "finalize_distributed",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "finalize_distributed",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "agent",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "input",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "decision",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "run_config",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "finalize_distributed"
-          }
-        },
-        {
-          "adaptation": "Python returns a synchronous iterator; Rust returns an async-capable RunEventStream.",
           "id": "stream",
           "kind": "operation",
           "python": {
@@ -1788,14 +1587,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "stream"
           }
         },
         {
-          "adaptation": "Python takes optional input directly; Rust also exposes resume_with_input.",
+          "behavior": "resume the existing session and turn, or use AgentSession; no new input",
           "id": "resume",
           "kind": "operation",
           "python": {
@@ -1806,24 +1601,19 @@
               "parameters": [
                 {
                   "kind": "positional_or_keyword",
-                  "name": "state",
+                  "name": "session_id",
                   "required": true
                 },
                 {
-                  "kind": "keyword_only",
-                  "name": "input",
-                  "required": false
+                  "kind": "positional_or_keyword",
+                  "name": "turn_id",
+                  "required": true
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resume"
           }
         },
         {
-          "adaptation": "Python returns ConfiguredRunner; Rust returns RunnerBuilder.",
           "id": "configured",
           "kind": "operation",
           "python": {
@@ -1839,15 +1629,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "builder"
           }
         }
       ],
-      "python_target": "vv_agent.Runner",
-      "rust_target": "vv_agent::Runner"
+      "python_target": "vv_agent.Runner"
     },
     {
       "id": "agent_task",
@@ -1855,26 +1640,38 @@
         {
           "id": "task_id",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "task_id"},
-          "rust": {"kind": "field", "name": "task_id"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "task_id"
+          }
         },
         {
           "id": "model",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "model"},
-          "rust": {"kind": "field", "name": "model"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "model"
+          }
         },
         {
           "id": "prompt_bundle",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "prompt_bundle"},
-          "rust": {"kind": "field", "name": "prompt_bundle"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "prompt_bundle"
+          }
         },
         {
           "id": "user_prompt",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "user_prompt"},
-          "rust": {"kind": "field", "name": "user_prompt"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "user_prompt"
+          }
         },
         {
           "id": "microcompaction_policy",
@@ -1883,12 +1680,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "microcompaction_policy"
-          },
-          "rust": {"kind": "field", "name": "microcompaction_policy"}
+          }
         }
       ],
-      "python_target": "vv_agent.AgentTask",
-      "rust_target": "vv_agent::AgentTask"
+      "python_target": "vv_agent.AgentTask"
     },
     {
       "id": "run_config",
@@ -1900,10 +1695,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model"
           }
         },
         {
@@ -1911,10 +1702,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "model_provider"
-          },
-          "rust": {
             "kind": "field",
             "name": "model_provider"
           }
@@ -1926,10 +1713,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model_settings"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model_settings"
           }
         },
         {
@@ -1937,10 +1720,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "microcompaction_policy"
-          },
-          "rust": {
             "kind": "field",
             "name": "microcompaction_policy"
           }
@@ -1952,10 +1731,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "workspace"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "workspace"
           }
         },
         {
@@ -1965,23 +1740,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "workspace_backend"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "workspace_backend"
-          }
-        },
-        {
-          "id": "session",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "session"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "session"
           }
         },
         {
@@ -1989,10 +1747,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "session_memory_enabled"
-          },
-          "rust": {
             "kind": "field",
             "name": "session_memory_enabled"
           }
@@ -2004,10 +1758,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "initial_messages"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "initial_messages"
           }
         },
         {
@@ -2015,10 +1765,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "max_cycles"
-          },
-          "rust": {
             "kind": "field",
             "name": "max_cycles"
           }
@@ -2030,10 +1776,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "no_tool_policy"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "no_tool_policy"
           }
         },
         {
@@ -2041,10 +1783,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "max_handoffs"
-          },
-          "rust": {
             "kind": "field",
             "name": "max_handoffs"
           }
@@ -2056,23 +1794,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tool_policy"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "tool_policy"
-          }
-        },
-        {
-          "id": "execution_backend",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "execution_backend"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "execution_backend"
           }
         },
         {
@@ -2080,10 +1801,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "cancellation_token"
-          },
-          "rust": {
             "kind": "field",
             "name": "cancellation_token"
           }
@@ -2095,10 +1812,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "hooks"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "hooks"
           }
         },
         {
@@ -2106,10 +1819,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "after_cycle_hooks"
-          },
-          "rust": {
             "kind": "field",
             "name": "after_cycle_hooks"
           }
@@ -2121,10 +1830,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "event_store"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "event_store"
           }
         },
         {
@@ -2132,10 +1837,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "event_store_fail_closed"
-          },
-          "rust": {
             "kind": "field",
             "name": "event_store_fail_closed"
           }
@@ -2147,24 +1848,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "approval_provider"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "approval_provider"
           }
         },
         {
-          "adaptation": "Python stores seconds as a float; Rust stores Duration.",
           "id": "approval_timeout",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "approval_timeout_seconds"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "approval_timeout"
           }
         },
         {
@@ -2172,10 +1864,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "approval_broker"
-          },
-          "rust": {
             "kind": "field",
             "name": "approval_broker"
           }
@@ -2187,10 +1875,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "context_providers"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "context_providers"
           }
         },
         {
@@ -2198,10 +1882,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "max_context_chars"
-          },
-          "rust": {
             "kind": "field",
             "name": "max_context_chars"
           }
@@ -2213,38 +1893,24 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "memory_providers"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "memory_providers"
           }
         },
         {
-          "adaptation": "Python names arbitrary host state context; Rust names it app_state.",
           "id": "app_state",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "context"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "app_state"
           }
         },
         {
-          "adaptation": "Both values seed per-run shared state using native naming.",
           "id": "initial_shared_state",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "shared_state"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "initial_shared_state"
           }
         },
         {
@@ -2252,10 +1918,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "tool_registry_factory"
-          },
-          "rust": {
             "kind": "field",
             "name": "tool_registry_factory"
           }
@@ -2267,10 +1929,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "log_preview_chars"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "log_preview_chars"
           }
         },
         {
@@ -2278,10 +1936,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "debug_dump_dir"
-          },
-          "rust": {
             "kind": "field",
             "name": "debug_dump_dir"
           }
@@ -2293,10 +1947,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "before_cycle_messages"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "before_cycle_messages"
           }
         },
         {
@@ -2306,23 +1956,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "interruption_messages"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "interruption_messages"
-          }
-        },
-        {
-          "id": "sub_task_manager",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "sub_task_manager"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "sub_task_manager"
           }
         },
         {
@@ -2332,67 +1965,42 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "metadata"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "metadata"
           }
         },
         {
-          "adaptation": "Python groups trace controls in a mapping; Rust uses typed trace fields.",
           "id": "trace_sink",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tracing"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "trace_sink"
           }
         },
         {
-          "adaptation": "Python reads trace_id from the tracing mapping; Rust exposes a field.",
           "id": "trace_id",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tracing"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "trace_id"
           }
         },
         {
-          "adaptation": "Python reads workflow_name from the tracing mapping; Rust exposes a field.",
           "id": "workflow_name",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tracing"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "workflow_name"
           }
         },
         {
-          "adaptation": "Python accepts a callback; Rust exposes independent typed RunHandle event streams.",
           "id": "event_observer",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "stream"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "events",
-            "target": "vv_agent::RunHandle"
           }
         },
         {
@@ -2400,10 +2008,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "budget_limits"
-          },
-          "rust": {
             "kind": "field",
             "name": "budget_limits"
           }
@@ -2415,54 +2019,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "host_cost_meter"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "host_cost_meter"
-          }
-        },
-        {
-          "id": "checkpoint_config",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "checkpoint_config"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "checkpoint_config"
-          }
-        },
-        {
-          "id": "checkpoint_extensions",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "checkpoint_extensions"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "checkpoint_extensions"
-          }
-        },
-        {
-          "id": "reconciliation_provider",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "reconciliation_provider"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "reconciliation_provider"
           }
         }
       ],
-      "python_target": "vv_agent.RunConfig",
-      "rust_target": "vv_agent::RunConfig"
+      "python_target": "vv_agent.RunConfig"
     },
     {
       "id": "run_result",
@@ -2474,10 +2034,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "input"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "input"
           }
         },
         {
@@ -2486,10 +2042,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "new_items"
-          },
-          "rust": {
-            "kind": "method",
             "name": "new_items"
           }
         },
@@ -2500,10 +2052,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "final_output"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "final_output"
           }
         },
         {
@@ -2512,10 +2060,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "status"
-          },
-          "rust": {
-            "kind": "method",
             "name": "status"
           }
         },
@@ -2536,10 +2080,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "completion_reason"
           }
         },
         {
@@ -2559,10 +2099,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "completion_tool_name"
           }
         },
         {
@@ -2582,10 +2118,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "partial_output"
           }
         },
         {
@@ -2605,10 +2137,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "budget_usage"
           }
         },
         {
@@ -2628,70 +2156,15 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "budget_exhaustion"
           }
         },
         {
-          "id": "checkpoint_key",
-          "kind": "field",
-          "python": {
-            "declaration": "property",
-            "kind": "property",
-            "name": "checkpoint_key",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "checkpoint_key"
-          }
-        },
-        {
-          "id": "resume_observations",
-          "kind": "field",
-          "python": {
-            "declaration": "property",
-            "kind": "property",
-            "name": "resume_observations",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resume_observations"
-          }
-        },
-        {
-          "adaptation": "Python names the inner runtime result raw_result; Rust names its getter result.",
           "id": "raw_result",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "raw_result"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "result"
           }
         },
         {
@@ -2700,10 +2173,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "events"
-          },
-          "rust": {
-            "kind": "method",
             "name": "events"
           }
         },
@@ -2714,10 +2183,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "token_usage"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "token_usage"
           }
         },
         {
@@ -2726,10 +2191,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "trace_id"
-          },
-          "rust": {
-            "kind": "method",
             "name": "trace_id"
           }
         },
@@ -2740,10 +2201,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "run_id"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "run_id"
           }
         },
         {
@@ -2752,10 +2209,6 @@
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
-            "name": "metadata"
-          },
-          "rust": {
-            "kind": "method",
             "name": "metadata"
           }
         },
@@ -2766,10 +2219,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "agent_name"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "agent_name"
           }
         },
         {
@@ -2779,54 +2228,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "resolved_model"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resolved_model"
-          }
-        },
-        {
-          "id": "approval_snapshot",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "approval_snapshot",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approval_snapshot"
-          }
-        },
-        {
-          "id": "into_state",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "into_state",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "into_state"
           }
         },
         {
@@ -2845,150 +2246,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "to_dict"
           }
         }
       ],
-      "python_target": "vv_agent.RunResult",
-      "rust_target": "vv_agent::RunResult"
-    },
-    {
-      "id": "run_state",
-      "members": [
-        {
-          "id": "result",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "result"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "result"
-          }
-        },
-        {
-          "id": "from_result",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "from_result",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "result",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "from_result"
-          }
-        },
-        {
-          "id": "approve",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "approve",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "interruption_id",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approve"
-          }
-        },
-        {
-          "id": "pending_approval_ids",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "pending_approval_ids",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "pending_approval_ids"
-          }
-        },
-        {
-          "id": "approved_interruption_ids",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "approved_interruption_ids",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approved_interruption_ids"
-          }
-        },
-        {
-          "id": "approval_snapshot",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "approval_snapshot",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approval_snapshot"
-          }
-        }
-      ],
-      "python_target": "vv_agent.RunState",
-      "rust_target": "vv_agent::RunState"
+      "python_target": "vv_agent.RunResult"
     },
     {
       "id": "run_handle",
@@ -3014,10 +2275,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "cancel"
           }
         },
         {
@@ -3036,10 +2293,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "events"
           }
         },
         {
@@ -3063,10 +2316,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "result"
           }
         },
         {
@@ -3085,10 +2334,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "state"
           }
         },
         {
@@ -3117,10 +2362,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approve"
           }
         },
         {
@@ -3144,10 +2385,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "steer"
           }
         },
         {
@@ -3171,10 +2408,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "follow_up"
           }
         },
         {
@@ -3203,15 +2436,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resume"
           }
         }
       ],
-      "python_target": "vv_agent.RunHandle",
-      "rust_target": "vv_agent::RunHandle"
+      "python_target": "vv_agent.RunHandle"
     },
     {
       "id": "interactive_session",
@@ -3233,33 +2461,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "messages"
-          }
-        },
-        {
-          "id": "session",
-          "kind": "field",
-          "python": {
-            "declaration": "property",
-            "kind": "property",
-            "name": "session",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "session"
           }
         },
         {
@@ -3279,10 +2480,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "shared_state"
           }
         },
         {
@@ -3302,10 +2499,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "latest_run"
           }
         },
         {
@@ -3325,10 +2518,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "running"
           }
         },
         {
@@ -3348,10 +2537,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "closed"
           }
         },
         {
@@ -3371,10 +2556,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "active_run_handle"
           }
         },
         {
@@ -3403,10 +2584,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "subscribe"
           }
         },
         {
@@ -3425,10 +2602,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "close"
           }
         },
         {
@@ -3452,10 +2625,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "steer"
           }
         },
         {
@@ -3479,32 +2648,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "follow_up"
-          }
-        },
-        {
-          "id": "clear_queues",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "clear_queues",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "clear_queues"
           }
         },
         {
@@ -3523,10 +2666,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "cancel"
           }
         },
         {
@@ -3555,14 +2694,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approve"
           }
         },
         {
-          "adaptation": "Python executes synchronously; Rust awaits the session run.",
           "id": "prompt",
           "kind": "operation",
           "python": {
@@ -3588,10 +2722,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "prompt"
           }
         },
         {
@@ -3615,10 +2745,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "continue_run"
           }
         },
         {
@@ -3647,10 +2773,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "query"
           }
         },
         {
@@ -3669,75 +2791,15 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "state"
-          }
-        },
-        {
-          "id": "replace_messages",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "replace_messages",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "messages",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "replace_messages"
-          }
-        },
-        {
-          "id": "replace_shared_state",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "replace_shared_state",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "shared_state",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "replace_shared_state"
           }
         }
       ],
-      "python_target": "vv_agent.AgentSession",
-      "rust_target": "vv_agent::InteractiveSession"
+      "python_target": "vv_agent.AgentSession"
     },
     {
       "id": "interactive_client",
       "members": [
         {
-          "adaptation": "Python creates synchronously; Rust resolves the session asynchronously.",
           "id": "create_session",
           "kind": "operation",
           "python": {
@@ -3778,21 +2840,15 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "create_session"
           }
         }
       ],
-      "python_target": "vv_agent.InteractiveAgentClient",
-      "rust_target": "vv_agent::InteractiveAgentClient"
+      "python_target": "vv_agent.InteractiveAgentClient"
     },
     {
       "id": "app_server",
       "members": [
         {
-          "adaptation": "Python owns a blocking loop; Rust awaits a generic transport server.",
           "id": "run",
           "kind": "operation",
           "python": {
@@ -3808,15 +2864,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "run"
           }
         }
       ],
-      "python_target": "vv_agent.AppServer",
-      "rust_target": "vv_agent::app_server::AppServer"
+      "python_target": "vv_agent.AppServer"
     },
     {
       "id": "app_server_client",
@@ -3842,10 +2893,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "initialize"
           }
         },
         {
@@ -3869,10 +2916,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "start_thread"
           }
         },
         {
@@ -3896,10 +2939,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resume_thread"
           }
         },
         {
@@ -3923,10 +2962,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read_thread"
           }
         },
         {
@@ -3950,10 +2985,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "list_threads"
           }
         },
         {
@@ -3977,10 +3008,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "archive_thread"
           }
         },
         {
@@ -4004,10 +3031,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "unsubscribe_thread"
           }
         },
         {
@@ -4031,10 +3054,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "start_turn"
           }
         },
         {
@@ -4058,10 +3077,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "interrupt_turn"
           }
         },
         {
@@ -4085,10 +3100,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resume_turn"
           }
         },
         {
@@ -4112,10 +3123,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "steer_turn"
           }
         },
         {
@@ -4139,10 +3146,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "follow_up_turn"
           }
         },
         {
@@ -4166,10 +3169,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resolve_approval_request"
           }
         },
         {
@@ -4193,10 +3192,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "list_models"
           }
         },
         {
@@ -4215,14 +3210,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "export_schema"
           }
         },
         {
-          "adaptation": "Both initialize facades send the initialized notification after the initialize response.",
           "id": "initialized",
           "kind": "operation",
           "python": {
@@ -4243,15 +3233,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "initialize"
           }
         }
       ],
       "python_target": "vv_agent.app_server.AppServerClient",
-      "rust_target": "vv_agent::app_server::client::AppServerClient",
       "supporting_operations": [
         {
           "id": "resolve_server_request",
@@ -4274,10 +3259,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resolve_approval"
           }
         },
         {
@@ -4306,14 +3287,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "send_response"
           }
         },
         {
-          "adaptation": "Python accepts a timeout; Rust uses its configured response timeout.",
           "id": "next_message",
           "kind": "operation",
           "python": {
@@ -4334,10 +3310,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "next_message"
           }
         },
         {
@@ -4356,10 +3328,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "close"
           }
         }
       ]
@@ -4370,60 +3338,86 @@
         {
           "id": "role",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "role"},
-          "rust": {"kind": "field", "name": "role"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "role"
+          }
         },
         {
           "id": "content",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "content"},
-          "rust": {"kind": "field", "name": "content"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "content"
+          }
         },
         {
           "id": "name",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "name"},
-          "rust": {"kind": "field", "name": "name"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "name"
+          }
         },
         {
           "id": "tool_call_id",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_call_id"},
-          "rust": {"kind": "field", "name": "tool_call_id"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "tool_call_id"
+          }
         },
         {
           "id": "tool_calls",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_calls"},
-          "rust": {"kind": "field", "name": "tool_calls"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "tool_calls"
+          }
         },
         {
           "id": "reasoning_content",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "reasoning_content"},
-          "rust": {"kind": "field", "name": "reasoning_content"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "reasoning_content"
+          }
         },
         {
           "id": "image_url",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_url"},
-          "rust": {"kind": "field", "name": "image_url"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "image_url"
+          }
         },
         {
           "id": "metadata",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
-          "rust": {"kind": "field", "name": "metadata"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "metadata"
+          }
         },
         {
           "id": "artifact_ref",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "artifact_ref"},
-          "rust": {"kind": "field", "name": "artifact_ref"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "artifact_ref"
+          }
         }
       ],
-      "python_target": "vv_agent.Message",
-      "rust_target": "vv_agent::Message"
+      "python_target": "vv_agent.Message"
     },
     {
       "id": "microcompaction_policy",
@@ -4435,8 +3429,7 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "trigger_ratio"
-          },
-          "rust": {"kind": "field", "name": "trigger_ratio"}
+          }
         },
         {
           "id": "target_ratio",
@@ -4445,8 +3438,7 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "target_ratio"
-          },
-          "rust": {"kind": "field", "name": "target_ratio"}
+          }
         },
         {
           "id": "keep_recent_cycles",
@@ -4455,8 +3447,7 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "keep_recent_cycles"
-          },
-          "rust": {"kind": "field", "name": "keep_recent_cycles"}
+          }
         },
         {
           "id": "min_result_chars",
@@ -4465,12 +3456,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "min_result_chars"
-          },
-          "rust": {"kind": "field", "name": "min_result_chars"}
+          }
         }
       ],
-      "python_target": "vv_agent.MicrocompactionPolicy",
-      "rust_target": "vv_agent::MicrocompactionPolicy"
+      "python_target": "vv_agent.MicrocompactionPolicy"
     },
     {
       "id": "tool_metadata",
@@ -4482,10 +3471,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "side_effect"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "side_effect"
           }
         },
         {
@@ -4493,10 +3478,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "idempotency"
-          },
-          "rust": {
             "kind": "field",
             "name": "idempotency"
           }
@@ -4508,10 +3489,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "terminal"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "terminal"
           }
         },
         {
@@ -4519,10 +3496,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "result_retention"
-          },
-          "rust": {
             "kind": "field",
             "name": "result_retention"
           }
@@ -4534,10 +3507,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "capability_tags"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "capability_tags"
           }
         },
         {
@@ -4547,15 +3516,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "cost_dimensions"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "cost_dimensions"
           }
         }
       ],
-      "python_target": "vv_agent.ToolMetadata",
-      "rust_target": "vv_agent::ToolMetadata"
+      "python_target": "vv_agent.ToolMetadata"
     },
     {
       "id": "tool_execution_result",
@@ -4563,91 +3527,131 @@
         {
           "id": "tool_call_id",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_call_id"},
-          "rust": {"kind": "field", "name": "tool_call_id"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "tool_call_id"
+          }
         },
         {
           "id": "content",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "content"},
-          "rust": {"kind": "field", "name": "content"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "content"
+          }
         },
         {
-          "adaptation": "Python uses the canonical status_code spelling; Rust exposes the same typed value as status.",
           "id": "status_code",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "status_code"},
-          "rust": {"kind": "field", "name": "status"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "status_code"
+          }
         },
         {
           "id": "directive",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "directive"},
-          "rust": {"kind": "field", "name": "directive"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "directive"
+          }
         },
         {
           "id": "error_code",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "error_code"},
-          "rust": {"kind": "field", "name": "error_code"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "error_code"
+          }
         },
         {
           "id": "metadata",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
-          "rust": {"kind": "field", "name": "metadata"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "metadata"
+          }
         },
         {
           "id": "image_url",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_url"},
-          "rust": {"kind": "field", "name": "image_url"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "image_url"
+          }
         },
         {
           "id": "image_path",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_path"},
-          "rust": {"kind": "field", "name": "image_path"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "image_path"
+          }
         },
         {
           "id": "truncated",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "truncated"},
-          "rust": {"kind": "field", "name": "truncated"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "truncated"
+          }
         },
         {
           "id": "truncation_reason",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "truncation_reason"},
-          "rust": {"kind": "field", "name": "truncation_reason"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "truncation_reason"
+          }
         },
         {
           "id": "original_bytes",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "original_bytes"},
-          "rust": {"kind": "field", "name": "original_bytes"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "original_bytes"
+          }
         },
         {
           "id": "visible_bytes",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "visible_bytes"},
-          "rust": {"kind": "field", "name": "visible_bytes"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "visible_bytes"
+          }
         },
         {
           "id": "artifact",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "artifact"},
-          "rust": {"kind": "field", "name": "artifact"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "artifact"
+          }
         },
         {
           "id": "cursor",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "cursor"},
-          "rust": {"kind": "field", "name": "cursor"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "cursor"
+          }
         }
       ],
-      "python_target": "vv_agent.ToolExecutionResult",
-      "rust_target": "vv_agent::ToolExecutionResult"
+      "python_target": "vv_agent.ToolExecutionResult"
     },
     {
       "id": "tool_artifact_ref",
@@ -4655,36 +3659,50 @@
         {
           "id": "path",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "path"},
-          "rust": {"kind": "field", "name": "path"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "path"
+          }
         },
         {
           "id": "media_type",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "media_type"},
-          "rust": {"kind": "field", "name": "media_type"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "media_type"
+          }
         },
         {
           "id": "encoding",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "encoding"},
-          "rust": {"kind": "field", "name": "encoding"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "encoding"
+          }
         },
         {
           "id": "size_bytes",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "size_bytes"},
-          "rust": {"kind": "field", "name": "size_bytes"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "size_bytes"
+          }
         },
         {
           "id": "sha256",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "sha256"},
-          "rust": {"kind": "field", "name": "sha256"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "sha256"
+          }
         }
       ],
-      "python_target": "vv_agent.ToolArtifactRef",
-      "rust_target": "vv_agent::ToolArtifactRef"
+      "python_target": "vv_agent.ToolArtifactRef"
     },
     {
       "id": "tool_result_cursor",
@@ -4692,30 +3710,41 @@
         {
           "id": "kind",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "kind"},
-          "rust": {"kind": "field", "name": "kind"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "kind"
+          }
         },
         {
           "id": "path",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "path"},
-          "rust": {"kind": "field", "name": "path"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "path"
+          }
         },
         {
           "id": "offset_chars",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "offset_chars"},
-          "rust": {"kind": "field", "name": "offset_chars"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "offset_chars"
+          }
         },
         {
           "id": "sha256",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "sha256"},
-          "rust": {"kind": "field", "name": "sha256"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "sha256"
+          }
         }
       ],
-      "python_target": "vv_agent.ToolResultCursor",
-      "rust_target": "vv_agent::ToolResultCursor"
+      "python_target": "vv_agent.ToolResultCursor"
     },
     {
       "id": "tool",
@@ -4727,10 +3756,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "name"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "name"
           }
         },
         {
@@ -4740,24 +3765,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "description"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "description"
           }
         },
         {
-          "adaptation": "The field follows each ecosystem's schema naming.",
           "id": "parameters_schema",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "params_json_schema"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "parameters_schema"
           }
         },
         {
@@ -4767,10 +3783,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "strict_json_schema"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "strict_schema"
           }
         },
         {
@@ -4780,38 +3792,24 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "exposure"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "exposure"
           }
         },
         {
-          "adaptation": "Python stores seconds; Rust stores Duration.",
           "id": "timeout",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "timeout_seconds"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "timeout"
           }
         },
         {
-          "adaptation": "Python accepts bool/callable; Rust exposes ToolApprovalRule.",
           "id": "approval_rule",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "needs_approval"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "approval_rule"
           }
         },
         {
@@ -4821,25 +3819,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "is_enabled"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "is_enabled"
           }
         },
         {
-          "adaptation": "Rust exposes tool metadata through ToolExecutor.",
           "id": "metadata",
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "metadata"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "metadata",
-            "target": "vv_agent::ToolExecutor"
           }
         },
         {
@@ -4849,14 +3837,9 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tool_metadata"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "tool_metadata"
           }
         },
         {
-          "adaptation": "Python returns the OpenAI schema directly; Rust returns ToolSpec containing it.",
           "id": "to_spec",
           "kind": "operation",
           "python": {
@@ -4872,14 +3855,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "as_tool_spec"
           }
         },
         {
-          "adaptation": "Rust executes through ToolExecutor after adapting Tool to ToolSpec.",
           "id": "invoke",
           "kind": "operation",
           "python": {
@@ -4905,56 +3883,15 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "run",
-            "target": "vv_agent::ToolExecutor"
           }
         }
       ],
-      "python_target": "vv_agent.FunctionTool",
-      "rust_target": "vv_agent::Tool"
+      "python_target": "vv_agent.FunctionTool"
     },
     {
       "id": "tool_context",
-      "members": [
-        {
-          "id": "defer",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "defer",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                }
-              ],
-              "return": "ToolCallOutcome.Deferred"
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "defer",
-            "return": "ToolCallOutcome::Deferred"
-          },
-          "construction": "framework-owned handle/outcome factory before external acceptance",
-          "requires_durable_checkpoint": true,
-          "without_checkpoint": {
-            "error": "deferred_requires_checkpoint",
-            "before_external_side_effect": true,
-            "result": "Completed(ERROR)"
-          },
-          "ordinary_outcome_without_checkpoint": "normal local tools continue to return Completed outcomes; only defer requires durable checkpointing",
-          "errors": ["deferred_requires_checkpoint"]
-        }
-      ],
-      "python_target": "vv_agent.ToolContext",
-      "rust_target": "vv_agent::ToolContext"
+      "members": [],
+      "python_target": "vv_agent.ToolContext"
     },
     {
       "id": "tool_policy",
@@ -4966,10 +3903,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "allowed_tools"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "allowed_tools"
           }
         },
         {
@@ -4977,10 +3910,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "disallowed_tools"
-          },
-          "rust": {
             "kind": "field",
             "name": "disallowed_tools"
           }
@@ -4992,10 +3921,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "approval"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "approval"
           }
         },
         {
@@ -5003,10 +3928,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "can_use_tool"
-          },
-          "rust": {
             "kind": "field",
             "name": "can_use_tool"
           }
@@ -5018,10 +3939,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "denied_side_effects"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "denied_side_effects"
           }
         },
         {
@@ -5029,10 +3946,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "denied_capability_tags"
-          },
-          "rust": {
             "kind": "field",
             "name": "denied_capability_tags"
           }
@@ -5044,10 +3957,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "deny_terminal_tools"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "deny_terminal_tools"
           }
         },
         {
@@ -5057,15 +3966,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "denied_cost_dimensions"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "denied_cost_dimensions"
           }
         }
       ],
-      "python_target": "vv_agent.ToolPolicy",
-      "rust_target": "vv_agent::ToolPolicy"
+      "python_target": "vv_agent.ToolPolicy"
     },
     {
       "id": "tool_registry",
@@ -5091,10 +3995,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "register"
           }
         },
         {
@@ -5118,10 +4018,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "register_many"
           }
         },
         {
@@ -5145,10 +4041,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "get"
           }
         },
         {
@@ -5172,10 +4064,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "has_tool"
           }
         },
         {
@@ -5204,10 +4092,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "register_schema"
           }
         },
         {
@@ -5231,10 +4115,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "register_schemas"
           }
         },
         {
@@ -5258,10 +4138,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "get_schema"
           }
         },
         {
@@ -5285,10 +4161,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "list_openai_schemas"
           }
         },
         {
@@ -5317,14 +4189,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "execute"
           }
         },
         {
-          "adaptation": "Python exposes ordered names plus get_executor; Rust exposes ordered executor objects.",
           "id": "executors",
           "kind": "operation",
           "python": {
@@ -5340,14 +4207,9 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "executors"
           }
         },
         {
-          "adaptation": "Both registries retain the registered executor for runtime dispatch, including its typed outcome.",
           "id": "register_executor",
           "kind": "operation",
           "python": {
@@ -5378,15 +4240,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "register_executor"
           }
         }
       ],
-      "python_target": "vv_agent.ToolRegistry",
-      "rust_target": "vv_agent::ToolRegistry"
+      "python_target": "vv_agent.ToolRegistry"
     },
     {
       "id": "workspace_backend",
@@ -5417,10 +4274,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "list_files"
           }
         },
         {
@@ -5444,10 +4297,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read_text"
           }
         },
         {
@@ -5471,10 +4320,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read_bytes"
           }
         },
         {
@@ -5508,10 +4353,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "write_text"
           }
         },
         {
@@ -5540,10 +4381,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "write_text_chunks_exclusive"
           }
         },
         {
@@ -5567,10 +4404,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "file_info"
           }
         },
         {
@@ -5594,10 +4427,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "exists"
           }
         },
         {
@@ -5621,10 +4450,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "is_file"
           }
         },
         {
@@ -5648,15 +4473,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "mkdir"
           }
         }
       ],
-      "python_target": "vv_agent.workspace.WorkspaceBackend",
-      "rust_target": "vv_agent::WorkspaceBackend"
+      "python_target": "vv_agent.workspace.WorkspaceBackend"
     },
     {
       "id": "memory_provider",
@@ -5682,10 +4502,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "search"
           }
         },
         {
@@ -5709,10 +4525,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "save"
           }
         },
         {
@@ -5736,10 +4548,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "before_compact"
           }
         },
         {
@@ -5763,15 +4571,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "after_compact"
           }
         }
       ],
-      "python_target": "vv_agent.memory.MemoryProvider",
-      "rust_target": "vv_agent::MemoryProvider"
+      "python_target": "vv_agent.memory.MemoryProvider"
     },
     {
       "id": "memory_manager",
@@ -5817,10 +4620,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "compact"
           }
         },
         {
@@ -5854,10 +4653,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "emergency_compact"
           }
         },
         {
@@ -5877,10 +4672,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "effective_context_window"
           }
         },
         {
@@ -5914,10 +4705,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "estimate_memory_usage_percentage"
           }
         },
         {
@@ -5946,10 +4733,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "microcompact_messages"
           }
         },
         {
@@ -5973,10 +4756,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "apply_session_memory_context"
           }
         },
         {
@@ -6000,15 +4779,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "strip_session_memory_context"
           }
         }
       ],
-      "python_target": "vv_agent.memory.MemoryManager",
-      "rust_target": "vv_agent::MemoryManager"
+      "python_target": "vv_agent.memory.MemoryManager"
     },
     {
       "id": "session_memory",
@@ -6039,10 +4813,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "should_extract"
           }
         },
         {
@@ -6076,10 +4846,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "extract"
           }
         },
         {
@@ -6098,10 +4864,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "render_as_system_context"
           }
         },
         {
@@ -6125,10 +4887,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "on_compaction"
           }
         },
         {
@@ -6147,15 +4905,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "load"
           }
         }
       ],
-      "python_target": "vv_agent.memory.SessionMemory",
-      "rust_target": "vv_agent::SessionMemory"
+      "python_target": "vv_agent.memory.SessionMemory"
     },
     {
       "id": "skills",
@@ -6176,10 +4929,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "discover_skill_dirs"
           }
         },
         {
@@ -6198,10 +4947,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read_properties"
           }
         },
         {
@@ -6225,10 +4970,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read_skill"
           }
         },
         {
@@ -6257,10 +4998,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "normalize_skill_list"
           }
         },
         {
@@ -6284,10 +5021,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "render_skills_xml"
           }
         },
         {
@@ -6311,10 +5044,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "validate"
           }
         },
         {
@@ -6338,15 +5067,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "validate_with_diagnostics"
           }
         }
       ],
-      "python_target": "vv_agent.skills",
-      "rust_target": "vv_agent::skills"
+      "python_target": "vv_agent.skills"
     },
     {
       "id": "tracing_span",
@@ -6358,10 +5082,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "name"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "name"
           }
         },
         {
@@ -6369,10 +5089,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "trace_id"
-          },
-          "rust": {
             "kind": "field",
             "name": "trace_id"
           }
@@ -6384,10 +5100,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "span_id"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "span_id"
           }
         },
         {
@@ -6395,10 +5107,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "parent_id"
-          },
-          "rust": {
             "kind": "field",
             "name": "parent_id"
           }
@@ -6410,10 +5118,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "started_at"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "started_at"
           }
         },
         {
@@ -6423,10 +5127,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "ended_at"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "ended_at"
           }
         },
         {
@@ -6434,10 +5134,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "metadata"
-          },
-          "rust": {
             "kind": "field",
             "name": "metadata"
           }
@@ -6463,15 +5159,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "finish"
           }
         }
       ],
-      "python_target": "vv_agent.Span",
-      "rust_target": "vv_agent::Span"
+      "python_target": "vv_agent.Span"
     },
     {
       "id": "tracing_sink",
@@ -6497,10 +5188,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "on_span_start"
           }
         },
         {
@@ -6524,10 +5211,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "on_span_end"
           }
         },
         {
@@ -6546,15 +5229,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "flush"
           }
         }
       ],
-      "python_target": "vv_agent.TraceSink",
-      "rust_target": "vv_agent::TraceSink"
+      "python_target": "vv_agent.TraceSink"
     },
     {
       "id": "prompt_bundle",
@@ -6566,10 +5244,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "sections"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "sections"
           }
         },
         {
@@ -6579,10 +5253,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "stable_hash"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "stable_hash"
           }
         },
         {
@@ -6590,16 +5260,21 @@
           "kind": "operation",
           "python": {
             "kind": "method",
-            "name": "flatten"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "flatten"
+            "name": "flatten",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
           }
         }
       ],
-      "python_target": "vv_agent.PromptBundle",
-      "rust_target": "vv_agent::PromptBundle"
+      "python_target": "vv_agent.PromptBundle"
     },
     {
       "id": "prompt_section",
@@ -6607,42 +5282,59 @@
         {
           "id": "id",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "id"},
-          "rust": {"kind": "field", "name": "id"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "id"
+          }
         },
         {
           "id": "text",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "text"},
-          "rust": {"kind": "field", "name": "text"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "text"
+          }
         },
         {
           "id": "stable",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "stable"},
-          "rust": {"kind": "field", "name": "stable"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "stable"
+          }
         },
         {
           "id": "source",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "source"},
-          "rust": {"kind": "field", "name": "source"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "source"
+          }
         },
         {
           "id": "cache_hint",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "cache_hint"},
-          "rust": {"kind": "field", "name": "cache_hint"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "cache_hint"
+          }
         },
         {
           "id": "metadata",
           "kind": "field",
-          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
-          "rust": {"kind": "field", "name": "metadata"}
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "metadata"
+          }
         }
       ],
-      "python_target": "vv_agent.PromptSection",
-      "rust_target": "vv_agent::PromptSection"
+      "python_target": "vv_agent.PromptSection"
     },
     {
       "id": "llm_request",
@@ -6654,10 +5346,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model"
           }
         },
         {
@@ -6665,10 +5353,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "messages"
-          },
-          "rust": {
             "kind": "field",
             "name": "messages"
           }
@@ -6680,10 +5364,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "tools"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "tools"
           }
         },
         {
@@ -6691,10 +5371,6 @@
           "kind": "field",
           "python": {
             "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "metadata"
-          },
-          "rust": {
             "kind": "field",
             "name": "metadata"
           }
@@ -6706,10 +5382,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "model_settings"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model_settings"
           }
         },
         {
@@ -6719,15 +5391,10 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "prompt_bundle"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "prompt_bundle"
           }
         }
       ],
-      "python_target": "vv_agent.llm.LlmRequest",
-      "rust_target": "vv_agent::LlmRequest"
+      "python_target": "vv_agent.llm.LlmRequest"
     },
     {
       "id": "llm_client",
@@ -6753,10 +5420,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "complete"
           }
         },
         {
@@ -6785,15 +5448,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "complete_with_stream"
           }
         }
       ],
-      "python_target": "vv_agent.llm.LLMClient",
-      "rust_target": "vv_agent::LlmClient"
+      "python_target": "vv_agent.llm.LLMClient"
     },
     {
       "id": "host_cost_meter",
@@ -6814,15 +5472,10 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "read"
           }
         }
       ],
-      "python_target": "vv_agent.HostCostMeter",
-      "rust_target": "vv_agent::HostCostMeter"
+      "python_target": "vv_agent.HostCostMeter"
     },
     {
       "id": "model_provider",
@@ -6848,10 +5501,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "resolve"
           }
         },
         {
@@ -6875,10 +5524,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "client"
           }
         },
         {
@@ -6902,10 +5547,6 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "default_settings"
           }
         },
         {
@@ -6924,110 +5565,83 @@
                 }
               ]
             }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "default_model_ref"
           }
         }
       ],
-      "python_target": "vv_agent.ModelProvider",
-      "rust_target": "vv_agent::ModelProvider"
+      "python_target": "vv_agent.ModelProvider"
     },
     {
-      "id": "runtime_backend",
-      "members": [
-        {
-          "id": "execute",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "execute",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "task",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "initial_messages",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "shared_state",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "cycle_executor",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "ctx",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "max_cycles",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "execute"
-          }
-        },
-        {
-          "id": "parallel_map",
-          "kind": "operation",
-          "python": {
-            "kind": "method",
-            "name": "parallel_map",
-            "signature": {
-              "async": false,
-              "parameters": [
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "self",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "fn",
-                  "required": true
-                },
-                {
-                  "kind": "positional_or_keyword",
-                  "name": "items",
-                  "required": true
-                }
-              ]
-            }
-          },
-          "rust": {
-            "kind": "method",
-            "name": "parallel_map"
-          }
-        }
-      ],
-      "python_target": "vv_agent.runtime.backends.ExecutionBackend",
-      "rust_target": "vv_agent::RuntimeExecutionBackend"
+      "behavior": "strict current canonical record codec",
+      "id": "session_Record",
+      "python_target": "vv_agent.Record"
+    },
+    {
+      "behavior": "strict current canonical inbox codec",
+      "id": "session_InboxItem",
+      "python_target": "vv_agent.InboxItem"
+    },
+    {
+      "behavior": "session admission identity and attributes",
+      "id": "session_SessionSpec",
+      "python_target": "vv_agent.SessionSpec"
+    },
+    {
+      "behavior": "single atomic log and inbox authority",
+      "id": "session_SessionStore",
+      "python_target": "vv_agent.SessionStore"
+    },
+    {
+      "behavior": "atomic admission, fences and consumer transactions",
+      "id": "session_SessionTx",
+      "python_target": "vv_agent.SessionTx"
+    },
+    {
+      "behavior": "SQLite mapping of session transaction semantics",
+      "id": "session_SQLiteStore",
+      "python_target": "vv_agent.SQLiteStore"
+    },
+    {
+      "behavior": "PostgreSQL mapping; optional driver is not required to import SDK",
+      "id": "session_PostgresStore",
+      "python_target": "vv_agent.PostgresStore"
+    },
+    {
+      "behavior": "deterministic identity or admission conflict",
+      "id": "session_Conflict",
+      "python_target": "vv_agent.Conflict"
+    },
+    {
+      "behavior": "stale writer fence rejection",
+      "id": "session_LeaseLost",
+      "python_target": "vv_agent.LeaseLost"
+    },
+    {
+      "behavior": "required host reference unavailable",
+      "id": "session_MissingHostBinding",
+      "python_target": "vv_agent.MissingHostBinding"
+    },
+    {
+      "behavior": "authentic definitive provider result",
+      "id": "session_Definitive",
+      "python_target": "vv_agent.Definitive"
+    },
+    {
+      "behavior": "authentic retained provider handle",
+      "id": "session_Accepted",
+      "python_target": "vv_agent.Accepted"
+    },
+    {
+      "behavior": "uncertain external operation outcome",
+      "id": "session_Unknown",
+      "python_target": "vv_agent.Unknown"
+    },
+    {
+      "behavior": "projection and delivery only; no independent event authority",
+      "id": "session_SessionRunEventStore",
+      "python_target": "vv_agent.SessionRunEventStore"
     }
   ],
   "verification": {
-    "python": "public export resolution plus dataclass field/property/getattr/callable/inspect.signature checks",
-    "rust": "compiled exports and exhaustive method/function references plus typed public-field accessors"
+    "python": "current exports minus section 6 removals plus Q4 accepted names; F3 root wiring pending"
   }
 }

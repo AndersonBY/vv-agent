@@ -50,7 +50,7 @@ def test_interactive_session_emits_current_events_from_run_handle(tmp_path) -> N
 
     session.prompt("hello", auto_follow_up=False)
 
-    typed_events = [payload for payload in emitted if payload.get("version") == "v5"]
+    typed_events = [payload for payload in emitted if payload.get("version") == "v6"]
     lifecycle_events = [payload for payload in typed_events if payload.get("type") in {"run_started", "run_completed"}]
     assert [payload["type"] for payload in lifecycle_events] == ["run_started", "run_completed"]
     assert [payload.get("session_id") for payload in lifecycle_events] == ["session_1", "session_1"]
@@ -120,7 +120,7 @@ def test_interactive_session_derives_each_run_from_host_cancellation_token(tmp_p
     assert not isinstance(outcome, BaseException)
     assert outcome.result.status == AgentStatus.FAILED
     assert outcome.result.error is not None
-    assert "host shutdown" in outcome.result.error["message"]
+    assert outcome.result.error["code"] == "cancel_requested"
     assert [event.type for event in outcome.events if event.type == "run_cancelled"] == ["run_cancelled"]
 
 

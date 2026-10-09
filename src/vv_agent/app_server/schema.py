@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -63,7 +62,7 @@ def _array(item_schema: dict[str, Any]) -> dict[str, Any]:
     return {"type": "array", "items": item_schema}
 
 
-def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
+def _definitions() -> dict[str, dict[str, Any]]:
     approval_decisions = {"type": "string", "enum": [decision.value for decision in ApprovalDecision]}
     input_item = _object({}, additional_properties=True)
     thread_item = _object(
@@ -91,43 +90,6 @@ def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
             "metadata": JSON_OBJECT,
         },
         required=["threadId", "agentKey", "cwd", "createdAt", "updatedAt", "archivedAt", "status", "metadata"],
-    )
-    checkpoint_summary = _object(
-        {
-            "key": {"type": "string"},
-            "resumeAttempt": {"type": "integer", "minimum": 1},
-            "cycleIndex": {"type": "integer", "minimum": 0},
-            "status": {
-                "type": "string",
-                "enum": [
-                    "running",
-                    "host_interaction",
-                    "suspended",
-                    "deferred",
-                    "reconciliation_required",
-                    "wait_user",
-                    "completed",
-                    "failed",
-                    "max_cycles",
-                ],
-            },
-            "terminalAcknowledged": {"type": "boolean"},
-        },
-        required=["key", "resumeAttempt", "cycleIndex", "status", "terminalAcknowledged"],
-    )
-    interruption_summary = _object(
-        {
-            "reason": {"const": "resume_requires_reconciliation"},
-            "operationId": {"type": "string"},
-            "operationKind": {"type": "string", "enum": ["model", "tool"]},
-            "cycleIndex": {"type": "integer", "minimum": 1},
-            "risk": {"type": "string"},
-            "idempotencySupport": {
-                "type": ["string", "null"],
-                "enum": ["supported", "unsupported", "unknown", None],
-            },
-        },
-        required=["reason", "operationId", "operationKind", "cycleIndex", "risk", "idempotencySupport"],
     )
     turn_record = _object(
         {
@@ -233,9 +195,8 @@ def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
             {
                 "threadId": {"type": "string"},
                 "turnId": {"type": "string"},
-                "checkpointKey": {"type": "string"},
             },
-            required=["threadId", "turnId", "checkpointKey"],
+            required=["threadId", "turnId"],
         ),
         "TurnSteerParams": _object(
             {
@@ -298,8 +259,6 @@ def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
         "AppItem": thread_item,
         "AppThread": thread_record,
         "AppTurn": turn_record,
-        "CheckpointSummary": checkpoint_summary,
-        "InterruptionSummary": interruption_summary,
         "ThreadStartedParams": _object(
             {
                 "threadId": {"type": "string"},
@@ -363,105 +322,94 @@ def _definitions(*, _kernel: bool = False) -> dict[str, dict[str, Any]]:
                 "tokenUsage": JSON_OBJECT,
                 "budgetUsage": JSON_OBJECT,
                 "budgetExhaustion": JSON_OBJECT,
-                "checkpoint": {"$ref": "#/$defs/CheckpointSummary"},
-                "interruption": {"$ref": "#/$defs/InterruptionSummary"},
                 "error": {"type": "string"},
             },
             required=["threadId", "turnId", "status"],
         ),
     }
     definitions.update(_result_definitions())
-    if _kernel:
-        from vv_agent.session.app_server import ThreadStatus
+    from vv_agent.session.app_server import ThreadStatus
 
-        status = {"type": "string", "enum": [value.value for value in ThreadStatus]}
-        for name in (
-            "AppThread",
-            "ThreadStatusChangedParams",
-            "ThreadStatusResponse",
-            "ThreadStartResponse",
-            "ThreadStartedParams",
-        ):
-            definitions[name]["properties"]["status"] = status
-        definitions["InitializeResponse"]["properties"]["protocolVersion"] = {"const": "v2"}
-        definitions["TurnResumeParams"] = _object(
-            {"threadId": {"type": "string"}, "turnId": {"type": "string"}}, required=["threadId", "turnId"]
-        )
-        definitions["ThreadResumeParams"]["properties"]["afterItemId"] = {"type": "string"}
-        definitions["Interaction"] = _object(
-            {
-                "sessionId": {"type": "string"},
-                "turnId": {"type": "string"},
-                "interactionId": {"type": "string"},
-                "prompt": {"type": "string"},
+    status = {"type": "string", "enum": [value.value for value in ThreadStatus]}
+    for name in (
+        "AppThread",
+        "ThreadStatusChangedParams",
+        "ThreadStatusResponse",
+        "ThreadStartResponse",
+        "ThreadStartedParams",
+    ):
+        definitions[name]["properties"]["status"] = status
+    definitions["InitializeResponse"]["properties"]["protocolVersion"] = {"const": "v2"}
+    definitions["ThreadResumeParams"]["properties"]["afterItemId"] = {"type": "string"}
+    definitions["Interaction"] = _object(
+        {
+            "sessionId": {"type": "string"},
+            "turnId": {"type": "string"},
+            "interactionId": {"type": "string"},
+            "prompt": {"type": "string"},
+        },
+        required=["sessionId", "turnId"],
+    )
+    for name in ("ThreadStatusResponse", "ThreadStatusChangedParams"):
+        definitions[name]["properties"]["interactions"] = _array({"$ref": "#/$defs/Interaction"})
+    definitions["CacheUsage"] = _object(
+        {
+            "status": {"type": "string", "enum": ["provider_reported", "accounting_missing", "unsupported"]},
+            **{
+                key: {"type": ["integer", "null"], "minimum": 0}
+                for key in ("readInputTokens", "writeInputTokens", "uncachedInputTokens")
             },
-            required=["sessionId", "turnId"],
-        )
-        for name in ("ThreadStatusResponse", "ThreadStatusChangedParams"):
-            definitions[name]["properties"]["interactions"] = _array({"$ref": "#/$defs/Interaction"})
-        for name in ("TurnResumeResponse", "TurnCompletedParams"):
-            for field_name in ("checkpoint", "interruption"):
-                definitions[name]["properties"].pop(field_name, None)
-        for name in ("CheckpointSummary", "InterruptionSummary"):
-            definitions.pop(name)
-        definitions["CacheUsage"] = _object(
-            {
-                "status": {"type": "string", "enum": ["provider_reported", "accounting_missing", "unsupported"]},
-                **{
-                    key: {"type": ["integer", "null"], "minimum": 0}
-                    for key in ("readInputTokens", "writeInputTokens", "uncachedInputTokens")
-                },
-                "source": NULLABLE_STRING,
-            },
-            required=["status", "readInputTokens", "writeInputTokens", "uncachedInputTokens", "source"],
-        )
-        counts = {
-            key: {"type": ["integer", "null"], "minimum": 0}
-            for key in ("inputTokens", "outputTokens", "totalTokens", "reasoningTokens")
-        }
-        definitions["TokenUsage"] = _object(
-            {
-                "schemaVersion": {"const": "vv-agent.token-usage.v1"},
-                **counts,
-                "usageSource": {"type": "string", "enum": ["provider_reported", "estimated", "accounting_missing"]},
-                "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
-                "providerUsage": JSON_OBJECT,
-            },
-            required=["schemaVersion", *counts, "usageSource", "cacheUsage", "providerUsage"],
-        )
-        call_fields = {
-            "schemaVersion": {"const": "vv-agent.model-call.v2"},
-            **{key: {"type": "string", "minLength": 1} for key in ("callId", "operationId", "backend", "model")},
-            **{key: {"type": "integer", "minimum": 1} for key in ("attempt", "cycleIndex")},
-            "operation": {"type": "string", "enum": ["agent_cycle", "memory_compaction", "session_memory", "output_repair"]},
-            "status": {"type": "string", "enum": ["completed", "failed", "ambiguous"]},
-            "usage": {"$ref": "#/$defs/TokenUsage"},
-            "errorCode": NULLABLE_STRING,
-        }
-        definitions["ModelCallRecord"] = _object(call_fields, required=list(call_fields))
-        definitions["TaskTokenUsage"] = _object(
-            {
-                "schemaVersion": {"const": "vv-agent.task-token-usage.v3"},
-                **counts,
-                "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
-                "modelCalls": _array({"$ref": "#/$defs/ModelCallRecord"}),
-            },
-            required=["schemaVersion", *counts, "cacheUsage", "modelCalls"],
-        )
-        result = {
-            "finalOutput": {},
-            "waitReason": {"type": "string"},
-            "completionReason": {"type": "string"},
-            "completionToolName": {"type": "string"},
-            "partialOutput": {},
-            "error": {"type": "string"},
-            "tokenUsage": {"$ref": "#/$defs/TaskTokenUsage"},
-            "budgetUsage": JSON_OBJECT,
-            "budgetExhaustion": JSON_OBJECT,
-        }
-        definitions["AppTurn"]["properties"]["result"] = _object(result)
-        for name in ("TurnResumeResponse", "TurnCompletedParams"):
-            definitions[name]["properties"].update(result)
+            "source": NULLABLE_STRING,
+        },
+        required=["status", "readInputTokens", "writeInputTokens", "uncachedInputTokens", "source"],
+    )
+    counts = {
+        key: {"type": ["integer", "null"], "minimum": 0}
+        for key in ("inputTokens", "outputTokens", "totalTokens", "reasoningTokens")
+    }
+    definitions["TokenUsage"] = _object(
+        {
+            "schemaVersion": {"const": "vv-agent.token-usage.v1"},
+            **counts,
+            "usageSource": {"type": "string", "enum": ["provider_reported", "estimated", "accounting_missing"]},
+            "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
+            "providerUsage": JSON_OBJECT,
+        },
+        required=["schemaVersion", *counts, "usageSource", "cacheUsage", "providerUsage"],
+    )
+    call_fields = {
+        "schemaVersion": {"const": "vv-agent.model-call.v2"},
+        **{key: {"type": "string", "minLength": 1} for key in ("callId", "operationId", "backend", "model")},
+        **{key: {"type": "integer", "minimum": 1} for key in ("attempt", "cycleIndex")},
+        "operation": {"type": "string", "enum": ["agent_cycle", "memory_compaction", "session_memory", "output_repair"]},
+        "status": {"type": "string", "enum": ["completed", "failed", "ambiguous"]},
+        "usage": {"$ref": "#/$defs/TokenUsage"},
+        "errorCode": NULLABLE_STRING,
+    }
+    definitions["ModelCallRecord"] = _object(call_fields, required=list(call_fields))
+    definitions["TaskTokenUsage"] = _object(
+        {
+            "schemaVersion": {"const": "vv-agent.task-token-usage.v3"},
+            **counts,
+            "cacheUsage": {"$ref": "#/$defs/CacheUsage"},
+            "modelCalls": _array({"$ref": "#/$defs/ModelCallRecord"}),
+        },
+        required=["schemaVersion", *counts, "cacheUsage", "modelCalls"],
+    )
+    result = {
+        "finalOutput": {},
+        "waitReason": {"type": "string"},
+        "completionReason": {"type": "string"},
+        "completionToolName": {"type": "string"},
+        "partialOutput": {},
+        "error": {"type": "string"},
+        "tokenUsage": {"$ref": "#/$defs/TaskTokenUsage"},
+        "budgetUsage": JSON_OBJECT,
+        "budgetExhaustion": JSON_OBJECT,
+    }
+    definitions["AppTurn"]["properties"]["result"] = _object(result)
+    for name in ("TurnResumeResponse", "TurnCompletedParams"):
+        definitions[name]["properties"].update(result)
 
     return definitions
 
@@ -550,8 +498,6 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
                 "completionToolName": {"type": "string"},
                 "partialOutput": {"type": "string"},
                 "waitReason": {"type": "string"},
-                "checkpoint": {"$ref": "#/$defs/CheckpointSummary"},
-                "interruption": {"$ref": "#/$defs/InterruptionSummary"},
                 "error": {"type": "string"},
             },
             required=["threadId", "turnId", "runId", "status"],
@@ -656,8 +602,8 @@ def _envelope_schema(title: str, variants: list[dict[str, Any]], definitions: di
     return {"$schema": SCHEMA_URI, "title": title, "oneOf": variants, "$defs": deepcopy(definitions)}
 
 
-def _schema_bundle(*, _kernel: bool = False) -> dict[str, Any]:
-    definitions = _definitions(_kernel=_kernel)
+def _schema_bundle() -> dict[str, Any]:
+    definitions = _definitions()
     if set(CLIENT_METHOD_SPECS) != set(CLIENT_METHODS):
         raise RuntimeError("Client method schema registry does not match processor methods")
     if set(SERVER_NOTIFICATION_SPECS) != set(SERVER_NOTIFICATION_METHODS):
@@ -759,11 +705,11 @@ def _contains_ref(value: Any) -> bool:
     return False
 
 
-def generate_json_schema(out_dir: str | Path, *, _kernel: bool = False) -> None:
+def generate_json_schema(out_dir: str | Path) -> None:
     root = Path(out_dir)
     json_dir = root / "json"
     json_dir.mkdir(parents=True, exist_ok=True)
-    schemas = _schema_bundle(_kernel=_kernel)
+    schemas = _schema_bundle()
     for name, schema in schemas.items():
         (json_dir / f"{name}.json").write_text(
             json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -775,229 +721,208 @@ def generate_json_schema(out_dir: str | Path, *, _kernel: bool = False) -> None:
     )
 
 
-def generate_typescript(out_dir: str | Path, *, _kernel: bool = False) -> None:
+def generate_typescript(out_dir: str | Path) -> None:
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
-    for name, source in typescript_schema_bundle(_kernel=_kernel).items():
+    for name, source in typescript_schema_bundle().items():
         (root / name).write_text(source, encoding="utf-8")
 
 
-def json_schema_bundle(*, _kernel: bool = False) -> dict[str, str]:
+def json_schema_bundle() -> dict[str, str]:
     return {
-        name: json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        for name, schema in _schema_bundle(_kernel=_kernel).items()
+        name: json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n" for name, schema in _schema_bundle().items()
     }
 
 
-def typescript_schema_bundle(*, _kernel: bool = False) -> dict[str, str]:
+def typescript_schema_bundle() -> dict[str, str]:
     source = _typescript_protocol_source()
-    if _kernel:
-        source = re.sub(r"export type CheckpointStatus =.*?;\n", "", source, flags=re.S)
-        source = re.sub(r"export interface (?:CheckpointSummary|InterruptionSummary) \{.*?\}\n", "", source, flags=re.S)
-        source = source.replace('protocolVersion: "v1"', 'protocolVersion: "v2"')
-        source = source.replace("; checkpointKey: string", "")
-        source = source.replace("  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary;", " ")
-        source = source.replace("subscribe?: boolean;", "subscribe?: boolean; afterItemId?: string;")
-        source += (
-            "\nexport interface Interaction { sessionId: string; turnId: string; interactionId?: string; prompt?: string; }\n"
-        )
-        source = source.replace(
-            "waitReason?: string; prompt?: string;", "waitReason?: string; prompt?: string; interactions?: Interaction[];"
-        )
-        source = source.replace("tokenUsage?: JsonObject", "tokenUsage?: TaskTokenUsage")
-        source = source.replace("result?: JsonObject", "result?: TurnResult")
-        source = source.replace(
-            "error?: string;",
-            "error?: string; tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;",
-            1,
-        )
-        source += """
-export interface CacheUsage {
-  status: "provider_reported" | "accounting_missing" | "unsupported";
-  readInputTokens: number | null; writeInputTokens: number | null;
-  uncachedInputTokens: number | null; source: string | null;
-}
-export interface TokenUsage {
-  schemaVersion: "vv-agent.token-usage.v1"; inputTokens: number | null;
-  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;
-  usageSource: "provider_reported" | "estimated" | "accounting_missing";
-  cacheUsage: CacheUsage; providerUsage: JsonObject;
-}
-export interface ModelCallRecord {
-  schemaVersion: "vv-agent.model-call.v2"; callId: string; operationId: string;
-  attempt: number; cycleIndex: number; backend: string; model: string;
-  operation: "agent_cycle" | "memory_compaction" | "session_memory" | "output_repair";
-  status: "completed" | "failed" | "ambiguous"; usage: TokenUsage; errorCode: string | null;
-}
-export interface TaskTokenUsage {
-  schemaVersion: "vv-agent.task-token-usage.v3"; inputTokens: number | null;
-  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;
-  cacheUsage: CacheUsage; modelCalls: ModelCallRecord[];
-}
-export interface TurnResult {
-  finalOutput?: JsonValue; waitReason?: string; completionReason?: string;
-  completionToolName?: string; partialOutput?: JsonValue; error?: string;
-  tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;
-}
-"""
     return {f"{name}.ts": source for name in TYPESCRIPT_SCHEMA_NAMES}
 
 
-def export_schema_bundles(*, _kernel: bool = False) -> dict[str, dict[str, str]]:
-    return {"jsonSchema": json_schema_bundle(_kernel=_kernel), "typescript": typescript_schema_bundle(_kernel=_kernel)}
+def export_schema_bundles() -> dict[str, dict[str, str]]:
+    return {"jsonSchema": json_schema_bundle(), "typescript": typescript_schema_bundle()}
 
 
 def _typescript_protocol_source() -> str:
-    return """// Generated by vv-agent. This file is self-contained.
-export type RequestId = string | number;
-export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
-export type JsonObject = { [key: string]: JsonValue };
-export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";
-export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";
-export type TurnStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
-export type CheckpointStatus =
-  | "running" | "host_interaction" | "suspended" | "deferred" | "reconciliation_required" | "wait_user"
-  | "completed" | "failed" | "max_cycles";
-export type AppItemStatus = "started" | "inProgress" | "completed" | "failed";
-
-export interface ClientInfo { name: string; title?: string; version?: string; }
-export interface ClientCapabilities { experimentalApi?: boolean; optOutNotificationMethods?: string[]; }
-export interface ServerCapabilities {
-  modelList: boolean; threadLifecycle: boolean; notificationOptOut: boolean;
-  schemaExport: boolean; approvalResolve: boolean;
-}
-export interface InitializeParams { clientInfo: ClientInfo; capabilities?: ClientCapabilities; }
-export interface ModelListParams { agentKey?: string; provider?: string; }
-export interface ThreadStartParams { agentKey?: string; cwd?: string; metadata?: JsonObject; }
-export interface ThreadIdParams { threadId: string; }
-export interface ThreadResumeParams { threadId: string; subscribe?: boolean; }
-export interface ThreadReadParams { threadId: string; afterItemId?: string; }
-export interface ThreadListParams {
-  includeArchived?: boolean; archived?: boolean; offset?: number; limit?: number;
-}
-export type InputItem = JsonObject;
-export interface TurnStartParams { threadId: string; input?: InputItem[]; metadata?: JsonObject; }
-export interface TurnResumeParams { threadId: string; turnId: string; checkpointKey: string; }
-export interface TurnSteerParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }
-export interface TurnFollowUpParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }
-export interface TurnInterruptParams { threadId: string; expectedTurnId?: string; reason?: string; }
-export interface ApprovalRequestParams {
-  requestId: string; threadId: string; turnId: string; toolCallId: string;
-  toolName: string; preview: string; arguments: JsonObject;
-}
-export interface ApprovalResolveParams {
-  requestId: string; threadId: string; turnId: string; decision: ApprovalDecision;
-  reason?: string; metadata?: JsonObject;
-}
-
-export interface AppItem {
-  itemId: string; threadId: string; turnId: string; type: string; status: AppItemStatus;
-  payload: JsonObject; createdAt: number; updatedAt: number;
-}
-export interface AppThread {
-  threadId: string; agentKey: string; cwd: string | null; createdAt: number; updatedAt: number;
-  archivedAt: number | null; status: ThreadStatus; metadata: JsonObject;
-}
-export interface AppTurn {
-  turnId: string; threadId: string; runId: string | null; status: TurnStatus;
-  startedAt: number; completedAt: number | null; input: InputItem[]; result: JsonObject;
-}
-export interface ToolCallDeltaParams extends AppItem { delta: JsonValue; }
-export interface WarningParams { message: string; code?: string; }
-export interface InitializeResponse { userAgent: string; protocolVersion: "v1"; capabilities: ServerCapabilities; }
-export interface ModelSummary {
-  id: string; provider?: string; displayName?: string; contextLength?: number;
-  supportsTools: boolean; metadata?: JsonObject;
-}
-export interface ModelListResponse { models: ModelSummary[]; }
-export interface ThreadStartResponse { threadId: string; agentKey: string; cwd: string | null; status: ThreadStatus; }
-export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }
-export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }
-export interface ThreadListResponse { threads: AppThread[]; }
-export interface ThreadArchiveResponse { threadId: string; archived: boolean; }
-export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; closed: boolean; }
-export interface ThreadStatusResponse { threadId: string; status: ThreadStatus; waitReason?: string; prompt?: string; }
-export interface TurnStartResponse { threadId: string; turnId: string; status: TurnStatus; }
-export interface CheckpointSummary {
-  key: string; resumeAttempt: number; cycleIndex: number; status: CheckpointStatus;
-  terminalAcknowledged: boolean;
-}
-export interface InterruptionSummary {
-  reason: "resume_requires_reconciliation"; operationId: string; operationKind: "model" | "tool";
-  cycleIndex: number; risk: string; idempotencySupport: "supported" | "unsupported" | "unknown" | null;
-}
-export interface TurnResumeResponse {
-  threadId: string; turnId: string; runId: string; status: TurnStatus; finalOutput?: JsonValue;
-  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;
-  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
-}
-export interface TurnQueueResponse { threadId: string; turnId: string; queued: boolean; }
-export interface TurnInterruptResponse { threadId: string; turnId: string; cancelled: boolean; }
-export type TurnAction =
-  | { kind: "respond"; message: { role: "user"; content: string } }
-  | { kind: "suspend" } | { kind: "resume" } | { kind: "cancel" } | { kind: "abort" };
-export interface TurnActionParams { threadId: string; turnId: string; actionId: string; action: TurnAction; }
-export interface TurnActionResponse {
-  threadId: string; turnId: string; actionId: string; accepted: boolean;
-  status: TurnStatus; waitReason?: string;
-}
-export interface ThreadStatusChangedParams { threadId: string; status: ThreadStatus; waitReason?: string; prompt?: string; }
-export interface ThreadClosedParams { threadId: string; }
-export interface TurnStartedParams { threadId: string; turnId: string; runId?: string; status?: TurnStatus; }
-export interface TurnCompletedParams {
-  threadId: string; turnId: string; runId?: string; status: TurnStatus; finalOutput?: JsonValue;
-  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;
-  tokenUsage?: JsonObject; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;
-  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
-}
-export type ApprovalResolveResponse = Record<string, never>;
-export interface SchemaExportResponse { jsonSchema: Record<string, string>; typescript: Record<string, string>; }
-
-export type ClientRequest =
-  | { jsonrpc: "2.0"; id: RequestId; method: "initialize"; params: InitializeParams }
-  | { jsonrpc: "2.0"; method: "initialized" }
-  | { jsonrpc: "2.0"; id: RequestId; method: "model/list"; params?: ModelListParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/start"; params?: ThreadStartParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; params: ThreadIdParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "thread/list"; params?: ThreadListParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/start"; params: TurnStartParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/resume"; params: TurnResumeParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/steer"; params: TurnSteerParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/followUp"; params: TurnFollowUpParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/interrupt"; params: TurnInterruptParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "turn/action"; params: TurnActionParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "approval/resolve"; params: ApprovalResolveParams }
-  | { jsonrpc: "2.0"; id: RequestId; method: "schema/export"; params?: Record<string, never> };
-
-export type ServerNotification =
-  | { jsonrpc: "2.0"; method: "thread/started"; params: ThreadStartResponse }
-  | { jsonrpc: "2.0"; method: "thread/status/changed"; params: ThreadStatusChangedParams }
-  | { jsonrpc: "2.0"; method: "thread/archived"; params: ThreadArchiveResponse }
-  | { jsonrpc: "2.0"; method: "thread/closed"; params: ThreadClosedParams }
-  | { jsonrpc: "2.0"; method: "turn/started"; params: TurnStartedParams }
-  | { jsonrpc: "2.0"; method: "turn/completed"; params: TurnCompletedParams }
-  | { jsonrpc: "2.0"; method: "item/started" | "item/completed"; params: AppItem }
-  | { jsonrpc: "2.0"; method: "item/agentMessage/delta"; params: AppItem & { delta: string } }
-  | { jsonrpc: "2.0"; method: "item/toolCall/delta"; params: ToolCallDeltaParams }
-  | { jsonrpc: "2.0"; method: "approval/requested"; params: ApprovalRequestParams }
-  | { jsonrpc: "2.0"; method: "approval/resolved"; params: ApprovalResolveParams }
-  | { jsonrpc: "2.0"; method: "error/warning"; params: WarningParams };
-
-export type ServerRequest = {
-  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;
-};
-export type ClientResult =
-  | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse
-  | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | ThreadUnsubscribeResponse | ThreadStatusResponse
-  | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | ApprovalResolveResponse
-  | SchemaExportResponse;
-export type JsonRpcSuccess = { jsonrpc: "2.0"; id: RequestId; result: ClientResult | JsonValue };
-export type JsonRpcError = {
-  jsonrpc: "2.0"; id: RequestId | null;
-  error: { code: number; message: string; data?: JsonValue };
-};
-export type JsonRpcMessage = ClientRequest | ServerNotification | ServerRequest | JsonRpcSuccess | JsonRpcError;
-"""
+    return (
+        "// Generated by vv-agent. This file is self-contained.\n"
+        "export type RequestId = string | number;\n"
+        "export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;\n"
+        "export type JsonObject = { [key: string]: JsonValue };\n"
+        'export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";\n'
+        'export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";\n'
+        'export type TurnStatus = "queued" | "running" | "completed" | "failed" | "interrupted";\n'
+        'export type AppItemStatus = "started" | "inProgress" | "completed" | "failed";\n'
+        "\n"
+        "export interface ClientInfo { name: string; title?: string; version?: string; }\n"
+        "export interface ClientCapabilities { experimentalApi?: boolean; optOutNotificationMethods?: string[]; }\n"
+        "export interface ServerCapabilities {\n"
+        "  modelList: boolean; threadLifecycle: boolean; notificationOptOut: boolean;\n"
+        "  schemaExport: boolean; approvalResolve: boolean;\n"
+        "}\n"
+        "export interface InitializeParams { clientInfo: ClientInfo; capabilities?: ClientCapabilities; }\n"
+        "export interface ModelListParams { agentKey?: string; provider?: string; }\n"
+        "export interface ThreadStartParams { agentKey?: string; cwd?: string; metadata?: JsonObject; }\n"
+        "export interface ThreadIdParams { threadId: string; }\n"
+        "export interface ThreadResumeParams { threadId: string; subscribe?: boolean; afterItemId?: string; }\n"
+        "export interface ThreadReadParams { threadId: string; afterItemId?: string; }\n"
+        "export interface ThreadListParams {\n"
+        "  includeArchived?: boolean; archived?: boolean; offset?: number; limit?: number;\n"
+        "}\n"
+        "export type InputItem = JsonObject;\n"
+        "export interface TurnStartParams { threadId: string; input?: InputItem[]; metadata?: JsonObject; }\n"
+        "export interface TurnResumeParams { threadId: string; turnId: string; }\n"
+        "export interface TurnSteerParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }\n"
+        "export interface TurnFollowUpParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }\n"
+        "export interface TurnInterruptParams { threadId: string; expectedTurnId?: string; reason?: string; }\n"
+        "export interface ApprovalRequestParams {\n"
+        "  requestId: string; threadId: string; turnId: string; toolCallId: string;\n"
+        "  toolName: string; preview: string; arguments: JsonObject;\n"
+        "}\n"
+        "export interface ApprovalResolveParams {\n"
+        "  requestId: string; threadId: string; turnId: string; decision: ApprovalDecision;\n"
+        "  reason?: string; metadata?: JsonObject;\n"
+        "}\n"
+        "\n"
+        "export interface AppItem {\n"
+        "  itemId: string; threadId: string; turnId: string; type: string; status: AppItemStatus;\n"
+        "  payload: JsonObject; createdAt: number; updatedAt: number;\n"
+        "}\n"
+        "export interface AppThread {\n"
+        "  threadId: string; agentKey: string; cwd: string | null; createdAt: number; updatedAt: number;\n"
+        "  archivedAt: number | null; status: ThreadStatus; metadata: JsonObject;\n"
+        "}\n"
+        "export interface AppTurn {\n"
+        "  turnId: string; threadId: string; runId: string | null; status: TurnStatus;\n"
+        "  startedAt: number; completedAt: number | null; input: InputItem[]; result: JsonObject;\n"
+        "}\n"
+        "export interface ToolCallDeltaParams extends AppItem { delta: JsonValue; }\n"
+        "export interface WarningParams { message: string; code?: string; }\n"
+        'export interface InitializeResponse { userAgent: string; protocolVersion: "v2"; '
+        "capabilities: ServerCapabilities; }\n"
+        "export interface ModelSummary {\n"
+        "  id: string; provider?: string; displayName?: string; contextLength?: number;\n"
+        "  supportsTools: boolean; metadata?: JsonObject;\n"
+        "}\n"
+        "export interface ModelListResponse { models: ModelSummary[]; }\n"
+        "export interface ThreadStartResponse { threadId: string; agentKey: string; cwd: string | "
+        "null; status: ThreadStatus; }\n"
+        "export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
+        "export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
+        "export interface ThreadListResponse { threads: AppThread[]; }\n"
+        "export interface ThreadArchiveResponse { threadId: string; archived: boolean; }\n"
+        "export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; closed: boolean; }\n"
+        "export interface ThreadStatusResponse { threadId: string; status: ThreadStatus; "
+        "waitReason?: string; prompt?: string; interactions?: Interaction[]; }\n"
+        "export interface TurnStartResponse { threadId: string; turnId: string; status: TurnStatus; }\n"
+        "export interface TurnResumeResponse {\n"
+        "  threadId: string; turnId: string; runId: string; status: TurnStatus; finalOutput?: JsonValue;\n"
+        "  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;\n"
+        "  error?: string; tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;\n"
+        "}\n"
+        "export interface TurnQueueResponse { threadId: string; turnId: string; queued: boolean; }\n"
+        "export interface TurnInterruptResponse { threadId: string; turnId: string; cancelled: boolean; }\n"
+        "export type TurnAction =\n"
+        '  | { kind: "respond"; message: { role: "user"; content: string } }\n'
+        '  | { kind: "suspend" } | { kind: "resume" } | { kind: "cancel" } | { kind: "abort" };\n'
+        "export interface TurnActionParams { threadId: string; turnId: string; actionId: string; action: TurnAction; }\n"
+        "export interface TurnActionResponse {\n"
+        "  threadId: string; turnId: string; actionId: string; accepted: boolean;\n"
+        "  status: TurnStatus; waitReason?: string;\n"
+        "}\n"
+        "export interface ThreadStatusChangedParams { threadId: string; status: ThreadStatus; "
+        "waitReason?: string; prompt?: string; interactions?: Interaction[]; }\n"
+        "export interface ThreadClosedParams { threadId: string; }\n"
+        "export interface TurnStartedParams { threadId: string; turnId: string; runId?: string; status?: TurnStatus; }\n"
+        "export interface TurnCompletedParams {\n"
+        "  threadId: string; turnId: string; runId?: string; status: TurnStatus; finalOutput?: JsonValue;\n"
+        "  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;\n"
+        "  tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;\n"
+        "  error?: string;\n"
+        "}\n"
+        "export type ApprovalResolveResponse = Record<string, never>;\n"
+        "export interface SchemaExportResponse { jsonSchema: Record<string, string>; typescript: "
+        "Record<string, string>; }\n"
+        "\n"
+        "export type ClientRequest =\n"
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "initialize"; params: InitializeParams }\n'
+        '  | { jsonrpc: "2.0"; method: "initialized" }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "model/list"; params?: ModelListParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/start"; params?: ThreadStartParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; '
+        "params: ThreadIdParams }\n"
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/list"; params?: ThreadListParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/start"; params: TurnStartParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/resume"; params: TurnResumeParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/steer"; params: TurnSteerParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/followUp"; params: TurnFollowUpParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/interrupt"; params: TurnInterruptParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "turn/action"; params: TurnActionParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "approval/resolve"; params: ApprovalResolveParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "schema/export"; params?: Record<string, never> };\n'
+        "\n"
+        "export type ServerNotification =\n"
+        '  | { jsonrpc: "2.0"; method: "thread/started"; params: ThreadStartResponse }\n'
+        '  | { jsonrpc: "2.0"; method: "thread/status/changed"; params: ThreadStatusChangedParams }\n'
+        '  | { jsonrpc: "2.0"; method: "thread/archived"; params: ThreadArchiveResponse }\n'
+        '  | { jsonrpc: "2.0"; method: "thread/closed"; params: ThreadClosedParams }\n'
+        '  | { jsonrpc: "2.0"; method: "turn/started"; params: TurnStartedParams }\n'
+        '  | { jsonrpc: "2.0"; method: "turn/completed"; params: TurnCompletedParams }\n'
+        '  | { jsonrpc: "2.0"; method: "item/started" | "item/completed"; params: AppItem }\n'
+        '  | { jsonrpc: "2.0"; method: "item/agentMessage/delta"; params: AppItem & { delta: string } }\n'
+        '  | { jsonrpc: "2.0"; method: "item/toolCall/delta"; params: ToolCallDeltaParams }\n'
+        '  | { jsonrpc: "2.0"; method: "approval/requested"; params: ApprovalRequestParams }\n'
+        '  | { jsonrpc: "2.0"; method: "approval/resolved"; params: ApprovalResolveParams }\n'
+        '  | { jsonrpc: "2.0"; method: "error/warning"; params: WarningParams };\n'
+        "\n"
+        "export type ServerRequest = {\n"
+        '  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;\n'
+        "};\n"
+        "export type ClientResult =\n"
+        "  | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse\n"
+        "  | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
+        "ThreadUnsubscribeResponse | ThreadStatusResponse\n"
+        "  | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | "
+        "ApprovalResolveResponse\n"
+        "  | SchemaExportResponse;\n"
+        'export type JsonRpcSuccess = { jsonrpc: "2.0"; id: RequestId; result: ClientResult | JsonValue };\n'
+        "export type JsonRpcError = {\n"
+        '  jsonrpc: "2.0"; id: RequestId | null;\n'
+        "  error: { code: number; message: string; data?: JsonValue };\n"
+        "};\n"
+        "export type JsonRpcMessage = ClientRequest | ServerNotification | ServerRequest | "
+        "JsonRpcSuccess | JsonRpcError;\n"
+        "\n"
+        "export interface Interaction { sessionId: string; turnId: string; interactionId?: string; prompt?: string; }\n"
+        "\n"
+        "export interface CacheUsage {\n"
+        '  status: "provider_reported" | "accounting_missing" | "unsupported";\n'
+        "  readInputTokens: number | null; writeInputTokens: number | null;\n"
+        "  uncachedInputTokens: number | null; source: string | null;\n"
+        "}\n"
+        "export interface TokenUsage {\n"
+        '  schemaVersion: "vv-agent.token-usage.v1"; inputTokens: number | null;\n'
+        "  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;\n"
+        '  usageSource: "provider_reported" | "estimated" | "accounting_missing";\n'
+        "  cacheUsage: CacheUsage; providerUsage: JsonObject;\n"
+        "}\n"
+        "export interface ModelCallRecord {\n"
+        '  schemaVersion: "vv-agent.model-call.v2"; callId: string; operationId: string;\n'
+        "  attempt: number; cycleIndex: number; backend: string; model: string;\n"
+        '  operation: "agent_cycle" | "memory_compaction" | "session_memory" | "output_repair";\n'
+        '  status: "completed" | "failed" | "ambiguous"; usage: TokenUsage; errorCode: string | null;\n'
+        "}\n"
+        "export interface TaskTokenUsage {\n"
+        '  schemaVersion: "vv-agent.task-token-usage.v3"; inputTokens: number | null;\n'
+        "  outputTokens: number | null; totalTokens: number | null; reasoningTokens: number | null;\n"
+        "  cacheUsage: CacheUsage; modelCalls: ModelCallRecord[];\n"
+        "}\n"
+        "export interface TurnResult {\n"
+        "  finalOutput?: JsonValue; waitReason?: string; completionReason?: string;\n"
+        "  completionToolName?: string; partialOutput?: JsonValue; error?: string;\n"
+        "  tokenUsage?: TaskTokenUsage; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;\n"
+        "}\n"
+    )
