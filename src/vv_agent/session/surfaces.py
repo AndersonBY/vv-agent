@@ -22,7 +22,7 @@ from vv_agent.types import AgentTask, Message
 from .children import child_handles
 from .context import project_context
 from .kernel import drive
-from .postgres import PostgresStore
+from .postgres import PostgresStore, _connection_conninfo
 from .records import InboxItem, SessionSpec
 from .result import project_result
 from .runtime import Runtime
@@ -98,7 +98,7 @@ class SessionDriver:
         if isinstance(self.store, SQLiteStore) and self.store.path != ":memory:":
             return SQLiteStore.standalone(self.store.path)
         if isinstance(self.store, PostgresStore):
-            return PostgresStore.standalone(self.store.connection.info.dsn)
+            return PostgresStore.standalone(_connection_conninfo(self.store.connection))
         return nullcontext(self.store)
 
     def start(

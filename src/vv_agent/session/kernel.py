@@ -49,6 +49,7 @@ class _Scope:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.lost = False
+        self.heartbeat_error: Exception | None = None
         self.turn_id: str | None = None
         self.generation: int | None = None
         self.thread = threading.Thread(target=self._heartbeat, daemon=True, name="session-heartbeat")
@@ -56,7 +57,7 @@ class _Scope:
     def poll(self, store: SessionStore):
         with self.lock:
             if self.lost:
-                raise LeaseLost("heartbeat lost ownership")
+                raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
             poll = store.renew(self.lease, ttl_ms=self.runtime.ttl_ms)
             self.lease = poll.lease
         for item in poll.controls:
@@ -73,8 +74,10 @@ class _Scope:
             with self.runtime.heartbeat_store() as store:
                 while not self.stop.wait(self.runtime.heartbeat_seconds):
                     self.poll(store)
-        except Exception:
-            self.lost = True
+        except Exception as exc:
+            with self.lock:
+                self.heartbeat_error = exc
+                self.lost = True
             self.token.cancel("lease_lost")
 
 
@@ -195,7 +198,7 @@ class _Driver:
             ]
         with self.scope.lock:
             if self.scope.lost:
-                raise LeaseLost("heartbeat lost ownership")
+                raise LeaseLost("heartbeat lost ownership") from self.scope.heartbeat_error
             with self.store.atomic() as tx:
                 if prepare is not None:
                     records.extend(prepare(tx))
@@ -1618,7 +1621,7 @@ def drive(
                 if not driver.step():
                     with scope.lock:
                         if scope.lost:
-                            raise LeaseLost("heartbeat lost ownership")
+                            raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
                         store.defer_idle_drive(scope.lease, poll_ms=runtime.poll_ms)
                     break
                 if _one_turn and driver.records[-1].record.kind == "turn_ended":
@@ -1626,7 +1629,7 @@ def drive(
             except SequenceConflict:
                 continue
         if scope.lost:
-            raise LeaseLost("heartbeat lost ownership")
+            raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
     finally:
         scope.stop.set()
         scope.thread.join(timeout=2)

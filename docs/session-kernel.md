@@ -136,7 +136,12 @@ when the host already has one. Mutation methods use savepoints so catching a
 validation/conflict exception inside the host transaction leaves zero partial
 writes. Returned receipts are provisional until the outer host transaction
 commits. Keep host transactions short. Use one connection per thread; heartbeat
-requires its own connection. `LeasePoll.controls` preserves complete inbox items,
+requires its own connection. SessionDriver derives its PostgreSQL heartbeat
+conninfo from the original connection, including `ConnectionInfo.password` when
+set, for both standalone and caller-owned stores. Credentials are not persisted
+in session records. Heartbeat failures retain the original exception as the cause
+of LeaseLost, including through LeaseRetryExhausted.
+`LeasePoll.controls` preserves complete inbox items,
 including their target turn and generation; it is not permission to apply a
 stale cancel to the current turn. Django extraction and `in_atomic_block` validation
 belong exclusively to the backend adapter.
@@ -635,6 +640,11 @@ only its own `vvsk_test_<uuid>` database. The role needs CREATEDB. Per-test
 databases preserve independent worker/heartbeat connections and process restart
 isolation without search_path propagation or shared schema collisions. Connection
 options from the supplied DSN are retained when replacing its database name.
+The TCP password-authentication regression also creates and drops a temporary
+login role, requiring CREATEROLE. It connects through `127.0.0.1`, verifies that
+an incorrect password is rejected, and waits for a real heartbeat renewal for
+both standalone and caller-owned connections. It skips explicitly only when
+local pg_hba rules reject the connection or do not require password authentication.
 
 If psycopg is unavailable, or neither connection is available, PG cases skip
 with an explicit reason; central CI supplies a reachable DSN and must run them.
