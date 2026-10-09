@@ -24,6 +24,8 @@ accept only the current strict public and wire shapes.
 Current HEAD uses contract v24, public API v8 and one session kernel execution path.
 Older runtime behavior is retained in Git tags. See [v8 migration](docs/migration-v8.md)
 for API replacements and host seed examples.
+See [cloud host integration](docs/host-integration.md) for PostgreSQL transactions,
+queue dispatch and a host-owned Celery example.
 
 ## Architecture
 

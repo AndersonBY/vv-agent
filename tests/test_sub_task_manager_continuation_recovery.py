@@ -45,7 +45,7 @@ def _start(driver, steps, *, waiting=False):
     )
 
 
-def test_configured_sub_agent_continuation_replays_complete_prior_turn():
+def test_configured_sub_agent_continuation_replays_complete_prior_turn(monkeypatch):
     driver = SessionDriver()
     requests = []
 
@@ -57,7 +57,7 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn():
         parent = _start(driver, [LLMResponse("first done"), LLMResponse("parent done"), continuing])
         assert parent.result().status is AgentStatus.COMPLETED
         child = _child(driver, parent)
-        parent.runtime.wake = lambda _sid: None
+        monkeypatch.setattr(parent, "_schedule_background", lambda: None)
         manager = parent.runtime.child_tasks(driver.store, parent.session_id)
         original = driver.store.read_state(child["session_id"])[1]
         assert manager.message(child["session_id"], "continuation", "more") == "continued"
@@ -77,13 +77,13 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn():
         driver.close()
 
 
-def test_continuation_admission_is_idempotent_and_conflicts_have_zero_writes():
+def test_continuation_admission_is_idempotent_and_conflicts_have_zero_writes(monkeypatch):
     driver = SessionDriver()
     try:
         parent = _start(driver, [LLMResponse("child done"), LLMResponse("parent done")])
         parent.result()
         child = _child(driver, parent)["session_id"]
-        parent.runtime.wake = lambda _sid: None
+        monkeypatch.setattr(parent, "_schedule_background", lambda: None)
         manager = parent.runtime.child_tasks(driver.store, "parent")
         assert manager.message(child, "exact/😀", "more") == "continued"
         before = driver.store.read(child).head_seq
@@ -101,7 +101,7 @@ def test_continuation_admission_is_idempotent_and_conflicts_have_zero_writes():
         driver.close()
 
 
-def test_wait_user_reply_stays_on_child_and_parent_adopts_only_authenticated_terminal():
+def test_wait_user_reply_stays_on_child_and_parent_adopts_only_authenticated_terminal(monkeypatch):
     driver = SessionDriver()
     try:
         parent = _start(
@@ -116,7 +116,7 @@ def test_wait_user_reply_stays_on_child_and_parent_adopts_only_authenticated_ter
         assert first.status is AgentStatus.WAIT_USER
         child = _child(driver, parent)
         original_tid = child["turn_id"]
-        parent.runtime.wake = lambda _sid: None
+        monkeypatch.setattr(parent, "_schedule_background", lambda: None)
         manager = parent.runtime.child_tasks(driver.store, "parent")
         assert manager.message(child["session_id"], "answer", "choice") == "message_queued"
         assert driver.store.peek_inbox(child["session_id"])[0].item.target_turn_id == original_tid
@@ -132,13 +132,13 @@ def test_wait_user_reply_stays_on_child_and_parent_adopts_only_authenticated_ter
         driver.close()
 
 
-def test_retained_child_cancel_does_not_cancel_parent_or_admit_a_new_turn():
+def test_retained_child_cancel_does_not_cancel_parent_or_admit_a_new_turn(monkeypatch):
     driver = SessionDriver()
     try:
         parent = _start(driver, [LLMResponse("", [ToolCall("ask", "wait_tool", {})]), LLMResponse("parent done")])
         parent.result()
         child = _child(driver, parent)
-        parent.runtime.wake = lambda _sid: None
+        monkeypatch.setattr(parent, "_schedule_background", lambda: None)
         manager = parent.runtime.child_tasks(driver.store, "parent")
         manager.handle(child["session_id"]).cancel()
         resumed = Runner.resume(parent.session_id, parent.run_id)
@@ -147,5 +147,27 @@ def test_retained_child_cancel_does_not_cancel_parent_or_admit_a_new_turn():
         assert len(state.turns) == 1 and state.active_turn_id is None
         assert next(r.record.payload["status"] for r in rows if r.record.kind == "turn_ended") == "cancelled"
         assert _contract()["cancellation"]["child_does_not_cancel_parent"]
+    finally:
+        driver.close()
+
+
+def test_child_continuation_schedules_locally_with_host_wake_separate():
+    driver = SessionDriver()
+    wakes = []
+    try:
+        parent = _start(driver, [LLMResponse("child done"), LLMResponse("parent done"), LLMResponse("continued")])
+        parent.result()
+        child = _child(driver, parent)["session_id"]
+        parent.runtime.wake = wakes.append
+        manager = parent.runtime.child_tasks(driver.store, "parent")
+        assert manager.message(child, "continuation", "more") == "continued"
+        background = driver._background[child]
+        background.join(timeout=5)
+        assert background.done() and background._error is None
+        state, rows, _ = driver.store.read_state(child)
+        assert len(state.turns) == 2 and state.active_turn_id is None
+        assert [r.record.payload["result"] for r in rows if r.record.kind == "turn_ended"] == ["child done", "continued"]
+        assert wakes == [child]
+        assert parent.runtime.wake == wakes.append
     finally:
         driver.close()

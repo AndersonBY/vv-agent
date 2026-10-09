@@ -68,16 +68,10 @@ class RunHandle:
             if point == "after_commit":
                 self._bind_cancel()
                 self._publish()
+            if point in {"after_commit", "after_drive", "after_input"}:
                 self._schedule_background()
 
         runtime.hook = hook
-        original_wake = runtime.wake
-
-        def wake(sid):
-            original_wake(sid)
-            self._schedule_background()
-
-        runtime.wake = wake
 
     def _bind_cancel(self) -> None:
         token = self.runtime.config.cancellation_token

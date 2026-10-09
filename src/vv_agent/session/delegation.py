@@ -671,6 +671,7 @@ class ChildTasks:
         with self.store.atomic() as tx:
             tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
         self.runtime.wake(task_id)
+        self.runtime.hook("after_input", None)
         return action
 
 

@@ -181,7 +181,8 @@ send("turn/resume", {"threadId": thread_id, "turnId": turn_id})
 `[redis]` and `[celery]` are removed, together with the `celery[redis]` development
 dependency. Use `[postgres]` for the SQL reference store and `[s3]` for workspace
 objects. No Redis kernel store exists. Celery tasks, broker and queue routing
-belong to backend integration B1; F3 builds no framework Celery glue.
+belong to the host. See [cloud host integration](host-integration.md) for dispatch
+semantics and a documentation-only Celery example; backend B1 implements the site's tasks.
 
 ```bash
 # Before

@@ -22,6 +22,7 @@ PostgreSQL SessionStore 按需安装 `postgres` extra，S3 工作区按需安装
 
 当前 HEAD 使用 contract v24、public API v8 和唯一 session kernel 执行路径。
 旧版本行为由 Git tags 保留。
+参见[云宿主集成指南](docs/host-integration.md)：PostgreSQL 同库事务、队列分发语义和宿主拥有的 Celery 示例。
 
 ## 架构
 

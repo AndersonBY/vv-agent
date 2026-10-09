@@ -16,6 +16,7 @@ history.
 | [migration-v8.md](migration-v8.md) | Retired API replacements, seed migration and current wire versions. |
 | [session-kernel-baseline.md](session-kernel-baseline.md) | Current measured overhead and M6 capacity with reproducible commands. |
 | `session-kernel.md` | Default session kernel, SQL stores, recovery, compaction, and test isolation. |
+| [host-integration.md](host-integration.md) | Cloud host transactions, runtime factories, wake/drive/tick semantics and host-owned Celery transport. |
 | `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
 | `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and retained operation receipts. |
 | `run-budgets.md` | Token, tool, wall-time, and host-cost limits; retained observations and same-turn resume. |

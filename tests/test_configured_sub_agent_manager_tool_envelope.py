@@ -186,7 +186,7 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
     _assert_error_metadata_matches_content(result)
 
 
-def test_sync_wait_stays_on_child_until_terminal_delivery():
+def test_sync_wait_stays_on_child_until_terminal_delivery(monkeypatch):
     from support.kernel_runtime import start_runner
 
     from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider, SubAgentConfig, function_tool
@@ -229,7 +229,7 @@ def test_sync_wait_stays_on_child_until_terminal_delivery():
         child = child_handles(parked.payload["handle"])[0]
         assert not contract["parent_adopts_intermediate_wait"]
         assert not any(r.record.kind == "child_terminal" for r in rows)
-        parent.runtime.wake = lambda _sid: None
+        monkeypatch.setattr(parent, "_schedule_background", lambda: None)
         parent.runtime.child_tasks(driver.store, "parent").message(child["session_id"], "answer", "choice")
         assert Runner.resume(parent.session_id, parent.run_id).final_output == "parent done"
         state = driver.store.read_state(child["session_id"])[0]

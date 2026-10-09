@@ -210,6 +210,14 @@ until exhausted, then restart from the beginning on the next scan. Projection
 work is independent of the execution lease. User waits and approval waits without
 a deadline have no due time. An approval deadline or response, including denial,
 makes resolution runnable.
+After release, `drive` checks execution readiness in a fresh transaction using
+the same SQL predicate as `list_runnable` (including lease availability). It wakes
+only due execution work, never consumer lag or idle sessions. A delivery that
+finds a held lease returns without waking; the holder's post-release check sees
+inputs committed during its exit. Future-available inbox items rely on tick, whose
+interval bounds discovery latency after they become due. In-process RunHandle
+child scheduling uses explicit `after_drive`/`after_input` hook notifications.
+See [cloud host integration](host-integration.md) for transport wiring and recovery.
 A planned operation blocked on an unresolved dependency does not spin.
 Queued user/follow-up inputs remain due after the active turn ends, even after
 their inbox rows are consumed. A turn input cannot be admitted a second time.
@@ -744,12 +752,14 @@ new durable identity; see [the seed migration](migration-v8.md#creation-time-see
 
 ## Transport ownership
 
-SQLite and PostgreSQL are the only kernel stores. There is no Redis store or
-framework Redis dependency. Celery transport integration is deferred to backend
-B1, which owns its tasks, queue routing, connection/runtime factories and wake
-transport. F3 builds no `[celery]` extra or integration module; contract v24 has
-no Celery surface. Host transport can call `drive`, scan via `tick` and supply
-`Runtime.wake`; durable execution authority remains in the store.
+SQLite and PostgreSQL are the only kernel stores. Celery/Redis remain the .ai
+host's runtime framework and transport; vv-agent has no Redis store, Celery/Redis
+code, integration module or extra. The host owns tasks, queues, connections and
+runtime factories. vv-agent owns transport-independent dispatch semantics and
+their SQLite/PostgreSQL tests. Host transport calls `drive`, scans via `tick` and
+supplies `Runtime.wake`; durable execution authority remains in the store.
+[Cloud host integration](host-integration.md) documents that wiring with Celery
+as a host-only example; backend B1 implements the site's tasks.
 
 ## Fixture generation
 

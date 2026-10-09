@@ -1627,4 +1627,7 @@ def drive(
         with suppress(Exception):
             store.release(scope.lease)
         with suppress(Exception):
-            runtime.wake(session_id)
+            runtime.hook("after_drive", None)
+        with suppress(Exception):
+            if store._is_runnable(session_id):
+                runtime.wake(session_id)

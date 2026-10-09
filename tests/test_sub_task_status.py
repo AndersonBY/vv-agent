@@ -30,7 +30,7 @@ def _completed_child(driver, workspace, continuation):
         run_config=RunConfig(workspace=workspace, model_provider=ScriptedModelProvider.from_steps("test", "m", steps)),
     )
     assert parent.result().status is AgentStatus.COMPLETED
-    parent.runtime.wake = lambda _sid: None
+    parent._schedule_background = lambda: None
     rows = driver.store.read_state(parent.session_id)[1]
     parked = next(
         row.record for row in rows if row.record.kind == "op_parked" and row.record.payload["handle"]["kind"] == "child"
