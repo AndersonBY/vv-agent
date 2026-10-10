@@ -1,8 +1,10 @@
-# Migration to public API v8
+# Host migration
 
-Public API v8 is a breaking replacement pinned by contract v24.0.1. Use the
-current API throughout a host; older runtimes remain in pinned releases. There
-is no conversion of a running v23 execution into a v24 session. Finish or
+Public API v9 selects contract 25.0.0. The execution
+replacements introduced by v8 still apply; the additional
+[0.23.0 host update](#python-0230--public-api-v9-host-update) below covers scheduling
+and storage. Use the current API throughout a host; older runtimes remain in
+pinned releases. There is no conversion of a running v23 execution. Finish or
 explicitly close old work with its original runtime before switching artifacts.
 
 ## Execution and resume
@@ -190,3 +192,25 @@ pip install 'vv-agent[redis,celery]'
 # After: only when this host uses PostgreSQL
 pip install 'vv-agent[postgres]'
 ```
+
+## Python 0.23.0 / public API v9 host update
+
+Python 0.23.0 pins the immutable contract v25.0.0 release. The v8 execution replacements above still apply; F5 adds
+custom child batches and changes the required store/scheduling surface.
+
+- Replace inline Celery tick with `tick(..., dispatch=enqueue_drive, project=...)`.
+  Expire or coalesce unleased queued duplicates, including wakes. Pass the runtime
+  factory directly to worker `drive`, and raise RuntimeNotReady for input
+  preparation that should retry without failing a turn. Handle tick ExceptionGroup.
+- Implement lease-fenced `defer_drive` and consumer-local `defer_projection` on
+  custom stores. Both gate discovery using database time; execution backoff also
+  gates acquisition, including ready inbox and direct duplicate wakes.
+- Copy the new PostgreSQL DDL: `drive_retry_at_ms` on sk_session and
+  `project_retry_at_ms` on sk_consumer, default zero. SQLite user_version is 2 and
+  rejects existing v1 files. No automatic migration of old executing sessions.
+- Custom callbacks may return a uniform-background nonempty sequence. Host rows
+  must use the same admission transaction. InvalidChildBatch rolls the admission
+  back; custom batch results include every child in admission order.
+
+See [host integration](host-integration.md) for the complete dispatch, retry and
+transaction contract. Record/inbox/event/App Server wire versions do not change.

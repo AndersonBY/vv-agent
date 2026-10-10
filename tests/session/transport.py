@@ -61,8 +61,19 @@ class Transport:
         if parent:
             self.wake(parent)
 
-    def tick(self, page_size=100):
-        return tick(self.store, runtime=self.runtimes.__getitem__, project=self.project, page_size=page_size)
+    def dispatch(self, sid):
+        # Host transport coalesces not-yet-leased messages; the kernel owns no queue claim.
+        if sid not in self.queue:
+            self.queue.append(sid)
+
+    def tick(self, page_size=100, *, dispatch=False):
+        return tick(
+            self.store,
+            runtime=self.runtimes.__getitem__,
+            project=self.project,
+            page_size=page_size,
+            dispatch=self.dispatch if dispatch else None,
+        )
 
 
 class WorkerKilled(BaseException):

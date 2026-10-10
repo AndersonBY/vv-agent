@@ -6,7 +6,7 @@ import json
 import random
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, fields, replace
@@ -61,6 +61,16 @@ from .reducer import ExecutionState
 from .store import SessionStore
 
 
+class RuntimeNotReady(Exception):
+    """Host input preparation needs another scheduled attempt, without failing a turn."""
+
+    def __init__(self, retry_after_ms: int):
+        if type(retry_after_ms) is not int or retry_after_ms <= 0:
+            raise ValueError("retry_after_ms must be a positive integer")
+        self.retry_after_ms = retry_after_ms
+        super().__init__(f"Runtime not ready; retry after {retry_after_ms} ms")
+
+
 @dataclass
 class Runtime:
     agent: Agent
@@ -69,7 +79,7 @@ class Runtime:
     llm: LLMClient
     heartbeat_store: Callable[[], AbstractContextManager[SessionStore]]
     providers: dict[str, Provider] = field(default_factory=dict)  # tool name -> trusted adapter
-    children: dict[str, Callable[[Record], ChildSession]] = field(default_factory=dict)
+    children: dict[str, Callable[[Record], ChildSession | Sequence[ChildSession]]] = field(default_factory=dict)
     host_bindings: dict[str, Any] = field(default_factory=dict)
     frozen_task: AgentTask | None = None
     handler_version: str = "1"

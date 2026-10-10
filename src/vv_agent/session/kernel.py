@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
@@ -24,7 +24,14 @@ from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 from .approval import resolve_approval
-from .children import cancel_children, child_handles, child_outcome, create_child, verify_completion
+from .children import (
+    ChildSession,
+    InvalidChildBatch,
+    cancel_children,
+    child_handles,
+    create_child,
+    verify_completion,
+)
 from .compaction import compact_context, finish_summary
 from .context import project_context
 from .delegation import admitted_result, assemble, result_for_children
@@ -34,7 +41,7 @@ from .output import prepare_output, serializable_output
 from .providers import Accepted, Definitive, Outcome, Unknown
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, Fold
-from .runtime import Runtime, budget, model_usage, request_from_dict
+from .runtime import Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 
 
@@ -752,9 +759,7 @@ class _Driver:
         if any(h["session_id"] not in delivered for h in handles):
             return target, [], "applied", "batch member completed"
         sdk = a.wait and a.wait.get("delegation")
-        result = (
-            result_for_children(self.store, a.execution_plan, handles, self.runtime) if sdk else child_outcome(a.plan, terminal)
-        ).to_dict()
+        result = result_for_children(self.store, a.execution_plan, handles, self.runtime).to_dict()
         if a.result:
             return (
                 target,
@@ -1186,7 +1191,13 @@ class _Driver:
                 assert plan.turn_id is not None
 
                 def admit_child(tx: SessionTx) -> list[Record]:
-                    specs = [self.runtime.children[name](plan)] if name in self.runtime.children else child_specs
+                    specs = self.runtime.children[name](plan) if name in self.runtime.children else child_specs
+                    if isinstance(specs, ChildSession):
+                        specs = [specs]
+                    if not isinstance(specs, Sequence) or not specs or any(not isinstance(c, ChildSession) for c in specs):
+                        raise InvalidChildBatch("Expected one ChildSession or a nonempty sequence of ChildSession")
+                    if any(c.background != specs[0].background for c in specs):
+                        raise InvalidChildBatch("All children in a batch must have the same background flag")
                     assert specs is not None
                     generation = self.state.turns[plan.turn_id or ""].start._payload["generation"]
                     handles = [create_child(tx, child, plan, generation) for child in specs]
@@ -1603,15 +1614,50 @@ class _Driver:
         return True
 
 
+def _defer_after_error(store: SessionStore, lease: Lease, retry_after_ms: int, error: Exception) -> None:
+    try:
+        store.defer_drive(lease, retry_after_ms=retry_after_ms)
+    except LeaseLost:
+        pass
+    except Exception as backoff_error:
+        raise error from backoff_error
+
+
 def drive(
-    store: SessionStore, session_id: str, *, runtime: Runtime, _one_turn: bool = False, _wait_for_lease: bool = False
+    store: SessionStore,
+    session_id: str,
+    *,
+    runtime: Runtime | Callable[[str], Runtime],
+    failure_backoff_ms: int = 1000,
+    _one_turn: bool = False,
+    _wait_for_lease: bool = False,
 ) -> None:
-    lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=runtime.ttl_ms)
+    if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
+        raise ValueError("failure_backoff_ms must be a positive integer")
+    scheduled = not isinstance(runtime, Runtime)
+    ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else 15000
+    lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     while lease is None and _wait_for_lease:
         time.sleep(0.01)
-        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=runtime.ttl_ms)
+        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     if lease is None:
         return
+    if not isinstance(runtime, Runtime):
+        try:
+            runtime = runtime(session_id)
+            lease = store.renew(lease, ttl_ms=runtime.ttl_ms).lease
+        except RuntimeNotReady as exc:
+            try:
+                _defer_after_error(store, lease, exc.retry_after_ms, exc)
+            finally:
+                store.release(lease)
+            return
+        except Exception as exc:
+            try:
+                _defer_after_error(store, lease, failure_backoff_ms, exc)
+            finally:
+                store.release(lease)
+            raise
     scope = _Scope(lease, runtime)
     scope.thread.start()
     try:
@@ -1630,6 +1676,11 @@ def drive(
                 continue
         if scope.lost:
             raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
+    except Exception as exc:
+        if scheduled:
+            with scope.lock:
+                _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
+        raise
     finally:
         scope.stop.set()
         scope.thread.join(timeout=2)

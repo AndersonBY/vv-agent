@@ -20,7 +20,8 @@ CREATE TABLE sk_session (
     lease_epoch INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
     lease_owner TEXT, lease_until_ms INTEGER,
     phase TEXT NOT NULL CHECK (phase IN ('idle','active','parked','suspended','closed')),
-    active_turn_id TEXT, next_drive_ms INTEGER, terminal_seq INTEGER NOT NULL DEFAULT 0,
+    active_turn_id TEXT, next_drive_ms INTEGER,
+    drive_retry_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0), terminal_seq INTEGER NOT NULL DEFAULT 0,
     CHECK ((lease_owner IS NULL) = (lease_until_ms IS NULL)),
     CHECK (terminal_seq BETWEEN 0 AND head_seq)
 ) STRICT;
@@ -52,7 +53,8 @@ CREATE TABLE sk_inbox (
 CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
 CREATE TABLE sk_consumer (
     session_id TEXT NOT NULL REFERENCES sk_session(session_id), consumer TEXT NOT NULL,
-    last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0), PRIMARY KEY(session_id,consumer)
+    last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
+    project_retry_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0), PRIMARY KEY(session_id,consumer)
 ) STRICT;
 -- Commit metadata is necessary for empty/fully overlapping commits and their original head_seq.
 -- It owns no execution state. Record bodies remain solely in sk_record.
@@ -75,7 +77,7 @@ class SQLiteStore(SQLStore):
         self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()
-        if version != 1 and (version != 0 or existing):
+        if version != 2 and (version != 0 or existing):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -135,4 +137,4 @@ class SQLiteStore(SQLStore):
             for statement in DDL.split(";"):
                 if statement.strip():
                     self.connection.execute(statement)
-            self.connection.execute("PRAGMA user_version=1")
+            self.connection.execute("PRAGMA user_version=2")

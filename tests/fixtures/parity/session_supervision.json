@@ -1,0 +1,19 @@
+{
+  "failure_backoff_ms": 1000,
+  "batch_children": 3,
+  "batch_invalid": [
+    "empty",
+    "mixed_background",
+    "invalid_member"
+  ],
+  "retry_after_ms": 250,
+  "rules": {
+    "ready_inbox_respects_backoff": true,
+    "stale_lease_cannot_defer": true,
+    "newer_schedule_survives": true,
+    "dispatch_never_drives_inline": true,
+    "projection_failure_isolated": true,
+    "factory_not_ready_preserves_turn": true,
+    "batch_delivery_atomic": true
+  }
+}

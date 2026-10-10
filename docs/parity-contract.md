@@ -76,7 +76,7 @@ semantics. The frozen Rust v23 baseline is outside current Python adoption.
 
 | Surface | Current producer | Evidence |
 | --- | --- | --- |
-| Public API v8 | package exports, Runner, RunConfig, interactive and App Server | test_parity_evidence_manifests.py |
+| Public API v9 | package exports, Runner, RunConfig, interactive and App Server | test_parity_evidence_manifests.py |
 | Strict wire | events.py, types.py, message_codec.py, app_server/protocol | event validation, protocol types and session codec tests |
 | Prompt and definition | runtime/compiler.py, prompt/, session/runtime.py | test_run_definition_producer.py, prompt and session fixture tests |
 | Execution and recovery | session/kernel.py, session/sql.py, session/reducer.py | tests/session, App Server durable resume tests |
@@ -99,7 +99,21 @@ consumer projections; JSONL event stores are sinks. Same-turn recovery preserves
 frozen prompt, model, limits and usage. Durable stores are opt-in through the
 session-facing API.
 
-The generated 45-file corpus is compared byte-for-byte with vendored v24.0.1
+The generated 45-file corpus is compared byte-for-byte with vendored local v25.0.0 candidate
 in one producer generation. Contract snapshot integrity is checked independently.
 An implementation cannot be declared verified before required producer and central
 gates establish it. See [migration-v8.md](migration-v8.md) for host migration.
+
+## F5 local adoption
+
+The candidate adds module-qualified ChildSession, InvalidChildBatch, Runtime,
+and RuntimeNotReady; drive accepts a Runtime or a factory, tick accepts host
+dispatch. SessionStore requires defer_drive and defer_projection.
+`tests/session/test_batch_children.py`, `test_supervisor.py` and `test_dispatch.py`
+exercise the canonical session_supervision expectations on PostgreSQL and SQLite.
+Public inventory v9 pins the new method/scan signatures. Existing wire producers
+keep their bytes. The lock uses a locally built deterministic artifact and the
+contract branch's base revision because this preparation must not create commits.
+It is not an immutable release pin: before release, commit the canonical change,
+rebuild the immutable artifact and re-sync the actual revision/URL. Central CI and
+verified adoption remain open; Rust stays frozen.

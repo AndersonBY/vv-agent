@@ -2,8 +2,10 @@
 
 All public entrypoints use the same session kernel. Inventory: **63 current
 capabilities**, each covered by a real producer test. Differences named below
-refer to the transition from the pinned v23 runtime; the current v24 fixtures
-and strict public API v8 define the supported behavior.
+refer to the transition from the pinned v23 runtime; the contract fixtures
+and strict public API v9 define the supported behavior.
+F5 prepares contract 25.0.0 locally; its immutable release and central adoption
+remain pending. The measured F3/F4 evidence below remains its named baseline.
 
 Paths are relative to `src/vv_agent/`. Test abbreviations under `tests/session/`:
 P = `test_runner_parity.py`, T = `test_tools_control_parity.py`,
@@ -11,7 +13,7 @@ C = `test_capability_parity.py`, D = `test_delegation_parity.py`,
 R = `test_recovery_matrix.py`. Persistent cases use PostgreSQL, SQLite files
 and SQLite `:memory:`; process-kill cases use durable stores only.
 
-The 2026-10-10 full gate passed **3067 tests**, with seven environment/opt-in
+The F3/F4 baseline gate on 2026-10-10 passed **3067 tests**, with seven environment/opt-in
 skips and no PostgreSQL skips. It includes 1572 session tests, with 440 PostgreSQL,
 440 SQLite file and 356 SQLite memory cases. All 63 capabilities below remain
 covered; the single default execution path has no outstanding adoption gap at
@@ -92,15 +94,25 @@ Identity and clock values are compared only where fixed by the contract. Recover
 cases reconstruct Runtime/store state and assert retained callbacks, receipts,
 authorization, child identity, budgets and same-turn replies.
 
-The forty-five generated v24.0.1 fixtures compare byte-for-byte with the vendored
-snapshot. Public API v8 resolves every exported capability/member and rejects
+The forty-five generated v25.0.0 candidate fixtures compare byte-for-byte with the
+vendored snapshot. Public API v9 resolves every exported capability/member and rejects
 extra or missing exports. Snapshot checks establish artifact integrity separately.
 
 Performance methodology and current absolute measurements live in
 [session-kernel-baseline.md](session-kernel-baseline.md); host API migration lives
 in [migration-v8.md](migration-v8.md).
 
-## Release validation
+## F5 validation
+
+| Boundary | Current evidence |
+| --- | --- |
+| Custom child batch admission and completion | `test_batch_children.py`: transaction rollback, all-sibling wait/cancel, ordered/background results, invalid batches and delivery process-kill cuts |
+| Tick isolation and scheduled retry | `test_supervisor.py`: cross-page failures, visible error groups, runtime readiness, SQL retry gates and lease/concurrent-schedule fencing |
+| Host dispatch transport | `test_dispatch.py`: dispatch scan, duplicate/lost messages, queue coalescing and recovery without a new input |
+| Public API and fixtures | API v9 resolves 243 capabilities / 286 members; 182 root exports unchanged; 45 generated files match the candidate snapshot |
+| Release preparation | [0.23.0 notes](releases/0.23.0.md); immutable publication and central adoption remain pending |
+
+## F3/F4 release baseline
 
 | Boundary | Current evidence |
 | --- | --- |
