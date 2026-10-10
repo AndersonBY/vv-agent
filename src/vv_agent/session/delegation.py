@@ -469,7 +469,23 @@ def result_for_children(
     first = store.read_state(handles[0]["session_id"])
     admission = first[1][0].record._payload["attributes"].get("child_admission")
     if admission is None:
-        raise ValueError("SDK child projection needs its admitted definition")
+        from .children import child_outcome
+
+        results = []
+        for i, handle in enumerate(handles):
+            snapshot = first if i == 0 else store.read_state(handle["session_id"])
+            terminal = next(r for r in snapshot[1] if r.record.kind == "turn_ended" and r.record.turn_id == handle["turn_id"])
+            results.append(child_outcome(plan, terminal))
+        if len(results) == 1:
+            return results[0]
+        return ToolExecutionResult(
+            plan._payload["request"]["id"],
+            json.dumps([result.to_dict() for result in results]),
+            status_code=ToolResultStatus.ERROR
+            if any(r.status_code == ToolResultStatus.ERROR for r in results)
+            else ToolResultStatus.SUCCESS,
+            metadata={"children": [result.metadata for result in results]},
+        )
     mode = admission["mode"]
     if mode == "configured":
         outcomes = []
@@ -515,6 +531,8 @@ def result_for_children(
 def admitted_result(store: SessionStore, plan: Record, handles: list[dict[str, Any]]) -> ToolExecutionResult:
     admission = store.read(handles[0]["session_id"], limit=1).records[0].record._payload["attributes"].get("child_admission")
     if not admission:
+        if len(handles) > 1:
+            return ToolExecutionResult(plan._payload["request"]["id"], json.dumps(handles), metadata={"children": handles})
         return ToolExecutionResult(plan._payload["request"]["id"], json.dumps(handles[0]), metadata={"child": handles[0]})
     name = admission["definition"]["agent_name"]
     if admission["mode"] == "background_task":

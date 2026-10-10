@@ -24,6 +24,12 @@ class ChildSession:
     background: bool = False
 
 
+class InvalidChildBatch(ValueError):
+    """Custom admission must return a nonempty, uniformly scheduled child batch."""
+
+    code = "invalid_child_batch"
+
+
 def child_handles(handle: dict[str, Any]) -> list[dict[str, Any]]:
     base = {key: value for key, value in handle.items() if key != "siblings"}
     return [base, *(base | sibling for sibling in handle.get("siblings", []))]

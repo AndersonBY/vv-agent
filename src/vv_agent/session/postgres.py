@@ -22,7 +22,8 @@ CREATE TABLE sk_session (
     lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
     lease_owner text, lease_until_ms bigint,
     phase text NOT NULL CHECK (phase IN ('idle','active','parked','suspended','closed')),
-    active_turn_id text, next_drive_ms bigint, terminal_seq bigint NOT NULL DEFAULT 0,
+    active_turn_id text, next_drive_ms bigint,
+    drive_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0), terminal_seq bigint NOT NULL DEFAULT 0,
     CHECK ((lease_owner IS NULL) = (lease_until_ms IS NULL)),
     CHECK (terminal_seq BETWEEN 0 AND head_seq)
 );
@@ -54,7 +55,8 @@ CREATE TABLE sk_inbox (
 CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
 CREATE TABLE sk_consumer (
     session_id text NOT NULL REFERENCES sk_session(session_id), consumer text NOT NULL,
-    last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0), PRIMARY KEY(session_id,consumer)
+    last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
+    project_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0), PRIMARY KEY(session_id,consumer)
 );
 -- Commit metadata is necessary for empty/fully overlapping commits and their original head_seq.
 -- It owns no execution state; record bodies remain solely in sk_record.

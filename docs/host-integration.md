@@ -52,11 +52,14 @@ stream sinks separately from durable projection consumers.
   releases its lease, then checks in a fresh transaction whether execution is
   still runnable. Only then does it wake. Idle sessions and completed turns with
   no remaining work do not self-wake. `next_drive_ms <= now` or an unconsumed inbox item with
-  `available_ms <= now` makes execution due, subject to lease availability;
+  `available_ms <= now` makes execution due, subject to lease availability and
+  `drive_retry_at_ms <= now`;
   the scan and per-session check share the same SQL predicate.
-- `tick(store, runtime=build_runtime, project=project_to_django)` scans due
-  sessions and consumer lag in cursor order, driving work and calling the
-  projection callback. Run it periodically even with a reliable broker.
+- `tick(store, dispatch=enqueue_drive, project=project_to_django)` scans due
+  sessions and consumer lag in cursor order, dispatching drive identities and
+  calling the projection callback inline. It never calls the runtime factory
+  or drives sessions in dispatch mode. Omitting dispatch retains synchronous
+  in-process execution through `runtime=build_runtime`. Run it periodically even with a reliable broker.
   Future-available inbox items, due provider polls, dropped wakes and expired
   worker leases rely on this scan. Its interval bounds discovery latency after
   the due time/lease expiry; queue backlog and execution add further latency.
@@ -76,8 +79,9 @@ inbox availability. The reducer retains all operation due times in
 `ExecutionState.due_ms`; the store uses that list without duplicating operation
 scheduling rules. `next_drive_ms` in the folded state remains its minimum.
 Deadline handling therefore remains due at its original
-time. New input is immediately runnable through the inbox predicate and does
-not wait for the deferred poll. Input/usage-only commits that leave the turn
+time. Outside failure/readiness backoff, new input is immediately runnable
+through the inbox predicate and does not wait for the deferred poll.
+Input/usage-only commits that leave the turn
 and reducer due times unchanged preserve the existing SQL schedule; execution
 changes recompute it from the log. Completed `_one_turn` drives return without this idle deferral,
 so queued turns remain immediately runnable.
@@ -120,50 +124,128 @@ operation key; other unknown effects must not be blindly repeated. A paused
 worker can still issue an already-admitted external request even after losing
 its lease. See [recovery semantics](session-kernel.md#repair-inputs-and-provider-evidence).
 
-## Celery example (host code only)
+## Host dispatch example
 
-The following lives in the backend, with Celery installed there. `store()` is a
-host context manager owning a thread-local PostgreSQL connection, and
-`build_runtime` defaults its wake callback to `drive_session.delay` for ticks.
+The following lives in the backend with Celery installed there. `store()` owns a
+thread-local PostgreSQL connection. Pass the **factory itself** into `drive` so
+preparation runs after lease acquisition and participates in scheduled backoff.
 
 ```python
 from celery import shared_task
 
 from vv_agent.session.kernel import drive
+from vv_agent.session.runtime import RuntimeNotReady
 from vv_agent.session.supervisor import tick
 
+TICK_SECONDS = 2
 
-@shared_task(name="agent.drive", acks_late=True)
+
+def enqueue_drive(sid):
+    drive_session.apply_async(args=(sid,), expires=TICK_SECONDS)
+
+
+def runtime_factory(sid):
+    if not child_inputs_ready(sid):
+        raise RuntimeNotReady(retry_after_ms=500)
+    return build_runtime(sid, wake=enqueue_drive)
+
+
+@shared_task(name="agent.drive", acks_late=True, reject_on_worker_lost=True,
+             ignore_result=True)
 def drive_session(sid):
     with store() as session_store:
-        drive(session_store, sid, runtime=build_runtime(sid, wake=drive_session.delay))
+        drive(session_store, sid, runtime=runtime_factory, failure_backoff_ms=1000)
 
 
-@shared_task(name="agent.tick")
+@shared_task(name="agent.tick", ignore_result=True)
 def tick_sessions():
     with store() as session_store:
-        tick(session_store, runtime=build_runtime, project=project_to_django)
+        tick(session_store, dispatch=enqueue_drive, project=project_to_django,
+             page_size=100, failure_backoff_ms=1000)
 ```
 
-Schedule `agent.tick` in Celery beat every few seconds. The tick task itself
-drives discovered sessions synchronously; size its worker/time budget for the
-scan. Queue routing, priorities, concurrency and prefetch are host choices.
-`acks_late` acknowledges after return, but process loss can still acknowledge a
-task; tick recovery does not depend on broker redelivery.
-See [Celery task acknowledgements](https://docs.celeryq.dev/en/stable/userguide/tasks.html#acks-late).
+Schedule tick every two seconds and expire tick messages after two seconds too.
+All wake/scan dispatch uses expiry no longer than that interval, or host queue
+coalescing by session identity. Tick does not claim queue messages: a queued but
+not-yet-leased session remains runnable and may be dispatched on each scan.
+Bound reserved/prefetched deliveries as well (for example prefetch 1 and bounded
+worker concurrency). Expired/lost deliveries leave SQL work runnable; the next
+tick discovers it without a new input. Active workers are protected by leases.
+The beat interval does not bound queue latency or total drive duration.
 
-Set the Redis broker's `visibility_timeout` above the expected longest drive
-(potentially several turns). Early redelivery while the lease is held safely
-returns, but wastes deliveries. Configure the applicable Celery visibility
-settings consistently; a long timeout delays broker recovery, while tick still
-discovers expired kernel leases. Prefer inbox `available_ms` plus tick for future
-work. See [Celery Redis visibility timeout](https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/redis.html#visibility-timeout).
+Dispatch mode scan time is independent of drive duration. SQL lock/statement,
+broker publish and projection I/O need host-enforced finite timeouts; projections
+stay short and transactional. Inline mode is synchronous and its scan time
+includes every drive. The kernel does not interrupt arbitrary host callbacks or
+create background scan threads. Each item is isolated; after visiting every page,
+`tick` raises an `ExceptionGroup` containing original exceptions with session,
+kind and consumer notes. Failure to persist a backoff is also reported. A scan
+query/database outage still aborts the scan; the next periodic scan retries.
 
-Set provider/tool timeouts first and allow worker time limits enough room for
-normal drives and cancellation cleanup. Hard time limits kill the process and
-leave recovery to lease TTL plus tick. Graceful deploy restarts allow drives to
-finish; forced restarts follow the same recovery path, without an outbox drain
-or reconciliation command. See [Celery worker time limits](https://docs.celeryq.dev/en/stable/userguide/workers.html#time-limits).
+`drive(..., runtime=runtime_factory)` acquires a 15-second preparation lease,
+then renews it to the returned Runtime TTL before execution. Keep preparation
+shorter than that lease and use host I/O timeouts. RuntimeNotReady has a positive
+integer `retry_after_ms`; it sets a database-time retry gate and releases the
+lease without consuming input, admitting a turn or writing a failed terminal.
+An already-admitted turn and its frozen definition survive deferral. Runtime
+factory/driver exceptions defer by `failure_backoff_ms` (default 1000) and
+re-raise to the worker. Explicit Runtime-instance drives keep their synchronous
+error behavior; use the factory form for scheduled workers. Factory readiness
+is separate from input guardrail denial, which still fails the turn.
+
+Stores must implement `defer_drive(lease, *, retry_after_ms) -> None` and
+`defer_projection(session_id, consumer, *, retry_after_ms) -> None`. Drive backoff
+locks the session, checks the current owner/epoch/unexpired lease, then advances
+`drive_retry_at_ms`. It never changes `next_drive_ms`, input availability, log or
+turn state; a concurrent newer schedule survives. The gate applies even to ready
+inbox and direct/duplicate wakes (`acquire`), including after schedule rebuild.
+Projection backoff advances only that consumer's `project_retry_at_ms` under its
+row lock, independently of drive and other consumers. Neither primitive shortens
+an existing later retry. Backoff expires automatically under database time; a
+new signal is unnecessary. New input does not bypass this short retry gate.
+The gate delays both control inputs (cancel/suspend) and user input for that
+session until it expires. Hosts should keep `RuntimeNotReady.retry_after_ms`
+short, from sub-second delays to a few seconds, and re-raise on later readiness
+checks instead of returning long delays. The plan's cancellation target of
+at most two seconds applies to running sessions under healthy workers.
+
+The PostgreSQL DDL adds exactly those two nonnegative bigint columns with default
+zero, one on `sk_session`, one on `sk_consumer`; no table, execution ledger or
+index is added. SQLite mirrors them and advances `PRAGMA user_version` to 2,
+rejecting old version 1 databases. Record/inbox schema 1, event and App Server
+wires are unchanged. Hosts copying DDL must take the current literal from
+`session/postgres.py`. The framework has no historical schema migrator: finish
+old executions using their pinned artifact, then provision the current schema;
+any host-managed schema change is an explicit host responsibility.
+
+Set broker visibility timeout above the host's longest allowed drive. Use
+provider/tool timeouts and worker limits with room for cancellation cleanup;
+hard process loss leaves recovery to lease TTL plus tick. Queue routing,
+concurrency and prefetch remain host choices. Tick needs no Redis scan, command
+outbox or reconciliation worker. At-least-once external requests and unknown
+outcomes retain the [existing recovery rules](session-kernel.md#repair-inputs-and-provider-evidence).
+
+## Custom child admission
+
+A Runtime.children callback returns one `ChildSession` or a nonempty sequence.
+The kernel calls it inside the parent admission transaction, validates all
+members and their common background flag, then uses the delegated siblings
+path. Empty, invalid-member and mixed-background batches raise
+`session.children.InvalidChildBatch` (code `invalid_child_batch`) before creating
+children or parking the parent. Host rows written through that same connection
+roll back too. No nontransactional I/O or external side effect belongs inside
+this callback; Django adapters must open the matching ORM transaction.
+
+Every child creation/initial input, parent started/parked record and background
+admission result commits together with callback host rows. Blocking batches wait
+for all original sibling terminals, authenticate each delivery, cancel every
+live sibling on parent closure and retain late/duplicate evidence. Custom batch
+completion content is a JSON array of per-child ToolExecutionResult objects in
+admission order, with `metadata.children`; any child error makes the batch ERROR.
+Background batch admission content is a JSON array of admitted handles with
+`metadata.children`. Singleton results retain their existing shape. Configured
+SDK children retain their typed configured-tool projection through the same
+admission/delivery machinery.
 
 ## Streaming and cancellation
 

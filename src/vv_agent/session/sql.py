@@ -32,6 +32,7 @@ from .store import (
 
 _DRIVE_RUNNABLE_SQL = """
     (s.lease_until_ms IS NULL OR s.lease_until_ms<=t.ms)
+    AND s.drive_retry_at_ms<=t.ms
     AND (s.next_drive_ms<=t.ms OR EXISTS (
         SELECT 1 FROM sk_inbox i WHERE i.session_id=s.session_id
         AND i.consumed_seq IS NULL AND i.available_ms<=t.ms))
@@ -127,7 +128,7 @@ class SQLStore:
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
-            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms "
+            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms "
             f"FROM sk_session WHERE session_id=%s{self.lock_clause}",
             (session_id,),
         )
@@ -264,7 +265,7 @@ class SQLStore:
         with self._transaction():
             row = self._lock(session_id)
             now = self._now()  # Must be read after the row lock, not at transaction start.
-            if row[4] is not None and row[4] > now:
+            if (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms)
             self._rows(
@@ -337,6 +338,34 @@ class SQLStore:
                 )
             )
 
+    def defer_drive(self, lease: Lease, *, retry_after_ms: int) -> None:
+        """Fence failure/readiness retry independently of due work and ready inbox."""
+        _positive(retry_after_ms, "retry_after_ms")
+        with self._transaction():
+            row = self._lock(lease.session_id)
+            now = self._now()
+            self._check_lease(lease.session_id, lease, row, now)
+            self._rows(
+                "UPDATE sk_session SET drive_retry_at_ms=CASE WHEN drive_retry_at_ms>%s "
+                "THEN drive_retry_at_ms ELSE %s END WHERE session_id=%s",
+                (now + retry_after_ms, now + retry_after_ms, lease.session_id),
+            )
+
+    def defer_projection(self, session_id: str, consumer: str, *, retry_after_ms: int) -> None:
+        """Back off one consumer without claiming or delaying execution."""
+        _positive(retry_after_ms, "retry_after_ms")
+        with self._transaction():
+            self._one(
+                f"SELECT last_seq FROM sk_consumer WHERE session_id=%s AND consumer=%s{self.lock_clause}",
+                (session_id, consumer),
+            )
+            until = self._now() + retry_after_ms
+            self._rows(
+                "UPDATE sk_consumer SET project_retry_at_ms=CASE WHEN project_retry_at_ms>%s "
+                "THEN project_retry_at_ms ELSE %s END WHERE session_id=%s AND consumer=%s",
+                (until, until, session_id, consumer),
+            )
+
     def is_runnable(self, session_id: str) -> bool:
         # Check after release in a fresh transaction so a pusher racing the holder is visible.
         with self._transaction():
@@ -362,9 +391,9 @@ class SQLStore:
                 ORDER BY s.session_id LIMIT %s
             ), projecting AS (
                 SELECT c.session_id,'project' AS work_kind,c.consumer FROM sk_consumer c
-                JOIN sk_session s USING(session_id)
+                JOIN sk_session s USING(session_id) CROSS JOIN clock t
                 WHERE c.session_id >= %s AND (c.session_id,'project',c.consumer)>(%s,%s,%s)
-                  AND c.last_seq<s.head_seq
+                  AND c.last_seq<s.head_seq AND c.project_retry_at_ms<=t.ms
                 ORDER BY c.session_id,c.consumer LIMIT %s
             ), work AS (
                 SELECT * FROM driving UNION ALL SELECT * FROM projecting

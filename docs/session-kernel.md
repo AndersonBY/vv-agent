@@ -5,9 +5,9 @@ RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinar
 runs own an SQLite `:memory:` store. Hosts opt into durable execution through
 SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
 
-The lock selects contract 24.0.1. Current codecs are RunEvent v6, model-call v2,
+The local candidate lock selects contract 25.0.0. Current codecs are RunEvent v6, model-call v2,
 task-token-usage v3, strict Message and App Server protocol v2. Public exports
-match public_api v8. Rust remains frozen at contract 23.0.0 and is outside this
+match public_api v9. Rust remains frozen at contract 23.0.0 and is outside this
 Python adoption. All execution uses the same kernel and retained log.
 
 Runner.resume(session_id, turn_id) reads the retained identity. User and approval
@@ -405,8 +405,14 @@ Consumers can filter the prefix by their durable cursor. Kernel v6 events use
 typed parked run-state projection.
 The App Server adapter projects the same log through protocol v2.
 
-`supervisor.tick` pages through `list_runnable`, calling drive or the supplied
-projection callback. It owns no claim mechanism. A host must schedule ticks and
+`supervisor.tick` pages through `list_runnable`, dispatching drive identities
+when a host dispatch callback is supplied, or driving inline by default.
+Per-item exceptions are collected and raised together after the scan; failed
+execution and projection have independent SQL retry gates. A runtime factory
+passed directly to drive runs under the lease and may raise RuntimeNotReady
+without ending the turn. Dispatch-mode latency is independent of drive duration;
+host SQL/dispatch/projection timeouts bound callback I/O. Inline mode includes
+drive time. See [host scheduling and retry](host-integration.md#host-dispatch-example). It owns no claim mechanism. A host must schedule ticks and
 make projection plus cursor acknowledgement atomic using the store transaction.
 Wake callbacks are best-effort hints; the scan recovers empty-inbox work and
 unprojected terminal records independently.
@@ -429,6 +435,12 @@ version and definition binding, and uses the admitted task. Workspace backends
 remain host configuration; S3 clients and credentials never enter the records.
 Configured children start with their own JSON state; agent tools and handoff
 children inherit a copy of the parent's JSON state.
+
+Custom callbacks return one ChildSession or a nonempty sequence; invalid members,
+empty batches and mixed background flags raise InvalidChildBatch and roll back
+callback host SQL writes with admission. All custom and delegated children use
+the same transaction, delivery and cancellation paths. Custom batch results
+retain all children in admission order (see host integration for result shapes).
 
 A batch uses optional closed `handle.siblings` member identities. Every member
 has the same parent delivery target and its own initial turn and cursor.
@@ -530,9 +542,9 @@ invalidate a newer turn's completion candidate.
 `tests/session/test_children.py` exercises these rules against disposable PostgreSQL and SQLite
 databases, including process-kill barriers around push/ack, concurrent
 delivery and input replay, identity/evidence rejection, atomic admission,
-background safe points, cancellation, and late-generation audit. Central contract
-24.0.1 adoption is verified at Python 53bdf32; the support matrix records the
-exact revision and CI run. Rust stays frozen at contract 23.0.0.
+background safe points, cancellation, and late-generation audit. F5 contract
+25.0.0 adoption remains pending; the support matrix owns required implementation
+revisions and central verification. Rust stays frozen at contract 23.0.0.
 
 
 ## Compaction through the log
@@ -609,6 +621,12 @@ compaction notification.
 
 ## SQLite file and memory stores
 
+Current SQL storage adds `sk_session.drive_retry_at_ms` and
+`sk_consumer.project_retry_at_ms` (nonnegative, default zero). SQLite database
+user_version is 2 and rejects version 1. These retry gates are scheduling state,
+not execution facts; the log codecs remain version 1. No migrations or historical
+decoders are supplied. PostgreSQL host migrations copy the current DDL literal.
+
 `SQLiteStore.standalone(path)` owns and closes one connection. Use `":memory:"`
 for process-local sessions; the database disappears when its owner closes it.
 The heartbeat factory must borrow the **same store instance** for memory sessions
@@ -616,7 +634,7 @@ The heartbeat factory must borrow the **same store instance** for memory session
 independent connections to the same path. SQLite is single-host only.
 
 SQLite uses STRICT tables, foreign keys, WAL (files), synchronous FULL, a
-5000 ms busy timeout and strict `user_version=1`. The record CHECK accepts
+5000 ms busy timeout and strict `user_version=2`. The record CHECK accepts
 `context_compacted`, including summary, emergency and microcompaction records.
 There are no historical readers or migrations in this internal module.
 
@@ -788,11 +806,12 @@ as a host-only example; backend B1 implements the site's tasks.
 `scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
 forty-five files from real store/kernel/public-surface/App Server producers with
 scripted providers and fixed semantic identities/clocks. It never edits the
-vendored snapshot. One generation compares all forty-five bytes with v24.0.1.
+vendored snapshot. One generation compares all forty-five bytes with the local v25.0.0 candidate.
 Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
 kind/stage/handle/optional-field coverage and source-prefix projections are
 revalidated. Deterministic curation preserves each behavioral coverage key.
-Seven unchanged fixtures are checked directly. Invalid versions/fields remain
+Seven unchanged fixtures are checked directly; session_supervision.json supplies
+the F5 real-store batch/retry/dispatch acceptance expectations. Invalid versions/fields remain
 negative inputs to current strict readers. The full corpus is limited to 3 MB
 and each output to 512 KB. Producer evidence supplements durable-store
 process-kill, concurrency, rollback and authentication tests.

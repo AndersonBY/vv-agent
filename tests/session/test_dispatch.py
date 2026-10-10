@@ -774,3 +774,50 @@ def test_failed_drive_does_not_defer(transport, clock, monkeypatch, exit_reason)
     with pytest.raises(RuntimeError if exit_reason == "error" else LeaseLost):
         drive(store, "s", runtime=transport.runtimes["s"])
     assert scheduled(store) == 0
+
+
+def test_dispatch_form_recovers_dropped_and_duplicate_messages_without_queue_growth(transport):
+    calls = []
+
+    def model(_request):
+        calls.append("model")
+        return LLMResponse("done")
+
+    transport.create(steps=[model])
+    transport.push("s", prompt())
+    transport.queue.clear()  # Lost wake.
+    for _ in range(20):
+        transport.tick(page_size=1, dispatch=True)
+    assert transport.queue == ["s"]  # Host coalesces queued/unleased duplicates.
+    assert calls == []
+    transport.queue.clear()  # A lost/expired dispatch needs no new input.
+    transport.tick(dispatch=True)
+    transport.queue.append("s")  # At-least-once worker delivery still remains safe.
+    transport.drain()
+    transport.tick(dispatch=True)
+    assert calls == ["model"]
+    assert transport.queue == []
+    assert len(records(transport.store, kind="turn_ended")) == 1
+
+
+def test_dispatch_form_preparation_failure_backs_off_worker_and_scan(transport, clock):
+    from vv_agent.session.runtime import RuntimeNotReady
+
+    transport.create(steps=[LLMResponse("done")])
+    transport.push("s", prompt())
+    transport.queue.clear()
+    transport.tick(dispatch=True)
+    sid = transport.queue.pop()
+
+    def not_ready(_sid):
+        raise RuntimeNotReady(250)
+
+    drive(transport.store, sid, runtime=not_ready)
+    for _ in range(5):
+        transport.tick(dispatch=True)
+    assert transport.queue == []
+    assert not records(transport.store, kind="turn_ended")
+    clock(250)
+    transport.tick(dispatch=True)
+    transport.drain()
+    assert len(records(transport.store, kind="turn_ended")) == 1

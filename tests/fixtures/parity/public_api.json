@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v8",
+  "contract": "vv-agent-public-api-v9",
   "domains": [
     {
       "capabilities": [
@@ -705,12 +705,12 @@
           "python": "vv_agent.SessionRunEventStore"
         },
         {
-          "behavior": "execute admitted work under fences and reuse receipts",
+          "behavior": "lease-fenced execution; runtime factory resolved under lease; factory failures and driver failures back off and re-raise; RuntimeNotReady defers without ending a turn",
           "id": "drive",
           "python": "vv_agent.session.kernel.drive"
         },
         {
-          "behavior": "discover execution and consumer work independent of wakes",
+          "behavior": "one complete paginated scan; optional host dispatch instead of inline drive; failures isolated and aggregated after scan; projection and dispatch failures back off",
           "id": "tick",
           "python": "vv_agent.session.supervisor.tick"
         },
@@ -718,6 +718,26 @@
           "behavior": "authenticate terminal child delivery and advance cursor atomically",
           "id": "child_delivery",
           "python": "vv_agent.session.children.child_delivery"
+        },
+        {
+          "behavior": "one admitted child specification",
+          "id": "session.ChildSession",
+          "python": "vv_agent.session.children.ChildSession"
+        },
+        {
+          "behavior": "invalid or empty custom-child batch; admission rolls back",
+          "id": "session.InvalidChildBatch",
+          "python": "vv_agent.session.children.InvalidChildBatch"
+        },
+        {
+          "behavior": "host preparation deferred without a failed turn",
+          "id": "session.RuntimeNotReady",
+          "python": "vv_agent.session.runtime.RuntimeNotReady"
+        },
+        {
+          "behavior": "current runtime bindings; custom callbacks return one child or a nonempty uniform-background sequence",
+          "id": "session.Runtime",
+          "python": "vv_agent.session.runtime.Runtime"
         }
       ],
       "id": "session"
@@ -1148,7 +1168,7 @@
       "id": "exports"
     }
   ],
-  "schema_version": 8,
+  "schema_version": 9,
   "surfaces": [
     {
       "id": "agent",
@@ -5586,8 +5606,71 @@
       "python_target": "vv_agent.SessionSpec"
     },
     {
-      "behavior": "single atomic log and inbox authority",
+      "behavior": "single atomic log and inbox authority; lease-fenced defer_drive(lease, retry_after_ms) gates even ready inbox and lease acquisition; defer_projection(session_id, consumer, retry_after_ms) gates only that consumer; retries preserve execution facts and newer schedules",
       "id": "session_SessionStore",
+      "members": [
+        {
+          "id": "defer_drive",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "defer_drive",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "lease",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "retry_after_ms",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "defer_projection",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "defer_projection",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "session_id",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "consumer",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "retry_after_ms",
+                  "required": true
+                }
+              ]
+            }
+          }
+        }
+      ],
       "python_target": "vv_agent.SessionStore"
     },
     {
@@ -5639,9 +5722,128 @@
       "behavior": "projection and delivery only; no independent event authority",
       "id": "session_SessionRunEventStore",
       "python_target": "vv_agent.SessionRunEventStore"
+    },
+    {
+      "id": "session_drive",
+      "members": [
+        {
+          "id": "drive",
+          "kind": "operation",
+          "python": {
+            "kind": "function",
+            "name": "drive",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "store",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "session_id",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "runtime",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "failure_backoff_ms",
+                  "required": false
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "python_target": "vv_agent.session.kernel"
+    },
+    {
+      "id": "session_tick",
+      "members": [
+        {
+          "id": "tick",
+          "kind": "operation",
+          "python": {
+            "kind": "function",
+            "name": "tick",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "store",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "project",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "runtime",
+                  "required": false
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "dispatch",
+                  "required": false
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "page_size",
+                  "required": false
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "failure_backoff_ms",
+                  "required": false
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "python_target": "vv_agent.session.supervisor"
+    },
+    {
+      "behavior": "one admitted child specification",
+      "id": "session_ChildSession",
+      "python_target": "vv_agent.session.children.ChildSession"
+    },
+    {
+      "behavior": "invalid or empty custom-child batch; admission rolls back",
+      "id": "session_InvalidChildBatch",
+      "python_target": "vv_agent.session.children.InvalidChildBatch"
+    },
+    {
+      "behavior": "current runtime bindings; custom callbacks return one child or a nonempty uniform-background sequence",
+      "id": "session_Runtime",
+      "members": [
+        {
+          "id": "children",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "children"
+          }
+        }
+      ],
+      "python_target": "vv_agent.session.runtime.Runtime"
+    },
+    {
+      "behavior": "host preparation deferred without a failed turn",
+      "id": "session_RuntimeNotReady",
+      "python_target": "vv_agent.session.runtime.RuntimeNotReady"
     }
   ],
   "verification": {
-    "python": "current exports minus section 6 removals plus Q4 accepted names; F3 root wiring pending"
+    "python": "F5 real producer/store/transport suites; local candidate, central adoption pending"
   }
 }
