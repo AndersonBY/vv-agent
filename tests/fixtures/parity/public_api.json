@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v9",
+  "contract": "vv-agent-public-api-v10",
   "domains": [
     {
       "capabilities": [
@@ -1168,7 +1168,7 @@
       "id": "exports"
     }
   ],
-  "schema_version": 9,
+  "schema_version": 10,
   "surfaces": [
     {
       "id": "agent",
@@ -5596,7 +5596,7 @@
       "python_target": "vv_agent.Record"
     },
     {
-      "behavior": "strict current canonical inbox codec",
+      "behavior": "strict inbox schema 2; provider_result requires usage object; completed-attempt replay compares result and usage canonical bytes; late audit usage is billable",
       "id": "session_InboxItem",
       "python_target": "vv_agent.InboxItem"
     },

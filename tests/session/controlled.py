@@ -108,7 +108,12 @@ class ControlledProvider:
         if kind == "provider_evidence":
             payload["handle"] = h
         else:
-            payload.update(provider_binding=h["provider"], result=result, evidence=[h["evidence"]])
+            payload.update(
+                provider_binding=h["provider"],
+                result=result,
+                usage=result.get("raw", {}).get("usage", {}),
+                evidence=[h["evidence"]],
+            )
         return InboxItem(input_id, kind, payload, target_turn_id=target_turn_id or "s/turn/initial")
 
     def retain_model_result(self, plan: Record, result: dict[str, Any]):

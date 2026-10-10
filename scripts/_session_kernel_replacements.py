@@ -696,6 +696,13 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
+        d.update(contract="vv-agent-public-api-v10", schema_version=10)
+        for surface in d["surfaces"]:
+            if surface["id"] == "session_InboxItem":
+                surface["behavior"] = (
+                    "strict inbox schema 2; provider_result requires usage object; completed-attempt replay compares "
+                    "result and usage canonical bytes; late audit usage is billable"
+                )
         for domain in d["domains"]:
             for capability in domain["capabilities"]:
                 resolve(capability["python"])

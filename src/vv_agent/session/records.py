@@ -179,7 +179,13 @@ INPUT_PAYLOADS = {
     "steer": closed(content=JSON_VALUE),
     "follow_up": closed(content=JSON_VALUE),
     "provider_result": closed(
-        operation_id=TEXT, attempt=POS, request_digest=HASH, provider_binding=nullable(TEXT), result=JSON_VALUE, evidence=STRINGS
+        operation_id=TEXT,
+        attempt=POS,
+        request_digest=HASH,
+        provider_binding=nullable(TEXT),
+        result=JSON_VALUE,
+        usage=JSON_OBJECT,
+        evidence=STRINGS,
     ),
     "approval_answer": closed(
         operation_id=TEXT,
@@ -206,7 +212,7 @@ INPUT_PAYLOADS = {
 INPUT_PAYLOADS["approval_answer"]["properties"].update(reason={"type": "string"}, metadata=JSON_OBJECT)
 
 INPUT_SCHEMA = closed(
-    schema_version={"type": "integer", "const": 1},
+    schema_version={"type": "integer", "const": 2},
     input_id=TEXT,
     kind=enum(*INPUT_PAYLOADS),
     target_turn_id=nullable(TEXT),
@@ -511,7 +517,7 @@ class InboxItem:
     target_turn_id: str | None = None
     generation: int | None = None
     available_ms: int = 0
-    schema_version: int = 1
+    schema_version: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

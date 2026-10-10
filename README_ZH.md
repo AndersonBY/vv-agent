@@ -23,7 +23,7 @@ PostgreSQL SessionStore 按需安装 `postgres` extra，S3 工作区按需安装
 同时使用两项扩展：`python -m pip install 'vv-agent[postgres,s3]'`。
 破坏性变更参见 [0.23.0 发布说明](docs/releases/0.23.0.md)。
 
-当前 HEAD 采用 contract v25、public API v9，使用唯一 session kernel 执行路径。
+当前 HEAD 采用 contract v26、public API v10，使用唯一 session kernel 执行路径。
 旧版本行为由 Git tags 保留。
 参见[云宿主集成指南](docs/host-integration.md)：PostgreSQL 同库事务、队列分发语义和宿主拥有的 Celery 示例。
 

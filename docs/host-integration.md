@@ -212,8 +212,8 @@ at most two seconds applies to running sessions under healthy workers.
 The PostgreSQL DDL adds exactly those two nonnegative bigint columns with default
 zero, one on `sk_session`, one on `sk_consumer`; no table, execution ledger or
 index is added. SQLite mirrors them and advances `PRAGMA user_version` to 2,
-rejecting old version 1 databases. Record/inbox schema 1, event and App Server
-wires are unchanged. Hosts copying DDL must take the current literal from
+rejecting old version 1 databases. Record schema 1, event and App Server wires are unchanged. Inbox schema 2
+requires provider usage as described below. Hosts copying DDL must take the current literal from
 `session/postgres.py`. The framework has no historical schema migrator: finish
 old executions using their pinned artifact, then provision the current schema;
 any host-managed schema change is an explicit host responsibility.
@@ -246,6 +246,18 @@ Background batch admission content is a JSON array of admitted handles with
 `metadata.children`. Singleton results retain their existing shape. Configured
 SDK children retain their typed configured-tool projection through the same
 admission/delivery machinery.
+
+## Billing recovered provider calls
+
+Authenticate and deliver inbox schema 2 `provider_result` with required `usage`
+(JSON object; `{}` only when no usage was observed), alongside operation,
+attempt, request digest, provider binding, result and evidence. Authentication
+must cover usage too. Bill from canonical `project_result` model-call usage or
+`project_records` typed model-call events, keyed by stable call ID. Include late
+normal and audit completions; an audit call still incurred provider cost.
+Do not decode usage from opaque result content. Same-value result/usage replay
+adds no completion or charge; altered usage conflicts even after completion.
+Retain consumer deduplication and projection/ACK transaction boundaries.
 
 ## Streaming and cancellation
 

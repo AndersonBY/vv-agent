@@ -1,6 +1,76 @@
 {
   "cases": [
     {
+      "billable_call_id": "late_usage_normal/turn/initial/model/primary/1/1",
+      "bytes_base64": "eyJiaWxsYWJsZV9jYWxsX2lkIjoibGF0ZV91c2FnZV9ub3JtYWwvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xIiwiY2FzZSI6ImxhdGVfdXNhZ2Vfbm9ybWFsIiwiY29tcGxldGlvbl9jb3VudCI6MSwiY29udGV4dCI6Im5vcm1hbCIsInByb2plY3RlZF91c2FnZSI6eyJjYWNoZV91c2FnZSI6eyJyZWFkX2lucHV0X3Rva2VucyI6bnVsbCwic291cmNlIjpudWxsLCJzdGF0dXMiOiJhY2NvdW50aW5nX21pc3NpbmciLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGwsIndyaXRlX2lucHV0X3Rva2VucyI6bnVsbH0sImlucHV0X3Rva2VucyI6MTAsIm91dHB1dF90b2tlbnMiOjUsInByb3ZpZGVyX3VzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjo1LCJwcm9tcHRfdG9rZW5zIjoxMCwidG90YWxfdG9rZW5zIjoxNX0sInJlYXNvbmluZ190b2tlbnMiOm51bGwsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQudG9rZW4tdXNhZ2UudjEiLCJ0b3RhbF90b2tlbnMiOjE1LCJ1c2FnZV9zb3VyY2UiOiJwcm92aWRlcl9yZXBvcnRlZCJ9LCJyZXBsYXlfZGlzcG9zaXRpb24iOiJub29wIiwidXNhZ2UiOnsiY29tcGxldGlvbl90b2tlbnMiOjUsInByb21wdF90b2tlbnMiOjEwLCJ0b3RhbF90b2tlbnMiOjE1fX0=",
+      "case": "late_usage_normal",
+      "completion_count": 1,
+      "context": "normal",
+      "projected_usage": {
+        "cache_usage": {
+          "read_input_tokens": null,
+          "source": null,
+          "status": "accounting_missing",
+          "uncached_input_tokens": null,
+          "write_input_tokens": null
+        },
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "provider_usage": {
+          "completion_tokens": 5,
+          "prompt_tokens": 10,
+          "total_tokens": 15
+        },
+        "reasoning_tokens": null,
+        "schema_version": "vv-agent.token-usage.v1",
+        "total_tokens": 15,
+        "usage_source": "provider_reported"
+      },
+      "record_id": null,
+      "replay_disposition": "noop",
+      "sha256": "1a5abb2540f647b6056a569c38f3955099e93abe7a14c5656a946ccc90675de9",
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15
+      }
+    },
+    {
+      "billable_call_id": "late_usage_audit/turn/initial/model/primary/1/1",
+      "bytes_base64": "eyJiaWxsYWJsZV9jYWxsX2lkIjoibGF0ZV91c2FnZV9hdWRpdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xLzEiLCJjYXNlIjoibGF0ZV91c2FnZV9hdWRpdCIsImNvbXBsZXRpb25fY291bnQiOjEsImNvbnRleHQiOiJhdWRpdCIsInByb2plY3RlZF91c2FnZSI6eyJjYWNoZV91c2FnZSI6eyJyZWFkX2lucHV0X3Rva2VucyI6bnVsbCwic291cmNlIjpudWxsLCJzdGF0dXMiOiJhY2NvdW50aW5nX21pc3NpbmciLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGwsIndyaXRlX2lucHV0X3Rva2VucyI6bnVsbH0sImlucHV0X3Rva2VucyI6MTAsIm91dHB1dF90b2tlbnMiOjUsInByb3ZpZGVyX3VzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjo1LCJwcm9tcHRfdG9rZW5zIjoxMCwidG90YWxfdG9rZW5zIjoxNX0sInJlYXNvbmluZ190b2tlbnMiOm51bGwsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQudG9rZW4tdXNhZ2UudjEiLCJ0b3RhbF90b2tlbnMiOjE1LCJ1c2FnZV9zb3VyY2UiOiJwcm92aWRlcl9yZXBvcnRlZCJ9LCJyZXBsYXlfZGlzcG9zaXRpb24iOiJub29wIiwidXNhZ2UiOnsiY29tcGxldGlvbl90b2tlbnMiOjUsInByb21wdF90b2tlbnMiOjEwLCJ0b3RhbF90b2tlbnMiOjE1fX0=",
+      "case": "late_usage_audit",
+      "completion_count": 1,
+      "context": "audit",
+      "projected_usage": {
+        "cache_usage": {
+          "read_input_tokens": null,
+          "source": null,
+          "status": "accounting_missing",
+          "uncached_input_tokens": null,
+          "write_input_tokens": null
+        },
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "provider_usage": {
+          "completion_tokens": 5,
+          "prompt_tokens": 10,
+          "total_tokens": 15
+        },
+        "reasoning_tokens": null,
+        "schema_version": "vv-agent.token-usage.v1",
+        "total_tokens": 15,
+        "usage_source": "provider_reported"
+      },
+      "record_id": null,
+      "replay_disposition": "noop",
+      "sha256": "d6b734d2d4cabd937fc6556bea0cc7c68c076e2e44ceeb963b97b4c95e41d6ce",
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15
+      }
+    },
+    {
       "bytes_base64": "eyJjYXNlIjoiY3JlYXRpb25fc2VlZCIsImV4cGVjdGVkX3NoYXJlZF9zdGF0ZSI6eyJib29sIjp0cnVlLCJmbG9hdCI6MS41LCJpbnRlZ2VyIjoxLCJudWxsIjpudWxsLCLwn5iAIjoxZS03LCLugIAiOjB9LCJzZXNzaW9uX2lkIjoic2VlZCJ9",
       "case": "creation_seed",
       "expected_shared_state": {
