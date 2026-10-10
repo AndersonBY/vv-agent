@@ -1,8 +1,8 @@
 # Host migration
 
-Public API v9 selects contract 25.0.0. The execution
+Public API v10 selects contract 26.0.0. The execution
 replacements introduced by v8 still apply; the additional
-[0.23.0 host update](#python-0230--public-api-v9-host-update) below covers scheduling
+[0.23.0 host update](#python-0230--public-api-v10-host-update) below covers scheduling
 and storage. Use the current API throughout a host; older runtimes remain in
 pinned releases. There is no conversion of a running v23 execution. Finish or
 explicitly close old work with its original runtime before switching artifacts.
@@ -193,9 +193,9 @@ pip install 'vv-agent[redis,celery]'
 pip install 'vv-agent[postgres]'
 ```
 
-## Python 0.23.0 / public API v9 host update
+## Python 0.23.0 / public API v10 host update
 
-Python 0.23.0 pins the immutable contract v25.0.0 release. The v8 execution replacements above still apply; F5 adds
+Python 0.23.0 selects the local contract v26.0.0 candidate. The v8 execution replacements above still apply; F5 adds
 custom child batches and changes the required store/scheduling surface.
 
 - Replace inline Celery tick with `tick(..., dispatch=enqueue_drive, project=...)`.
@@ -213,4 +213,7 @@ custom child batches and changes the required store/scheduling surface.
   back; custom batch results include every child in admission order.
 
 See [host integration](host-integration.md) for the complete dispatch, retry and
-transaction contract. Record/inbox/event/App Server wire versions do not change.
+transaction contract. Inbox schema 2 requires `provider_result.usage` as a JSON
+object (`{}` for no observed usage); schema 1 rejects. Authenticate usage along
+with result and bill from canonical typed usage, including late audit attempts.
+Record schema 1 and event/App Server wire versions remain current.

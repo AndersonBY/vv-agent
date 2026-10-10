@@ -97,7 +97,7 @@ def validate_outputs(values, base: Path, keep, replacements):
         for name, value in baseline.items()
         if isinstance(value.get("schema_version"), str) and name != "run_definition.json"
     )
-    current.add("vv-agent-public-api-v9")
+    current.add("vv-agent-public-api-v10")
     current.add(baseline["memory_local.json"]["microcompact"]["schema_version"])
     for schema in schemas.values():
         current.update(
@@ -182,8 +182,10 @@ def validate_outputs(values, base: Path, keep, replacements):
                             current
                             if isinstance(item, str)
                             else {
-                                9
+                                10
                                 if name == "public_api.json" and not path
+                                else INPUT_SCHEMA["properties"]["schema_version"]["const"]
+                                if "input_id" in node and "available_ms" in node
                                 else RECORD_SCHEMA["properties"]["schema_version"]["const"]
                             }
                         )
@@ -209,7 +211,6 @@ def validate_outputs(values, base: Path, keep, replacements):
                 if key.endswith("_omitted_when_absent") and key != "optional_fields_omitted_when_absent":
                     field = key.removesuffix("_omitted_when_absent")
                     assert field in owners.get((name, path), ()), f"{location}/{key}: unknown omitted field {field}"
-    assert INPUT_SCHEMA["properties"]["schema_version"]["const"] == RECORD_SCHEMA["properties"]["schema_version"]["const"]
     return {
         "references": references,
         "optional_lists": optional_lists,

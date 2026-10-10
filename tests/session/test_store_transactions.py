@@ -479,6 +479,7 @@ def test_late_callback_after_generation_replaced_is_consumed_as_audit(store):
             "request_digest": record("op_planned").payload["request_digest"],
             "provider_binding": "provider",
             "result": {"ok": True},
+            "usage": {},
             "evidence": ["accepted"],
         },
         target_turn_id="t",

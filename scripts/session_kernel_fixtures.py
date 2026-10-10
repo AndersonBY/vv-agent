@@ -152,11 +152,12 @@ class PendingApproval:
 class Provider:
     """Independent trusted provider truth with one stable accepted job."""
 
-    def __init__(self, *, unknown=False):
+    def __init__(self, *, unknown=False, usage=None):
         self.unknown = unknown
         self.handle = None
         self.result = None
         self.effects = 0
+        self.usage = usage or {}
 
     def submit(self, plan, *, context):
         self.effects += 1
@@ -186,7 +187,11 @@ class Provider:
             return False
         if item.kind == "provider_evidence":
             return item.payload["handle"] == self.handle
-        return item.payload["result"] == self.result and item.payload["evidence"] == ["trusted/job"]
+        return (
+            item.payload["result"] == self.result
+            and item.payload["usage"] == self.usage
+            and item.payload["evidence"] == ["trusted/job"]
+        )
 
     def callback(self, kind, tid, input_id):
         h = self.handle
@@ -195,7 +200,7 @@ class Provider:
         if kind == "provider_evidence":
             p["handle"] = h
         else:
-            p.update(provider_binding=h["provider"], result=self.result, evidence=[h["evidence"]])
+            p.update(provider_binding=h["provider"], result=self.result, usage=self.usage, evidence=[h["evidence"]])
         return InboxItem(input_id, kind, p, tid, 0)
 
 
@@ -286,6 +291,7 @@ class Fixtures:
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
 
     def produce(self):
+        self.provider_usage()
         opaque = {"😀": 1e-7, "\ue000": -0.0, "null": None, "bool": True, "integer": 1, "float": 1.5}
         self.admit(
             "seed",
@@ -1170,6 +1176,77 @@ class Fixtures:
             },
         }
 
+    def provider_usage(self):
+        class Cut(BaseException):
+            pass
+
+        usage = USAGE
+        for retry_started in (False, True):
+            sid = "late_usage_audit" if retry_started else "late_usage_normal"
+            provider = Provider(usage=usage)
+            response = LLMResponse("first", raw={"usage": usage})
+
+            def lose(point, plan, provider=provider, response=response):
+                if point == "after_external_call":
+                    provider.handle = {
+                        "kind": "provider",
+                        "provider": "model",
+                        "job_id": "job",
+                        "operation_id": plan.operation_id,
+                        "attempt": plan.attempt,
+                        "request_digest": plan.payload["request_digest"],
+                        "evidence": "trusted/job",
+                        "query_ref": "query/job",
+                        "cancel_ref": None,
+                    }
+                    provider.result = {"content": response.content, "tool_calls": [], "raw": response.raw}
+                    raise Cut
+
+            rt = self.admit(sid, [response, LLMResponse("second")], providers={"model": provider}, hook=lose)
+            try:
+                self.run(sid)
+            except Cut:
+                pass
+            else:
+                raise AssertionError("missing late usage cut")
+            pushed = False
+
+            def deliver(point, record, retry_started=retry_started, sid=sid, provider=provider):
+                nonlocal pushed
+                if not pushed and point == ("before_external_call" if retry_started else "after_commit") and record.attempt == 2:
+                    pushed = True
+                    self.push(sid, provider.callback("provider_result", f"{sid}/turn/initial", "receipt"))
+
+            rt.hook = deliver
+            self.run(sid)
+            result = self.result(sid)
+            assert result.final_output == ("second" if retry_started else "first")
+            first = result.token_usage.model_calls[0]
+            assert first.usage.input_tokens == usage["prompt_tokens"] and first.usage.output_tokens == usage["completion_tokens"]
+            assert first.usage.usage_source.value == "provider_reported"
+            self.push(sid, provider.callback("provider_result", f"{sid}/turn/initial", "replay"))
+            rt.hook = lambda *_: None
+            self.run(sid)
+            state, rows, _ = self.kernel.store.read_state(sid)
+            assert state.applied_inputs["replay"].payload["disposition"] == "noop"
+            completions = [r.record for r in rows if r.record.kind == "op_completed" and r.record.attempt == 1]
+            assert len(completions) == 1
+            assert independent_bytes([completions[0].payload["usage"]])[0] == independent_bytes([usage])[0]
+            events = [e for e in project_records(rows) if e.type == "model_call_completed" and e.attempt == 1]
+            assert len(events) == 1 and events[0].usage == first.usage
+            assert self.result(sid).token_usage == result.token_usage
+            self.semantics.append(
+                {
+                    "case": sid,
+                    "context": completions[0].payload["context"],
+                    "usage": usage,
+                    "projected_usage": first.usage.to_dict(),
+                    "billable_call_id": first.call_id,
+                    "replay_disposition": "noop",
+                    "completion_count": len(completions),
+                }
+            )
+
     def collect(self):
         streams = []
         for sid in self.kernel.store.list_sessions(limit=1_000_000):
@@ -1486,6 +1563,11 @@ def invalid_vectors(vectors):
     inbox = next(v["wire"] for v in vectors if v["type"] == "inbox" and v["wire"]["kind"] == "provider_result")
     for label, value in (
         ("retired_inbox_kind", inbox | {"kind": "deferred_result"}),
+        ("stale_inbox_version", inbox | {"schema_version": 1}),
+        ("missing_provider_usage", inbox | {"payload": {k: v for k, v in inbox["payload"].items() if k != "usage"}}),
+        ("extra_provider_field", inbox | {"payload": inbox["payload"] | {"extra": True}}),
+        ("null_provider_usage", inbox | {"payload": inbox["payload"] | {"usage": None}}),
+        ("nonobject_provider_usage", inbox | {"payload": inbox["payload"] | {"usage": []}}),
         (
             "inbox_trailing_newline_hash",
             inbox | {"payload": inbox["payload"] | {"request_digest": inbox["payload"]["request_digest"] + "\n"}},

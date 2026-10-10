@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
+from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import _project_provider_stream_payload
 from vv_agent.llm.errors import is_prompt_too_long_error
 from vv_agent.llm.vv_llm_client import VvLlmClient
@@ -573,11 +574,19 @@ class _Driver:
                     if item.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
                         disposition, reason = "rejected", "provider binding mismatch"
                     elif attempt.result is not None:
-                        disposition = "noop" if attempt.result._payload["result"] == item.payload["result"] else "rejected"
+                        disposition = (
+                            "noop"
+                            if all(
+                                canonical_json_bytes(attempt.result._payload[key]) == canonical_json_bytes(item.payload[key])
+                                for key in ("result", "usage")
+                            )
+                            else "rejected"
+                        )
                         reason = "retained result" if disposition == "noop" else "result conflict"
                     else:
                         extra = self.completed(
-                            attempt.execution_plan, Definitive(item.payload["result"], tuple(item.payload["evidence"]))
+                            attempt.execution_plan,
+                            Definitive(item.payload["result"], tuple(item.payload["evidence"]), usage=item.payload["usage"]),
                         )
                 elif attempt.state == "started":
                     extra = [self.parked(attempt.execution_plan, item.payload["handle"], after=True)]

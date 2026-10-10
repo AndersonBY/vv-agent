@@ -5,9 +5,9 @@ RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinar
 runs own an SQLite `:memory:` store. Hosts opt into durable execution through
 SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
 
-The contract lock pins the v25.0.0 release. Current codecs are RunEvent v6, model-call v2,
+The contract lock selects the local v26.0.0 candidate revision/artifact. Current codecs are RunEvent v6, model-call v2,
 task-token-usage v3, strict Message and App Server protocol v2. Public exports
-match public_api v9. Rust remains frozen at contract 23.0.0 and is outside this
+match public_api v10. InboxItem uses schema 2; Record remains schema 1. Rust remains frozen at contract 23.0.0 and is outside this
 Python adoption. All execution uses the same kernel and retained log.
 
 Runner.resume(session_id, turn_id) reads the retained identity. User and approval
@@ -318,6 +318,28 @@ Expired allow/allow_session answers are rejected; Broker session flags alone can
 authorize effects. Duplicate answers are noop only when all decision bytes agree;
 conflicting decisions are rejected.
 
+## Authenticated provider usage
+
+Inbox schema 2 requires `provider_result` payload fields `operation_id`,
+`attempt`, `request_digest`, `provider_binding` (nullable), `result`, `usage`
+and `evidence`. `usage` is a required JSON object with the same shape as
+`op_completed.usage`; use `{}` for no observed measurement. Missing, null,
+non-object usage and extra fields reject. Schema 1 inbox values reject; there is
+no old decoder. Authentication must cover usage, result and the attempt identity.
+
+The kernel retains this usage unchanged through `Definitive(..., usage=...)`.
+Synchronous model returns and provider submit/query Definitive outcomes retain
+the same upstream usage bytes. Late normal, correction and audit completions
+remain billable: audit prevents execution adoption but the call happened.
+`project_result` and `project_records` expose the canonical typed usage; hosts
+must not decode opaque `result.raw.usage` or infer zero for missing measurements.
+
+A new authenticated input for a completed attempt is a noop only when result
+and usage both have identical RFC8785 bytes; either difference is a result
+conflict. Replays create no second completion or billable call. Existing
+RunEvent v6, model-call v2, task-token-usage v3, TokenUsage v1 and App Server v2
+shapes remain unchanged.
+
 ## Repair, inputs and provider evidence
 
 Model results and all dependent tool plans commit together. A retained response
@@ -542,8 +564,8 @@ invalidate a newer turn's completion candidate.
 `tests/session/test_children.py` exercises these rules against disposable PostgreSQL and SQLite
 databases, including process-kill barriers around push/ack, concurrent
 delivery and input replay, identity/evidence rejection, atomic admission,
-background safe points, cancellation, and late-generation audit. F5 contract
-25.0.0 adoption remains pending; the support matrix owns required implementation
+background safe points, cancellation, and late-generation audit. Contract
+26.0.0 adoption remains pending; the support matrix owns required implementation
 revisions and central verification. Rust stays frozen at contract 23.0.0.
 
 
@@ -806,7 +828,7 @@ as a host-only example; backend B1 implements the site's tasks.
 `scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
 forty-five files from real store/kernel/public-surface/App Server producers with
 scripted providers and fixed semantic identities/clocks. It never edits the
-vendored snapshot. One generation compares all forty-five bytes with the vendored v25.0.0 snapshot.
+vendored snapshot. One generation compares all forty-five bytes with the vendored v26.0.0 snapshot.
 Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
 kind/stage/handle/optional-field coverage and source-prefix projections are
 revalidated. Deterministic curation preserves each behavioral coverage key.

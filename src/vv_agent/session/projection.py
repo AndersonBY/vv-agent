@@ -264,7 +264,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         event = ModelCallFailedEvent(
                             **identity, outcome="definitive", usage=model_usage(p["usage"]), error_code=p["result"]["error_code"]
                         )
-                    elif p["context"] != "audit":
+                    else:
                         event = ModelCallCompletedEvent(**identity, usage=model_usage(p["usage"]))
                 elif r.kind == "op_unknown":
                     events.append(

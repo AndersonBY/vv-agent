@@ -12,6 +12,7 @@ import pytest
 
 from vv_agent.agent import Agent
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session.kernel import Runtime, drive, read_state
@@ -25,6 +26,8 @@ from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
 from .controlled import ControlledProvider
+
+MODEL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}
 
 
 def runtime(database, steps, tools=(), **kwargs):
@@ -139,10 +142,10 @@ def worker(
             assert pipe.recv() == "continue"
 
     def model_response(_request):
-        response = LLMResponse("first")
+        response = LLMResponse("first", raw={"usage": MODEL_USAGE})
         with open_store(database) as reader:
             plan = records_of(reader, "op_planned")[-1]
-        provider.retain_model_result(plan, {"content": response.content, "tool_calls": [], "raw": {}})
+        provider.retain_model_result(plan, {"content": response.content, "tool_calls": [], "raw": response.raw})
         return response
 
     rt = runtime(
@@ -858,6 +861,10 @@ def test_budget_counts_and_elapsed_survive_recovery(store, database):
 @pytest.mark.parametrize("retry_started", [False, True])
 @pytest.mark.persistent_store
 def test_late_first_model_result_respects_retry_dispatch_boundary(store, database, retry_started):
+    from vv_agent.session.projection import project_records
+    from vv_agent.session.result import project_result
+    from vv_agent.session.runtime import model_usage
+
     provider = ControlledProvider(database)
     provider.install()
     start(store)
@@ -880,8 +887,29 @@ def test_late_first_model_result_respects_retry_dispatch_boundary(store, databas
         assert len(rt.llm.steps) == (0 if retry_started else 1)
         result = next(r for r in records_of(store, "op_completed") if r.attempt == 1)
         assert result.payload["context"] == ("audit" if retry_started else "normal")
+        assert result.payload["usage"] == MODEL_USAGE
         assert records_of(store, "turn_ended")[0].payload["result"] == ("second" if retry_started else "first")
         assert len(records_of(store, "op_started")) == (2 if retry_started else 1)
+        state, rows, _ = read_state(store, "s")
+        projected = project_result(store, "s", result.turn_id)
+        call = next(c for c in projected.token_usage.model_calls if c.attempt == 1)
+        assert call.usage == model_usage(MODEL_USAGE)
+        assert call.usage.input_tokens == 12000 and call.usage.output_tokens == 300
+        assert call.usage.usage_source.value == "provider_reported"
+        completed = [e for e in project_records(rows) if isinstance(e, ModelCallCompletedEvent) and e.attempt == 1]
+        assert len(completed) == 1 and completed[0].usage == call.usage
+        assert len({c.call_id for c in projected.token_usage.model_calls}) == (2 if retry_started else 1)
+
+        # Redelivery under either input identity must not create a second billable call.
+        with store.atomic() as tx:
+            first_receipt = tx.push("s", provider.callback())
+            assert tx.push("s", provider.callback()) == first_receipt
+            tx.push("s", provider.callback(input_id="redelivery"))
+        drive(store, "s", runtime=rt)
+        state, replay_rows, _ = read_state(store, "s")
+        assert state.applied_inputs["redelivery"].payload["disposition"] == "noop"
+        assert project_result(store, "s", result.turn_id).token_usage == projected.token_usage
+        assert len([e for e in project_records(replay_rows) if isinstance(e, ModelCallCompletedEvent) and e.attempt == 1]) == 1
     finally:
         if proc.is_alive():
             kill(proc, pipe, database)
