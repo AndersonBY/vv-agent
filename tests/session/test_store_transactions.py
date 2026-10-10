@@ -224,10 +224,12 @@ def test_due_time_reached_on_database_clock(store):
     create(store)
     lease = lease_for(store)
     now = store._now()
-    append(store, lease, [record("turn_started"), record("op_planned", not_before_ms=now + 150)])
+    due = now + 2000  # Wide margin: slow CI runners need >150 ms for append+release+scan.
+    append(store, lease, [record("turn_started"), record("op_planned", not_before_ms=due)])
     store.release(lease)
     assert store.list_runnable() == ()
-    sleep(0.16)
+    while store._now() < due:
+        sleep(0.05)
     assert [w.kind for w in store.list_runnable()] == ["drive"]
 
 
