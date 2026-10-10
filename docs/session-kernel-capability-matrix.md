@@ -4,8 +4,8 @@ All public entrypoints use the same session kernel. Inventory: **63 current
 capabilities**, each covered by a real producer test. Differences named below
 refer to the transition from the pinned v23 runtime; the contract fixtures
 and strict public API v10 define the supported behavior.
-The current candidate selects contract 26.0.0 locally; its immutable release and central adoption
-remain pending. The measured F3/F4 evidence below remains its named baseline.
+The current candidate selects immutable contract release v26.0.0; central adoption
+is recorded in the contract support matrix. The measured F3/F4 evidence below remains its named baseline.
 
 Paths are relative to `src/vv_agent/`. Test abbreviations under `tests/session/`:
 P = `test_runner_parity.py`, T = `test_tools_control_parity.py`,
@@ -94,7 +94,7 @@ Identity and clock values are compared only where fixed by the contract. Recover
 cases reconstruct Runtime/store state and assert retained callbacks, receipts,
 authorization, child identity, budgets and same-turn replies.
 
-The forty-five generated v26.0.0 candidate fixtures compare byte-for-byte with the
+The forty-five generated v26.0.0 fixtures compare byte-for-byte with the
 vendored snapshot. Public API v10 resolves every exported capability/member and rejects
 extra or missing exports. Snapshot checks establish artifact integrity separately.
 
