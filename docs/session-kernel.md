@@ -5,7 +5,7 @@ RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinar
 runs own an SQLite `:memory:` store. Hosts opt into durable execution through
 SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
 
-The local candidate lock selects contract 25.0.0. Current codecs are RunEvent v6, model-call v2,
+The contract lock pins the v25.0.0 release. Current codecs are RunEvent v6, model-call v2,
 task-token-usage v3, strict Message and App Server protocol v2. Public exports
 match public_api v9. Rust remains frozen at contract 23.0.0 and is outside this
 Python adoption. All execution uses the same kernel and retained log.
@@ -806,7 +806,7 @@ as a host-only example; backend B1 implements the site's tasks.
 `scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
 forty-five files from real store/kernel/public-surface/App Server producers with
 scripted providers and fixed semantic identities/clocks. It never edits the
-vendored snapshot. One generation compares all forty-five bytes with the local v25.0.0 candidate.
+vendored snapshot. One generation compares all forty-five bytes with the vendored v25.0.0 snapshot.
 Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
 kind/stage/handle/optional-field coverage and source-prefix projections are
 revalidated. Deterministic curation preserves each behavioral coverage key.

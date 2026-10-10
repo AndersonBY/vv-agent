@@ -1,6 +1,6 @@
 # Host migration
 
-Public API v9 selects the local contract 25.0.0 candidate. The execution
+Public API v9 selects contract 25.0.0. The execution
 replacements introduced by v8 still apply; the additional
 [0.23.0 host update](#python-0230--public-api-v9-host-update) below covers scheduling
 and storage. Use the current API throughout a host; older runtimes remain in
@@ -195,8 +195,7 @@ pip install 'vv-agent[postgres]'
 
 ## Python 0.23.0 / public API v9 host update
 
-Contract 25.0.0 is a local candidate pending immutable publication and required
-central adoption. The v8 execution replacements above still apply; F5 adds
+Python 0.23.0 pins the immutable contract v25.0.0 release. The v8 execution replacements above still apply; F5 adds
 custom child batches and changes the required store/scheduling surface.
 
 - Replace inline Celery tick with `tick(..., dispatch=enqueue_drive, project=...)`.
