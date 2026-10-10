@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "contract_version": "26.0.0",
-  "contract_revision": "3df46d2d518694e1c81b764164202eac134a8073",
+  "contract_revision": "a9fe9191f1e40272aee4413305d0850c5706b713",
   "source_repository": "https://github.com/AndersonBY/vv-agent-contract",
-  "artifact_url": "/home/makerbi/vectorvein/tmp/codex-runs/f6-contract-dist-a/vv-agent-contract-26.0.0.zip",
+  "artifact_url": "https://github.com/AndersonBY/vv-agent-contract/releases/download/v26.0.0/vv-agent-contract-26.0.0.zip",
   "artifact_sha256": "e04f050ac3cbd59f31991cfded32ebb59852d55d3ce1a22b4c9b0cf0585564bd",
   "snapshot_path": "tests/fixtures/parity",
   "fixture_manifest_sha256": "75c26c736c661114d3ae22d391f64149c12fe7f58662142129e5d14b8bd4ed81"
