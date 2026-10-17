@@ -8,6 +8,7 @@ history.
 
 | Document | Use it for |
 | --- | --- |
+| [releases/0.23.1.md](releases/0.23.1.md) | Cache-write usage aliases for vv-llm and Moonshot kimi-k3. |
 | [releases/0.23.0.md](releases/0.23.0.md) | Candidate batch admission, dispatch isolation and host schema update. |
 | [releases/0.22.0.md](releases/0.22.0.md) | Breaking changes, supported extras and central release adoption requirements. |
 | `architecture.md` | Runtime structure, module boundaries, execution flow, and invariants. |

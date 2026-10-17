@@ -56,8 +56,10 @@ def normalize_token_usage(
         ("cache_write_input_tokens",),
         ("cache_creation_input_tokens",),
         ("cache_write_tokens",),
+        ("cache_creation_tokens",),
         ("input_tokens_details", "cache_creation_tokens"),
         ("prompt_tokens_details", "cache_creation_tokens"),
+        ("prompt_tokens_details", "cache_write_tokens"),
     )
     uncached_input_tokens = _read_nested_non_negative_int(raw_usage, ("uncached_input_tokens",))
 
