@@ -143,6 +143,55 @@ def test_native_cache_write_usage_is_normalized_without_public_aliases() -> None
     assert usage.cache_usage.uncached_input_tokens == 400
 
 
+@pytest.mark.parametrize(
+    "provider_usage",
+    [
+        # vv-llm Usage.model_dump(exclude_none=True) for Moonshot kimi-k3.
+        {
+            "completion_tokens": 91,
+            "prompt_tokens": 10617,
+            "total_tokens": 10708,
+            "cache_creation_tokens": 10496,
+            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 10496},
+        },
+        # The provider shape before vv-llm promotes the nested write count.
+        {
+            "completion_tokens": 91,
+            "prompt_tokens": 10617,
+            "total_tokens": 10708,
+            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 10496},
+        },
+    ],
+    ids=["vv-llm-normalized", "nested-only"],
+)
+def test_openai_compatible_cache_write_usage_is_provider_reported(provider_usage: dict[str, Any]) -> None:
+    usage = normalize_token_usage(provider_usage)
+
+    assert usage.input_tokens == 10617
+    assert usage.total_tokens == 10708
+    assert usage.cache_usage.status.value == "provider_reported"
+    assert usage.cache_usage.read_input_tokens == 0
+    assert usage.cache_usage.write_input_tokens == 10496
+    assert usage.cache_usage.uncached_input_tokens == 10617
+
+
+def test_vv_llm_cache_creation_is_not_added_to_inclusive_prompt_tokens() -> None:
+    usage = normalize_token_usage(
+        {
+            "completion_tokens": 50,
+            "prompt_tokens": 1000,
+            "total_tokens": 1050,
+            "cache_creation_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 600},
+        }
+    )
+
+    assert usage.input_tokens == 1000
+    assert usage.cache_usage.read_input_tokens == 600
+    assert usage.cache_usage.write_input_tokens == 100
+    assert usage.cache_usage.uncached_input_tokens == 400
+
+
 @pytest.mark.parametrize("case", _contract()["compaction_cases"][:3], ids=lambda case: case["name"])
 def test_compaction_accounting_real_producer(case):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider, ToolOutputText, function_tool
