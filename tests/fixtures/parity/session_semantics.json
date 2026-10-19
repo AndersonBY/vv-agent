@@ -1,6 +1,499 @@
 {
   "cases": [
     {
+      "billable_models": [
+        "m",
+        "m",
+        "B"
+      ],
+      "bytes_base64": "eyJiaWxsYWJsZV9tb2RlbHMiOlsibSIsIm0iLCJCIl0sImNhbGxzIjpbeyJhdHRlbXB0IjoxLCJiYWNrZW5kIjoic2NyaXB0ZWQiLCJjYWxsX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMSIsImN5Y2xlX2luZGV4IjoxLCJlcnJvcl9jb2RlIjoibW9kZWxfb3V0Y29tZV91bmtub3duIiwibW9kZWwiOiJtIiwib3BlcmF0aW9uIjoiYWdlbnRfY3ljbGUiLCJvcGVyYXRpb25faWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSIsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQubW9kZWwtY2FsbC52MiIsInN0YXR1cyI6ImFtYmlndW91cyIsInVzYWdlIjp7ImNhY2hlX3VzYWdlIjp7InJlYWRfaW5wdXRfdG9rZW5zIjpudWxsLCJzb3VyY2UiOm51bGwsInN0YXR1cyI6ImFjY291bnRpbmdfbWlzc2luZyIsInVuY2FjaGVkX2lucHV0X3Rva2VucyI6bnVsbCwid3JpdGVfaW5wdXRfdG9rZW5zIjpudWxsfSwiaW5wdXRfdG9rZW5zIjpudWxsLCJvdXRwdXRfdG9rZW5zIjpudWxsLCJwcm92aWRlcl91c2FnZSI6e30sInJlYXNvbmluZ190b2tlbnMiOm51bGwsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQudG9rZW4tdXNhZ2UudjEiLCJ0b3RhbF90b2tlbnMiOm51bGwsInVzYWdlX3NvdXJjZSI6ImFjY291bnRpbmdfbWlzc2luZyJ9fSx7ImF0dGVtcHQiOjIsImJhY2tlbmQiOiJzY3JpcHRlZCIsImNhbGxfaWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8yIiwiY3ljbGVfaW5kZXgiOjEsImVycm9yX2NvZGUiOm51bGwsIm1vZGVsIjoibSIsIm9wZXJhdGlvbiI6ImFnZW50X2N5Y2xlIiwib3BlcmF0aW9uX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiLCJzY2hlbWFfdmVyc2lvbiI6InZ2LWFnZW50Lm1vZGVsLWNhbGwudjIiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJ1c2FnZSI6eyJjYWNoZV91c2FnZSI6eyJyZWFkX2lucHV0X3Rva2VucyI6bnVsbCwic291cmNlIjpudWxsLCJzdGF0dXMiOiJhY2NvdW50aW5nX21pc3NpbmciLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGwsIndyaXRlX2lucHV0X3Rva2VucyI6bnVsbH0sImlucHV0X3Rva2VucyI6MTAsIm91dHB1dF90b2tlbnMiOjUsInByb3ZpZGVyX3VzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjo1LCJwcm9tcHRfdG9rZW5zIjoxMCwidG90YWxfdG9rZW5zIjoxNX0sInJlYXNvbmluZ190b2tlbnMiOm51bGwsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQudG9rZW4tdXNhZ2UudjEiLCJ0b3RhbF90b2tlbnMiOjE1LCJ1c2FnZV9zb3VyY2UiOiJwcm92aWRlcl9yZXBvcnRlZCJ9fSx7ImF0dGVtcHQiOjEsImJhY2tlbmQiOiJhbnRocm9waWMiLCJjYWxsX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzIvMSIsImN5Y2xlX2luZGV4IjoyLCJlcnJvcl9jb2RlIjpudWxsLCJtb2RlbCI6IkIiLCJvcGVyYXRpb24iOiJhZ2VudF9jeWNsZSIsIm9wZXJhdGlvbl9pZCI6Im1vZGVsX3NlbGVjdGlvbi90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8yIiwic2NoZW1hX3ZlcnNpb24iOiJ2di1hZ2VudC5tb2RlbC1jYWxsLnYyIiwic3RhdHVzIjoiY29tcGxldGVkIiwidXNhZ2UiOnsiY2FjaGVfdXNhZ2UiOnsicmVhZF9pbnB1dF90b2tlbnMiOm51bGwsInNvdXJjZSI6bnVsbCwic3RhdHVzIjoiYWNjb3VudGluZ19taXNzaW5nIiwidW5jYWNoZWRfaW5wdXRfdG9rZW5zIjpudWxsLCJ3cml0ZV9pbnB1dF90b2tlbnMiOm51bGx9LCJpbnB1dF90b2tlbnMiOjEwLCJvdXRwdXRfdG9rZW5zIjo1LCJwcm92aWRlcl91c2FnZSI6eyJjb21wbGV0aW9uX3Rva2VucyI6NSwicHJvbXB0X3Rva2VucyI6MTAsInRvdGFsX3Rva2VucyI6MTV9LCJyZWFzb25pbmdfdG9rZW5zIjpudWxsLCJzY2hlbWFfdmVyc2lvbiI6InZ2LWFnZW50LnRva2VuLXVzYWdlLnYxIiwidG90YWxfdG9rZW5zIjoxNSwidXNhZ2Vfc291cmNlIjoicHJvdmlkZXJfcmVwb3J0ZWQifX1dLCJjYXNlIjoibW9kZWxfc2VsZWN0aW9uX21pZF9zZXNzaW9uX3JldHJ5IiwibW9kZWxzIjpbIm0iLCJtIiwiQiJdLCJwbGFuX2lkcyI6WyJvcC9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xL3BsYW5uZWQiLCJvcC9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8yL3BsYW5uZWQiLCJvcC9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMi8xL3BsYW5uZWQiXSwicGxhbnMiOlt7ImF0dGVtcHQiOjEsImtpbmQiOiJvcF9wbGFubmVkIiwib3BlcmF0aW9uX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiLCJwYXlsb2FkIjp7ImJ1ZGdldF9hZG1pc3Npb24iOnt9LCJjb25zdW1lZF91bmtub3ducyI6W10sImNvbnRleHRfdmVyc2lvbiI6IjMiLCJkZXBlbmRlbmNpZXMiOltdLCJpZGVtcG90ZW5jeV9rZXkiOiJtb2RlbF9zZWxlY3Rpb24vbW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiLCJub3RfYmVmb3JlX21zIjpudWxsLCJvcF9raW5kIjoibW9kZWwiLCJwcm92aWRlcl9iaW5kaW5nIjoibW9kZWwiLCJwdXJwb3NlIjoicHJpbWFyeSIsInJlcXVlc3QiOnsibWVzc2FnZXMiOlt7ImNvbnRlbnQiOiJCZSBwcmVjaXNlLiIsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF90b29sX3BvbGljeV9hcHByb3ZhbCI6ImRlZmF1bHQiLCJfdnZfYWdlbnRfdG9vbF91c2VfYmVoYXZpb3IiOiJydW5fbGxtX2FnYWluIiwic2Vzc2lvbl9tZW1vcnlfZW5hYmxlZCI6ZmFsc2UsInRyYWNlX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbCJ9LCJyb2xlIjoic3lzdGVtIn0seyJjb250ZW50IjoiZ28iLCJyb2xlIjoidXNlciJ9XSwibWV0YWRhdGEiOnsiX3Z2X2FnZW50X3Rvb2xfcG9saWN5X2FwcHJvdmFsIjoiZGVmYXVsdCIsIl92dl9hZ2VudF90b29sX3VzZV9iZWhhdmlvciI6InJ1bl9sbG1fYWdhaW4iLCJzZXNzaW9uX21lbW9yeV9lbmFibGVkIjpmYWxzZSwidHJhY2VfaWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIiwidnZfc2Vzc2lvbiI6eyJjeWNsZV9pbmRleCI6MSwibW9kZWxfYmluZGluZyI6eyJiYWNrZW5kIjoic2NyaXB0ZWQiLCJjb250ZXh0X2xlbmd0aCI6bnVsbCwiZW5kcG9pbnRzIjpbXSwibWF4X291dHB1dF90b2tlbnMiOm51bGwsIm1vZGVsIjoibSJ9LCJzaGFyZWRfc3RhdGUiOnsidG9kb19saXN0IjpbXX19fSwibW9kZWwiOiJtIiwibW9kZWxfc2V0dGluZ3MiOnsicmV0cnkiOnsiYmFja29mZl9zZWNvbmRzIjowLCJtYXhfYXR0ZW1wdHMiOjF9fSwicHJvbXB0X2J1bmRsZSI6eyJzZWN0aW9ucyI6W3siaWQiOiJhZ2VudF9pbnN0cnVjdGlvbnMiLCJzb3VyY2UiOiJhZ2VudC5pbnN0cnVjdGlvbnMiLCJzdGFibGUiOnRydWUsInRleHQiOiJCZSBwcmVjaXNlLiJ9XSwic3RhYmxlX2hhc2giOiI1YzU5ZjQwNjcxOGUzZjE4NTJjZjI2N2E1ZWRkOTJmYzUxYzlkYWU2NGRjMTkyNDA2YjViMTYwZmY3MzlhNGQyIn0sInJvdXRlIjp7fSwidG9vbHMiOlt7ImZ1bmN0aW9uIjp7ImRlc2NyaXB0aW9uIjoiIiwibmFtZSI6ImVjaG8iLCJwYXJhbWV0ZXJzIjp7ImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjpmYWxzZSwicHJvcGVydGllcyI6eyJ0ZXh0Ijp7InR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbInRleHQiXSwidHlwZSI6Im9iamVjdCJ9LCJzdHJpY3QiOnRydWV9LCJ0eXBlIjoiZnVuY3Rpb24ifV19LCJyZXF1ZXN0X2RpZ2VzdCI6IjBhZWVlYmMwYzlhZjgwMzdjZjI1MjIyNjcyZDc2ZGZiNzhjMWY2OTk4ZDU5ZDY4OTRlYTRlZGI5ODFhOGE3NmEiLCJ0b29sIjpudWxsfSwicmVjb3JkX2lkIjoib3AvbW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMS9wbGFubmVkIiwic2NoZW1hX3ZlcnNpb24iOjEsInNlc3Npb25faWQiOiJtb2RlbF9zZWxlY3Rpb24iLCJ0dXJuX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbCJ9LHsiYXR0ZW1wdCI6Miwia2luZCI6Im9wX3BsYW5uZWQiLCJvcGVyYXRpb25faWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSIsInBheWxvYWQiOnsiYnVkZ2V0X2FkbWlzc2lvbiI6e30sImNvbnN1bWVkX3Vua25vd25zIjpbXSwiY29udGV4dF92ZXJzaW9uIjoiMyIsImRlcGVuZGVuY2llcyI6W10sImlkZW1wb3RlbmN5X2tleSI6Im1vZGVsX3NlbGVjdGlvbi9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSIsIm5vdF9iZWZvcmVfbXMiOjAsIm9wX2tpbmQiOiJtb2RlbCIsInByb3ZpZGVyX2JpbmRpbmciOiJtb2RlbCIsInB1cnBvc2UiOiJwcmltYXJ5IiwicmVxdWVzdCI6eyJtZXNzYWdlcyI6W3siY29udGVudCI6IkJlIHByZWNpc2UuIiwibWV0YWRhdGEiOnsiX3Z2X2FnZW50X3Rvb2xfcG9saWN5X2FwcHJvdmFsIjoiZGVmYXVsdCIsIl92dl9hZ2VudF90b29sX3VzZV9iZWhhdmlvciI6InJ1bl9sbG1fYWdhaW4iLCJzZXNzaW9uX21lbW9yeV9lbmFibGVkIjpmYWxzZSwidHJhY2VfaWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIn0sInJvbGUiOiJzeXN0ZW0ifSx7ImNvbnRlbnQiOiJnbyIsInJvbGUiOiJ1c2VyIn1dLCJtZXRhZGF0YSI6eyJfdnZfYWdlbnRfdG9vbF9wb2xpY3lfYXBwcm92YWwiOiJkZWZhdWx0IiwiX3Z2X2FnZW50X3Rvb2xfdXNlX2JlaGF2aW9yIjoicnVuX2xsbV9hZ2FpbiIsInNlc3Npb25fbWVtb3J5X2VuYWJsZWQiOmZhbHNlLCJ0cmFjZV9pZCI6Im1vZGVsX3NlbGVjdGlvbi90dXJuL2luaXRpYWwiLCJ2dl9zZXNzaW9uIjp7ImN5Y2xlX2luZGV4IjoxLCJtb2RlbF9iaW5kaW5nIjp7ImJhY2tlbmQiOiJzY3JpcHRlZCIsImNvbnRleHRfbGVuZ3RoIjpudWxsLCJlbmRwb2ludHMiOltdLCJtYXhfb3V0cHV0X3Rva2VucyI6bnVsbCwibW9kZWwiOiJtIn0sInNoYXJlZF9zdGF0ZSI6eyJ0b2RvX2xpc3QiOltdfX19LCJtb2RlbCI6Im0iLCJtb2RlbF9zZXR0aW5ncyI6eyJyZXRyeSI6eyJiYWNrb2ZmX3NlY29uZHMiOjAsIm1heF9hdHRlbXB0cyI6MX19LCJwcm9tcHRfYnVuZGxlIjp7InNlY3Rpb25zIjpbeyJpZCI6ImFnZW50X2luc3RydWN0aW9ucyIsInNvdXJjZSI6ImFnZW50Lmluc3RydWN0aW9ucyIsInN0YWJsZSI6dHJ1ZSwidGV4dCI6IkJlIHByZWNpc2UuIn1dLCJzdGFibGVfaGFzaCI6IjVjNTlmNDA2NzE4ZTNmMTg1MmNmMjY3YTVlZGQ5MmZjNTFjOWRhZTY0ZGMxOTI0MDZiNWIxNjBmZjczOWE0ZDIifSwicm91dGUiOnt9LCJ0b29scyI6W3siZnVuY3Rpb24iOnsiZGVzY3JpcHRpb24iOiIiLCJuYW1lIjoiZWNobyIsInBhcmFtZXRlcnMiOnsiYWRkaXRpb25hbFByb3BlcnRpZXMiOmZhbHNlLCJwcm9wZXJ0aWVzIjp7InRleHQiOnsidHlwZSI6InN0cmluZyJ9fSwicmVxdWlyZWQiOlsidGV4dCJdLCJ0eXBlIjoib2JqZWN0In0sInN0cmljdCI6dHJ1ZX0sInR5cGUiOiJmdW5jdGlvbiJ9XX0sInJlcXVlc3RfZGlnZXN0IjoiMGFlZWViYzBjOWFmODAzN2NmMjUyMjI2NzJkNzZkZmI3OGMxZjY5OThkNTlkNjg5NGVhNGVkYjk4MWE4YTc2YSIsInRvb2wiOm51bGx9LCJyZWNvcmRfaWQiOiJvcC9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8yL3BsYW5uZWQiLCJzY2hlbWFfdmVyc2lvbiI6MSwic2Vzc2lvbl9pZCI6Im1vZGVsX3NlbGVjdGlvbiIsInR1cm5faWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIn0seyJhdHRlbXB0IjoxLCJraW5kIjoib3BfcGxhbm5lZCIsIm9wZXJhdGlvbl9pZCI6Im1vZGVsX3NlbGVjdGlvbi90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8yIiwicGF5bG9hZCI6eyJidWRnZXRfYWRtaXNzaW9uIjp7fSwiY29uc3VtZWRfdW5rbm93bnMiOltdLCJjb250ZXh0X3ZlcnNpb24iOiIyMiIsImRlcGVuZGVuY2llcyI6W10sImlkZW1wb3RlbmN5X2tleSI6Im1vZGVsX3NlbGVjdGlvbi9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMiIsIm5vdF9iZWZvcmVfbXMiOm51bGwsIm9wX2tpbmQiOiJtb2RlbCIsInByb3ZpZGVyX2JpbmRpbmciOiJtb2RlbCIsInB1cnBvc2UiOiJwcmltYXJ5IiwicmVxdWVzdCI6eyJtZXNzYWdlcyI6W3siY29udGVudCI6IkJlIHByZWNpc2UuIiwibWV0YWRhdGEiOnsiX3Z2X2FnZW50X3Rvb2xfcG9saWN5X2FwcHJvdmFsIjoiZGVmYXVsdCIsIl92dl9hZ2VudF90b29sX3VzZV9iZWhhdmlvciI6InJ1bl9sbG1fYWdhaW4iLCJzZXNzaW9uX21lbW9yeV9lbmFibGVkIjpmYWxzZSwidHJhY2VfaWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIn0sInJvbGUiOiJzeXN0ZW0ifSx7ImNvbnRlbnQiOiJnbyIsInJvbGUiOiJ1c2VyIn0seyJjb250ZW50IjoiIiwicm9sZSI6ImFzc2lzdGFudCIsInRvb2xfY2FsbHMiOlt7ImZ1bmN0aW9uIjp7ImFyZ3VtZW50cyI6IntcInRleHRcIjpcIm9rXCJ9IiwibmFtZSI6ImVjaG8ifSwiaWQiOiJlY2hvIiwidHlwZSI6ImZ1bmN0aW9uIn1dfSx7ImNvbnRlbnQiOiJvayIsInJvbGUiOiJ0b29sIiwidG9vbF9jYWxsX2lkIjoiZWNobyJ9XSwibWV0YWRhdGEiOnsiX3Z2X2FnZW50X3Rvb2xfcG9saWN5X2FwcHJvdmFsIjoiZGVmYXVsdCIsIl92dl9hZ2VudF90b29sX3VzZV9iZWhhdmlvciI6InJ1bl9sbG1fYWdhaW4iLCJzZXNzaW9uX21lbW9yeV9lbmFibGVkIjpmYWxzZSwidHJhY2VfaWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIiwidnZfc2Vzc2lvbiI6eyJjeWNsZV9pbmRleCI6MiwibW9kZWxfYmluZGluZyI6eyJiYWNrZW5kIjoiYW50aHJvcGljIiwiY29udGV4dF9sZW5ndGgiOjEyODAwMCwiZW5kcG9pbnRzIjpbXSwibWF4X291dHB1dF90b2tlbnMiOjQwOTYsIm1vZGVsIjoiQiJ9LCJzaGFyZWRfc3RhdGUiOnsidG9kb19saXN0IjpbXX19fSwibW9kZWwiOiJCIiwibW9kZWxfc2V0dGluZ3MiOnsibWF4X3Rva2VucyI6MTAyNCwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImhpZ2gifSwicmV0cnkiOnsiYmFja29mZl9zZWNvbmRzIjowLCJtYXhfYXR0ZW1wdHMiOjF9fSwicHJvbXB0X2J1bmRsZSI6eyJzZWN0aW9ucyI6W3siaWQiOiJhZ2VudF9pbnN0cnVjdGlvbnMiLCJzb3VyY2UiOiJhZ2VudC5pbnN0cnVjdGlvbnMiLCJzdGFibGUiOnRydWUsInRleHQiOiJCZSBwcmVjaXNlLiJ9XSwic3RhYmxlX2hhc2giOiI1YzU5ZjQwNjcxOGUzZjE4NTJjZjI2N2E1ZWRkOTJmYzUxYzlkYWU2NGRjMTkyNDA2YjViMTYwZmY3MzlhNGQyIn0sInJvdXRlIjp7ImJhY2tlbmRfdHlwZSI6ImFudGhyb3BpYyJ9LCJ0b29scyI6W3siZnVuY3Rpb24iOnsiZGVzY3JpcHRpb24iOiIiLCJuYW1lIjoiZWNobyIsInBhcmFtZXRlcnMiOnsiYWRkaXRpb25hbFByb3BlcnRpZXMiOmZhbHNlLCJwcm9wZXJ0aWVzIjp7InRleHQiOnsidHlwZSI6InN0cmluZyJ9fSwicmVxdWlyZWQiOlsidGV4dCJdLCJ0eXBlIjoib2JqZWN0In0sInN0cmljdCI6dHJ1ZX0sInR5cGUiOiJmdW5jdGlvbiJ9XX0sInJlcXVlc3RfZGlnZXN0IjoiM2I4YzU3ZmVkYzlkOGQ0ODhmODQ4ZDg4YWMwZGQ0ODNmNjk2ZWM1YzM5ZTEzY2E2MjYzMzFkZmZkNmIwOWZmZCIsInRvb2wiOm51bGx9LCJyZWNvcmRfaWQiOiJvcC9tb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMi8xL3BsYW5uZWQiLCJzY2hlbWFfdmVyc2lvbiI6MSwic2Vzc2lvbl9pZCI6Im1vZGVsX3NlbGVjdGlvbiIsInR1cm5faWQiOiJtb2RlbF9zZWxlY3Rpb24vdHVybi9pbml0aWFsIn1dLCJyZXRyeV9yZXF1ZXN0X3VuY2hhbmdlZCI6dHJ1ZSwicm91dGUiOnsiYmFja2VuZF90eXBlIjoiYW50aHJvcGljIn0sInNlbGVjdGlvbl9yZWNvcmQiOnsiYXR0ZW1wdCI6bnVsbCwia2luZCI6ImlucHV0X2FwcGxpZWQiLCJvcGVyYXRpb25faWQiOm51bGwsInBheWxvYWQiOnsiZGlzcG9zaXRpb24iOiJhcHBsaWVkIiwiaW5wdXQiOnsiYXZhaWxhYmxlX21zIjowLCJnZW5lcmF0aW9uIjpudWxsLCJpbnB1dF9pZCI6InNlbGVjdC1CIiwia2luZCI6Im1vZGVsX3NlbGVjdGlvbiIsInBheWxvYWQiOnsic2VsZWN0aW9uIjp7Im1vZGVsIjoiQiIsIm1vZGVsX3NldHRpbmdzIjp7Im1heF90b2tlbnMiOjEwMjQsInJlYXNvbmluZyI6eyJlZmZvcnQiOiJoaWdoIn19LCJyb3V0ZSI6eyJiYWNrZW5kX3R5cGUiOiJhbnRocm9waWMifX19LCJzY2hlbWFfdmVyc2lvbiI6MywidGFyZ2V0X3R1cm5faWQiOm51bGx9LCJpbnB1dF9kaWdlc3QiOiIwMDk1ZjkwNDYwMGRhYjNlOGZkZmQ1MzlhYjAzYjQwMTYwNWJhMjVhMDdhNjAyYTYwZTdhZDkwYTc3MmYwNzVjIiwibW9kZWxfYmluZGluZyI6eyJiYWNrZW5kIjoiYW50aHJvcGljIiwiY29udGV4dF9sZW5ndGgiOjEyODAwMCwiZW5kcG9pbnRzIjpbXSwibWF4X291dHB1dF90b2tlbnMiOjQwOTYsIm1vZGVsIjoiQiJ9LCJwb3NpdGlvbiI6ImJldHdlZW5fYWN0aW9ucyIsInJlYXNvbiI6bnVsbCwidGFyZ2V0X29wZXJhdGlvbl9pZCI6bnVsbCwidGFyZ2V0X3dhaXRfaWQiOm51bGx9LCJyZWNvcmRfaWQiOiJpbnB1dC9zZWxlY3QtQi9hcHBsaWVkIiwic2NoZW1hX3ZlcnNpb24iOjEsInNlc3Npb25faWQiOiJtb2RlbF9zZWxlY3Rpb24iLCJ0dXJuX2lkIjoibW9kZWxfc2VsZWN0aW9uL3R1cm4vaW5pdGlhbCJ9LCJzZXNzaW9uX2lkIjoibW9kZWxfc2VsZWN0aW9uIn0=",
+      "calls": [
+        {
+          "attempt": 1,
+          "backend": "scripted",
+          "call_id": "model_selection/turn/initial/model/primary/1/1",
+          "cycle_index": 1,
+          "error_code": "model_outcome_unknown",
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "model_selection/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "ambiguous",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": null,
+            "output_tokens": null,
+            "provider_usage": {},
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": null,
+            "usage_source": "accounting_missing"
+          }
+        },
+        {
+          "attempt": 2,
+          "backend": "scripted",
+          "call_id": "model_selection/turn/initial/model/primary/1/2",
+          "cycle_index": 1,
+          "error_code": null,
+          "model": "m",
+          "operation": "agent_cycle",
+          "operation_id": "model_selection/turn/initial/model/primary/1",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_usage": {
+              "completion_tokens": 5,
+              "prompt_tokens": 10,
+              "total_tokens": 15
+            },
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": 15,
+            "usage_source": "provider_reported"
+          }
+        },
+        {
+          "attempt": 1,
+          "backend": "anthropic",
+          "call_id": "model_selection/turn/initial/model/primary/2/1",
+          "cycle_index": 2,
+          "error_code": null,
+          "model": "B",
+          "operation": "agent_cycle",
+          "operation_id": "model_selection/turn/initial/model/primary/2",
+          "schema_version": "vv-agent.model-call.v2",
+          "status": "completed",
+          "usage": {
+            "cache_usage": {
+              "read_input_tokens": null,
+              "source": null,
+              "status": "accounting_missing",
+              "uncached_input_tokens": null,
+              "write_input_tokens": null
+            },
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_usage": {
+              "completion_tokens": 5,
+              "prompt_tokens": 10,
+              "total_tokens": 15
+            },
+            "reasoning_tokens": null,
+            "schema_version": "vv-agent.token-usage.v1",
+            "total_tokens": 15,
+            "usage_source": "provider_reported"
+          }
+        }
+      ],
+      "case": "model_selection_mid_session_retry",
+      "models": [
+        "m",
+        "m",
+        "B"
+      ],
+      "plan_ids": [
+        "op/model_selection/turn/initial/model/primary/1/1/planned",
+        "op/model_selection/turn/initial/model/primary/1/2/planned",
+        "op/model_selection/turn/initial/model/primary/2/1/planned"
+      ],
+      "plans": [
+        {
+          "attempt": 1,
+          "kind": "op_planned",
+          "operation_id": "model_selection/turn/initial/model/primary/1",
+          "payload": {
+            "budget_admission": {},
+            "consumed_unknowns": [],
+            "context_version": "3",
+            "dependencies": [],
+            "idempotency_key": "model_selection/model_selection/turn/initial/model/primary/1",
+            "not_before_ms": null,
+            "op_kind": "model",
+            "provider_binding": "model",
+            "purpose": "primary",
+            "request": {
+              "messages": [
+                {
+                  "content": "Be precise.",
+                  "metadata": {
+                    "_vv_agent_tool_policy_approval": "default",
+                    "_vv_agent_tool_use_behavior": "run_llm_again",
+                    "session_memory_enabled": false,
+                    "trace_id": "model_selection/turn/initial"
+                  },
+                  "role": "system"
+                },
+                {
+                  "content": "go",
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "_vv_agent_tool_policy_approval": "default",
+                "_vv_agent_tool_use_behavior": "run_llm_again",
+                "session_memory_enabled": false,
+                "trace_id": "model_selection/turn/initial",
+                "vv_session": {
+                  "cycle_index": 1,
+                  "model_binding": {
+                    "backend": "scripted",
+                    "context_length": null,
+                    "endpoints": [],
+                    "max_output_tokens": null,
+                    "model": "m"
+                  },
+                  "shared_state": {
+                    "todo_list": []
+                  }
+                }
+              },
+              "model": "m",
+              "model_settings": {
+                "retry": {
+                  "backoff_seconds": 0,
+                  "max_attempts": 1
+                }
+              },
+              "prompt_bundle": {
+                "sections": [
+                  {
+                    "id": "agent_instructions",
+                    "source": "agent.instructions",
+                    "stable": true,
+                    "text": "Be precise."
+                  }
+                ],
+                "stable_hash": "5c59f406718e3f1852cf267a5edd92fc51c9dae64dc192406b5b160ff739a4d2"
+              },
+              "route": {},
+              "tools": [
+                {
+                  "function": {
+                    "description": "",
+                    "name": "echo",
+                    "parameters": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "strict": true
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "request_digest": "0aeeebc0c9af8037cf25222672d76dfb78c1f6998d59d6894ea4edb981a8a76a",
+            "tool": null
+          },
+          "record_id": "op/model_selection/turn/initial/model/primary/1/1/planned",
+          "schema_version": 1,
+          "session_id": "model_selection",
+          "turn_id": "model_selection/turn/initial"
+        },
+        {
+          "attempt": 2,
+          "kind": "op_planned",
+          "operation_id": "model_selection/turn/initial/model/primary/1",
+          "payload": {
+            "budget_admission": {},
+            "consumed_unknowns": [],
+            "context_version": "3",
+            "dependencies": [],
+            "idempotency_key": "model_selection/model_selection/turn/initial/model/primary/1",
+            "not_before_ms": 0,
+            "op_kind": "model",
+            "provider_binding": "model",
+            "purpose": "primary",
+            "request": {
+              "messages": [
+                {
+                  "content": "Be precise.",
+                  "metadata": {
+                    "_vv_agent_tool_policy_approval": "default",
+                    "_vv_agent_tool_use_behavior": "run_llm_again",
+                    "session_memory_enabled": false,
+                    "trace_id": "model_selection/turn/initial"
+                  },
+                  "role": "system"
+                },
+                {
+                  "content": "go",
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "_vv_agent_tool_policy_approval": "default",
+                "_vv_agent_tool_use_behavior": "run_llm_again",
+                "session_memory_enabled": false,
+                "trace_id": "model_selection/turn/initial",
+                "vv_session": {
+                  "cycle_index": 1,
+                  "model_binding": {
+                    "backend": "scripted",
+                    "context_length": null,
+                    "endpoints": [],
+                    "max_output_tokens": null,
+                    "model": "m"
+                  },
+                  "shared_state": {
+                    "todo_list": []
+                  }
+                }
+              },
+              "model": "m",
+              "model_settings": {
+                "retry": {
+                  "backoff_seconds": 0,
+                  "max_attempts": 1
+                }
+              },
+              "prompt_bundle": {
+                "sections": [
+                  {
+                    "id": "agent_instructions",
+                    "source": "agent.instructions",
+                    "stable": true,
+                    "text": "Be precise."
+                  }
+                ],
+                "stable_hash": "5c59f406718e3f1852cf267a5edd92fc51c9dae64dc192406b5b160ff739a4d2"
+              },
+              "route": {},
+              "tools": [
+                {
+                  "function": {
+                    "description": "",
+                    "name": "echo",
+                    "parameters": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "strict": true
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "request_digest": "0aeeebc0c9af8037cf25222672d76dfb78c1f6998d59d6894ea4edb981a8a76a",
+            "tool": null
+          },
+          "record_id": "op/model_selection/turn/initial/model/primary/1/2/planned",
+          "schema_version": 1,
+          "session_id": "model_selection",
+          "turn_id": "model_selection/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_planned",
+          "operation_id": "model_selection/turn/initial/model/primary/2",
+          "payload": {
+            "budget_admission": {},
+            "consumed_unknowns": [],
+            "context_version": "22",
+            "dependencies": [],
+            "idempotency_key": "model_selection/model_selection/turn/initial/model/primary/2",
+            "not_before_ms": null,
+            "op_kind": "model",
+            "provider_binding": "model",
+            "purpose": "primary",
+            "request": {
+              "messages": [
+                {
+                  "content": "Be precise.",
+                  "metadata": {
+                    "_vv_agent_tool_policy_approval": "default",
+                    "_vv_agent_tool_use_behavior": "run_llm_again",
+                    "session_memory_enabled": false,
+                    "trace_id": "model_selection/turn/initial"
+                  },
+                  "role": "system"
+                },
+                {
+                  "content": "go",
+                  "role": "user"
+                },
+                {
+                  "content": "",
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"text\":\"ok\"}",
+                        "name": "echo"
+                      },
+                      "id": "echo",
+                      "type": "function"
+                    }
+                  ]
+                },
+                {
+                  "content": "ok",
+                  "role": "tool",
+                  "tool_call_id": "echo"
+                }
+              ],
+              "metadata": {
+                "_vv_agent_tool_policy_approval": "default",
+                "_vv_agent_tool_use_behavior": "run_llm_again",
+                "session_memory_enabled": false,
+                "trace_id": "model_selection/turn/initial",
+                "vv_session": {
+                  "cycle_index": 2,
+                  "model_binding": {
+                    "backend": "anthropic",
+                    "context_length": 128000,
+                    "endpoints": [],
+                    "max_output_tokens": 4096,
+                    "model": "B"
+                  },
+                  "shared_state": {
+                    "todo_list": []
+                  }
+                }
+              },
+              "model": "B",
+              "model_settings": {
+                "max_tokens": 1024,
+                "reasoning": {
+                  "effort": "high"
+                },
+                "retry": {
+                  "backoff_seconds": 0,
+                  "max_attempts": 1
+                }
+              },
+              "prompt_bundle": {
+                "sections": [
+                  {
+                    "id": "agent_instructions",
+                    "source": "agent.instructions",
+                    "stable": true,
+                    "text": "Be precise."
+                  }
+                ],
+                "stable_hash": "5c59f406718e3f1852cf267a5edd92fc51c9dae64dc192406b5b160ff739a4d2"
+              },
+              "route": {
+                "backend_type": "anthropic"
+              },
+              "tools": [
+                {
+                  "function": {
+                    "description": "",
+                    "name": "echo",
+                    "parameters": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "strict": true
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "request_digest": "3b8c57fedc9d8d488f848d88ac0dd483f696ec5c39e13ca626331dffd6b09ffd",
+            "tool": null
+          },
+          "record_id": "op/model_selection/turn/initial/model/primary/2/1/planned",
+          "schema_version": 1,
+          "session_id": "model_selection",
+          "turn_id": "model_selection/turn/initial"
+        }
+      ],
+      "record_id": null,
+      "retry_request_unchanged": true,
+      "route": {
+        "backend_type": "anthropic"
+      },
+      "selection_record": {
+        "attempt": null,
+        "kind": "input_applied",
+        "operation_id": null,
+        "payload": {
+          "disposition": "applied",
+          "input": {
+            "available_ms": 0,
+            "generation": null,
+            "input_id": "select-B",
+            "kind": "model_selection",
+            "payload": {
+              "selection": {
+                "model": "B",
+                "model_settings": {
+                  "max_tokens": 1024,
+                  "reasoning": {
+                    "effort": "high"
+                  }
+                },
+                "route": {
+                  "backend_type": "anthropic"
+                }
+              }
+            },
+            "schema_version": 3,
+            "target_turn_id": null
+          },
+          "input_digest": "0095f904600dab3e8fdfd539ab03b401605ba25a07a602a60e7ad90a772f075c",
+          "model_binding": {
+            "backend": "anthropic",
+            "context_length": 128000,
+            "endpoints": [],
+            "max_output_tokens": 4096,
+            "model": "B"
+          },
+          "position": "between_actions",
+          "reason": null,
+          "target_operation_id": null,
+          "target_wait_id": null
+        },
+        "record_id": "input/select-B/applied",
+        "schema_version": 1,
+        "session_id": "model_selection",
+        "turn_id": "model_selection/turn/initial"
+      },
+      "session_id": "model_selection",
+      "sha256": "fb02ab88fcef27cba428275033cdc0344796a9776f5d3a5272117009f925bbec"
+    },
+    {
       "billable_call_id": "late_usage_normal/turn/initial/model/primary/1/1",
       "bytes_base64": "eyJiaWxsYWJsZV9jYWxsX2lkIjoibGF0ZV91c2FnZV9ub3JtYWwvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS8xIiwiY2FzZSI6ImxhdGVfdXNhZ2Vfbm9ybWFsIiwiY29tcGxldGlvbl9jb3VudCI6MSwiY29udGV4dCI6Im5vcm1hbCIsInByb2plY3RlZF91c2FnZSI6eyJjYWNoZV91c2FnZSI6eyJyZWFkX2lucHV0X3Rva2VucyI6bnVsbCwic291cmNlIjpudWxsLCJzdGF0dXMiOiJhY2NvdW50aW5nX21pc3NpbmciLCJ1bmNhY2hlZF9pbnB1dF90b2tlbnMiOm51bGwsIndyaXRlX2lucHV0X3Rva2VucyI6bnVsbH0sImlucHV0X3Rva2VucyI6MTAsIm91dHB1dF90b2tlbnMiOjUsInByb3ZpZGVyX3VzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjo1LCJwcm9tcHRfdG9rZW5zIjoxMCwidG90YWxfdG9rZW5zIjoxNX0sInJlYXNvbmluZ190b2tlbnMiOm51bGwsInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQudG9rZW4tdXNhZ2UudjEiLCJ0b3RhbF90b2tlbnMiOjE1LCJ1c2FnZV9zb3VyY2UiOiJwcm92aWRlcl9yZXBvcnRlZCJ9LCJyZXBsYXlfZGlzcG9zaXRpb24iOiJub29wIiwidXNhZ2UiOnsiY29tcGxldGlvbl90b2tlbnMiOjUsInByb21wdF90b2tlbnMiOjEwLCJ0b3RhbF90b2tlbnMiOjE1fX0=",
       "case": "late_usage_normal",
@@ -130,7 +623,7 @@
       "sha256": "95f6f8801c1f5c81d027ac58893af73f3641c7378a476ceb6730462bdbf444f3"
     },
     {
-      "bytes_base64": "eyJjYXNlIjoiZGlzcGF0Y2hfcmVxdWVzdCIsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF90b29sX3BvbGljeV9hcHByb3ZhbCI6ImRlZmF1bHQiLCJfdnZfYWdlbnRfdG9vbF91c2VfYmVoYXZpb3IiOiJydW5fbGxtX2FnYWluIiwiYXR0ZW1wdCI6MSwiY2FsbF9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMSIsIm9wZXJhdGlvbl9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiLCJwdXJwb3NlIjoicHJpbWFyeSIsInNlc3Npb25fbWVtb3J5X2VuYWJsZWQiOmZhbHNlLCJ0cmFjZV9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbCIsInZ2X3Nlc3Npb24iOnsiY3ljbGVfaW5kZXgiOjEsImVuZHBvaW50X2lkIjoiZW5kcG9pbnQiLCJlbmRwb2ludF9vcmRlciI6WyJlbmRwb2ludCJdLCJzaGFyZWRfc3RhdGUiOnsidG9kb19saXN0IjpbXX19fX0=",
+      "bytes_base64": "eyJjYXNlIjoiZGlzcGF0Y2hfcmVxdWVzdCIsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF90b29sX3BvbGljeV9hcHByb3ZhbCI6ImRlZmF1bHQiLCJfdnZfYWdlbnRfdG9vbF91c2VfYmVoYXZpb3IiOiJydW5fbGxtX2FnYWluIiwiYXR0ZW1wdCI6MSwiY2FsbF9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvMSIsIm9wZXJhdGlvbl9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEiLCJwdXJwb3NlIjoicHJpbWFyeSIsInNlc3Npb25fbWVtb3J5X2VuYWJsZWQiOmZhbHNlLCJ0cmFjZV9pZCI6ImVuZHBvaW50L3R1cm4vaW5pdGlhbCIsInZ2X3Nlc3Npb24iOnsiY3ljbGVfaW5kZXgiOjEsImVuZHBvaW50X2lkIjoiZW5kcG9pbnQiLCJlbmRwb2ludF9vcmRlciI6WyJlbmRwb2ludCJdLCJtb2RlbF9iaW5kaW5nIjp7ImJhY2tlbmQiOiJzY3JpcHRlZCIsImNvbnRleHRfbGVuZ3RoIjpudWxsLCJlbmRwb2ludHMiOlsiZW5kcG9pbnQiXSwibWF4X291dHB1dF90b2tlbnMiOm51bGwsIm1vZGVsIjoibSJ9LCJzaGFyZWRfc3RhdGUiOnsidG9kb19saXN0IjpbXX19fX0=",
       "case": "dispatch_request",
       "metadata": {
         "_vv_agent_tool_policy_approval": "default",
@@ -147,13 +640,22 @@
           "endpoint_order": [
             "endpoint"
           ],
+          "model_binding": {
+            "backend": "scripted",
+            "context_length": null,
+            "endpoints": [
+              "endpoint"
+            ],
+            "max_output_tokens": null,
+            "model": "m"
+          },
           "shared_state": {
             "todo_list": []
           }
         }
       },
       "record_id": null,
-      "sha256": "7c80af9f9bf6feff5e26a98021deeae59fa20b5f0b6e47c24c8c7018c46940ac"
+      "sha256": "d9a95efe742893e87a697704ed1ecb6c04fc6e4687b2b671b0e603532b056da9"
     },
     {
       "bytes_base64": "eyJjYXNlIjoid2hvbGVfY29tbWl0X2Fja19maXJzdF90cmFjZV90ZXJtaW5hbF9wcmVmaXgiLCJjb21taXRfcmVjb3JkX2lkcyI6WyJzZXNzaW9uL3NlZWQvY3JlYXRlZCJdLCJmaXJzdF9vdXRwdXQiOiJmaXJzdCIsImxhdGVzdF9vdXRwdXQiOiJzZWNvbmQiLCJ0cmFjZV9yZWRlbGl2ZXJ5IjowfQ==",

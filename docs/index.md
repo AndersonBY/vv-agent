@@ -6,6 +6,9 @@ history.
 
 ## Core Documents
 
+[Session model selection](session-model-selection.md) defines durable next-cycle routing.
+[0.24.0 release](releases/0.24.0.md) covers contract 27 adoption.
+
 | Document | Use it for |
 | --- | --- |
 | [releases/0.23.1.md](releases/0.23.1.md) | Cache-write usage aliases for vv-llm and Moonshot kimi-k3. |

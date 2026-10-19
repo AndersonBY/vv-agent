@@ -56,7 +56,7 @@ from vv_agent.workspace.local import LocalWorkspaceBackend
 from .bindings import bind_shared_state, durable_shared_state
 from .children import ChildSession
 from .providers import FunctionProvider, Provider
-from .records import Record, copy_json
+from .records import MODEL_BINDING, Record, copy_json, validate
 from .reducer import ExecutionState
 from .store import SessionStore
 
@@ -81,6 +81,7 @@ class Runtime:
     providers: dict[str, Provider] = field(default_factory=dict)  # tool name -> trusted adapter
     children: dict[str, Callable[[Record], ChildSession | Sequence[ChildSession]]] = field(default_factory=dict)
     host_bindings: dict[str, Any] = field(default_factory=dict)
+    model_resolver: Callable[[dict[str, Any]], tuple[LLMClient, ResolvedModelConfig]] | None = None
     frozen_task: AgentTask | None = None
     handler_version: str = "1"
     ttl_ms: int = 15000
@@ -200,6 +201,7 @@ class Runtime:
             client,
             self.heartbeat_store,
             providers=self.providers,
+            model_resolver=self.model_resolver,
             children=self.children,
             host_bindings=self.host_bindings,
             handler_version=self.handler_version,
@@ -274,8 +276,38 @@ class Runtime:
         self._memory_binding_key, self._memory_binding = key, bindings
         return bindings
 
-    def complete(self, request: LlmRequest, attempt: int, stream_callback=None) -> LLMResponse:
-        client, _ = self.model_route(request.metadata.get("purpose", "primary"))
+    def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
+        """Resolve only the retained request; this binding must not submit provider work."""
+        if self.model_resolver is not None:
+            client, resolved = self.model_resolver(copy_json(request))
+        else:
+            if request["model"] != self.resolved.model_id or request.get("route", {}):
+                raise ValueError("Runtime requires a model_resolver for this selection")
+            client, resolved = self.llm, self.resolved
+        if resolved.model_id != request["model"]:
+            raise ValueError("Resolver changed the requested model")
+        validate(self.model_binding(client, resolved), MODEL_BINDING)
+        retained = request.get("metadata", {}).get("vv_session", {}).get("model_binding")
+        if retained is not None and self.model_binding(client, resolved) != retained:
+            raise ValueError("Resolved model binding differs from the retained plan")
+        return client, resolved
+
+    @staticmethod
+    def model_binding(client: LLMClient, resolved: ResolvedModelConfig) -> dict[str, Any]:
+        return {
+            "backend": resolved.backend,
+            "model": resolved.model_id,
+            "endpoints": [t.endpoint_id for t in client.endpoint_targets] if isinstance(client, VvLlmClient) else [],
+            "context_length": resolved.context_length,
+            "max_output_tokens": resolved.max_output_tokens,
+        }
+
+    def complete(self, request: LlmRequest, attempt: int, stream_callback=None, *, planned_request=None) -> LLMResponse:
+        client, _ = (
+            self.resolve_model(planned_request)
+            if planned_request is not None and request.metadata.get("purpose") == "primary"
+            else self.model_route(request.metadata.get("purpose", "primary"))
+        )
         if isinstance(client, VvLlmClient):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
             targets = client.endpoint_targets

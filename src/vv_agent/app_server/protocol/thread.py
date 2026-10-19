@@ -82,3 +82,25 @@ class ThreadUnsubscribeParams:
 
     def to_dict(self) -> dict[str, str]:
         return {"threadId": self.thread_id}
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadModelSelectParams:
+    thread_id: str
+    input_id: str
+    selection: dict[str, Any] | None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> ThreadModelSelectParams:
+        from vv_agent.session.records import InboxItem
+
+        if set(value) != {"threadId", "inputId", "selection"}:
+            raise ValueError("thread/model/select requires exactly threadId, inputId and selection")
+        for key in ("threadId", "inputId"):
+            if not isinstance(value[key], str) or not value[key] or len(value[key].encode("utf-8")) > 512:
+                raise ValueError(f"{key} must be a nonempty identity of at most 512 bytes")
+        InboxItem(value["inputId"], "model_selection", {"selection": value["selection"]}).encode()
+        return cls(value["threadId"], value["inputId"], value["selection"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"threadId": self.thread_id, "inputId": self.input_id, "selection": self.selection}

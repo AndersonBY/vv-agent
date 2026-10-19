@@ -17,6 +17,7 @@ from vv_agent.events import _project_provider_stream_payload
 from vv_agent.llm.errors import is_prompt_too_long_error
 from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory.microcompact import is_microcompacted_tool_content
+from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.output_validation import OutputRepairRequest
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
@@ -289,6 +290,20 @@ class _Driver:
         assert self.state.active_turn_id is not None
         return self.state.turns[self.state.active_turn_id].start.task()
 
+    def effective_model(self) -> dict[str, Any]:
+        selected = self.state.model_selection
+        if selected is not None:
+            selection = selected._payload["input"]["payload"]["selection"]
+            return selection | {"binding": selected._payload["model_binding"]}
+        assert self.state.active_turn_id is not None
+        task = self.state.turns[self.state.active_turn_id].start._task()
+        return {
+            "model": task.model,
+            "model_settings": task.model_settings.to_dict() if task.model_settings else {},
+            "route": {},
+            "binding": self.runtime.model_binding(self.runtime.llm, self.runtime.resolved),
+        }
+
     def plan(
         self,
         oid: str,
@@ -300,7 +315,27 @@ class _Driver:
         capability: dict[str, Any] | None = None,
         purpose: str = "primary",
     ) -> Record:
-        client = self.runtime.model_route(purpose)[0] if kind == "model" else None
+        client = self.runtime.model_route(purpose)[0] if kind == "model" and purpose != "primary" else None
+        if kind == "model" and purpose == "primary":
+            endpoints = request["metadata"]["vv_session"]["model_binding"]["endpoints"]
+            if endpoints:
+                if self.state.model_selection is None and isinstance(self.runtime.llm, VvLlmClient):
+                    endpoints = [t.endpoint_id for t in self.runtime.llm.ordered_targets(self.state.preferred_endpoint_id)]
+                elif self.state.preferred_endpoint_id in endpoints:
+                    endpoints = [
+                        self.state.preferred_endpoint_id,
+                        *[e for e in endpoints if e != self.state.preferred_endpoint_id],
+                    ]
+                request["metadata"]["vv_session"]["endpoint_order"] = endpoints
+        if kind == "model" and purpose in {"compaction", "session_memory"}:
+            memory_client, memory_resolved = self.runtime.model_route(purpose)
+            request = request | {
+                "metadata": request["metadata"]
+                | {
+                    "vv_session": request["metadata"].get("vv_session", {})
+                    | {"model_binding": self.runtime.model_binding(memory_client, memory_resolved)}
+                }
+            }
         if (
             kind == "model"
             and isinstance(client, VvLlmClient)
@@ -545,6 +580,8 @@ class _Driver:
                 )
             ):
                 continue
+            if item.kind == "model_selection" and self.pending_batch():
+                continue
             if item.kind == "steer" and (tid is None or (self.pending_batch() and target_tid == tid)):
                 continue
             if item.kind == "child_result":
@@ -706,6 +743,15 @@ class _Driver:
                     disposition, reason = "rejected", "turn already active"
                 else:
                     disposition = "queued"
+            elif item.kind == "model_selection":
+                if self.state.closed:
+                    disposition, reason = "rejected", "session closed"
+                elif item.payload["selection"] is not None:
+                    try:
+                        client, resolved = self.runtime.resolve_model(item.payload["selection"])
+                        selection_binding = self.runtime.model_binding(client, resolved)
+                    except Exception:
+                        disposition, reason = "rejected", "model_selection_unresolvable"
             elif item.kind == "control":
                 if item.payload["action"] not in {"archive", "close"} and (tid is None or target_tid != tid):
                     disposition, reason = "rejected", "control requires active target"
@@ -729,6 +775,8 @@ class _Driver:
                 },
                 tid=target_tid if evidence else tid,
             )
+            if item.kind == "model_selection" and disposition == "applied" and item.payload["selection"] is not None:
+                applied = replace(applied, payload=applied._payload | {"model_binding": selection_binding})
             self.commit([applied, *extra], (item.input_id,), guarded=True)
             return True
         return False
@@ -903,14 +951,25 @@ class _Driver:
         ):
             self.close("failed", "microcompaction_recovery_unavailable")
             return None
+        effective = self.effective_model()
         request = {
-            "model": task.model,
+            "model": effective["model"],
+            "route": effective["route"],
             "messages": [m.to_dict() for m in messages],
             "tools": schemas,
             "metadata": dict(task.metadata)
-            | {"vv_session": {"shared_state": self.runtime.durable_state(shared), "cycle_index": cycle}},
+            | {
+                "vv_session": {
+                    "shared_state": self.runtime.durable_state(shared),
+                    "cycle_index": cycle,
+                    "model_binding": effective["binding"],
+                }
+            },
             "prompt_bundle": task.prompt_bundle.to_dict(),
-            "model_settings": task.model_settings.to_dict() if task.model_settings else None,
+            "model_settings": replace(
+                ModelSettings.from_dict(effective.get("model_settings", {})),
+                retry=RetrySettings(max_attempts=1, backoff_seconds=0),
+            ).to_dict(),
         }
         number = (
             sum(
@@ -1292,7 +1351,7 @@ class _Driver:
                             with suppress(Exception):
                                 stream(event)
 
-                response = self.runtime.complete(request, plan.attempt or 1, callback)
+                response = self.runtime.complete(request, plan.attempt or 1, callback, planned_request=plan._payload["request"])
             except Exception as exc:
                 if is_prompt_too_long_error(exc):
                     return Definitive({"error_code": "prompt_too_long", "content": "", "tool_calls": []})

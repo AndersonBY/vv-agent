@@ -344,7 +344,7 @@ def curate(output, streams, semantics, independent, facts):
     invalid = values["session_invalid.json"]
     invalid["vectors"] = select("session_invalid.json", invalid["vectors"])
     for vector in invalid["vectors"]:
-        if vector["layer"] not in {"fold", "admission"}:
+        if vector["layer"] not in {"fold", "admission", "input_conflict"}:
             continue
         ids = set(vector.get("prefix_ids", [])) | {vector.get("audit_record_id")}
         for row in sources[vector["session_id"]]:
@@ -447,7 +447,7 @@ def curate(output, streams, semantics, independent, facts):
             lines = [
                 "{",
                 '  "sessions": '
-                + json.dumps(value["sessions"], ensure_ascii=True, sort_keys=True, indent=2).replace("\n", "\n  ")
+                + json.dumps(value["sessions"], ensure_ascii=True, sort_keys=True, indent=0).replace("\n", "\n  ")
                 + ",",
                 '  "source_records": {',
             ]

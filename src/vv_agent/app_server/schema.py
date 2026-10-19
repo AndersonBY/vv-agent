@@ -7,6 +7,7 @@ from typing import Any
 
 from vv_agent.app_server.processor import CLIENT_METHODS, SERVER_NOTIFICATION_METHODS, SERVER_REQUEST_METHODS
 from vv_agent.app_server.protocol.approval import ApprovalDecision
+from vv_agent.session.records import MODEL_SELECTION, nullable
 
 SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
 REQUEST_ID_SCHEMA = {
@@ -169,6 +170,18 @@ def _definitions() -> dict[str, dict[str, Any]]:
         "ThreadResumeParams": _object(
             {"threadId": {"type": "string"}, "subscribe": {"type": "boolean"}},
             required=["threadId"],
+        ),
+        "ThreadModelSelectResponse": _object(
+            {"threadId": {"type": "string"}, "inputId": {"type": "string"}, "accepted": {"const": True}},
+            required=["threadId", "inputId", "accepted"],
+        ),
+        "ThreadModelSelectParams": _object(
+            {
+                "threadId": {"type": "string", "minLength": 1},
+                "inputId": {"type": "string", "minLength": 1},
+                "selection": nullable(MODEL_SELECTION),
+            },
+            required=["threadId", "inputId", "selection"],
         ),
         "ThreadReadParams": _object(
             {"threadId": {"type": "string"}, "afterItemId": {"type": "string"}},
@@ -543,6 +556,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/start": ("ThreadStartParams", True, False),
     "thread/resume": ("ThreadResumeParams", True, True),
     "thread/read": ("ThreadReadParams", True, True),
+    "thread/model/select": ("ThreadModelSelectParams", True, True),
     "thread/status": ("ThreadStatusParams", True, True),
     "thread/list": ("ThreadListParams", True, False),
     "thread/archive": ("ThreadIdParams", True, True),
@@ -765,6 +779,9 @@ def _typescript_protocol_source() -> str:
         "export interface ThreadStartParams { agentKey?: string; cwd?: string; metadata?: JsonObject; }\n"
         "export interface ThreadIdParams { threadId: string; }\n"
         "export interface ThreadResumeParams { threadId: string; subscribe?: boolean; afterItemId?: string; }\n"
+        "export interface ThreadModelSelectResponse { threadId: string; inputId: string; accepted: true; }\n"
+        "export interface ThreadModelSelectParams { threadId: string; inputId: string; "
+        "selection: { model: string; model_settings?: Record<string, unknown>; route: Record<string, unknown> } | null; }\n"
         "export interface ThreadReadParams { threadId: string; afterItemId?: string; }\n"
         "export interface ThreadListParams {\n"
         "  includeArchived?: boolean; archived?: boolean; offset?: number; limit?: number;\n"
@@ -850,6 +867,7 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; id: RequestId; method: "model/list"; params?: ModelListParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/start"; params?: ThreadStartParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/model/select"; params: ThreadModelSelectParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; '
@@ -883,7 +901,7 @@ def _typescript_protocol_source() -> str:
         "};\n"
         "export type ClientResult =\n"
         "  | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse\n"
-        "  | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
+        "  | ThreadModelSelectResponse | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
         "ThreadUnsubscribeResponse | ThreadStatusResponse\n"
         "  | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | "
         "ApprovalResolveResponse\n"

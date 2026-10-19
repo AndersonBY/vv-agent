@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
 from vv_agent.canonical_json import canonical_json_bytes, utf16_sort_key
+from vv_agent.model_settings import ModelSettings
 
 if TYPE_CHECKING:
     from vv_agent.types import AgentTask
@@ -141,6 +142,31 @@ TASK_SESSION_METADATA["required"] = []
 REQUEST_SESSION_METADATA = closed(endpoint_order=STRINGS, endpoint_id=TEXT, shared_state=JSON_OBJECT, cycle_index=POS)
 REQUEST_SESSION_METADATA["required"] = []
 
+MODEL_BINDING = closed(backend=TEXT, model=TEXT, endpoints=STRINGS, context_length=nullable(POS), max_output_tokens=nullable(NAT))
+MODEL_SETTINGS = closed(
+    temperature=nullable({"type": "number", "minimum": 0}),
+    top_p=nullable({"type": "number", "minimum": 0, "maximum": 1}),
+    max_tokens=nullable(POS),
+    tool_choice=nullable(
+        {"oneOf": [enum("auto", "required", "none"), closed(type={"const": "function"}, function=closed(name=TEXT))]}
+    ),
+    parallel_tool_calls=nullable(BOOL),
+    reasoning=nullable(JSON_OBJECT),
+    response_format=nullable(
+        {"oneOf": [closed(type=enum("text", "json_object")), closed(type={"const": "json_schema"}, json_schema=JSON_OBJECT)]}
+    ),
+    timeout_seconds=nullable({"type": "number", "exclusiveMinimum": 0}),
+    retry=nullable(closed(max_attempts=POS, backoff_seconds={"type": "number", "minimum": 0})),
+    extra_headers={"type": "object", "additionalProperties": {"type": "string"}},
+    extra_body=JSON_OBJECT,
+    extra_args=JSON_OBJECT,
+)
+MODEL_SETTINGS["required"] = []
+MODEL_SETTINGS["properties"]["retry"]["anyOf"][0]["required"] = []
+MODEL_SELECTION = closed(model=TEXT, model_settings=MODEL_SETTINGS, route=JSON_OBJECT)
+MODEL_SELECTION["required"] = ["model", "route"]
+REQUEST_SESSION_METADATA["properties"]["model_binding"] = MODEL_BINDING
+
 APP_SERVER_ATTRIBUTES = closed(agent_key={"type": "string"}, cwd=nullable({"type": "string"}), metadata=JSON_OBJECT)
 
 
@@ -175,6 +201,7 @@ BOUNDARY_DATA = {
     "budget": closed(usage=JSON_OBJECT, exhaustion=nullable(JSON_OBJECT), tool_names=STRINGS),
 }
 INPUT_PAYLOADS = {
+    "model_selection": closed(selection=nullable(MODEL_SELECTION)),
     "user": closed(content=JSON_VALUE),
     "steer": closed(content=JSON_VALUE),
     "follow_up": closed(content=JSON_VALUE),
@@ -212,7 +239,7 @@ INPUT_PAYLOADS = {
 INPUT_PAYLOADS["approval_answer"]["properties"].update(reason={"type": "string"}, metadata=JSON_OBJECT)
 
 INPUT_SCHEMA = closed(
-    schema_version={"type": "integer", "const": 2},
+    schema_version={"type": "integer", "const": 3},
     input_id=TEXT,
     kind=enum(*INPUT_PAYLOADS),
     target_turn_id=nullable(TEXT),
@@ -331,6 +358,8 @@ PAYLOADS["context_compacted"]["properties"]["micro_usage"] = closed(
     reclaimed_tokens=NAT,
     artifact_failure_count=NAT,
 )
+PAYLOADS["input_applied"]["properties"]["model_binding"] = MODEL_BINDING
+
 RECORD_SCHEMA = closed(
     schema_version={"type": "integer", "const": 1},
     record_id=TEXT,
@@ -356,6 +385,7 @@ _VALIDATORS = {
         SEED,
         TASK_SESSION_METADATA,
         REQUEST_SESSION_METADATA,
+        MODEL_BINDING,
         *PAYLOADS.values(),
         *INPUT_PAYLOADS.values(),
         *BOUNDARY_DATA.values(),
@@ -377,6 +407,9 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
         return lambda v: isinstance(v, str) and v == schema["const"]
     kind = schema.get("type")
     if kind == "object":
+        if set(schema) == {"type", "additionalProperties"}:
+            check = _compile_check(schema["additionalProperties"])
+            return lambda v: isinstance(v, dict) and all(check(item) for item in v.values())
         if set(schema) == {"type"}:
             return lambda v: isinstance(v, dict)
         if set(schema) == {"type", "properties", "required", "additionalProperties"}:
@@ -394,6 +427,15 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
     if kind == "array" and set(schema) == {"type", "items"}:
         check = _compile_check(schema["items"])
         return lambda v: isinstance(v, list) and all(check(item) for item in v)
+    if kind == "number" and set(schema) <= {"type", "minimum", "maximum", "exclusiveMinimum"}:
+        return lambda v: (
+            type(v) in (int, float)
+            and (
+                not v < schema.get("minimum", -float("inf"))
+                and not v > schema.get("maximum", float("inf"))
+                and not v <= schema.get("exclusiveMinimum", -float("inf"))
+            )
+        )
     if kind == "integer":
         if set(schema) == {"type", "minimum", "maximum"}:
             return lambda v: type(v) is int and schema["minimum"] <= v <= schema["maximum"]
@@ -517,7 +559,7 @@ class InboxItem:
     target_turn_id: str | None = None
     generation: int | None = None
     available_ms: int = 0
-    schema_version: int = 2
+    schema_version: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -525,6 +567,15 @@ class InboxItem:
     def _validate(self, value: dict[str, Any]) -> None:
         validate(value, INPUT_SCHEMA, canonical=False)
         validate(self.payload, INPUT_PAYLOADS[self.kind], canonical=False)
+        if self.kind == "model_selection":
+            if self.target_turn_id is not None or self.generation is not None:
+                raise RecordError("model_selection requires session scope")
+            selection = self.payload["selection"]
+            if selection is not None:
+                try:
+                    ModelSettings.from_dict(selection.get("model_settings", {}))
+                except (ValueError, TypeError) as exc:
+                    raise RecordError(str(exc)) from exc
 
     def encode(self) -> bytes:
         value = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -543,7 +594,7 @@ class InboxItem:
         value = _load(body)
         validate(value, INPUT_SCHEMA, canonical=False)
         item = cls(**value)
-        validate(item.payload, INPUT_PAYLOADS[item.kind], canonical=False)
+        item._validate(value)
         try:
             canonical_json_bytes(value)
         except (ValueError, TypeError) as exc:
@@ -716,7 +767,7 @@ class Record:
                 encoded_fields[digest_field] = _check_digest(self.payload, digest_field)
         if self.kind == "input_applied":
             incoming = self.payload["input"]
-            validate(incoming["payload"], INPUT_PAYLOADS[incoming["kind"]], canonical=False)
+            InboxItem(**incoming)._validate(incoming)
         if self.kind == "boundary_recorded":
             validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):

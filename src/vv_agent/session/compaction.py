@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.llm.errors import MAX_PTL_RETRIES
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
@@ -24,8 +24,30 @@ def manager_for(driver: _Driver) -> MemoryManager:
     start = driver.state.turns[driver.state.active_turn_id].start
     task = start._task()
     definition = start._payload["definition"]
+    settings: dict[str, Any] = dict(definition["memory_settings"])
+    if driver.state.model_selection is not None:
+        effective = driver.effective_model()
+        binding = effective["binding"]
+        settings["model"] = effective["model"]
+        settings["model_max_output_tokens"] = binding["max_output_tokens"]
+        reserve = effective.get("model_settings", {}).get("max_tokens")
+        if reserve is not None:
+            settings["reserved_output_tokens"] = reserve
+            settings["reserved_output_source"] = "model_settings"
+        elif settings["reserved_output_source"] != "task_metadata":
+            cap = binding["max_output_tokens"]
+            settings["reserved_output_tokens"] = min(16000, cap) if cap is not None else 16000
+            settings["reserved_output_source"] = (
+                "framework_fallback_capped_by_model_capability" if cap is not None and cap < 16000 else "framework_fallback"
+            )
+        settings["model_context_window"] = binding["context_length"] or (
+            (settings["compact_threshold"] if settings["compact_threshold"] > 0 else 250000)
+            + settings["reserved_output_tokens"]
+            + settings["autocompact_buffer_tokens"]
+        )
+    settings["artifact_scope"] = f"session/{driver.sid}/{task.task_id}"
     return MemoryManager(
-        **(definition["memory_settings"] | {"artifact_scope": f"session/{driver.sid}/{task.task_id}"}),
+        **settings,
         workspace_backend=(
             driver.runtime.memory_manager.workspace_backend
             or driver.runtime.config.workspace_backend

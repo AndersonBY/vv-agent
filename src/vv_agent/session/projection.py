@@ -247,7 +247,13 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     }.get(plan["purpose"], ModelCallOperation.AGENT_CYCLE),
                     "metadata": common["metadata"] | {"purpose": plan["purpose"]},
                     "cycle_index": cycle,
-                    "backend": turns[r.turn_id]["definition"].get("model_binding", {}).get("backend", plan["provider_binding"]),
+                    "backend": request.get("metadata", {})
+                    .get("vv_session", {})
+                    .get("model_binding", {})
+                    .get(
+                        "backend",
+                        turns[r.turn_id]["definition"].get("model_binding", {}).get("backend", plan["provider_binding"]),
+                    ),
                     "model": request["model"],
                 }
                 if r.kind == "op_started":

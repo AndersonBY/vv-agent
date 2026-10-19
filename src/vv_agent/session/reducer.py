@@ -112,6 +112,7 @@ class ExecutionState:
     compactions: list[Record] = field(default_factory=list)
     boundaries: dict[tuple[str, str, str], Record] = field(default_factory=dict)
     preferred_endpoint_id: str | None = None
+    model_selection: Record | None = None
 
     @property
     def waits(self) -> dict[tuple[str, int], dict[str, Any]]:
@@ -176,6 +177,14 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
         state.child_completions[key] = record
     if session_control and tid is not None:
         require(tid == state.active_turn_id, "session control targets an inactive turn")
+    if item.kind == "model_selection":
+        require(item.target_turn_id is None and item.generation is None, "selection needs session scope")
+        require(not state.closed, "selection after session close")
+        require(item.payload["selection"] is None or "model_binding" in p, "selection needs resolved binding")
+        if item.payload["selection"] is not None:
+            require(p["model_binding"]["model"] == item.payload["selection"]["model"], "selection binding model mismatch")
+        state.model_selection = record if item.payload["selection"] is not None else None
+        return
     if item.kind not in {"user", "follow_up"} and not session_control and not evidence_input:
         require(tid == state.active_turn_id and tid in state.turns, "applied input needs active target turn")
     if tid in state.turns and item.generation is not None:
@@ -279,8 +288,12 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt.unknown_consumed = True
     order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
     if order is not None:
-        binding = turn.start._payload["definition"].get("model_binding", {})
-        binding = binding.get("internal", {}).get(p["purpose"], binding)
+        # Output repair is an independently frozen host callback.
+        binding = (
+            turn.start._payload["definition"].get("model_binding", {})
+            if p["purpose"] == "output_repair"
+            else p["request"].get("metadata", {}).get("vv_session", {}).get("model_binding", {})
+        )
         require(
             op.kind == "model"
             and isinstance(order, list)

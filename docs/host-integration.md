@@ -211,8 +211,9 @@ at most two seconds applies to running sessions under healthy workers.
 
 The PostgreSQL DDL adds exactly those two nonnegative bigint columns with default
 zero, one on `sk_session`, one on `sk_consumer`; no table, execution ledger or
-index is added. SQLite mirrors them and advances `PRAGMA user_version` to 2,
-rejecting old version 1 databases. Record schema 1, event and App Server wires are unchanged. Inbox schema 2
+index is added. SQLite mirrors them. Its current `PRAGMA user_version` is 3 because F8 adds
+the model_selection kind constraint; old versions 1 and 2 reject. Record envelope schema 1, event v6 and App Server protocol v2 remain current.
+Inbox schema 3
 requires provider usage as described below. Hosts copying DDL must take the current literal from
 `session/postgres.py`. The framework has no historical schema migrator: finish
 old executions using their pinned artifact, then provision the current schema;
@@ -249,7 +250,7 @@ admission/delivery machinery.
 
 ## Billing recovered provider calls
 
-Authenticate and deliver inbox schema 2 `provider_result` with required `usage`
+Authenticate and deliver inbox schema 3 `provider_result` with required `usage`
 (JSON object; `{}` only when no usage was observed), alongside operation,
 attempt, request digest, provider binding, result and evidence. Authentication
 must cover usage too. Bill from canonical `project_result` model-call usage or
@@ -280,3 +281,36 @@ controlled at-least-once queue against SQLite files and PostgreSQL, including
 duplicates, reordering, exit races, abandoned leases, waits, delayed inputs,
 cancellation and monotonic projection cursors. No broker is required to test
 these kernel guarantees.
+
+## Model selection
+
+In the host update transaction, submit a stable input ID for each user command:
+
+```python
+selection = {
+    "model": model_name,
+    "model_settings": {"reasoning": {"effort": reasoning_effort}},
+    "route": {"backend_type": backend_type},
+}
+with store.atomic() as tx:
+    tx.push(session_id, InboxItem(command_id, "model_selection", {"selection": selection}))
+```
+
+No execution lease is required. Wake the session after the outer transaction
+commits. The next cycle uses the latest accepted selection; an in-flight call and
+its retries stay on their retained plan. Selection persists across session turns;
+submit `{"selection": None}` to restore the frozen task model/settings.
+
+Provide `Runtime(model_resolver=resolve_request, ...)`. resolve_request receives
+model, model_settings and route from selection or a retained plan and returns
+`(llm_client, resolved_config)`. It must perform no provider submission, resolve
+exact model IDs and enforce host authorization. Keep the frozen Runtime binding
+stable across recovery; resolve clients for selected plans separately. Never
+include keys or credentials in route. A selection that cannot resolve becomes a
+rejected input with reason model_selection_unresolvable; the previous choice
+remains active. Inspect input_applied for acceptance, not the push receipt alone.
+
+Bill from canonical per-call usage (`AgentResult.token_usage.model_calls` or
+ModelCallCompletedEvent / ModelCallFailedEvent) using each call's model/backend
+and stable call_id. Never bill using the task's latest requested model. Child
+sessions require their own selection inputs. See [design](session-model-selection.md).

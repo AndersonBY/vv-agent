@@ -18,6 +18,7 @@ from vv_agent.app_server import (
     ModelSummary,
     ThreadArchiveParams,
     ThreadListParams,
+    ThreadModelSelectParams,
     ThreadReadParams,
     ThreadResumeParams,
     ThreadStartParams,
@@ -113,6 +114,11 @@ def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
 
     thread = client.start_thread(ThreadStartParams(agent_key="default"))
     thread_id = str(thread["threadId"])
+    assert client.select_model(ThreadModelSelectParams(thread_id, "model-choice", {"model": "test-model", "route": {}})) == {
+        "threadId": thread_id,
+        "inputId": "model-choice",
+        "accepted": True,
+    }
     assert client.resume_thread(ThreadResumeParams(thread_id=thread_id))["thread"]["threadId"] == thread_id
     assert client.read_thread(ThreadReadParams(thread_id=thread_id))["thread"]["threadId"] == thread_id
     assert client.list_threads(ThreadListParams())["threads"][0]["threadId"] == thread_id
@@ -281,6 +287,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "thread/start": "start_thread",
         "thread/resume": "resume_thread",
         "thread/read": "read_thread",
+        "thread/model/select": "select_model",
         "thread/status": "thread_status",
         "thread/list": "list_threads",
         "thread/archive": "archive_thread",
@@ -295,7 +302,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "schema/export": "export_schema",
     }
 
-    assert len(CLIENT_METHOD_SPECS) == 18
+    assert len(CLIENT_METHOD_SPECS) == 19
     assert set(facade_methods) == set(CLIENT_METHOD_SPECS)
     assert all(callable(getattr(AppServerClient, method)) for method in facade_methods.values())
     assert callable(AppServerClient.send_response)

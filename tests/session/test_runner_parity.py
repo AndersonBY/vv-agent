@@ -678,7 +678,11 @@ def test_user_metadata_with_legacy_kernel_names_stays_opaque(store, database, lo
 
     def check(request):
         assert {key: request.metadata[key] for key in metadata} == metadata
-        assert request.metadata["vv_session"] == {"shared_state": shared_state, "cycle_index": 1}
+        assert request.metadata["vv_session"] == {
+            "shared_state": shared_state,
+            "cycle_index": 1,
+            "model_binding": rt.model_binding(rt.llm, rt.resolved),
+        }
         return LLMResponse("done")
 
     with store.atomic() as tx:
@@ -696,7 +700,11 @@ def test_user_metadata_with_legacy_kernel_names_stays_opaque(store, database, lo
     assert {key: definition["task"]["metadata"][key] for key in metadata} == metadata
     request = next(record.payload["request"] for record in records if record.kind == "op_planned")
     assert {key: request["metadata"][key] for key in metadata} == metadata
-    assert request["metadata"]["vv_session"] == {"shared_state": shared_state, "cycle_index": 1}
+    assert request["metadata"]["vv_session"] == {
+        "shared_state": shared_state,
+        "cycle_index": 1,
+        "model_binding": rt.model_binding(rt.llm, rt.resolved),
+    }
 
 
 @pytest.mark.parametrize("location", ["agent", "config"])

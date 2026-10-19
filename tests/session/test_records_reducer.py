@@ -62,7 +62,7 @@ def test_inbox_closed_and_duplicate_json_keys():
         with pytest.raises(RecordError):
             InboxItem.parse(canonical_json_bytes(item().to_dict() | {key: val}))
     with pytest.raises(RecordError):
-        InboxItem.parse(item().encode().replace(b'"schema_version":2', b'"schema_version":2,"schema_version":2'))
+        InboxItem.parse(item().encode().replace(b'"schema_version":3', b'"schema_version":3,"schema_version":3'))
     with pytest.raises(RecordError):
         replace(item(), payload={"content": "x", "extra": 1}).encode()
 
@@ -231,7 +231,7 @@ def test_all_inbox_variants_closed(kind, payload):
         replace(incoming, payload={}).encode()
 
 
-@pytest.mark.parametrize("codec,current,stale", [(Record, 1, 2), (InboxItem, 2, 1)])
+@pytest.mark.parametrize("codec,current,stale", [(Record, 1, 2), (InboxItem, 3, 2)])
 @pytest.mark.parametrize("value", [1.0, True, "1", None, -1, 0, "stale"])
 def test_version_requires_exact_integer(codec, current, stale, value):
     wire = record("session_created").to_dict() if codec is Record else item().to_dict()

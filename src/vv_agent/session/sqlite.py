@@ -44,7 +44,7 @@ CREATE TABLE sk_inbox (
     session_id TEXT NOT NULL REFERENCES sk_session(session_id), input_id TEXT NOT NULL,
     input_seq INTEGER NOT NULL CHECK (input_seq > 0),
     kind TEXT NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
-        'control','provider_evidence')),
+        'control','provider_evidence','model_selection')),
     body BLOB NOT NULL, digest TEXT NOT NULL CHECK (length(digest)=64),
     available_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL, consumed_seq INTEGER,
     PRIMARY KEY(session_id,input_id), UNIQUE(session_id,input_seq),
@@ -77,7 +77,7 @@ class SQLiteStore(SQLStore):
         self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()
-        if version != 2 and (version != 0 or existing):
+        if version != 3 and (version != 0 or existing):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -137,4 +137,4 @@ class SQLiteStore(SQLStore):
             for statement in DDL.split(";"):
                 if statement.strip():
                     self.connection.execute(statement)
-            self.connection.execute("PRAGMA user_version=2")
+            self.connection.execute("PRAGMA user_version=3")

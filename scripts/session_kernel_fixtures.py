@@ -290,7 +290,93 @@ class Fixtures:
                         child_delivery(self.kernel.store, tx, child)
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
 
+    def model_selection(self):
+        sid = "model_selection"
+        selection = {
+            "model": "B",
+            "model_settings": {"reasoning": {"effort": "high"}, "max_tokens": 1024},
+            "route": {"backend_type": "anthropic"},
+        }
+        selected = InboxItem("select-B", "model_selection", {"selection": selection})
+        calls = []
+
+        def lost(request):
+            calls.append(request.model)
+            self.push(sid, selected)
+            raise TimeoutError("lost A result")
+
+        def retry(request):
+            calls.append(request.model)
+            return LLMResponse("", [ToolCall("echo", "echo", {"text": "ok"})], raw={"usage": USAGE})
+
+        def done(request):
+            calls.append(request.model)
+            return LLMResponse("B done", raw={"usage": USAGE})
+
+        rt = self.admit(sid, [lost, retry])
+        other = ScriptedLLM([done])
+
+        def resolve(request):
+            if request["model"] == "m" and request.get("route", {}) == {}:
+                return rt.llm, rt.resolved
+            if request["model"] != "B" or request["route"] != selection["route"]:
+                raise ValueError("route rejected")
+            return other, replace(
+                rt.resolved,
+                backend="anthropic",
+                requested_model="B",
+                selected_model="B",
+                model_id="B",
+                context_length=128000,
+                max_output_tokens=4096,
+            )
+
+        rt.model_resolver = resolve
+        self.run(sid)
+        assert calls == ["m", "m", "B"], calls
+        rows = self.kernel.store.read_state(sid)[1]
+        plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record.payload["purpose"] == "primary"]
+        assert plans[0].payload["request"] == plans[1].payload["request"]
+        assert plans[2].payload["request"]["route"] == selection["route"]
+        assert [c.backend for c in self.result(sid).token_usage.model_calls] == [
+            rt.resolved.backend,
+            rt.resolved.backend,
+            "anthropic",
+        ]
+        assert self.push(sid, selected).replayed
+        try:
+            self.kernel.push(sid, replace(selected, payload={"selection": None}))
+        except Conflict:
+            pass
+        else:
+            raise AssertionError("conflicting model selection accepted")
+        self.invalid.append(
+            {
+                "rejection_class": "model_selection_input_id_conflict",
+                "session_id": sid,
+                "layer": "input_conflict",
+                "reason": "input_id bytes conflict",
+                "audit_record_id": "input/select-B/applied",
+                **facts(replace(selected, payload={"selection": None}).encode()),
+            }
+        )
+        self.semantics.append(
+            {
+                "case": "model_selection_mid_session_retry",
+                "session_id": sid,
+                "models": calls,
+                "plan_ids": [p.record_id for p in plans],
+                "plans": [p.to_dict() for p in plans],
+                "selection_record": self.state(sid).applied_inputs["select-B"].to_dict(),
+                "calls": [c.to_dict() for c in self.result(sid).token_usage.model_calls],
+                "retry_request_unchanged": True,
+                "route": selection["route"],
+                "billable_models": [c.model for c in self.result(sid).token_usage.model_calls],
+            }
+        )
+
     def produce(self):
+        self.model_selection()
         self.provider_usage()
         opaque = {"😀": 1e-7, "\ue000": -0.0, "null": None, "bool": True, "integer": 1, "float": 1.5}
         self.admit(
@@ -499,9 +585,9 @@ class Fixtures:
         )
         complete = rt.complete
 
-        def dispatched(request, attempt, stream_callback=None):
+        def dispatched(request, attempt, stream_callback=None, *, planned_request=None):
             self.semantics.append({"case": "dispatch_request", "metadata": deepcopy(request.metadata)})
-            return complete(request, attempt, stream_callback)
+            return complete(request, attempt, stream_callback, planned_request=planned_request)
 
         rt.complete = dispatched
         with (
@@ -993,6 +1079,15 @@ class Fixtures:
         assert request(4, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "idle"
         request(5, "turn/resume", {"threadId": "thread_1", "turnId": "thread_1/turn/turn_1", "checkpointKey": "old"})
         request(6, "thread/unsubscribe", {"threadId": "thread_1"})
+        selection_params = {"threadId": "thread_1", "inputId": "select-app", "selection": {"model": "m", "route": {}}}
+        assert request(16, "thread/model/select", selection_params)["result"] == {
+            "threadId": "thread_1",
+            "inputId": "select-app",
+            "accepted": True,
+        }
+        assert request(17, "thread/model/select", selection_params)["result"]["accepted"] is True
+        assert request(18, "thread/model/select", selection_params | {"selection": None})["error"]["code"] == -32602
+        assert request(19, "thread/model/select", selection_params | {"extra": True})["error"]["code"] == -32602
         request(13, "thread/archive", {"threadId": "thread_1"})
         assert request(14, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "closed"
         for i, method, params in (
@@ -1267,6 +1362,9 @@ def wire_schema(envelope, payloads, *, record=False):
         shape = deepcopy(envelope)
         shape["properties"]["kind"] = {"const": kind}
         shape["properties"]["payload"] = deepcopy(payload)
+        if not record and kind == "model_selection":
+            shape["properties"]["target_turn_id"] = {"type": "null"}
+            shape["properties"]["generation"] = {"type": "null"}
         if record and kind == "session_created":
             attributes = {
                 "type": "object",
@@ -1574,6 +1672,41 @@ def invalid_vectors(vectors):
         ),
     ):
         raw = json.dumps(value).encode()
+        try:
+            InboxItem.parse(raw)
+        except RecordError:
+            pass
+        else:
+            raise AssertionError(label)
+        invalid.append({"rejection_class": label, "layer": "inbox_codec", **facts(raw)})
+    selected = next(v["wire"] for v in vectors if v["type"] == "inbox" and v["wire"]["kind"] == "model_selection")
+    base = {"model": "B", "route": {}}
+    bad_selections = [
+        ({}, "missing_model"),
+        ({"model": "B"}, "missing_route"),
+        (base | {"model": ""}, "empty_model"),
+        (base | {"route": []}, "bad_route"),
+        (base | {"extra": True}, "extra_field"),
+        (base | {"model_settings": {"unknown": 1}}, "extra_setting"),
+        (base | {"model_settings": {"max_tokens": False}}, "bad_setting"),
+        (base | {"model_settings": {"timeout_seconds": 0}}, "bad_timeout"),
+        (base | {"model_settings": {"extra_headers": {"x": 1}}}, "bad_header"),
+    ]
+    bad_selections.extend(
+        (base | {"model_settings": {key: None}}, "null_" + key) for key in ("extra_headers", "extra_body", "extra_args")
+    )
+    bad = [("selection_" + label, selected | {"payload": {"selection": value}}) for value, label in bad_selections]
+    bad.extend(
+        [
+            ("selection_missing_payload", selected | {"payload": {}}),
+            ("selection_extra_payload", selected | {"payload": {"selection": None, "extra": 1}}),
+            ("selection_target_turn", selected | {"target_turn_id": "t"}),
+            ("selection_generation", selected | {"generation": 1}),
+            ("previous_inbox_version", selected | {"schema_version": 2}),
+        ]
+    )
+    for label, wire in bad:
+        raw = json.dumps(wire).encode()
         try:
             InboxItem.parse(raw)
         except RecordError:

@@ -18,6 +18,7 @@ from vv_agent.app_server.protocol import (
     JsonRpcResponse,
     ModelListRequest,
     RequestId,
+    ThreadModelSelectParams,
     TurnActionParams,
 )
 from vv_agent.app_server.request_serialization import (
@@ -39,6 +40,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/start",
     "thread/resume",
     "thread/read",
+    "thread/model/select",
     "thread/status",
     "thread/list",
     "thread/archive",
@@ -159,6 +161,9 @@ class MessageProcessor:
             return
         if request.method == "thread/start":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_start(connection_id, request))
+            return
+        if request.method == "thread/model/select":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_model_select(connection_id, request))
             return
         if request.method == "thread/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
@@ -370,6 +375,23 @@ class MessageProcessor:
         payload = {"threadId": thread.thread_id, "agentKey": thread.agent_key, "cwd": thread.cwd, "status": "idle"}
         self._router.send_response(connection_id, request.id, payload)
         self._router.send_notification(connection_id, "thread/started", payload)
+
+    def _handle_model_select(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        try:
+            selection = ThreadModelSelectParams.from_dict(params)
+            result = self._run_adapter.select_model(
+                thread_id=selection.thread_id, input_id=selection.input_id, selection=selection.selection
+            )
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        except ValueError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        self._router.send_response(connection_id, request.id, result)
 
     def _handle_thread_read(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)

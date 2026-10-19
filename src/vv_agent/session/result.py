@@ -96,9 +96,15 @@ def project_result(
                         "output_repair": ModelCallOperation.OUTPUT_REPAIR,
                     }.get(purpose, ModelCallOperation.AGENT_CYCLE),
                     cycle_index=cycle,
-                    backend=turn.start._payload["definition"]["model_binding"]
-                    .get("internal", {})
-                    .get(purpose, turn.start._payload["definition"]["model_binding"])["backend"],
+                    backend=attempt.plan._payload["request"]
+                    .get("metadata", {})
+                    .get("vv_session", {})
+                    .get(
+                        "model_binding",
+                        turn.start._payload["definition"]["model_binding"]
+                        .get("internal", {})
+                        .get(purpose, turn.start._payload["definition"]["model_binding"]),
+                    )["backend"],
                     model=attempt.plan._payload["request"]["model"],
                     status=ModelCallStatus.FAILED
                     if attempt.result and error_code

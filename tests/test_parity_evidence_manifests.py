@@ -70,6 +70,7 @@ EXPECTED_APP_SERVER_PROTOCOL_OPERATIONS = (
     "model/list",
     "schema/export",
     "initialized",
+    "thread/model/select",
 )
 
 
@@ -455,7 +456,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 286
+        == 289
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

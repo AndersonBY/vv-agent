@@ -15,6 +15,7 @@ from vv_agent.app_server.protocol.model import ModelListRequest, ModelListRespon
 from vv_agent.app_server.protocol.thread import (
     ThreadArchiveParams,
     ThreadListParams,
+    ThreadModelSelectParams,
     ThreadReadParams,
     ThreadResumeParams,
     ThreadStartParams,
@@ -56,6 +57,7 @@ __all__ = [
     "ThreadArchiveParams",
     "ThreadItem",
     "ThreadListParams",
+    "ThreadModelSelectParams",
     "ThreadReadParams",
     "ThreadResumeParams",
     "ThreadStartParams",

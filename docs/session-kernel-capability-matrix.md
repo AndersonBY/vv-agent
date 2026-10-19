@@ -1,11 +1,11 @@
 # Session kernel capability matrix
 
-All public entrypoints use the same session kernel. Inventory: **63 current
+All public entrypoints use the same session kernel. Inventory below preserves **63 baseline
 capabilities**, each covered by a real producer test. Differences named below
 refer to the transition from the pinned v23 runtime; the contract fixtures
-and strict public API v10 define the supported behavior.
-The current candidate selects immutable contract release v26.0.0; central adoption
-is recorded in the contract support matrix. The measured F3/F4 evidence below remains its named baseline.
+and strict public API v11 define the supported behavior.
+The F8 candidate selects the contract 27.0.0 branch revision; immutable release
+re-pin and central adoption remain pending in the contract support matrix. The measured F3/F4 evidence below remains its named baseline.
 
 Paths are relative to `src/vv_agent/`. Test abbreviations under `tests/session/`:
 P = `test_runner_parity.py`, T = `test_tools_control_parity.py`,
@@ -94,8 +94,8 @@ Identity and clock values are compared only where fixed by the contract. Recover
 cases reconstruct Runtime/store state and assert retained callbacks, receipts,
 authorization, child identity, budgets and same-turn replies.
 
-The forty-five generated v26.0.0 fixtures compare byte-for-byte with the
-vendored snapshot. Public API v10 resolves every exported capability/member and rejects
+The forty-five generated v27.0.0 fixtures compare byte-for-byte with the
+vendored snapshot. Public API v11 resolves every exported capability/member and rejects
 extra or missing exports. Snapshot checks establish artifact integrity separately.
 
 Performance methodology and current absolute measurements live in
@@ -125,3 +125,10 @@ in [migration-v8.md](migration-v8.md).
 | Examples and public API | 28 example compile/import cases without network calls; public API v8 resolves 239 capabilities / 281 members, 182 root exports with extra/missing = 0 |
 | Fixture provenance and current wire | One generation of 45 fixtures matches v24.0.1 byte-for-byte; snapshot/manifest check is separate; generator v23 wording is retained provenance |
 | Release preparation | [0.22.0 notes](releases/0.22.0.md), migration and host transport ownership; release workflow checks central verified ancestry |
+
+## F8 model selection
+
+Session-scoped model_selection inputs, Runtime.model_resolver, retained per-plan
+routing/usage and effective capacity are covered by test_model_selection.py on
+PostgreSQL and SQLite. test_app_server_model_selection.py covers closed RPC
+admission and conflicts. See [model selection](session-model-selection.md).

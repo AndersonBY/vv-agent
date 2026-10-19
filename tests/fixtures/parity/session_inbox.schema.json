@@ -9,6 +9,269 @@
           "type": "integer"
         },
         "generation": {
+          "type": "null"
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "model_selection"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "selection": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "model": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "model_settings": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "extra_args": {
+                          "type": "object"
+                        },
+                        "extra_body": {
+                          "type": "object"
+                        },
+                        "extra_headers": {
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "max_tokens": {
+                          "anyOf": [
+                            {
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "parallel_tool_calls": {
+                          "anyOf": [
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reasoning": {
+                          "anyOf": [
+                            {
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "response_format": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "enum": [
+                                        "text",
+                                        "json_object"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "json_schema": {
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "const": "json_schema"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "json_schema"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "retry": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "backoff_seconds": {
+                                  "minimum": 0,
+                                  "type": "number"
+                                },
+                                "max_attempts": {
+                                  "minimum": 1,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "temperature": {
+                          "anyOf": [
+                            {
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timeout_seconds": {
+                          "anyOf": [
+                            {
+                              "exclusiveMinimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "tool_choice": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "enum": [
+                                    "auto",
+                                    "required",
+                                    "none"
+                                  ],
+                                  "type": "string"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "function": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "name": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "name"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "const": "function"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "function"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "top_p": {
+                          "anyOf": [
+                            {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "route": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "model",
+                    "route"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "selection"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
           "anyOf": [
             {
               "minimum": 0,
@@ -37,7 +300,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -99,7 +362,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -161,7 +424,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -263,7 +526,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -368,7 +631,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -471,7 +734,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -543,7 +806,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {
@@ -835,7 +1098,7 @@
           "type": "object"
         },
         "schema_version": {
-          "const": 2,
+          "const": 3,
           "type": "integer"
         },
         "target_turn_id": {

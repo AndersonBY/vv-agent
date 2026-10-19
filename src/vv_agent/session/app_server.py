@@ -376,6 +376,14 @@ class _KernelRunAdapter(RunAdapter):
             for wait in waits
         ]
 
+    def select_model(self, *, thread_id, input_id, selection):
+        self._store.read_thread(thread_id)
+        try:
+            self.kernel.push(thread_id, InboxItem(input_id, "model_selection", {"selection": selection}))
+        except Conflict as exc:
+            raise ValueError("inputId was reused with a different selection") from exc
+        return {"threadId": thread_id, "inputId": input_id, "accepted": True}
+
     def controller_action(self, *, thread_id, turn_id, action_id, action):
         for identity, name in ((thread_id, "threadId"), (turn_id, "turnId"), (action_id, "actionId")):
             self._validate_public_controller_action_identity(identity, name)

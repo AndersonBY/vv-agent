@@ -118,7 +118,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     corpus = read("session_codec_vectors.json")
     coverage = corpus["coverage"]
     assert len(coverage["record_kinds"]) == 14
-    assert len(coverage["inbox_kinds"]) == 8
+    assert len(coverage["inbox_kinds"]) == 9
     assert len(coverage["boundary_stages"]) == 7
     assert len(coverage["handle_variants"]) == 4
     assert all(coverage["optional_fields"].values())
@@ -196,6 +196,13 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
             consumed = [InboxItem(**r.payload["input"]) for r in log if r.kind == "input_applied"]
             with pytest.raises(TransitionError, match=re.escape(vector["reason"])):
                 fold(log, consumed_inputs=consumed)
+        elif layer == "input_conflict":
+            item = InboxItem.parse(raw)
+            audit = records[(vector["session_id"], vector["audit_record_id"])].payload
+            original = InboxItem(**audit["input"])
+            assert audit["disposition"] == "applied"
+            assert original.input_id == item.input_id and original.encode() != item.encode()
+            assert vector["reason"] == "input_id bytes conflict"
         else:
             assert layer == "admission"
             item = InboxItem.parse(raw)
@@ -264,6 +271,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         "thread/start": "ThreadStartResponse",
         "thread/read": "ThreadReadResponse",
         "thread/resume": "ThreadResumeResponse",
+        "thread/model/select": "ThreadModelSelectResponse",
         "turn/start": "TurnStartResponse",
         "turn/resume": "TurnResumeResponse",
     }
@@ -275,11 +283,14 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
             errors = list(Draft202012Validator(schemas["ClientRequest"]).iter_errors(request))
             if errors:
                 assert entry["responses"][0]["error"]["code"] == -32602
-                assert "checkpointKey" in request["params"]
+                bad_fields = {"turn/resume": "checkpointKey", "thread/model/select": "extra"}
+                assert bad_fields[request["method"]] in request["params"]
             for response in entry["responses"]:
                 envelope.validate(response)
                 if "result" in response and request["method"] in results:
-                    Draft202012Validator(schemas[results[request["method"]]]).validate(response["result"])
+                    name = results[request["method"]]
+                    result_schema = schemas.get(name, schemas["ClientRequest"]["$defs"].get(name))
+                    Draft202012Validator(result_schema).validate(response["result"])
         for notification in entry.get("notifications", []):
             envelope.validate(notification)
     assert app["facts"]["observer_cannot_approve"] and app["facts"]["timeout_at_absolute_deadline"]
