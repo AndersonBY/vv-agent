@@ -1,848 +1,634 @@
 # Session kernel
 
-The session kernel is the only execution path for Runner, configured Runner,
-RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinary
-runs own an SQLite `:memory:` store. Hosts opt into durable execution through
-SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
+The session kernel is the only execution path in vv-agent. Runner, configured
+Runner, RunHandle, interactive sessions, the CLI, the App Server and delegated
+children all run through it. There is no execution selector.
 
-The contract lock selects the local v27.0.0 candidate revision/artifact. Current codecs are RunEvent v6, model-call v2,
-task-token-usage v3, strict Message and App Server protocol v2. Public exports
-match public_api v11. InboxItem uses schema 3; Record remains schema 1. Rust remains frozen at contract 23.0.0 and is outside this
-Python adoption. All execution uses the same kernel and retained log.
+An ordinary run uses an SQLite `:memory:` store that disappears when its owner
+closes it. For durable execution a host supplies a `SessionStore`: `SQLiteStore`
+on one machine, or `PostgresStore` for workers that share a database. Host setup
+(runtime factory, wake, drive, tick, billing) is in
+[cloud host integration](host-integration.md). This page is the reference for
+how the kernel behaves, for contributors and for hosts that need exact rules.
 
-Runner.resume(session_id, turn_id) reads the retained identity. User and approval
-replies continue the same turn; a fresh prompt after a terminal admits a fresh
-turn. AgentSession history and state are read-only projections; initial messages
-and JSON state belong to the creation-time seed. A closed session cannot reopen.
+The package implements contract 27.0.0, pinned in `contract.lock.json`. Current
+versions: public API v11, inbox schema 3, record schema 1, RunEvent v6,
+model-call v2, task-token-usage v3, strict Message, App Server protocol v2 and
+SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
-LeaseLost recovery uses bounded exponential backoff with jitter. Runtime defaults
-are five losses, 10 ms initial delay and a 500 ms delay cap; each delay is sampled
-between half and all of the capped delay. Runtime accepts injected sleep/jitter
-functions for deterministic tests. Exhaustion raises LeaseRetryExhausted to
-Runner and interactive callers and produces typed App Server error responses or
-notifications. Recovery reads can also lose their lease and count toward the
-same cap. A committed terminal completes its original turn without re-dispatch.
+## Terms
 
-## Modules and logical bytes
+- **Record**: one immutable log entry, such as `turn_started` or `op_completed`.
+  There are 14 record kinds.
+- **Inbox item** (input): a message written to a session from outside, such as
+  a user reply, steering, a provider result or a control. There are nine kinds.
+  The kernel applies one by appending `input_applied` with a disposition such
+  as `applied`, `queued` or `rejected`.
+- **Turn**: one unit of work started by a user input and closed by `turn_ended`.
+  `turn_started` holds a generation number; a targeted input may carry it, and
+  a mismatch is rejected.
+- **Operation** and **attempt**: an operation is one logical model call, tool
+  call or child admission. Each try at running it is a numbered attempt.
+- **Lease**: a time-limited claim that lets one worker append execution
+  records. Writes are fenced by the lease epoch.
+- **Consumer cursor**: a named, durable log position for a projection, such as
+  `host`, `app_server`, `traces` or `child_delivery`.
+- **Receipt**: the store's answer to a committed append: the new records with
+  their sequence numbers and the inbox watermark.
 
-- `records.py` defines 14 record variants and nine inbox variants. The
-  version, envelope, payload, handles, and control discriminators are closed.
-  Missing fields, unknown fields, non-integer/stale versions, duplicate JSON
-  object keys, invalid identities, and incorrect embedded digests are rejected.
-- `reducer.py` folds the ordered log and the consumed inbox items into operations,
-  attempts, waits, active turn, controls, and the scheduling projection. It has
-  no clock or persistence access. The store folds before writing anything.
-- `store.py` defines the transaction/store protocols, envelopes, receipts,
-  leases, pagination cursor, and errors.
-- `sql.py` owns the shared SQL transaction rules: identities, commit manifests,
-  append validation, lease/CAS checks, scheduling and consumer acknowledgements.
-- `postgres.py` implements the reference store on a supplied psycopg v3
-  connection. psycopg is lazy-imported and available through `[postgres]` and
-  the development group, not the default dependencies.
-- `sqlite.py` provides the single-host implementation for local persistent and in-memory sessions.
-- `context.py` projects model messages, including accepted compaction replacements;
-  `compaction.py` adapts MemoryManager to ordinary logged model operations.
-- `delegation.py` assembles configured children, agent tools, background handles and handoffs;
-  `bindings.py` separates JSON state from process-local shared-state objects.
-- `lifecycle.py` logs after-cycle decisions; `memory.py` binds callbacks and
-  session-memory file projections to committed boundaries.
-- `projection.py`, `result.py`, `events.py` and `tracing.py` provide typed host
-  projections; events and spans acknowledge through existing consumer cursors.
-- `surfaces.py` assembles the SQLite owner and host handles; ordinary
-  runs use `:memory:` and retained sessions use a SQLite file. Blocking children
-  drive after releasing the parent lease; background children drive independently.
-- `vv_agent/interactive.py` implements steering, follow-up, user/approval replies,
-  archive and close through inbox items, with transcript/result projections.
-- `app_server.py` projects threads, turns and timeline items from records. It
-  creates no second thread ledger. App Server metadata uses the closed reserved
-  `session_created.attributes.app_server` object (`agent_key`, `cwd`, `metadata`).
+## Sessions and turns
 
-The App Server resumes active turns from retained records and the original
-approval owner. Recovery waits for an existing lease to release or expire. Client
-timeline replay uses stable item IDs and `afterItemId`; notification delivery
-acknowledges the `app_server` consumer cursor only after transport projection.
-Images retain both their wire input and model messages. Child waits expose safe
-session/turn/interaction identities; responses target the child's inbox before
-the parent adopts its terminal. Archive and close use stable control identities:
-equal bytes replay, different bytes conflict, and closed turns never revive.
-Host migration is documented in [migration-v8.md](migration-v8.md).
+`Runner.resume(session_id, turn_id)` reads the retained turn identity. User and
+approval replies continue the same turn; a fresh prompt after the turn ends
+admits a new turn. `AgentSession` history and state are read-only projections.
+Initial messages and JSON state go in the
+[creation-time seed](#reserved-metadata-and-seed). A closed session cannot
+reopen.
 
-Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
-with SHA-256 digests. Producer construction validates and freezes each Record's
-canonical bytes and digest once. Parsed JSON is retained privately for read-only
-kernel use; already parsed canonical storage bytes are not parsed a second time.
-`payload`, `to_dict()`, typed task copies and projected messages detach mutable
-values at host boundaries, including tool hooks replayed from a retained model
-receipt. Immutable prompt and scalar-only model settings can
-be shared. Edit by constructing a replacement Record, never by mutating a returned
-payload. Direct dataclass construction is checked by `encode()` before admission.
-The closed record schemas compile to checks for their exact keyword vocabulary;
-unsupported keywords fail at import, and invalid values use the original
-jsonschema validator for diagnostics. Equivalence tests exercise all schema and
-handle variants as well as the unchanged invalid-record tests.
+When a worker loses its lease (`LeaseLost`), the runtime retries with bounded
+exponential backoff. `Runtime` defaults allow 5 losses (`lease_retry_attempts`),
+starting at 10 ms (`lease_retry_base_seconds`) and capped at 500 ms
+(`lease_retry_cap_seconds`). Each delay is sampled between half and all of the
+capped value; tests can inject `lease_retry_jitter` and `lease_retry_sleep`.
+Recovery reads count toward the same cap. When it runs out, Runner and
+interactive callers get `LeaseRetryExhausted` and the App Server sends a typed
+error. If a terminal record was already committed, the turn completes without
+dispatching again.
 
-The shared JCS encoder uses the stdlib C encoder for safe integers, valid Unicode
-strings, arrays and objects with BMP keys and no floats. Other values use the full
-encoder, with the same guarded optimization for eligible nested subtrees. Lone
-surrogates and unsafe integers retain their rejection boundaries; astral keys
-retain UTF-16 ordering. Vendored JCS golden vectors, literal escaping checks and
-6,000 generated nested-value comparisons test fast/full byte equivalence.
+## The log is the execution ledger
 
-Storage sequence, receiving time, and writer epoch are excluded. Record IDs derive from semantic positions; input and commit IDs must
-be stable caller-owned source/transaction identities. No retry generates an ID.
-`input_id` and `commit_id` are scoped by session. `session/create` is reserved
-for creation. Repeated record IDs inside one append are rejected; overlap with
-previously persisted records is checked byte-for-byte and not reinserted.
+The log is the only record of what a session did. The reducer derives
+operations, attempts, waits, the active turn, controls and the schedule from it.
+There is no snapshot table and no second ledger.
 
-Payload fields containing host/provider data (`attributes`, `definition`,
-`budget`, `request`, `tool`, `budget_admission`, `result`, `usage`, `observation`,
-`evidence_manifest`, and input `content`) are explicit opaque JSON values or
-objects. They cannot introduce kernel fields. External authenticity is the
-provider/host adapter's responsibility; evidence references in the log are not
-cryptographic proof. Operation/attempt, request digest, provider binding and
-parked evidence references are checked by the reducer.
+The log is the execution ledger for one runtime version. After a record or
+inbox schema change, the new runtime rejects old rows, including those of
+finished sessions, so hosts keep their own product copy of what they need. See
+[session data and upgrades](upgrading.md#session-data-and-upgrades).
 
-`op_planned.consumed_unknowns` records the exact unknown attempts frozen into a
-successor model request. The reducer requires completion context `normal`,
-`correction`, or `audit` according to that history. A trusted earlier model
-result can supersede an undispatched retry; the reducer marks that retry
-completed with `superseded=True` and no invented provider result. Once the retry
-has started, the earlier result is audit-only. Cancelled/ended turns never
-revive. The adapter must additionally reject stale external business generation
-before choosing which input disposition to append.
+| Module | Role |
+| --- | --- |
+| `records.py` | Record and inbox kinds with closed schemas. |
+| `reducer.py` | Folds the log and consumed inputs into execution state. No clock, no persistence. |
+| `store.py`, `sql.py` | Store protocols, receipts, leases and errors; the shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
+| `postgres.py`, `sqlite.py` | The PostgreSQL reference store (psycopg v3, imported lazily; install the `[postgres]` extra or the dev group) and the single-host SQLite store. |
+| `context.py`, `compaction.py` | Model-message projection and the MemoryManager adapter. |
+| `delegation.py`, `children.py` | Child admission, agent tools, background handles, handoffs and delivery. |
+| `bindings.py`, `lifecycle.py`, `memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
+| `projection.py`, `result.py`, `events.py`, `tracing.py` | Typed host projections. |
+| `surfaces.py`, `app_server.py` | Public entrypoint handles; App Server threads and timelines. |
+
+### Record validation and identity
+
+Validation is strict. Missing or unknown fields, stale versions, duplicate JSON
+keys, invalid identities and wrong embedded digests are rejected, and the
+version, envelope, payload, handle and control discriminators are closed. The
+store folds new records through the reducer before writing anything.
+
+Logical bytes are RFC 8785 (JCS) from `canonical_json.canonical_json_bytes`,
+hashed with SHA-256 once when a record is built. Values returned to hosts
+(`payload`, `to_dict()`, task copies, projected messages, replayed hook inputs)
+are detached copies. To change a record, build a replacement `Record`.
+
+Storage sequence, receive time and writer epoch are not part of a record's
+identity. Record IDs derive from semantic positions. `input_id` and `commit_id`
+are stable, session-scoped identities owned by the caller; a retry never makes a
+new one. `session/create` is reserved for creation. A repeated record ID inside
+one append is rejected; a record that overlaps a persisted one is compared byte
+for byte and not inserted again.
+
+Host and provider data is opaque JSON: `attributes`, `definition`, `budget`,
+`request`, `tool`, `budget_admission`, `result`, `usage`, `observation`,
+`evidence_manifest` and input `content`. It cannot introduce kernel fields. The
+adapter that produced it owns its authenticity; an evidence reference is not
+cryptographic proof. The reducer still checks operation, attempt, request
+digest, provider binding and parked evidence.
+
+### Late results and superseded retries
+
+`op_planned.consumed_unknowns` lists unknown attempts frozen into a later model
+request. Each completion must be labeled `normal`, `correction` or `audit` to
+match that history:
+
+- A trusted earlier result can supersede a retry that has not been dispatched.
+  The retry is marked completed with `superseded=True` and no invented result.
+- Once the retry has started, the earlier result is audit-only.
+- An unknown already frozen into a later request keeps its single tool message
+  and gets a separate correction.
+- Cancelled or ended turns accept authentic late receipts as audit only and
+  never revive.
+
+The host adapter must also reject inputs from a stale business generation
+before it chooses a disposition.
 
 ## Joining host transactions
 
-```python
-from vv_agent.session.postgres import join_transaction
+The code pattern is in [host integration](host-integration.md#store-and-transactions).
+`join_transaction(connection)` needs a psycopg transaction that is already open
+and never commits it. A `SessionTx` cannot outlive that transaction, and `ack`
+accepts only a batch the same transaction issued. The cursor stays locked until
+the host transaction ends. In `consumer_batch`, `limit` is a soft maximum: a
+batch always includes the whole of its last commit. `from_seq` and `through_seq`
+are both inclusive.
 
-with connection.transaction():
-    tx = join_transaction(connection)
-    batch = tx.consumer_batch(session_id, "host")
-    if batch is not None:
-        apply_host_projection(connection, batch)
-        tx.ack(batch)
-```
+`PostgresStore(connection).atomic()` opens a transaction, or a savepoint if one
+is open. Mutations use savepoints, so a host that catches a validation or
+conflict error is left with no partial writes. Receipts stay provisional until
+the outer transaction commits. Use one connection per thread.
 
-`join_transaction` requires an already-open psycopg transaction. It does not
-open or commit a connection. A `SessionTx` cannot escape its original database
-transaction, and `ack` accepts only the actual batch issued by that transaction.
-The cursor is locked until the host transaction ends. `limit` is a soft maximum:
-consumer batches include the entire last commit. `from_seq` is the inclusive
-first record; `through_seq` is the inclusive last record.
+The heartbeat needs its own connection. `SessionDriver` derives its conninfo
+from the original connection, including `ConnectionInfo.password` when set.
+Credentials never enter records. A heartbeat failure is kept as the cause of
+`LeaseLost` and of `LeaseRetryExhausted`.
 
-`PostgresStore(connection).atomic()` opens a transaction, or nests as a savepoint
-when the host already has one. Mutation methods use savepoints so catching a
-validation/conflict exception inside the host transaction leaves zero partial
-writes. Returned receipts are provisional until the outer host transaction
-commits. Keep host transactions short. Use one connection per thread; heartbeat
-requires its own connection. SessionDriver derives its PostgreSQL heartbeat
-conninfo from the original connection, including `ConnectionInfo.password` when
-set, for both standalone and caller-owned stores. Credentials are not persisted
-in session records. Heartbeat failures retain the original exception as the cause
-of LeaseLost, including through LeaseRetryExhausted.
-`LeasePoll.controls` preserves complete inbox items,
-including their target turn and generation; it is not permission to apply a
-stale cancel to the current turn. Django extraction and `in_atomic_block` validation
-belong exclusively to the backend adapter.
+`LeasePoll.controls` returns full inbox items with target turn and generation.
+A cancel aimed at an older turn does not apply to the current one.
 
 `PostgresStore.standalone(conninfo)` owns an autocommit connection for local
-tests. Call `install_schema()` once on an empty database. There are no migrations
-or historical decoders.
+tests. Call `install_schema()` once on an empty database.
 
 ## Commit receipts
 
-The four-table design cannot retain an independently replayable commit with no
-new record rows, nor the original head and ordered receipt of an all-overlap
-commit. This implementation adds **`sk_commit`** keyed by session and commit ID.
-It stores a canonical manifest of record IDs and consumed input IDs, a logical
-batch digest, original record sequence mappings, original head, and receiving
-time. Creation manifests additionally retain the consumer set. It contains no
-operation state and no second copy of record bodies. The original four tables
-and indexes retain their designed columns and constraints.
+The kernel must replay a commit that added no rows, and return the original
+receipt for a commit whose records all overlapped. For that the store keeps
+`sk_commit`, keyed by session and commit ID: a canonical manifest of record and
+consumed input IDs, a batch digest, the original sequence mapping and head, the
+receive time and, for creation, the consumer set. It holds no record bodies.
 
-Replay compares the manifest and each referenced record's exact canonical
-bytes before returning the original receipt with `replayed=True`. It does not
-check or renew the old lease and does not grant execution authority. CAS,
-lease, and expected inbox watermark are admission conditions, excluded from
-logical commit identity. A subsequent new append still needs current epoch,
-owner, unexpired lease, and head/inbox CAS. Empty commits are admitted through
-those same checks and retained for replay.
+Replay compares the manifest and each referenced record's bytes, then returns
+the original receipt with `replayed=True`. It neither checks nor renews the old
+lease and grants no execution authority. CAS, lease and expected inbox watermark
+are admission conditions, not part of commit identity, so a new append still
+needs the current epoch, owner, a live lease and head and inbox CAS. Empty
+commits pass the same checks and are kept for replay.
 
 ## Scheduling and recovery
 
-Each SQL store keeps at most two disposable in-memory validated prefixes, bound to session,
-head sequence, lease epoch and the stored head digest. Cold recovery checks stored
-byte digests, closed schemas, embedded digests and every reducer transition. A
-warm refresh reads and folds only the new tail. Append validates new records
-against a fork of that prefix inside the same transaction and retains head/inbox
-CAS and both lease checks. Forks copy index containers and clone only operations
-or turns that a transition will modify. This avoids allocating an entire old
-operation graph for a one-record append. Public state snapshots still detach all
-mutable operations, attempts, waits and child handles without copying the fold's
-history and record/input identity indexes. Successful model dispatch endpoints are
-folded into a scalar preference, including audit receipts, so planning does not
-scan the full log to recover that preference. Commit replay and overlap use indexed identity lookups.
-Rollback/conflict, head rollback or a changed head digest discard the cache;
-an outer host rollback is caught by the next database binding check. A new lease
-epoch rebinds the immutable prefix only after its stored head bytes and digest
-still match; it never transfers execution authority. Both database lease checks,
-head CAS and optional inbox CAS remain mandatory for a new append.
-Every fetched row's bytes are checked against its stored digest. Matching session,
-sequence and exact retained bytes reuse a validated Record; other bytes still
-receive full schema, identity and embedded-digest validation. Native opaque values
-(for example tuples) are frozen as the same JSON values a cold reader sees.
-Returned execution state is detached, while immutable Records may be shared.
-Deleting the cache affects only cost, never authoritative state. No snapshot table
-or second ledger exists. `rebuild_schedule(session_id)` locks the session and derives only `phase`, `next_drive_ms`, `active_turn_id`,
-and `terminal_seq` again. Zero is the deterministic immediate-due sentinel;
-absolute deadlines/not-before values come from records. Reads of current time,
-lease deadlines, and receipt times use PostgreSQL `clock_timestamp()` after
-acquiring the session row lock.
+Each SQL store caches up to two validated log prefixes, so projecting a child
+result does not evict the executing parent. A cache entry is bound to session,
+head sequence, lease epoch and head digest. A cold read checks every stored
+digest, schema and reducer transition; a warm refresh folds only the new tail.
+Appends still run both lease checks and CAS. Rollback, conflict or a changed
+head digest drops the cache. The cache changes cost, never results.
 
-The second slot prevents child result projection from evicting the executing
-parent's prefix. A third session evicts the older slot; rollback or explicit
-disposal clears both. Neither slot skips database head/digest binding checks.
-Child projection reuses one validated state snapshot and creation record, and
-Runtime initializes its tool registry only when planning or dispatching requires
-it. Read-only projection still resolves host bindings and the child model/config.
+`rebuild_schedule(session_id)` locks the session and recomputes `phase`,
+`next_drive_ms`, `active_turn_id` and `terminal_seq` from the log. Zero means
+due now; absolute deadlines come from records. PostgreSQL reads time with
+`clock_timestamp()` after taking the session row lock. `drive_retry_at_ms` and
+`project_retry_at_ms` are retry gates for execution and projection
+(nonnegative, default zero). They are scheduling state, not execution facts.
 
-`list_runnable` uses the design's union of due/unconsumed-input execution work
-and consumer lag. It does not claim work. Each ordered branch starts at the cursor session using existing primary and
-ready-inbox indexes and stops at the page limit before the union is sorted.
-The final merge sorts at most twice the page size. Call with `after=page[-1].cursor`
-until exhausted, then restart from the beginning on the next scan. Projection
-work is independent of the execution lease. User waits and approval waits without
-a deadline have no due time. An approval deadline or response, including denial,
-makes resolution runnable.
-After release, `drive` checks execution readiness in a fresh transaction using
-the same SQL predicate as `list_runnable` (including lease availability). It wakes
-only due execution work, never consumer lag or idle sessions. A delivery that
-finds a held lease returns without waking; the holder's post-release check sees
-inputs committed during its exit. Future-available inbox items rely on tick, whose
-interval bounds discovery latency after they become due. In-process RunHandle
-child scheduling uses explicit `after_drive`/`after_input` hook notifications.
-See [cloud host integration](host-integration.md) for transport wiring and recovery.
-A planned operation blocked on an unresolved dependency does not spin.
-Queued user/follow-up inputs remain due after the active turn ends, even after
-their inbox rows are consumed. A turn input cannot be admitted a second time.
-Undispatched operations require explicit closure before terminal records; all
-remaining dispatched attempts must be named in the unconfirmed list.
+`list_runnable` returns due execution work, unconsumed input and consumer lag.
+It claims nothing. Each branch stops at the page limit, so the merge sorts at
+most twice the page size. Page with `after=page[-1].cursor` until empty, then
+restart on the next scan. Projection work does not need the execution lease.
 
-Fencing protects database state, not previously issued external requests.
-The kernel propagates cancellation and fences every new log write, but a worker
-paused after admission can still issue a delayed external request. Only provider
-idempotency constrains that request's effects.
+- A user or approval wait without a deadline has no due time.
+- An approval deadline or response, including a denial, makes the session
+  runnable.
+- A planned operation blocked on an unresolved dependency does not spin.
+- Queued user and follow-up inputs stay due after the active turn ends, even
+  once their inbox rows are consumed. A turn input cannot be admitted twice.
+
+After releasing its lease, `drive` rechecks readiness in a fresh transaction
+with the same predicate and wakes only for due execution work.
+`supervisor.tick` pages through `list_runnable` and either dispatches or drives
+inline; per-session failures are raised together after the scan. Tick claims
+nothing. The host side of wake, drive and tick is in
+[host integration](host-integration.md#workers-drive).
+
+Undispatched operations need an explicit closure before a terminal record, and
+every remaining dispatched attempt must be listed as unconfirmed.
+
+Fencing protects database state, not requests already sent. A worker paused
+after admission can still send a delayed external request after losing its
+lease. Only provider idempotency limits that request's effects.
 
 ## Synchronous execution bindings
 
-`kernel.drive(store, session_id, runtime=...)` acquires a store lease, folds the
-log, applies ready inputs, repairs incomplete operations, and serially dispatches
-work. Append receipts include the newly committed immutable records with their
-store envelopes and the transaction's inbox watermark. After its transaction
-commits, the driver applies that delta through the same Fold, without rereading
-the committed range. Refresh reads only a bounded new tail and checks sequence
-continuity; commit replay or external tails retain the authoritative store path. `Runtime` in `session/runtime.py` supplies the agent, RunConfig, resolved
-model, existing LLM client, tool/provider bindings and a factory returning a
-heartbeat store (a separate connection for files/PG, the same locked instance
-for SQLite memory sessions). It is re-exported by the kernel
-module for assembly. The default heartbeat interval is 250 ms with a 15-second
-lease; intervals above one second are rejected. External calls use daemon
-threads so the synchronous driver can close an unconfirmed cancellation without
-waiting for an uncooperative handler. A cancelled thread is never described as
-stopped unless the handler confirms cooperative cancellation.
+`kernel.drive(store, session_id, runtime=...)` takes a lease, folds the log,
+applies ready inputs, repairs incomplete operations and dispatches work
+serially. It folds its own receipts directly instead of rereading the records it
+just wrote.
 
-The immutable definition contains the compiled AgentTask/PromptBundle, tool
-schemas/capabilities, model binding and handler version. Resume does not rerun
-instruction/context providers. Version/schema/capability/model-binding changes
-stop with an explicit reason. Each Runtime constructs its registry once, or reuses
-the registry supplied by its factory. Bounded definition/digest and schema caches
-include task controls, model binding, memory settings, child names, registry
-revision, exposure and detached capability declarations. Type-sensitive JSON
-fingerprints prevent bool/integer cache-key collisions. Frozen Record tasks reuse a
-bounded task fingerprint. Unchanged tool schemas share their validated Record's
-private JSON graph and cached JCS bytes across definitions and requests. Reuse
-requires exact schema bytes or the same retained schema objects; mutable hook
-inputs still detach, and source/digest validation remains mandatory. Persisted
-bytes keep the complete schemas, so cold readers use the same wire shape.
-The definition's schema/capability/memory/model-binding
-JCS fragments are cached separately from the task and rebuilt whenever those
-bindings or task tool controls change. Every composed definition digest equals
-full JCS encoding; live binding checks still run on every driver step. Failed canonical validation
-preserves the last valid definition cache. Dynamic `is_enabled`
-predicates are reevaluated when compiling each new turn. Dispatch reevaluates
-current authorization and retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
-executors, honoring FunctionTool `is_enabled` and registry exposure. The capability
-matrix in `session-kernel-capability-matrix.md` records the current producer evidence.
+`Runtime` (`session/runtime.py`) supplies the agent, RunConfig, resolved model,
+LLM client, tool and provider bindings, and a `heartbeat_store` factory: a
+separate connection for files and PostgreSQL, the same locked instance for
+memory sessions. Defaults are a 15-second lease (`ttl_ms=15000`) and 250 ms
+heartbeats; the heartbeat must be at most one second and under half the TTL.
+External calls run on daemon threads, so the driver can close a cancellation
+without waiting for a handler that ignores it. A thread counts as stopped only
+if its handler confirms cooperative cancellation.
 
-| Need | Existing implementation called |
-| --- | --- |
-| Prompt compilation/freeze | `runtime/compiler.py:AgentCompiler.compile`, `types.py:AgentTask.to_dict/from_dict` |
-| Request/tool schemas | `llm/base.py:LlmRequest`, `runtime/tool_planner.py:plan_tool_schemas` |
-| Model transport | `llm/vv_llm_client.py:VvLlmClient.complete`; tests use `llm/scripted.py:ScriptedLLM.complete` |
-| Budget admission | `budget.py:BudgetEvaluator`, `cycle_start`, `model_call_complete`, `preflight_tools` |
-| Tool policy, arguments, approval | `tools/orchestrator.py:ToolOrchestrator.run_one` and its existing dispatch callback |
-| Handlers and context | `tools/function.py:FunctionTool.invoke`, `tools/base.py:ToolContext`, `runtime/context.py:ExecutionContext`, `runtime/cancellation.py:CancellationToken` |
-| Compaction | `memory/manager.py:MemoryManager.plan_microcompaction`, `apply_microcompaction`, `plan_summary`, `accept_summary`, `compaction_evidence` |
-| Event types | `events.py:RunEvent` and existing typed lifecycle subclasses |
+### The frozen definition
 
-The kernel builds LlmRequest and uses the configured client with logged
-operation admission and persistence. It freezes `RetrySettings(max_attempts=1)` and binds one VvLlmClient endpoint per
-logged attempt, following the frozen preferred/randomized order. Custom clients must also perform exactly one
-provider attempt per `complete` call. No network/provider
-credentials are needed by the scripted recovery tests.
+Each turn freezes a definition: the compiled AgentTask and PromptBundle, tool
+schemas and capabilities, model binding and handler version. Resume does not
+rerun instruction or context providers. A changed version, schema, capability or
+model binding stops the session with an explicit reason, checked on every driver
+step. Dynamic `is_enabled` predicates are evaluated when each new turn compiles.
+Dispatch rechecks current authorization and keeps frozen policy denials.
+[The capability matrix](session-kernel-capability-matrix.md) lists the producers
+for each capability.
 
-`FunctionProvider.preflight` runs the actual ToolOrchestrator up to its existing
-pre-dispatch callback, then stops without executing the handler. Its real submit
-uses the same orchestrator and original handler. This avoids duplicating policy,
-argument validation or callable approval predicates. Ordinary handler timeout
-is unknown because the handler thread may continue. Executors marked
-`policy_managed_by_handler` are rejected before preflight because they bypass
-the orchestrator dispatch callback; they cannot execute through this wrapper.
+The kernel calls the existing pieces rather than reimplementing them:
+`AgentCompiler`, `LlmRequest` and `plan_tool_schemas`, `BudgetEvaluator`,
+`ToolOrchestrator.run_one`, `FunctionTool.invoke` with `ToolContext` and
+`ExecutionContext`, and `MemoryManager`. Tests use `llm/scripted.py:ScriptedLLM`
+in place of `VvLlmClient`.
 
-Before-tool hooks run serially immediately before each tool's preflight.
-`op_prepared` retains the patched call/digest, capability, provider/idempotency
-binding, short-circuit result and JSON state. It is replayed after approval or
-Runtime reconstruction without calling the hook again. Definitive result records
-retain after-tool hooks and stop behavior, including pre-dispatch denials and
-short circuits. Native FINISH closes already planned pending tools with the
-shared skipped-result producer.
+### Model calls and model selection
 
-Approval parks bind the exact prepared arguments. The internal approval bridge
-uses ApprovalProvider and ApprovalBroker only as transports and pushes their
-decisions through the same inbox. Answers allow approve, deny, allow_session and
-timeout with optional typed reason/metadata fields. Session grants are folded
-from applied answers; a new Broker cannot lose them. Deadlines are absolute
-store times retained in the parked record, including provider decision time.
-Expired allow/allow_session answers are rejected; Broker session flags alone cannot
-authorize effects. Duplicate answers are noop only when all decision bytes agree;
-conflicting decisions are rejected.
+The kernel freezes `RetrySettings(max_attempts=1)`: one logged attempt is one
+provider call, and endpoint fallback is a new logged attempt. The request
+freezes the endpoint order from the preference and randomization policy, and
+each attempt binds one endpoint from it. The last durable success sets the
+preferred endpoint for later turns. Request or endpoint drift is rejected before
+dispatch. A custom
+client must also make exactly one provider attempt per `complete` call.
+
+To change the model for later cycles, a host pushes a session-scoped
+`model_selection` input; editing `Runtime` or task fields does not do it. Once
+the current model and tool batch (including retries) closes, the driver resolves
+the selection through `Runtime.model_resolver` and applies it. A resolver failure
+makes the input `rejected` with `model_selection_unresolvable`, and the previous
+choice stays. An accepted selection and its binding live in `input_applied`;
+later primary requests retain model, settings, route and binding. A `null`
+selection restores the turn's frozen model. Children keep their own selection,
+and existing plans, retries and late receipts keep their identity. See
+[session model selection](session-model-selection.md).
+
+### Tools, hooks and approval
+
+`FunctionProvider.preflight` runs the real ToolOrchestrator up to its
+pre-dispatch callback and stops before the handler; submit runs the same
+orchestrator with the original handler. A handler timeout is unknown, since the
+thread may still run. Executors marked `policy_managed_by_handler` bypass that
+callback, so they are rejected before preflight.
+
+Before-tool hooks run one at a time, just before each preflight. `op_prepared`
+keeps the patched call, capability, provider and idempotency binding, any
+short-circuit result and the JSON state. After an approval or rebuild the kernel
+replays it instead of calling the hook again. Result records keep after-tool
+hook output and stop behavior. A native FINISH closes already planned tools with
+the shared skipped-result producer.
+
+An approval park binds the exact prepared arguments. ApprovalProvider and
+ApprovalBroker are transports only; decisions go through the inbox. Answers are
+`approve`, `deny`, `allow_session` or `timeout`, with optional reason and
+metadata. Session grants are folded from applied answers, so a new Broker
+cannot lose them. Deadlines are absolute store times in the parked record. An
+`allow` or `allow_session` after the deadline is rejected, and Broker flags
+alone never authorize effects. A duplicate answer is a no-op only if every
+decision byte matches; a conflicting one is rejected.
 
 ## Authenticated provider usage
 
-Inbox schema 3 requires `provider_result` payload fields `operation_id`,
-`attempt`, `request_digest`, `provider_binding` (nullable), `result`, `usage`
-and `evidence`. `usage` is a required JSON object with the same shape as
-`op_completed.usage`; use `{}` for no observed measurement. Missing, null,
-non-object usage and extra fields reject. Schema 1 inbox values reject; there is
-no old decoder. Authentication must cover usage, result and the attempt identity.
+A `provider_result` input carries `operation_id`, `attempt`, `request_digest`,
+`provider_binding` (nullable), `result`, `usage` and `evidence`. `usage` is a
+required object shaped like `op_completed.usage`, `{}` when nothing was
+measured. Missing, null or non-object usage and extra fields are rejected.
+Authentication must cover usage, result and attempt identity.
 
-The kernel retains this usage unchanged through `Definitive(..., usage=...)`.
-Synchronous model returns and provider submit/query Definitive outcomes retain
-the same upstream usage bytes. Late normal, correction and audit completions
-remain billable: audit prevents execution adoption but the call happened.
-`project_result` and `project_records` expose the canonical typed usage; hosts
-must not decode opaque `result.raw.usage` or infer zero for missing measurements.
-
-A new authenticated input for a completed attempt is a noop only when result
-and usage both have identical RFC8785 bytes; either difference is a result
-conflict. Replays create no second completion or billable call. Existing
-RunEvent v6, model-call v2, task-token-usage v3, TokenUsage v1 and App Server v2
-shapes remain unchanged.
+The kernel keeps usage bytes unchanged. Late `normal`, `correction` and `audit`
+completions are all billable: an audit completion is not adopted, but the call
+still happened. A new input for a completed attempt is a no-op only if result
+and usage bytes both match; any difference is a conflict. Hosts read usage from
+`project_result` or `project_records`, never from `result.raw.usage`; see
+[billing](host-integration.md#billing).
 
 ## Repair, inputs and provider evidence
 
-Model results and all dependent tool plans commit together. A retained response
-with missing plans can also reconstruct those plans without another model call.
-Known results are reused; planned work is admitted again; durable provider waits
-keep their exact handle. A started operation without authentic result/acceptance
-evidence becomes unknown only after the inbox watermark is rechecked. Models
-have at most max(2, frozen endpoint count) logged attempts; an uncertain output
-repair is never retried. Tools retry at most once only when their frozen
-metadata declares `supported` idempotency. Their key includes the session and
-logical operation, never the attempt. Unknown model records explicitly carry
-`duplicate_model_request_and_cost` and missing measurement information.
+### Repairing after a crash
 
-Providers implement `submit(plan, context)`, `query(handle)`, `cancel(handle)` and
-`authenticate(input, plan)`. Outcomes are `Definitive`, `Accepted` or `Unknown`.
-The adapter owns evidence authenticity and actual provider idempotency; a job ID
-or model-produced value is insufficient. The store/reducer additionally checks
-operation, attempt, request digest, provider binding and retained evidence.
-Queries are bounded and performed at most once per handle per drive; query
-failure preserves the parked operation. `SessionStore.next_drive_delay_ms`
-reads the sole SQL `next_drive_ms` schedule under the held lease using database
-time. The first query occurs no earlier than `poll_at_ms`; later queries honor idle deferral,
-even on duplicate/reordered wakes or unrelated inbox admission. Input/usage-only
-commits preserve that schedule when the active turn and reducer due times are
-unchanged. Authenticated receipts and controls are applied immediately.
-Local handles return when the turn parks on a provider wait. When `poll_at_ms`
-is in the future, the in-process run returns parked without querying or leaving
-a thread waiting. A later host tick/supervisor drive, wake or `Runner.resume`
-at or after the due time performs the query; an authenticated `provider_result`
-can continue the turn before that time. Runner, interactive, App Server and
-local children use that same handle path.
+A model result and its dependent tool plans commit together. If a retained
+response lacks its plans, the driver rebuilds them without calling the model.
+Known results are reused and durable provider waits keep their handle. A
+started operation without authentic result or acceptance evidence becomes
+unknown only after the inbox watermark is checked again.
 
-Ready receipts/controls are applied before repair. Steering stays in the inbox
-until the current model/tool batch, including any retry, closes; the next new
-model request includes it. Follow-up input is recorded queued and opens a new
-turn after the active one ends. Normal end commits use the inbox watermark; an
-input arriving in that window forces recomputation. Replies to `ask_user` use a
-`user` input with the active `target_turn_id` and a content object containing
-`operation_id`, `interaction_id`, and `text`; they produce one tool result in the
-same turn, not an additional user message. Approval answers bind the operation,
-attempt, request ID, request digest and scope; authentication of the host user
-belongs to the inbox-writing adapter. Identical reply replays are noop; different
-response bytes for the same interaction are rejected even after completion.
+- A model operation has at most `max(2, frozen endpoint count)` logged attempts.
+  Unknown model records carry `duplicate_model_request_and_cost` and mark the
+  measurement missing.
+- An uncertain output repair is never retried.
+- A tool is retried at most once, only when its frozen metadata declares
+  `supported` idempotency. Its key covers session and logical operation, never
+  the attempt.
 
-A no-tool `wait_user` result creates `turn_parked` with its source model receipt,
-interaction identity and prompt, leaving no due time. It has no tool operation or
-invented tool message. A targeted `user` reply contains `interaction_id` and
-`text`, clears that wait and appends the user message within the same turn.
-Cancel/suspend controls remain effective while parked.
+### Providers
 
-Bash/check/stop reuse the existing BackgroundSessionManager. A retained bash
-receipt carries the process-manager session ID; rebuilding a drive/Runtime keeps
-the original turn owner, so subsequent management tools reattach through the
-same owner-scoped manager. Manager/OS-worker restart is outside this guarantee;
-missing handles are never adopted by PID alone. Unknown/stopping receipts are
-not confirmed stop receipts.
+A provider implements `submit(plan, context)`, `query(handle)`, `cancel(handle)`
+and `authenticate(input, plan)`, returning `Definitive`, `Accepted` or
+`Unknown`. The adapter owns evidence authenticity and real idempotency; a job ID
+or a model-produced value is not enough.
 
-Late results follow the reducer's original normal/correction/audit rules.
-An unknown already frozen into a successor request keeps its single original
-tool message and receives a separate correction. Earlier model results cannot
-win after a later attempt has started. Cancelled/ended turns accept authentic
-late receipts as audit evidence without revival.
+Each handle is queried at most once per drive, and a failed query leaves the
+operation parked. `SessionStore.next_drive_delay_ms` reads `next_drive_ms` under
+the held lease in database time, so the first query happens no earlier than
+`poll_at_ms` and later ones honor idle deferral, whatever wakes arrive. Commits
+that only add inputs or usage keep the schedule when the active turn and reducer
+due times are unchanged. Authenticated receipts and
+controls apply at once. How in-process runs return on a provider wait is in
+[host integration](host-integration.md#provider-waits).
 
-Cancellation of an already dispatched provider wait follows this rule: if the turn is cancelled and stopping cannot be confirmed, the
-parked attempt can become unknown while retaining its acceptance evidence.
-Ordinary parked recovery still cannot manufacture unknown. Undispatched plans
-close explicitly without claiming an external effect. Durable abort controls,
-not transient token timing, determine an aborted terminal state.
+If a turn is cancelled during a dispatched provider wait and the stop cannot be
+confirmed, the attempt can become unknown while keeping its acceptance evidence.
+Ordinary parked recovery never turns a wait into unknown. A durable abort
+control, not token timing, decides whether a terminal is aborted.
 
-Budget limits stay frozen per turn. Dispatch counts and model usage derive from
-the log, not successful re-admission during replay. `usage_observed` contains
-per-lease cumulative active milliseconds and host cost observations. Parked time
-between drives is excluded; a lost started interval is marked unavailable.
-Strict budgets stop on required missing measurements; retries cannot reset
-counts or substitute a stale host meter value for a missing current observation.
+### Inputs during a turn
 
-## Projection and scanning
+Ready receipts and controls apply before repair.
 
-`projection.project_records` maps a consistent log prefix to existing RunEvent
-types with stable session-scoped IDs, original database timestamps and
-`metadata.session_seq`. Host-interaction event digests reuse the existing
-`HostInteractionRequest` value type. Projection never dispatches or acknowledges.
-Consumers can filter the prefix by their durable cursor. Kernel v6 events use
-`session_id`. Provider waits use a
-typed parked run-state projection.
-The App Server adapter projects the same log through protocol v2.
+- **Steering** waits until the current model and tool batch, including retries,
+  closes, and reaches the next model request.
+- **Follow-up** is recorded as queued and opens a new turn after this one ends.
+- A normal end commits against the inbox watermark; an input arriving in that
+  window forces a recompute.
 
-`supervisor.tick` pages through `list_runnable`, dispatching drive identities
-when a host dispatch callback is supplied, or driving inline by default.
-Per-item exceptions are collected and raised together after the scan; failed
-execution and projection have independent SQL retry gates. A runtime factory
-passed directly to drive runs under the lease and may raise RuntimeNotReady
-without ending the turn. Dispatch-mode latency is independent of drive duration;
-host SQL/dispatch/projection timeouts bound callback I/O. Inline mode includes
-drive time. See [host scheduling and retry](host-integration.md#host-dispatch-example). It owns no claim mechanism. A host must schedule ticks and
-make projection plus cursor acknowledgement atomic using the store transaction.
-Wake callbacks are best-effort hints; the scan recovers empty-inbox work and
-unprojected terminal records independently.
+A reply to `ask_user` is a `user` input with the active `target_turn_id` and
+content `{operation_id, interaction_id, text}`. It produces one tool result in
+the same turn, not an extra user message. A no-tool `wait_user` result appends
+`turn_parked` with no due time and no tool operation; its reply carries
+`interaction_id` and `text` and appends the user message in the same turn. A
+tool returning WAIT_USER parks with `turn_parked`, and the reply resumes it
+without rerunning the handler. Cancel and suspend still work while parked.
+
+Approval answers bind operation, attempt, request ID, request digest and scope;
+the adapter that writes the inbox authenticates the user. Replaying an
+identical reply is a no-op. Different bytes for the same interaction are
+rejected, even after completion.
+
+`bash`, `check` and `stop` use BackgroundSessionManager. A bash receipt keeps
+the process-manager session ID and a rebuilt Runtime keeps the turn owner, so
+management tools reattach. A manager or worker restart is outside this
+guarantee: a missing handle is never adopted by PID alone, and an unknown or
+stopping receipt is not a confirmed stop.
+
+## Budgets
+
+Budget limits are frozen per turn. Counts and usage come from the log, not from
+re-admission during replay.
+
+- Tool budgets reserve the whole model batch in the transaction that adopts the
+  model receipt and tool plans. A rejected admission has no tool effects.
+- Counts use admission names, including reserved calls later skipped by a
+  finish or wait. Retries reuse the reservations.
+- Token totals include logged internal model calls (compaction, session memory,
+  output repair).
+- `usage_observed` records per-lease active milliseconds and host cost. Parked
+  time is excluded, an interval lost to a crash is marked unavailable, and no
+  wall time is inferred from downtime.
+- Strict budgets stop on a missing required measurement. Retries cannot reset
+  counts or substitute a stale host meter value.
+
+## Projection, events and tracing
+
+`projection.project_records` maps a consistent log prefix to RunEvents with
+stable session-scoped IDs, original database timestamps and
+`metadata.session_seq`. Child events come from parent records and carry the
+child's session and turn. Provider waits project as a typed parked run state.
+Projection never dispatches or acknowledges.
+
+`SessionRunEventStore` replays events and validates appends against the
+projection. `batch(tx)` turns a consumer batch into events, so a host can write
+its projection and acknowledge in one transaction. `consume(sink)` is at least
+once; sinks deduplicate by stable event ID. Live assistant, reasoning and tool
+deltas are volatile: final content and tool calls rebuild from receipts.
+
+Tracing uses a separate `traces` consumer. `deliver_spans` needs a top-level
+transaction and commits its cursor before calling processors, so spans are at
+most once and can be lost after acknowledgement. Span output is detached, so
+processors cannot change results.
+
+The App Server keeps no thread ledger of its own. Its metadata is the closed
+`session_created.attributes.app_server` object (`agent_key`, `cwd`, `metadata`).
+It resumes active turns from records and the original approval owner, after
+any existing lease is released or expires. Child waits expose safe session,
+turn and interaction identities, and responses go to the child's inbox. Timeline
+replay uses stable item IDs and `afterItemId`; notifications acknowledge the
+`app_server` cursor only after transport projection. Archive and close use
+stable control identities: equal bytes replay, different bytes conflict, closed
+turns never revive.
 
 ## Child sessions and completion delivery
 
-The internal Runtime binds configured `create_sub_task`, `Agent.as_tool`,
-`BackgroundAgentTask` and handoff tools to the same child admission path.
-Adapters only assemble definitions and project results; they never execute a
-recursive Runner or a child driver under the parent lease. The host independently
-schedules each child and its completion consumer. Public SDK entrypoints use
-these adapters; local handles schedule child drives after releasing the parent lease.
+Configured `create_sub_task`, `Agent.as_tool`, `BackgroundAgentTask` and handoff
+tools share one child admission path. Adapters assemble definitions and project
+results; they never run a nested Runner or a child driver under the parent's
+lease. The host schedules each child and its completion consumer independently.
+
+### Admission
 
 `session_created.attributes.child_admission` is closed: mode, selector, frozen
-definition/digest, budget, handler version, SubAgentConfig, discovery filter,
-handoff count/maximum and handoff metadata. The definition freezes child policy,
-model binding, prompt, workspace path and initial JSON state at admission.
-Recovery re-supplies the agent/tool/provider/workspace handlers, validates their
-version and definition binding, and uses the admitted task. Workspace backends
-remain host configuration; S3 clients and credentials never enter the records.
-Configured children start with their own JSON state; agent tools and handoff
-children inherit a copy of the parent's JSON state.
+definition and digest, budget, handler version, SubAgentConfig, discovery
+filter and handoff count, maximum and metadata. The definition freezes the
+child's policy, model binding, prompt, workspace path and initial JSON state.
+On recovery the host supplies handlers again and the kernel checks their
+version and binding. Workspace credentials never enter records. Configured
+children start with their own JSON state; agent tools and handoff children get
+a copy of the parent's.
 
-Custom callbacks return one ChildSession or a nonempty sequence; invalid members,
-empty batches and mixed background flags raise InvalidChildBatch and roll back
-callback host SQL writes with admission. All custom and delegated children use
-the same transaction, delivery and cancellation paths. Custom batch results
-retain all children in admission order (see host integration for result shapes).
+`Runtime.children` maps a tool name to a synchronous callback returning one
+`children.ChildSession` or a nonempty sequence. Policy, argument, approval and
+budget checks run first. The callback runs inside `store.atomic()`, may join
+that host transaction, and must not start an execution loop or cause external
+effects. Child creation, initial input, parent dispatch and parent park commit
+together; any failure, including `InvalidChildBatch`, rolls all of it back with
+the callback's host writes. See
+[custom child admission](host-integration.md#custom-child-admission).
 
-A batch uses optional closed `handle.siblings` member identities. Every member
-has the same parent delivery target and its own initial turn and cursor.
-Blocking completion requires an authenticated terminal input for every member.
-A disposable fold index supplies completion lookups; it is reconstructed from
-`input_applied`, with no second ledger. Result assembly always projects the
-terminal turn named in the authenticated handle, even after the child continues.
+The closed child handle holds the child's session, turn and generation, the
+background flag, and the parent's session, turn, generation, operation and
+attempt. It stays in the fold after completion so late receipts can be checked.
+A batch adds `handle.siblings`. A blocking batch completes only when every
+member has an authenticated terminal input, and results always project the
+terminal turn named in the handle. `Runtime.child_tasks(store, parent_id)`
+returns owner-scoped status and handles; `handle.poll`, `snapshot`, `wait` and
+`cancel` survive a Runtime rebuild.
 
-`Runtime.child_tasks(store, parent_id)` supplies owner-scoped status and handles.
-The built-in status adapter uses record projections plus the existing status
-formatter, with its own SQL connection on the provider thread. Messages,
-continuations, user replies and cancellation use stable inbox IDs; retries
-replay identical bytes and conflicting content fails. `handle.poll`, `snapshot`,
-`wait` and `cancel` survive Runtime reconstruction. The start operation is the
-background tool's atomic child admission; its initial snapshot is durably
-running, independent of the child's scheduling race. Public BackgroundAgentTask
-handles project that admitted child and its retained operations.
+### Delivery
 
-A blocking child waiting for a user keeps the parent operation parked until a
-terminal result, rather than returning Runner's intermediate waiting outcome.
-Ordinary tools returning WAIT_USER retain their result and park the turn using
-`turn_parked`; a reply resumes it without repeating the handler.
-Handoff is a terminal child continuation: count and maximum come from admitted
-records, and the source never resumes model execution after transfer. The source
-log remains the durable owner, while result agent/model/state/output project the
-terminal target. Target validation runs once on execution; the source's transient
-Runner transfer marker is not a user-facing final output and is not validated.
-See [migration-v8.md](migration-v8.md) for current host API migration.
+`children.child_delivery(store, tx, child_session_id)` reads the
+`child_delivery` cursor. For each matching `turn_ended` it pushes one stable
+`child_result` input to the parent, with the terminal sequence and record
+digest, and advances the cursor in the caller's transaction. Delivery needs
+neither a wake nor the child's lease.
+
+The parent checks the child log (creation relationship, handle, terminal and
+result bytes) and its own turn, generation, operation and attempt, then
+consumes the input and completes the operation in one commit.
+
+- A repeated input ID with different bytes raises `Conflict`. A different input
+  ID for an identical completion is a no-op.
+- Forged or mismatched inputs are rejected and kept for audit.
+- Cancelled, ended or replaced turns never revive; late results and stale generations are
+  recorded as audit.
+- A blocking operation cannot complete without its terminal input, and a
+  successful terminal cannot leave a child wait open (`HasLiveDescendants`).
+
+A blocking child waiting for a user keeps the parent operation parked until the
+child reaches a terminal result.
+
+### Cancellation and background children
+
+When a turn's operations close on cancel, the same transaction pushes stable
+cancel controls to every live child, background ones included. A child that has
+not started applies it before any model call, and each child passes it on to its
+descendants. Until terminal evidence arrives, the parent's child wait is listed
+as unconfirmed. A handler-version failure keeps that wait unconfirmed, fails the
+parent and requests durable cancellation of the child.
+
+With `background=True`, admission completes the parent tool at once with a
+child reference. The completion arrives later as a notification input, after the
+current model and tool batch closes, and reaches the next request. A
+notification after the owning turn ended is audit-only.
+
+### Handoff
+
+Handoff is a terminal child continuation. Count and maximum come from admitted
+records, and the source never resumes model execution after the transfer. The
+source log stays the durable owner; the result's agent, model, state and output
+come from the target, and output validation runs once, on the target.
 
 ### Shared-state host bindings
 
-Durable shared_state remains JSON-only. A host supplies arbitrary Python objects
-explicitly through `Runtime.host_bindings`; only their sorted required names in
-`task.metadata.vv_session.host_binding_names` are frozen. Tools and runtime hooks
-receive the original references; records, model-visible metadata and result
-projections retain only JSON state. Bound references cannot shadow durable keys,
-be replaced or be deleted. Reconstructing without a required binding raises
-`MissingHostBinding` before execution; the host must re-supply the object.
-Nothing pickles or serializes its object representation. These bindings are
-process-local and do not promise rollback of mutations to the host object.
-
-
-`Runtime.children` maps a registered tool name to a synchronous admission
-callback returning `children.ChildSession`. The existing tool policy, argument
-validation, approval and budget checks run before admission. The callback runs
-inside `store.atomic()` and may join that same host transaction; it must not
-start a second execution loop or perform external effects. It supplies the child
-SessionSpec, content, generation, consumers and blocking/background mode.
-The kernel commits child creation, its initial user inbox, parent dispatch and
-child park together. Admission failures roll back the entire transaction.
-A host store adapter must include its ORM admission writes in that transaction.
-PostgreSQL remains the correctness reference; SQLite shares these transaction
-operations and runs the applicable child fault matrix.
-
-The closed child handle retains child session/turn/generation, background mode,
-and parent session/turn/generation/operation/attempt. It remains in the fold
-after completion so replay and late receipts can still be checked. The same
-handle is stored in the child's creation attributes. This is a replacement of
-the unused prototype child shape, with no compatibility reader.
-
-`children.child_delivery(store, tx, child_session_id)` consumes the reserved
-`child_delivery` cursor. Each matching `turn_ended` produces one stable
-`child_result` input, containing the original terminal sequence and logical
-record digest, and advances the cursor on the caller's transaction. The host
-routes that consumer from `list_runnable` alongside its other consumers.
-Delivery does not depend on a wake or the child's execution lease. Neither
-`drive` nor delivery invokes the child recursively.
-
-The parent reads the child log to verify its creation relationship, exact handle,
-terminal kind/turn/sequence/digest and result bytes. It validates the parent
-turn/generation and operation/attempt, then consumes the input and completes the
-blocking operation in one commit. Repeated input IDs compare canonical bytes;
-alias input IDs for an identical completion are no-ops. Forged or mismatched
-completion inputs are rejected and retained in the audit log. Same input ID
-with changed bytes raises `Conflict`. Cancelled/ended/replaced turns cannot be
-revived; authentic late blocking results have audit context, and stale-generation
-inputs retain an audit rejection. A blocking child cannot be completed without
-its applied terminal input, nor can a successful terminal record leave a child
-wait unresolved (`HasLiveDescendants`).
-
-Cancellation pushes stable targeted cancel controls to every live child owned
-by the turn, including background children, in the transaction closing the
-parent operations. A child not yet started applies cancellation immediately
-after admitting its initial turn, before any model dispatch. Each child's own
-drive propagates cancellation to its descendants. Until terminal evidence
-arrives, a cancelled parent's dispatched child wait is unknown and appears in
-its unconfirmed operation list; delivery later records the actual audit result.
-A handler-version failure retains the authentic child wait as unconfirmed, ends
-the parent with explicit failure, and also requests durable child cancellation.
-
-For `background=True`, admission also completes the parent tool immediately
-with a child reference. Completion is a notification input, not a replacement
-of that tool result. It becomes a user notification only after the current
-model/tool batch closes; a newly applied notification invalidates a previously
-frozen completion candidate and reaches the next model request. Notifications
-after the owning turn ends are audit-only and never start another turn or
-invalidate a newer turn's completion candidate.
-
-`tests/session/test_children.py` exercises these rules against disposable PostgreSQL and SQLite
-databases, including process-kill barriers around push/ack, concurrent
-delivery and input replay, identity/evidence rejection, atomic admission,
-background safe points, cancellation, and late-generation audit. Contract
-27.0.0 adoption remains pending; the support matrix owns required implementation
-revisions and central verification. Rust stays frozen at contract 23.0.0.
-
+Durable `shared_state` is JSON only. A host passes Python objects through
+`Runtime.host_bindings`; only their sorted names are frozen, in
+`task.metadata.vv_session.host_binding_names`. Tools and hooks get the original
+objects, records keep only JSON, and a bound name cannot shadow a durable key. A
+missing binding on rebuild raises `MissingHostBinding` before execution. Nothing
+is pickled, and mutations to host objects are not rolled back.
 
 ## Compaction through the log
 
-The host supplies `Runtime.memory_manager`; its value settings, including tool
-retention declarations, are frozen in the turn definition. Drift stops resume
-through the existing definition check. The kernel does not call the legacy
-summary callback or Session Memory extraction loop.
-Summary inference uses the runtime's bound model and client, with tools disabled,
-a text-only prompt, one transport attempt, and the existing budget evaluator.
+The host supplies `Runtime.memory_manager`; its settings are frozen in the turn
+definition. The kernel never calls the legacy summary callback or the Session
+Memory extraction loop. It reuses `MemoryManager.plan_summary`,
+`accept_summary(plan, text, notify=False)` and `compaction_evidence`.
 
-`MemoryManager.plan_summary` delegates block splitting and prompt rendering to
-the existing implementation. Its optional `drop_ratio` also owns the emergency
-tail formula used by `emergency_compact`. `accept_summary(plan, text,
-notify=False)` uses the existing extraction, normalization, effective-content,
-file-path/evidence merging, context-budget and actual-reduction checks.
-`compaction_evidence` exposes the same validated artifact/cursor collector for
-log manifests. Existing compact/emergency/microcompact signatures and default
-Runner behavior are unchanged.
+Before a primary request the driver makes at most one archive-backed prune pass
+and commits mode `micro` only after MemoryManager confirms the archive. A
+summary is an ordinary model operation (`purpose=compaction`): bound model,
+tools disabled, text-only prompt, one transport attempt, normal budget checks.
+Its identity covers turn, source context digest, mode and tail target. On
+restart a saved `op_completed` is validated again rather than rerun, and an
+identical source and tail target reuses its receipt. Invalid output or exhausted
+ambiguous attempts keep history and the turn continues; cancellation, lost
+ownership and exhausted budgets still stop it.
 
-Before a primary request, the driver performs at most one archive-backed prune
-pass for that context. It commits mode `micro` only after MemoryManager has
-verified persistence. Content-addressed artifact reuse survives a crash after
-persistence but before the log commit. If necessary, a summary is then planned
-as an ordinary `op_kind=model`, `purpose=compaction` operation. Its stable identity
-contains the turn, source context digest, mode and tail target. The
-request retains its source log version, rendered prompt, tail target and model
-settings. A saved `op_completed` is revalidated on restart; inference is not
-repeated. Invalid output, an oversized summary input, or exhausted ambiguous
-summary attempts preserve history and allow the normal turn to continue.
-Cancellation, lost ownership and exhausted run budgets still stop execution.
+Acceptance appends `context_compacted`: source digest, ordered prefix and tail
+identities, mode, summary operation reference, replacement messages and
+evidence manifest. The reducer reruns acceptance against the retained receipt.
+MemoryManager verifies archive bytes before commit; the reducer never reads
+them. The context projection applies replacements in log order. Raw records,
+earlier summaries and evidence are never removed or truncated, and summaries
+never become assistant answers.
 
-Acceptance appends `context_compacted`: source digest, ordered prefix/tail
-identities (source position plus message digest), mode, summary operation
-reference, complete replacement messages and evidence manifest. The selected
-attempt and result remain in the log under that operation. The reducer validates
-source and identities, reruns summary acceptance against the retained receipt,
-and verifies the exact replacement and manifest. Micro records bind eligible
-original tool bodies to recovery markers and artifact hashes. Artifact bytes
-are verified by MemoryManager before commit, never by the pure reducer.
+A prompt-too-long (PTL) error is a definitive logged failure. Recovery uses the
+emergency plan with `drop_ratio = 0.2 * consecutive_prompt_too_long_failures`
+(clamped by the manager) and allows a new primary operation, up to three
+retries with the same logical cycle number. When retries run out, the turn ends
+with `CompactionExhaustedError` without dropping history. PTL failures and
+summaries do not count against `AgentTask.max_cycles`.
 
-The model context projection applies accepted replacements in log order, then
-adds subsequent input/results. Raw records remain immutable, including removed
-history, previous summaries and receipts. Typed tool artifacts and recovery
-cursors reach this projection through `ToolExecutionResult.to_tool_message`.
-Successive summaries keep prior evidence; manifests are not truncated. Summary
-results do not become assistant answers or tool plans. They retain their own
-`MEMORY_COMPACTION` model telemetry and usage accounting in the internal RunEvent projection.
+A retry reuses the exact request and context version. Steering waits behind the
+frozen operation, and a saved summary is accepted before newly arrived steering
+applies.
 
-A provider prompt-too-long error is a definitive logged failure rather than an
-ambiguous dispatch. Emergency summarization uses MemoryManager's smaller-tail
-plan with `drop_ratio = 0.2 * consecutive_prompt_too_long_failures`; the manager
-clamps it under the current compaction contract. Each PTL recovery permits a new primary operation, with the existing three-retry
-limit. Rejected or unavailable summaries retain history; equal source/tail
-targets reuse their retained receipt. PTL exhaustion ends the turn with
-`CompactionExhaustedError` without dropping history. PTL failures and summary
-operations do not spend `AgentTask.max_cycles`. PTL recovery goes directly to the specified smaller emergency tail.
+Session Memory notifications come from a host consumer of `context_compacted`
+records; the driver never calls `SessionMemory.on_compaction`, and a raw model
+receipt is not a notification. Register the consumer at creation and take
+`current_tokens` from the replacement summary plus tail. A host with lasting
+notification effects deduplicates by compaction record ID and commits them with
+its cursor; file-backed Session Memory needs an idempotent delivery adapter.
 
-Retries of an existing operation reuse its exact request and context version;
-the reducer rejects a changed version, purpose, request digest or binding.
-Steering waits behind the frozen operation and reaches the next request.
-Acceptance of a saved summary precedes application of newly arrived steering,
-while cancellation and definition/version checks remain authoritative.
+## Lifecycle callbacks, session memory and output
 
-Session Memory notifications belong to a host consumer of accepted
-`context_compacted` records. The driver and pure fold never call
-`SessionMemory.on_compaction` before the append, or during replay. Register that
-consumer when creating the session, use `consumer_batch`/`ack`, and derive its
-`current_tokens` baseline from the replacement summary plus tail. A host with
-persistent notification effects must deduplicate by the compaction record ID
-and commit those effects with its cursor; file-backed Session Memory needs an
-idempotent host delivery adapter. The raw model receipt alone is not a
-compaction notification.
+`boundary_recorded` stores stage-specific callback, decision, output and budget
+data. A decision is committed before the next dispatch and reused after
+recovery. A callback interrupted before its commit can run again; a recorded
+one never does.
 
-## SQLite file and memory stores
+Session-memory extraction is a tools-free model operation with purpose
+`session_memory`. Its state is logged before the file is written atomically, so
+the file can be rebuilt from records.
 
-Current SQL storage adds `sk_session.drive_retry_at_ms` and
-`sk_consumer.project_retry_at_ms` (nonnegative, default zero). SQLite database
-user_version is 3 and rejects versions 1 and 2. These retry gates are scheduling state,
-not execution facts; the log codecs remain version 1. No migrations or historical
-decoders are supplied. PostgreSQL host migrations copy the current DDL literal.
-
-`SQLiteStore.standalone(path)` owns and closes one connection. Use `":memory:"`
-for process-local sessions; the database disappears when its owner closes it.
-The heartbeat factory must borrow the **same store instance** for memory sessions
-(for example `lambda: nullcontext(store)`), without closing it. File stores use
-independent connections to the same path. SQLite is single-host only.
-
-SQLite uses STRICT tables, foreign keys, WAL (files), synchronous FULL, a
-5000 ms busy timeout and strict `user_version=3`. The record CHECK accepts
-`context_compacted`, including summary, emergency and microcompaction records.
-There are no historical readers or migrations in this internal module.
-
-The instance serializes its connection with an RLock. Transactions use
-`BEGIN IMMEDIATE`; lease time is read after acquiring the write lock. Nested
-mutations use savepoints. Host writes and consumer acknowledgements share
-`store.atomic()` and its connection; independently opened psycopg host
-transactions belong to PostgreSQL only.
-
-## Validation and database isolation
-
-Pure record/reducer tests request no database fixture and do not import psycopg.
-Store, recovery, compaction, child and concurrency semantics are parametrized
-across PostgreSQL, SQLite files and SQLite `:memory:`. Process-kill tests use both
-durable stores: memory sessions cannot survive process death. SQLite file-header
-checks run on file stores; external psycopg transaction joins/rollbacks run on PG.
-
-PostgreSQL tests first try `VV_AGENT_TEST_POSTGRES_DSN` when set, then fall back
-to local `dbname=postgres` through the unix socket. Each test creates and finally drops
-only its own `vvsk_test_<uuid>` database. The role needs CREATEDB. Per-test
-databases preserve independent worker/heartbeat connections and process restart
-isolation without search_path propagation or shared schema collisions. Connection
-options from the supplied DSN are retained when replacing its database name.
-The TCP password-authentication regression also creates and drops a temporary
-login role, requiring CREATEROLE. It connects through `127.0.0.1`, verifies that
-an incorrect password is rejected, and waits for a real heartbeat renewal for
-both standalone and caller-owned connections. It skips explicitly only when
-local pg_hba rules reject the connection or do not require password authentication.
-
-If psycopg is unavailable, or neither connection is available, PG cases skip
-with an explicit reason; central CI supplies a reachable DSN and must run them.
-Pure and SQLite tests remain runnable.
-No other databases are changed. Teardown waits for test-owned connections to
-close and does not terminate server backends.
-
-```bash
-uv run pytest tests/session/test_records_reducer.py -q
-uv run pytest tests/session -q
-# CI: supply VV_AGENT_TEST_POSTGRES_DSN for a disposable test server.
-python3 scripts/contract_snapshot.py check
-uv run ruff format --check .
-uv run ruff check .
-uv run ty check
-# Full gates require real PostgreSQL.
-uv run pytest
-```
-
-Capacity regressions exercise cold recovery, long-log cancellation/fencing,
-cache disposal, rollback, mutable caller isolation and external tails. Current
-absolute measurements are in [session-kernel-baseline.md](session-kernel-baseline.md).
-
-The M6 script uses the same bounded 1 KiB receipt history as the capacity tests,
-real PostgreSQL and disposable databases. Its checks require cold recovery at
-5k/20k to finish within 5/20 seconds, steady append median <=50 ms and full
-catalog pagination <=1 second. The one-sample capacity invocation is:
-
-```bash
-uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1 --assert-capacity
-```
-
-
-## Memory, decisions and budgets
-
-`boundary_recorded` retains closed, stage-specific callback, decision, output and
-budget data. Before-memory replacements include the exact source context digest
-and JSON shared state. After-cycle snapshots use adopted model/tool receipts,
-including the parked ask_user WAIT_RESPONSE receipt. Decisions are committed
-before another dispatch and reused after recovery. Steer, persisted tool denials,
-invalid decisions and non-success stops use the existing lifecycle helpers.
-A callback interrupted before its boundary commit can run again; a recorded
-callback or decision is never executed again.
-
-MemoryProvider callbacks surround a logged started/completed compaction lifecycle.
-Micro and summary work share that lifecycle, with retained archive statistics.
-Summary requests, their acceptance and replacements still use MemoryManager and
-the ordinary model driver. First prompt-too-long recovery forces compaction with
-the configured tail; later retries shrink it. Primary requests retain the logical
-cycle number across those retries. Identical rejected summary operations reuse
-retained receipts rather than issuing another identical model request.
-
-Session-memory extraction is a tools-free logged model operation with purpose
-`session_memory`. Structured state is logged before file projection. Atomic file
-replacement and reconstruction from records make the file disposable; projection
-runs before compilation/reload of the next turn. Extraction parsing, entry merging
-and pruning reuse SessionMemory.
-
-Tool budgets reserve the whole ordered model batch in the same transaction as the
-adopted model receipt and tool plans. Rejected admission has no tool effects.
-Counts refer to admission names, including reserved calls later skipped by a
-finish/wait; per-dispatch wall/host checks do not increment them again. Retry and
-recovery reuse those reservations. Total/uncached tokens include logged internal
-model calls. Host metrics retain unavailable classifications across reconstruction;
-lost active intervals are explicitly unavailable, and strict policy stops instead
-of inventing wall time. No wall time is inferred from process downtime.
-
-## Model and result adapters
-
-Endpoint order freezes the existing preference/randomization policy in the model
-request; each logged attempt selects exactly one endpoint from that order. Client
-and transport retries are set to one, and fallback is represented by another logged
-attempt. The last durable model success supplies later-turn preference. Request
-and endpoint drift are rejected before dispatch.
-
-Typed output checks and one tools-free repair use output_validation helpers.
-Repair is a logged `output_repair` operation; reported usage participates in budget
-and result ledgers, and an uncertain repair is never retried automatically.
-Candidate/partial output and final decisions survive recovery. Completed results
-use their terminal prefix, so later turns cannot change an older result. Per-cycle
-compaction flags, waits, errors, budget exhaustion and typed JSON output are
-reconstructed from records. Kernel accounting exposes `output_repair` directly,
-with model-call v2 and task-token-usage v3; TokenUsage remains v1. Kernel events
-use v6 across all entrypoints.
-
-## Events, streams and tracing
-
-Typed RunEvents project agent/cycle/diagnostic/budget/memory/child lifecycle from
-records with stable event IDs and `metadata.session_seq`. Child admission/completion
-events use parent records and carry child session/turn identities. Existing wait,
-approval, skipped-tool and cancellation differences remain explicit. All public entrypoints use this projection.
-
-`SessionRunEventStore` implements replay and validates append against the existing
-projection without another event ledger. `batch(tx)` bridges consumer cursors to
-projected events; a host can write its projection and acknowledge in the same SQL
-transaction. `consume` with an external sink is at least once if a crash occurs
-between sink delivery and acknowledgement; stable IDs support deduplication.
-
-Live assistant/reasoning/tool deltas use the existing stream-payload adapter and
-remain volatile. Sink loss cannot affect correctness. Definitive content,
-reasoning and tool calls rebuild from durable receipts; delta delivery is never a
-recovery prerequisite.
-
-Tracing projects stable run/agent/tool spans and uses a separate registered traces
-consumer. `deliver_spans` requires a top-level transaction and commits its cursor
-before invoking processors, preventing recovery duplicates. Telemetry is therefore
-at most once and may be lost after acknowledgement; processor failures remain
-isolated. Span output is detached before delivery so processors cannot mutate
-retained result data. Host assembly supplies processors explicitly, and all
-public entrypoints use these kernel projections.
+Typed output checks and one tools-free repair use the `output_validation`
+helpers. The repair is a logged `output_repair` operation whose usage counts
+toward budgets. A result is projected from its terminal prefix, so later turns
+cannot change it.
 
 ## Reserved metadata and seed
 
-Kernel task metadata reserves one closed `vv_session` object containing optional
+Task metadata reserves a closed `vv_session` object with optional
 `host_binding_names`, `max_handoffs`, `handoff_targets`, `input_messages`,
-`memory_initial_state` and `input_blocked`. User-supplied `vv_session` rejects
-at compile time. Request metadata reserves its own closed `vv_session` object
-with optional `endpoint_order`, `endpoint_id`, `shared_state` and `cycle_index`.
-Other metadata stays opaque JSON. Completion state is `op_completed.shared_state`;
-usage contains measurements. Hashes are exactly 64 lowercase hex characters.
-Compaction IDs omit the summary segment when summary_operation_id is null.
+`memory_initial_state` and `input_blocked`; a user-supplied one is rejected at
+compile time. Request metadata reserves its own closed `vv_session` with
+optional `endpoint_order`, `endpoint_id`, `shared_state`, `cycle_index` and
+`model_binding`. Other metadata is opaque JSON. Hashes are 64 lowercase hex
+characters.
 
-Creation can carry closed `attributes.seed = {messages, shared_state}`, both
-required. History projects immediately, before the first turn compilation.
-Messages and JSON state are detached projections after creation. A reset uses a
-new durable identity; see [the seed migration](migration-v8.md#creation-time-seed).
+Creation can carry a closed `attributes.seed = {messages, shared_state}`, both
+required. Seeded history is visible before the first turn compiles. To reset,
+create a session with a new identity; see
+[creation-time seed](upgrading.md#creation-time-seed).
+
+## Stores
+
+`PostgresStore` is the correctness reference. A host that manages its own schema
+copies the current DDL from `postgres.py` exactly. Custom stores must implement
+the [scheduling methods](host-integration.md#if-you-implement-your-own-store).
+
+`SQLiteStore.standalone(path)` owns and closes one connection. Use `":memory:"`
+for a process-local session; its heartbeat factory must lend the same store
+without closing it, for example `lambda: nullcontext(store)`. File stores use
+independent connections to one path. SQLite is single-host only.
+
+SQLite uses STRICT tables, foreign keys, WAL for files, `synchronous=FULL`, a
+5000 ms busy timeout and `user_version=3`; any other version is rejected.
+Transactions use `BEGIN IMMEDIATE`, lease time is read after taking the write
+lock, and nested mutations use savepoints. Host writes and acknowledgements
+share `store.atomic()`.
 
 ## Transport ownership
 
-SQLite and PostgreSQL are the only kernel stores. Celery/Redis remain the .ai
-host's runtime framework and transport; vv-agent has no Redis store, Celery/Redis
-code, integration module or extra. The host owns tasks, queues, connections and
-runtime factories. vv-agent owns transport-independent dispatch semantics and
-their SQLite/PostgreSQL tests. Host transport calls `drive`, scans via `tick` and
-supplies `Runtime.wake`; durable execution authority remains in the store.
-[Cloud host integration](host-integration.md) documents that wiring with Celery
-as a host-only example; backend B1 implements the site's tasks.
+SQLite and PostgreSQL are the only kernel stores. vv-agent ships no Redis store
+and no Celery or Redis code. A host such as a Celery deployment owns tasks,
+queues, connections and runtime factories; it calls `drive`, scans with `tick`
+and supplies `Runtime.wake`. Execution authority stays in the store.
+
+## Tests and database isolation
+
+Pure record and reducer tests use no database and do not import psycopg. Store,
+recovery, compaction, child and concurrency tests run on PostgreSQL, SQLite
+files and SQLite `:memory:`; process-kill tests use the two durable stores.
+
+PostgreSQL tests use `VV_AGENT_TEST_POSTGRES_DSN` if set, otherwise local
+`dbname=postgres` over the unix socket. Each test creates and drops its own
+`vvsk_test_<uuid>` database, so the role needs CREATEDB. The TCP password test
+also creates a temporary login role (CREATEROLE) and connects through
+`127.0.0.1`. Without psycopg or a server, PostgreSQL cases skip with a reason;
+CI supplies a DSN so they run there.
+
+```bash
+uv run pytest tests/session -q
+python3 scripts/contract_snapshot.py check
+uv run ruff format --check . && uv run ruff check . && uv run ty check
+uv run pytest   # full gates need real PostgreSQL
+```
+
+`scripts/session_kernel_benchmark.py --assert-capacity` runs on real PostgreSQL
+with a bounded 1 KiB receipt history. It requires cold recovery of 5,000 and
+20,000 records within 5 and 20 seconds, a steady append median of at most
+50 ms, and full catalog pagination within 1 second. Measurements are in
+[session-kernel-baseline.md](session-kernel-baseline.md).
 
 ## Fixture generation
 
-`scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
-forty-five files from real store/kernel/public-surface/App Server producers with
-scripted providers and fixed semantic identities/clocks. It never edits the
-vendored snapshot. One generation compares all forty-five bytes with the vendored v27.0.0 snapshot.
-Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
-kind/stage/handle/optional-field coverage and source-prefix projections are
-revalidated. Deterministic curation preserves each behavioral coverage key.
-Seven unchanged fixtures are checked directly; session_supervision.json supplies
-the F5 real-store batch/retry/dispatch acceptance expectations. Invalid versions/fields remain
-negative inputs to current strict readers. The full corpus is limited to 3 MB
-and each output to 512 KB. Producer evidence supplements durable-store
-process-kill, concurrency, rollback and authentication tests.
-
-## Per-cycle model selection
-
-Use the session-scoped model_selection inbox input, not mutable Runtime or Task
-fields. See [design and wire](session-model-selection.md) and
-[host recipe](host-integration.md#model-selection). Accepted selection and resolved
-binding live in input_applied; subsequent primary requests retain model, settings,
-route and binding. A resolver rejection preserves the previous choice. Children
-are unaffected. Existing plans, retries and late receipts keep their identity.
+`scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates 45
+fixture files from the real store, kernel, public surfaces and App Server, with
+scripted providers and fixed clocks. It never edits the vendored snapshot; it
+compares all 45 outputs with it byte for byte, and checks digests, record IDs
+and schemas with an independent Node RFC 8785 encoder. The corpus is limited to
+3 MB, and 512 KB per file.

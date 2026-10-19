@@ -15,6 +15,8 @@ versioned source of truth for architecture, workflows, and model configuration.
   release hygiene.
 - Use `docs/model-settings.md` before changing model defaults, settings
   parsing, live tests, or examples that mention provider model ids.
+- Read `docs/upgrading.md` before changing anything stored in a session
+  store (record, inbox or SQL schema).
 
 ## Repository Rules
 
@@ -55,18 +57,22 @@ versioned source of truth for architecture, workflows, and model configuration.
   contract, their real producer suites and full gates pass, and central CI
   records their revisions. Frozen Rust does not block Python adoption; preserve
   its pinned version and verified baseline.
-- Record incomplete required adoption as an explicit open gap. Rust reactivation
-  requires a new Maker decision and full adoption of the then-current contract.
+- Record incomplete required adoption as an explicit open gap. Reactivating Rust
+  needs a new maintainer decision and full adoption of the then-current contract.
 - Keep `HEAD` forward-only. Maintain one current public and wire shape, and
   delete superseded readers, aliases, shims, migrations, fixtures, tests, and
   documentation in the same change across required implementations. Git tags
   provide old runtimes.
-- Backward compatibility is not a design or acceptance requirement. Prefer a
-  breaking replacement when it improves the current architecture, update active
-  callers in the same change, and leave old behavior only in pinned releases.
+- Do not keep old behavior alive in code for compatibility. Prefer a breaking
+  replacement when it improves the design, and update active callers in the
+  same change.
 - Schema and protocol versions are strict rejection boundaries, not decoder
   selectors. Reject missing, stale, unknown, and malformed versions, and reject
   unknown fields unless the central contract defines a typed extension map.
+- Breaking is cheap for us and expensive for hosts. A record or inbox schema
+  bump makes every stored session unreadable, finished ones included. Mark such
+  a change as a store boundary in the release notes and keep
+  `docs/upgrading.md` accurate about how hosts get across it.
 
 ## Common Commands
 

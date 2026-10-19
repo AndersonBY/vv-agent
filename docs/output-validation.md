@@ -1,12 +1,13 @@
-# Optional Output Validation
+# Optional output validation
 
-The current contract defines a default-off host extension that validates a
-completed output and may make one tools-free repair request. It runs outside
-the normal agent loop and does not call the primary model again.
+Output validation lets a host check a run's final output and, if the check
+fails, make one repair attempt without tools. It is off by default. It runs
+after the agent loop has produced its final output and never calls the
+primary model again.
 
 ## Python API
 
-Register callbacks on `Agent` and opt in explicitly with
+Register the callbacks on `Agent` and turn the feature on with
 `output_validation_enabled=True`:
 
 ```python
@@ -45,53 +46,75 @@ agent = Agent(
 )
 ```
 
-Merely registering callbacks does not enable them. The default remains off,
-and `output_validation_max_repairs` accepts only `0` or `1`.
+Registering callbacks alone does not enable validation. The `Agent`
+constructor also checks the configuration:
 
-## Lifecycle And Failure
+- `output_validation_enabled=True` requires an `output_validator`.
+- `output_repair` requires an `output_validator`.
+- `output_validation_max_repairs` must be `0` or `1`.
 
-The Runner first applies the existing output guardrail and `output_type`
-coercion to form a terminal candidate. When this extension is enabled, the
-validator and optional one-shot repair run before the session turn terminal
-and terminal-event emission. The committed terminal
-is therefore either the validated success or a typed validation failure.
-Disabled and accepted validators preserve the existing event and trace shape.
-A retained turn terminal replay reuses that authoritative terminal and does not
-call the primary model, validator, or repair callback again.
+## Lifecycle and failure
 
-If the initial output is invalid and repair is enabled, the callback receives
-one `OutputRepairRequest`. A replacement is passed through `output_type` and
-the same validator again. A second invalid result, a repair exception, or a
-malformed validator result cannot start another repair.
+The steps run in this order:
 
-Validation failure returns a normal `RunResult` with:
+1. The runner applies the output guardrails and `output_type` coercion to get
+   a candidate output.
+2. If validation is enabled, the validator checks the candidate.
+3. If the candidate is invalid and repair is enabled, the repair callback
+   receives one `OutputRepairRequest`. Its replacement goes through
+   `output_type` coercion and the same validator again.
+4. The runner commits the turn's terminal result and emits its terminal
+   event.
+
+Because validation happens before step 4, the stored terminal result is
+either the validated output or a validation failure. There is at most one
+repair, and these cases end the run as failed without another attempt:
+
+- the repaired output is still invalid;
+- the repair callback raises (`repair_provider_error`);
+- the validator raises (`output_validator_error`) or returns something other
+  than `OutputValidationResult` (`output_validator_contract_invalid`). These
+  two are not repaired at all.
+
+An `output_type` coercion failure counts as a rejection with code
+`output_type_invalid`, so it can be repaired. When validation is
+disabled or the validator accepts the output, events and traces look exactly
+as they would without this feature.
+
+Replaying a finished turn returns its stored terminal result. The primary
+model, the validator, and the repair callback are not called again. A turn
+resumed after approval goes through the same steps before its terminal result
+is committed.
+
+A validation failure returns a normal `RunResult` with:
 
 - `status == AgentStatus.FAILED`;
 - `error_code == "output_validation_failed"`;
-- the invalid candidate in `partial_output` when it can be represented;
-- diagnostic validation or provider detail in `raw_result.error`.
+- the invalid candidate in `partial_output`, when it can be represented;
+- validation or provider details in `raw_result.error`.
 
-Exactly one terminal event is emitted for the final validated observation. A
-rejection emits `run_failed`; a successful repair emits `run_completed` with
-the repaired output. Approval resume follows the same ordering before its
-fresh terminal is committed. No separate validation event is added.
+The run emits exactly one terminal event for the final result:
+`run_failed` after a rejection, or `run_completed` with the repaired output
+after a successful repair. There is no separate validation event.
 
-## Safety Boundary
+## Safety boundary
 
-`OutputValidationContext` contains only `run_id`, `agent_name`, and the
-declared `output_type`. The framework does not inspect task categories, answer
-meaning, domain milestones, or stopping rules.
+`OutputValidationContext` holds only `run_id`, `agent_name`, and the declared
+`output_type`. The framework does not look at what the task is about or what
+the answer means; that judgment belongs to the host's validator.
 
-`OutputRepairRequest.tools` is an immutable empty tuple, the Python adaptation
-of the contract's empty tool collection. `model` and `model_settings` are
-host-selected descriptors passed to the callback; the Runner does not resolve
-them, inject tools, or turn repair into another agent cycle.
+`OutputRepairRequest.tools` is always an empty tuple (the contract's empty
+tool list). `model` and `model_settings` come from `output_repair_model` and
+`output_repair_model_settings` and are passed to the callback as-is. The
+runner does not resolve them, add tools, or run repair as another agent cycle.
 
-Durable hosts must reconstruct the frozen callback bindings. A repair is one
-logged tools-free `output_repair` operation, with model-call v2 accounting; an
-unknown repair outcome is never automatically retried.
+In a durable session, repair is logged as one `output_repair` model operation
+with no tools, and its usage counts toward the run budget. If the outcome of a
+repair is unknown, for example because the process died during the call, the
+runner does not retry it automatically. A durable host must register the same
+validator and repair callbacks when it rebuilds the agent for a turn.
 
-## Verification
+## Tests
 
 ```bash
 uv run pytest tests/test_output_validation_contract.py

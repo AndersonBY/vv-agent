@@ -2,92 +2,86 @@
 
 [中文文档](README_ZH.md)
 
-A lightweight agent framework extracted from VectorVein's production runtime. Cycle-based execution with pluggable LLM backends, tool dispatch, memory compression, and durable session scheduling.
+vv-agent is a lightweight Python agent framework extracted from VectorVein's
+production runtime. An agent runs in cycles: each cycle calls the model, runs
+the tools it asked for, and decides whether to continue. The framework provides
+pluggable LLM backends, tool dispatch, context compaction, and durable sessions
+that can resume after a crash.
 
 ## Install
 
-`contract.lock.json` pins this repository's language-neutral contract. The
-schema-2 central support matrix records adoption and verification: Python is the
-required implementation; `vv-agent-rs` is frozen at contract `23.0.0` / package
-series `0.21.x` for maintenance only. Python adoption does not require a Rust
-update. See [the contract workflow](docs/parity-contract.md). This repository
-keeps a Python-idiomatic API.
+```bash
+python -m pip install vv-agent
+```
+
+Two optional extras add storage backends:
+
+- `postgres` for the PostgreSQL session store (`PostgresStore`).
+- `s3` for the S3 workspace backend (`S3WorkspaceBackend`).
 
 ```bash
-python -m pip install -e .
+python -m pip install 'vv-agent[postgres,s3]'
 ```
 
-Install the `postgres` extra for PostgreSQL SessionStore or the `s3` extra
-for S3 workspace storage. Repository `HEAD` is forward-only: current readers
-accept only the current strict public and wire shapes.
+To work from a checkout, run `python -m pip install -e .` or `uv sync --dev`.
 
-For both extras: `python -m pip install 'vv-agent[postgres,s3]'`.
-See the [0.23.0 release notes](docs/releases/0.23.0.md) for breaking changes.
+vv-agent 0.24.0 implements version 27.0.0 of the language-neutral
+`vv-agent-contract`, pinned in `contract.lock.json`. Python is the maintained
+implementation. The Rust port, `vv-agent-rs`, is frozen at contract 23.0.0
+(package series 0.21.x) and only gets maintenance fixes. The Python API keeps
+Python naming; see [the contract workflow](docs/parity-contract.md).
 
-Current HEAD adopts contract v26, public API v10 and one session kernel execution path.
-Older runtime behavior is retained in Git tags. See [v8 migration](docs/migration-v8.md)
-for API replacements and host seed examples.
-See [cloud host integration](docs/host-integration.md) for PostgreSQL transactions,
-queue dispatch and a host-owned Celery example.
+If you upgrade from an earlier release and keep sessions in SQLite files or
+PostgreSQL, read [Upgrading a host](docs/upgrading.md) first. A new release can
+make stored sessions unreadable, and that guide explains how to get across.
 
-## Architecture
+## Configure a model
 
-```text
-Runner / InteractiveAgentClient / CLI / AppServer
-  -> SessionDriver -> SessionStore (SQLite or PostgreSQL)
-  -> session.kernel.drive
-  -> retained model/tool operations and child delivery
-  -> RunResult / RunEvent / tracing / protocol projections
-```
-
-The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
-`RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `SessionStore`,
-`PromptBundle`, `PromptSection`, `ToolExecutionResult`, `ToolArtifactRef`,
-`ToolResultCursor`, typed `RunEvent` objects, `ApprovalProvider`,
-`ContextProvider`, `SessionRunEventStore`, and the interactive session API for
-desktop/runtime integrations. Extension points that live in package modules include
-`vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
-Lower-level runtime implementation details include `AgentTask`, `AgentResult`,
-`Message`, `CycleRecord`, and `ToolCall`.
-
-Task completion is explicit: tool directives are the default, while a declared
-no-tool policy can finish or pause on a normal assistant response. No implicit
-"last message = answer" heuristic is used.
-
-## Repository Setup
+Model endpoints and API keys live in a Python settings file. Copy the template
+and fill in your keys:
 
 ```bash
 cp local_settings.example.py local_settings.py
-# Fill in your API keys and endpoints in local_settings.py
 ```
 
-```bash
-uv sync --dev
-uv run pytest
-```
+The template defines a `moonshot` backend with the `kimi-k3` model. The CLI,
+examples and live tests use those two names by default. Never commit
+`local_settings.py`. See [Model settings](docs/model-settings.md) for the
+settings shape and how a model key is resolved.
 
-## Quick Start
+## Quick start
 
 ### CLI
 
 ```bash
 uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k3
 
-# With per-cycle logging
-uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k3 --verbose
+# Print a log line for every cycle
+uv run vv-agent --prompt "Summarize this framework" --verbose
 ```
 
-CLI flags: `--settings-file`, `--backend`, `--model`, `--verbose`.
+| Flag | Default |
+| --- | --- |
+| `--backend` | `moonshot` |
+| `--model` | `kimi-k3` |
+| `--settings-file` | `$VV_AGENT_LOCAL_SETTINGS`, else `local_settings.py` |
+| `--workspace` | `./workspace` |
+| `--max-cycles` | `80` |
+| `--language` | `zh-CN` (system prompt language; `en-US` also works) |
+| `--agent-type`, `--temperature`, `--top-p`, `--max-tokens` | unset |
+| `--verbose` | off |
 
-### Programmatic SDK
+### Python
 
 ```python
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
+
+provider = VvLlmModelProvider.from_settings_file("local_settings.py").with_default_backend("moonshot")
 
 @function_tool
 def read_order(order_id: str) -> str:
     """Read order information."""
-    return "order details"
+    return f"Order {order_id}: 2 items, shipped"
 
 agent = Agent(
     name="ops",
@@ -96,16 +90,24 @@ agent = Agent(
     tools=[read_order],
 )
 
-result = Runner.run_sync(agent, "Analyze order 123", run_config=RunConfig(
-    default_backend="moonshot",
-))
+result = Runner.run_sync(agent, "Analyze order 123", run_config=RunConfig(model_provider=provider))
 print(result.status, result.final_output)
 ```
 
-For defaults shared by several runs, create a configured Runner instead of
-repeating the same `RunConfig`:
+Every run needs a `ModelProvider`. `VvLlmModelProvider` reads the settings file
+and calls the model through `vv-llm`. The examples below reuse `provider`.
+
+By default the run finishes when the model replies without calling a tool. The
+framework does not guess whether a reply "looks final"; it follows the declared
+no-tool policy, described in [Finishing a run](#finishing-a-run).
+
+### Shared defaults
+
+When several runs share the same settings, configure a Runner once:
 
 ```python
+from vv_agent import RunConfig, Runner
+
 runner = Runner.configured(RunConfig(
     model_provider=provider,
     model="kimi-k3",
@@ -114,82 +116,58 @@ runner = Runner.configured(RunConfig(
 result = runner.run_sync(agent, "Analyze order 123")
 ```
 
-Provider resolution is per-run then Runner. Model resolution is per-run,
-Agent, Runner, then the selected provider default. Model settings merge in the
-opposite layering direction: provider, Runner, Agent, then per-run, with each
-later layer overriding earlier fields.
+Values are resolved in this order:
 
-`Agent.output_type` can coerce JSON final output into `dict`, `list`,
-dataclasses, or Pydantic-style models. Decorated tools may accept a leading
-`ToolContext` parameter; it is passed at invocation time and omitted from the
-tool JSON schema.
+- Provider: the per-run `RunConfig`, then the Runner default.
+- Model: the per-run config, then `Agent.model`, then the Runner default, then
+  the provider's default model. The Runner's model is skipped when the per-run
+  config brings its own provider.
+- `ModelSettings`: merged field by field from provider defaults, then Runner,
+  then Agent, then per-run. Later layers win.
 
-### Streaming And Sessions
+Set `Agent.output_type` to coerce the JSON final output into a `dict`, a
+`list`, a dataclass or a Pydantic-style model. See
+[Output validation](docs/output-validation.md) for validation and repair.
 
-Ordinary Runner runs use a fresh SQLite `:memory:` store. `Runner.start()` returns
- a live RunHandle; events(), result(), cancel() and approve() share the same
-kernel path. Durable events derive from the session log; assistant deltas are
-volatile live observations. A JsonlRunEventStore is an optional projection sink.
+## Streaming and cancellation
+
+`Runner.start()` returns a `RunHandle` right away and runs the agent in the
+background. Use `events()` to stream typed `RunEvent` objects, `result()` to
+wait for the result, and `cancel()` to stop the run, for example from a UI
+button or a timer.
 
 ```python
 from vv_agent import Agent, RunConfig, Runner
 
 agent = Agent("assistant", "Answer briefly.", model="kimi-k3")
-handle = Runner.start(agent, "Inspect the project", run_config=RunConfig(default_backend="moonshot"))
+handle = Runner.start(agent, "Inspect the project", run_config=RunConfig(model_provider=provider))
 for event in handle.events():
     if event.type == "assistant_delta":
         print(event.delta, end="")
 print(handle.result().final_output)
 ```
 
-Use InteractiveAgentClient for multiple turns and SessionStore for durable
-retention. Waiting operations retain the same session_id and turn_id. After
-answering a parked approval, explicitly resume the handle or retained turn.
+Every run is a session in a session store. A plain Runner run uses a fresh
+in-memory SQLite store. Durable events are read back from the session log.
+Assistant deltas are live only and are not stored. A `JsonlRunEventStore` can
+copy events to a file if you want one. See
+[Runtime control](docs/runtime-control.md) for waits, resume, budgets and event
+projections.
 
-### App Server
+## Multi-turn sessions
 
-Use the App Server when a desktop app, worker, IDE, or other host process needs
-to drive `vv-agent` through a stable protocol instead of embedding the Python
-SDK directly. It runs JSONL over stdio, exposes Thread / Turn / Item lifecycle
-events, routes tool approval as server-to-client requests, supports
-`thread/read` and `thread/resume` replay, and exports typed JSON Schema and
-self-contained TypeScript bindings.
-
-```bash
-uv run vv-agent app-server --listen stdio --settings local_settings.py --backend moonshot --model kimi-k3
-uv run vv-agent app-server schema --out ./app-server-schema
-uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
-uv run vv-agent debug app-server send-message "hello"
-```
-
-Product hosts implement `AppServerHost` to map product profiles, workspace
-context, tools, approval UI, memory, and model settings into framework
-`Agent` and `RunConfig` objects. The App Server remains a runtime boundary; it
-does not import product UI, account, billing, browser, or IM modules.
-
-See [docs/app-server.md](docs/app-server.md) for protocol details and
-[docs/app-server-host-integration.md](docs/app-server-host-integration.md) for
-the current host boundary and rollout checks.
-
-### Interactive Sessions
-
-InteractiveAgentClient owns conversation turns, steering, follow-up, cancellation
-and approvals. Its default store is SQLite `:memory:`. Supply SQLiteStore or
-PostgresStore through AgentSessionOptions.session_store for durable retention.
-Creation-time `session` is a closed seed with messages and shared_state; messages
-and shared_state become read-only projections after creation.
+`InteractiveAgentClient` manages conversations: turns, steering, follow-up
+messages, cancellation and approvals. Its default store is in memory. Pass a
+`SQLiteStore` or `PostgresStore` as `AgentSessionOptions.session_store` to keep
+sessions across restarts.
 
 ```python
-from pathlib import Path
-from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, SQLiteStore, VvLlmModelProvider
+from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, SQLiteStore
 
 with SQLiteStore.standalone("sessions.sqlite3") as store:
-    if not store.connection.execute("PRAGMA user_version").fetchone()[0]:
+    if store.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
         store.install_schema()
-    client = InteractiveAgentClient(options=AgentSessionOptions(
-        model_provider=VvLlmModelProvider(Path("local_settings.py"), default_backend="moonshot"),
-        session_store=store,
-    ))
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, session_store=store))
     try:
         session = client.create_session(
             agent=Agent("assistant", "Remember prior turns.", model="kimi-k3"),
@@ -201,19 +179,175 @@ with SQLiteStore.standalone("sessions.sqlite3") as store:
         client.driver.close()
 ```
 
-Runner.resume(session_id, turn_id), AgentSession.continue_run() and App Server
-turn/resume drive an explicitly retained turn. Replies preserve turn budgets;
-fresh turns reset their counters. Closed sessions reject execution.
+A few rules about sessions:
 
-### Agent As Tool, Handoff, And Policy
+- `create_session(session=...)` accepts a seed with `messages` and
+  `shared_state`, and nothing else. After creation, `session.messages` and
+  `session.shared_state` are read-only views. See
+  [Creation-time seed](docs/upgrading.md#creation-time-seed).
+- A turn that waits for a user reply or an approval keeps its `session_id` and
+  `turn_id`. After you answer, drive the same turn again with
+  `Runner.resume(session_id, turn_id)`, `AgentSession.continue_run()` or the App
+  Server `turn/resume` request.
+- A resumed turn keeps its original budget counters. A new turn starts with
+  fresh counters.
+- A closed session rejects new work.
 
-Use `agent.as_tool()` when a child agent should return a result to the parent
-agent and let the parent continue. Use `handoff()` when control should transfer
-to the target agent and the target output should finish the run.
+To run sessions on many workers against one PostgreSQL database, see
+[Cloud host integration](docs/host-integration.md).
+
+## App Server
+
+Use the App Server when a desktop app, worker, IDE or another process should
+drive vv-agent through a stable protocol instead of importing the Python SDK. It
+speaks JSONL over stdio and offers:
+
+- Thread, Turn and Item lifecycle events.
+- Tool approvals sent to the client as server-to-client requests.
+- `thread/read` and `thread/resume` replay.
+- Generated JSON Schema and self-contained TypeScript bindings.
+
+```bash
+uv run vv-agent app-server --listen stdio --settings local_settings.py --backend moonshot --model kimi-k3
+uv run vv-agent app-server schema --out ./app-server-schema
+uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
+uv run vv-agent debug app-server send-message "hello"
+```
+
+The App Server takes `--settings`, not `--settings-file`. `--listen`,
+`--settings`, `--backend` and `--model` are required; `--timeout-seconds` sets
+the provider request timeout.
+
+A product host implements `AppServerHost` to turn its own profiles, workspace
+context, tools, approval UI, memory and model settings into `Agent` and
+`RunConfig` objects. The App Server never imports product UI, account, billing,
+browser or IM code. See [App Server protocol](docs/app-server.md) and
+[App Server host integration](docs/app-server-host-integration.md).
+
+## Tools
+
+### Custom tools
+
+Decorate a Python function with `@function_tool` and pass it in
+`Agent(tools=[...])`. The decorator builds the JSON schema from the signature.
+A tool may take a `ToolContext` as its first parameter; the runtime passes it
+in and leaves it out of the schema.
+
+For lower-level tools, register them on a `ToolRegistry` (`register()` or
+`register_tool()`) and supply the registry through
+`RunConfig.tool_registry_factory`.
+
+### Approvals
+
+A tool declared with `@function_tool(needs_approval=True)` pauses the run
+before its body runs. The run enters `WAIT_USER` and emits an
+`ApprovalRequestedEvent`. Answer it, then resume the handle:
 
 ```python
-from vv_agent import Agent, RunConfig, Runner, ToolPolicy, handoff
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent import Agent, ApprovalDecision, RunConfig, Runner, function_tool
+
+@function_tool(needs_approval=True)
+def delete_temp_files() -> str:
+    """Delete temporary files."""
+    return "deleted 3 files"
+
+agent = Agent("ops", "Clean up when asked.", model="kimi-k3", tools=[delete_temp_files])
+handle = Runner.start(agent, "Clean the workspace", run_config=RunConfig(model_provider=provider))
+for event in handle.events():
+    if event.type == "approval_requested":
+        handle.approve(event.request_id, ApprovalDecision.allow())
+
+result = handle.result()
+if result.status == "wait_user":
+    result = handle.resume()
+print(result.final_output)
+```
+
+`ToolPolicy(approval=...)` takes `default`, `always`, `never` (for trusted
+runs) or `on_request`. An `ApprovalProvider` can answer from product rules or
+UI with allow, deny, allow for this session, or timeout. See
+[Approval](docs/architecture.md#approval) for how the layers combine.
+
+### Capability metadata and policy
+
+A tool can declare what kind of thing it does. The host sees this metadata; the
+model does not.
+
+```python
+from vv_agent import ToolIdempotency, ToolMetadata, ToolPolicy, ToolSideEffect, function_tool
+
+@function_tool(
+    tool_metadata=ToolMetadata(
+        side_effect=ToolSideEffect.EXTERNAL,
+        idempotency=ToolIdempotency.UNSUPPORTED,
+        terminal=False,
+        capability_tags=["ticket.write"],
+        cost_dimensions=["support_api.request"],
+    )
+)
+def create_ticket(title: str) -> dict[str, str]:
+    """Create a support ticket."""
+    return {"ticket_id": "TCK-1001", "title": title}
+
+policy = ToolPolicy(
+    denied_side_effects=[ToolSideEffect.EXECUTE],
+    denied_capability_tags=["filesystem.delete"],
+    deny_terminal_tools=True,
+    denied_cost_dimensions=["gpu.second"],
+)
+```
+
+`side_effect` is one coarse label with no hierarchy. `capability_tags` and
+`cost_dimensions` are opaque labels matched exactly. `terminal=True` only says the tool may return
+`finish` or `wait_user`. The metadata never reaches the model-visible schema.
+
+The `denied_*` and `deny_terminal_tools` policy fields only remove tools. They
+add up across the Agent, the configured Runner, the per-run config and any
+delegated child, and a matching call returns `tool_not_allowed`. See
+[Tool metadata](docs/architecture.md#tool-metadata) and
+[Tool policy](docs/architecture.md#tool-policy).
+
+### Built-in tools
+
+`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`,
+`search_files`, `todo_write`, `ask_user`, `bash`, `check_background_command`,
+`stop_background_command`, `read_image`, `create_sub_task`, `sub_task_status`,
+`activate_skill`.
+
+File search is tuned for large workspaces:
+
+- `find_files` returns at most 100 paths unless you raise `max_results` (up to a
+  hard cap). `scan_limit` stops early on huge trees and marks the count with
+  `count_is_estimate=true`.
+- Both `find_files` and `search_files` use `ripgrep` (`rg`) on local workspaces
+  when it is installed, and a Python walk otherwise. `search_files` is
+  smart-case: an all-lowercase pattern ignores case. Its structured matches and
+  counts are in `ToolExecutionResult.metadata`.
+- Hidden directories and dependency or cache roots such as `node_modules`,
+  `.venv` and `.git` are skipped, and only summarized in a root listing. Point
+  `path` at one, or set `include_ignored=true`, to look inside. Sensitive files
+  such as `.env` and private keys need `include_sensitive=true`.
+
+`bash` waits up to `yield_time_ms` (default 1000 ms) for a command. If it is
+still running, the tool returns the output so far and a `session_id`, and the
+process keeps going. `timeout_seconds` sets an optional deadline from process
+start. `check_background_command` and `stop_background_command` take that
+`session_id`. See [Bash process management](docs/bash-process-management.md).
+
+When a `bash` or `read_file` result is truncated, `ToolExecutionResult` points
+to the rest: an immutable workspace artifact for `bash`, and a cursor for
+`read_file`. A cursor rejects a changed file, a different path or an invalid
+offset. The `tool_result` diagnostic event carries the model-visible `content`,
+status, directive, error code and metadata, but not the artifact or cursor.
+
+## Multi-agent runs
+
+Use `agent.as_tool()` when a child agent should return a result and the parent
+should carry on. Use `handoff()` when the target agent should take over and its
+output should finish the run.
+
+```python
+from vv_agent import Agent, RunConfig, Runner, handoff
 
 researcher = Agent(name="researcher", instructions="Collect facts.", model="kimi-k3")
 writer = Agent(
@@ -232,93 +366,56 @@ triage = Agent(
 result = Runner.run_sync(
     triage,
     "Write a short report.",
-    run_config=RunConfig(
-        default_backend="moonshot",
-        max_handoffs=4,
-        tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "transfer_to_writer"]),
-    ),
+    run_config=RunConfig(model_provider=provider, max_handoffs=4),
 )
 ```
 
-A handoff is an outer Runner control transfer, not an agent-as-tool call. The
-target Agent resolves its own model and model settings, while the active
-session, cancellation token, and mutated shared state continue across the
-transition. `max_handoffs` defaults to `10` and limits control transfers
-independently from `max_cycles`. Approval resume preserves the same behavior.
+The model performs a handoff by calling a `transfer_to_<agent name>` tool
+(`transfer_to_writer` here). The Runner then switches agents. The target agent
+resolves its own model and model settings. The session, the cancellation token
+and any changes to shared state carry over. `max_handoffs` defaults to `10` and
+is counted separately from `max_cycles`. A run that resumes after an approval
+follows the same rules.
 
-No-tool completion is an explicit control, not a task or answer classifier.
-Set `Agent(no_tool_policy="finish")` when a normal assistant response should
-finish the run without `task_finish`, or override it for one call with
-`RunConfig(no_tool_policy="continue" | "wait_user" | "finish")`. Per-run
-configuration wins over a configured Runner default, which wins over the
-Agent value; omitting every layer uses `finish`. Inspect
-`result.completion_reason`, `result.completion_tool_name`,
-and `result.partial_output` to distinguish natural completion, tool-driven
-completion, waits, cancellation, failure, and max-cycle exhaustion.
+The model can also manage background or parallel work itself with
+`create_sub_task` and `sub_task_status`. Each child is its own session with its
+own lease (a worker's claim to drive a session). The parent fixes the child's
+prompt, policy, model and budget when it admits the child, and accepts only the
+child's own final result. A child that waits for a user keeps that wait.
+`sub_task_status` reads progress, waits for completion or sends a follow-up; a
+host steers a child by pushing a targeted `steer` inbox item. A child reuses the
+parent's `ModelProvider` and resolves its own model. See
+[Delegation and background work](docs/runtime-control.md#delegation-and-background-work).
 
-`RunConfig.budget_limits` can independently limit total tokens, uncached input
-tokens, total or exact-name tool calls, active wall time, and host-metered
-cost. Limits are optional and task-neutral. Inspect `result.budget_usage` and
-`result.budget_exhaustion`; a budget stop is a typed failed result, not a
-successful answer. See [Run Budgets](docs/run-budgets.md).
+## Finishing a run
 
-Tools can request approval with `@function_tool(needs_approval=True)`. By
-default the run enters `WAIT_USER` before the tool body is called and emits a
-`ApprovalRequestedEvent`. `ToolPolicy(approval="never")` disables that
-approval gate for trusted runs. The four policy modes are `default`, `always`,
-`never`, and `on_request`: `default` inherits the next configured policy,
-whereas explicit `on_request` follows each tool's static or dynamic approval
-declaration.
+A run ends or pauses in one of two ways:
 
-Custom tools may also attach an optional host-visible capability declaration:
+- A tool returns a `finish` or `wait_user` directive. `ask_user`, for example,
+  pauses the run for a reply.
+- The model replies without calling a tool, and the no-tool policy decides.
 
-```python
-from vv_agent import (
-    ToolIdempotency,
-    ToolMetadata,
-    ToolPolicy,
-    ToolSideEffect,
-    function_tool,
-)
+The no-tool policy is `finish` unless you change it. Set it on the agent with
+`Agent(no_tool_policy=...)`, or for one call with `RunConfig(no_tool_policy=...)`.
+The values are `finish`, `continue` and `wait_user`. A per-run value beats a
+configured Runner default, which beats the Agent value.
 
-@function_tool(
-    tool_metadata=ToolMetadata(
-        side_effect=ToolSideEffect.EXTERNAL,
-        idempotency=ToolIdempotency.UNSUPPORTED,
-        terminal=False,
-        capability_tags=["ticket.write"],
-        cost_dimensions=["support_api.request"],
-    )
-)
-def create_ticket(title: str) -> dict[str, str]:
-    return {"ticket_id": "TCK-1001", "title": title}
+Read `result.completion_reason` to see why the run stopped: a tool finish, a
+no-tool finish, a wait, cancellation, failure, budget exhaustion or running out
+of cycles. `result.completion_tool_name` and `result.partial_output` add detail.
+Plain runs default to 10 cycles (`max_cycles`); the CLI uses 80.
 
-policy = ToolPolicy(
-    denied_side_effects=[ToolSideEffect.EXECUTE],
-    denied_capability_tags=["filesystem.delete"],
-    deny_terminal_tools=True,
-    denied_cost_dimensions=["gpu.second"],
-)
-```
+`RunConfig.budget_limits` takes a `RunBudgetLimits`. It can cap total tokens,
+uncached input tokens, all tool calls or calls to one tool, active wall time and
+host-metered cost. All limits are optional. They limit resources and never judge
+the answer. A run that hits a budget ends as a typed failure, not a success;
+inspect `result.budget_usage` and `result.budget_exhaustion`. See
+[Run budgets](docs/run-budgets.md).
 
-`side_effect` is one coarse declaration with no inferred hierarchy;
-`capability_tags` and `cost_dimensions` are opaque exact-match labels, and cost
-dimensions are not measurements or prices. `terminal=True` only declares that
-a tool may return `finish` or `wait_user`; it never ends a run by itself. The
-four new policy fields are cumulative denials across Agent, configured Runner,
-per-run, and delegated-child layers, and a matching denial returns
-`tool_not_allowed`. They cannot grant a capability or remove an existing name,
-argument, approval, budget, or runtime restriction.
+## Guardrails and tracing
 
-Typed metadata is separate from generic `FunctionTool.metadata` and is not
-added to the model-visible function schema. `ToolMetadata.idempotency` is the
-only idempotency declaration used by execution, telemetry, and retained operations.
-
-### Guardrails And Tracing
-
-Input guardrails run before the model provider is called. Output guardrails run
-after a final output is available. Trace processors receive lightweight run and
-tool spans.
+Input guardrails run before the model is called. Output guardrails run once a
+final output exists. Trace processors receive lightweight run and tool spans.
 
 ```python
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, input_guardrail
@@ -340,28 +437,57 @@ agent = Agent(
 result = Runner.run_sync(
     agent,
     "Summarize this project.",
-    run_config=RunConfig(default_backend="moonshot", tracing={"workflow_name": "summary"}),
+    run_config=RunConfig(model_provider=provider, tracing={"workflow_name": "summary"}),
 )
 ```
 
-### Shell Runtime Configuration (Windows)
+## Workspaces
 
-`bash` runtime defaults are a **startup/session configuration**, not tool-call arguments.
+Built-in file tools read and write through a `WorkspaceBackend`.
 
-- Run defaults: pass `bash_shell`, `windows_shell_priority`, and `bash_env`
-  through `RunConfig.metadata`.
-- Per-agent defaults: put the same keys in `Agent.metadata`.
-- Recommended Windows priority: `["git-bash", "powershell", "cmd"]`
-- On Windows, bash-tool child processes default `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` unless already overridden via the parent environment or `bash_env`.
-- On Windows, bash-tool child processes are launched with hidden-console flags so GUI hosts can run `bash` / `powershell` commands without flashing a terminal window.
-- `Runner.run_sync(...)` and `Runner.stream_sync(...)` both inherit compiled
-  shell metadata.
-- The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
-- The runtime shell hint is frozen per task/session-run for local LLM requests to keep those request schemas stable across cycles and preserve prompt-cache efficiency. Frozen turn definitions retain the canonical schemas planned for the compiled task, so host-specific hint text does not affect the task-scoped toolset digest.
-- Runner/CLI-generated tasks carry one resolved `PromptBundle` explicitly
-  through `AgentTask`, each `LlmRequest`, the frozen turn definition and logged model operations. Generic metadata is not a prompt-section transport.
-  Anthropic projection may use the canonical sections for cache breakpoints;
-  other providers receive the deterministic flattened prompt.
+| Backend | Use it for |
+| --- | --- |
+| `LocalWorkspaceBackend` | The default. A local directory, with protection against paths that escape it. |
+| `MemoryWorkspaceBackend` | An in-memory dict. Good for tests and sandboxed runs. |
+| `S3WorkspaceBackend` | S3-compatible object storage: AWS S3, Aliyun OSS, MinIO, Cloudflare R2. Needs the `s3` extra. |
+
+```python
+from pathlib import Path
+from vv_agent import RunConfig
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+
+local_config = RunConfig(workspace_backend=LocalWorkspaceBackend(Path("./workspace")))
+memory_config = RunConfig(workspace_backend=MemoryWorkspaceBackend())
+```
+
+```python
+from vv_agent.workspace import S3WorkspaceBackend
+
+s3_backend = S3WorkspaceBackend(
+    bucket="my-bucket",
+    prefix="agent-workspace",
+    endpoint_url="https://oss-cn-hangzhou.aliyuncs.com",  # None for AWS
+    aws_access_key_id="...",
+    aws_secret_access_key="...",
+    addressing_style="virtual",  # "path" for MinIO
+)
+```
+
+To plug in other storage, implement the `WorkspaceBackend` protocol in
+`src/vv_agent/workspace/base.py`. It covers listing files, text and binary
+reads, plain and exclusive (create-only) writes, file info, existence and file
+checks, and creating directories.
+
+## Shell settings
+
+The `bash` tool's shell is chosen when the run starts, not per tool call. Set
+these keys in `RunConfig.metadata` for one run, or in `Agent.metadata` for an
+agent:
+
+- `bash_shell`: the shell to use.
+- `windows_shell_priority`: the order to try shells on Windows. We recommend
+  `["git-bash", "powershell", "cmd"]`.
+- `bash_env`: extra environment variables for commands.
 
 ```python
 from vv_agent import Agent, RunConfig, Runner
@@ -376,7 +502,7 @@ result = Runner.run_sync(
     agent,
     "Check the workspace.",
     run_config=RunConfig(
-        default_backend="moonshot",
+        model_provider=provider,
         metadata={
             "windows_shell_priority": ["git-bash", "powershell", "cmd"],
             "bash_env": {"PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple"},
@@ -385,344 +511,139 @@ result = Runner.run_sync(
 )
 ```
 
-## Session Execution
+On Windows, commands get `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` unless the
+parent environment or `bash_env` sets them. They also start without a console
+window, so a GUI host does not flash a terminal.
 
-All public entrypoints use SessionDriver and the session kernel. SessionStore
-transactions own the log, inbox, leases, child admission and retained receipts.
-Ordinary runs use SQLite `:memory:`; durable SQLite/PostgreSQL are opt-in through
-the session API. Runner.start() provides non-blocking execution and cancellation.
+The `bash` tool description tells the model which shell and command prefix it
+will get. The hint, like the run's `PromptBundle`, stays fixed for the whole
+run, so every cycle sends the same request prefix and the provider's prompt
+cache keeps hitting. Anthropic requests can place cache breakpoints at prompt
+sections; other providers get the flattened prompt.
 
-```python
-from vv_agent import Agent, RunConfig, Runner
+## Memory compaction
 
-handle = Runner.start(Agent("assistant", "Answer briefly.", model="kimi-k3"), "Explain session history.",
-                      run_config=RunConfig(default_backend="moonshot"))
-# A host can call handle.cancel() from its UI or a timer.
-print(handle.result().final_output)
-```
+When the history grows too large for the model, `MemoryManager` compacts it.
+It first archives old, large tool results (microcompaction). If that is not
+enough, it summarizes the older part of the history and keeps the last 10 raw
+messages (`memory_keep_recent_messages`). A failed step leaves the history
+unchanged.
 
-See [runtime-control.md](docs/runtime-control.md) for waits, explicit resume,
-LeaseLost backoff, budgets and event projections.
+- The compaction threshold is the smaller of `memory_compact_threshold`
+  (default `250000` tokens) and the model's prompt capacity: its context window
+  minus the output reserve minus a `13000`-token buffer. A memory warning
+  appears at `memory_threshold_percentage` (default `90`) percent of it. Both
+  settings are fields of `AgentTask` and `InteractiveAgentDefinition`; Runner
+  runs use the defaults.
+  See [Capacity metadata](docs/model-settings.md#capacity-metadata).
+- Tune microcompaction with `RunConfig(microcompaction_policy=MicrocompactionPolicy(...))`.
+  By default it starts at `0.75` of the threshold, aims for `0.60`, keeps the
+  last 3 cycles, and only touches results over 500 characters.
+- An archived result is first written in full to `.vv-agent/artifacts/` in the
+  workspace; the model then sees a `<Tool Result Compact>` marker with the
+  artifact path, a `read_file` hint and a short excerpt. Archiving is off when
+  the model cannot call `read_file`, because it could not read the result back.
+  A tool declared with `result_retention=ToolResultRetention.PRESERVE` is never
+  archived. The artifact's byte size and SHA-256 stay in the host-visible
+  `ToolArtifactRef`.
+- The summary uses `memory_summary_model` (and optional
+  `memory_summary_backend`) from metadata, else the run's own model. It keeps
+  artifact and file paths with read hints and never reads those files itself.
+- Size comes from the previous cycle's reported prompt tokens plus the new tool
+  messages. Without usage data, vv-agent counts tokens with `vv-llm`, then falls
+  back to a local estimate that handles CJK text.
+- `memory_compact_started` and `memory_compact_completed` events report each
+  attempt. The completed event names the strongest step taken: `none`, `micro`,
+  `structural`, `summary` or `emergency`.
 
-### Runtime Log Payloads
+Session Memory carries notes from one run of a session to the next. It is off
+by default; turn it on with `RunConfig(session_memory_enabled=True)`. Notes live
+in `workspace/.memory/session/<session-or-task-scope>/session_memory.json`,
+scoped by `metadata.session_id` or else the task ID. A run reads them once, at
+compile time, into its first system message; notes extracted during the run
+show up from the next run on, and a resumed turn reuses its frozen copy.
+Extraction uses the summary model unless `session_memory_extraction_model` says
+otherwise. Full compaction keeps the stored notes. Sub-tasks keep Session Memory
+off by default so parent and child never share a file.
 
-The `tool_result` diagnostic contains the model-visible `content`, ordinary
-metadata, and a bounded `content_preview`; it does not duplicate artifact or
-cursor fields. Structured recovery belongs to `ToolExecutionResult` and is
-preserved in cycle results and retained operation receipts. A
-bounded bash result points to an immutable workspace artifact, while a bounded
-`read_file` result points to a source-verified cursor. Hosts must read artifacts
-through normal workspace policy; cursors reject changed sources, path
-mismatches, and invalid offsets.
+These metadata keys, set in `Agent.metadata` or `RunConfig.metadata`, tune the
+details: `model_context_window`, `reserved_output_tokens`,
+`autocompact_buffer_tokens`, `memory_keep_recent_messages`,
+`memory_summary_model`, `memory_summary_backend`, `include_memory_warning`,
+`session_memory_min_tokens`, `session_memory_max_tokens`,
+`session_memory_min_text_messages`, `session_memory_storage_dir`,
+`session_memory_extraction_model`, `session_memory_extraction_backend`,
+`tool_result_excerpt_head`, `tool_result_excerpt_tail` and
+`summary_event_limit`.
 
-## Workspace Backends
+For the full algorithm, see
+[History-preserving compaction](docs/architecture.md#history-preserving-compaction)
+and [Compaction through the log](docs/session-kernel.md#compaction-through-the-log).
 
-Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `find_files`, etc.) go through this abstraction.
-
-`find_files` includes built-in safety defaults for large workspaces:
-
-- Returns at most `100` paths per call by default (`max_results` can tune this, with hard cap).
-- Uses `ripgrep` (`rg`) for fast local traversal when available, with automatic fallback to Python walk.
-- `search_files` also uses `rg` for local workspaces (with Python fallback), defaults to smart-case matching (lowercase patterns are case-insensitive; patterns with uppercase stay case-sensitive), and skips hidden/common dependency roots unless explicitly included.
-- `search_files` returns model-facing search text in `ToolExecutionResult.content`, while structured files/matches/counts live in `ToolExecutionResult.metadata`.
-- Sensitive files such as `.env` and private keys are omitted by default; set `include_sensitive=true` to opt in.
-- When listing from workspace root, common dependency/cache roots (for example `node_modules`, `.venv`, `.git`) are summarized instead of expanded.
-- You can still inspect those paths explicitly by setting `path` to that directory (or by setting `include_ignored=true`).
-- Supports `scan_limit` to stop early on very large trees; when triggered, response sets `count_is_estimate=true`.
-
-| Backend | Use case |
-|---------|----------|
-| `LocalWorkspaceBackend` | Default. Reads/writes to a local directory with path-escape protection. |
-| `MemoryWorkspaceBackend` | Pure in-memory dict storage. Great for testing and sandboxed runs. |
-| `S3WorkspaceBackend` | S3-compatible object storage (AWS S3, Aliyun OSS, MinIO, Cloudflare R2). |
-
-```python
-from pathlib import Path
-from vv_agent import RunConfig
-from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
-
-local_config = RunConfig(workspace_backend=LocalWorkspaceBackend(Path("./workspace")))
-memory_config = RunConfig(workspace_backend=MemoryWorkspaceBackend())
-```
-
-### S3WorkspaceBackend
-
-Install the optional S3 dependency: `uv pip install 'vv-agent[s3]'`.
-
-```python
-from vv_agent.workspace import S3WorkspaceBackend
-
-backend = S3WorkspaceBackend(
-    bucket="my-bucket",
-    prefix="agent-workspace",
-    endpoint_url="https://oss-cn-hangzhou.aliyuncs.com",  # or None for AWS
-    aws_access_key_id="...",
-    aws_secret_access_key="...",
-    addressing_style="virtual",  # "path" for MinIO
-)
-```
-
-### Custom Backend
-
-Implement the `WorkspaceBackend` protocol declared in
-`src/vv_agent/workspace/base.py` to plug in any storage backend. A custom
-backend provides file enumeration, text/binary reads, writes, metadata,
-existence checks, file checks, and directory creation.
-
-```python
-from vv_agent.workspace import WorkspaceBackend
-
-class MyBackend(WorkspaceBackend):
-    ...
-```
-
-## Modules
-
-| Module | Description |
-|--------|-------------|
-| `vv_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
-| `vv_agent.session.SessionStore` | Durable log, inbox, leases and projections |
-| `vv_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
-| `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
-| `vv_agent.tools` | Built-in tools plus `function_tool`, `FunctionTool`, and structured tool outputs |
-| `vv_agent` | Public SDK: `Agent`, `Runner`, `RunConfig`, `ModelSettings`, tools, sessions, typed events |
-| `vv_agent.app_server` | JSONL App Server protocol, transport, thread state, replay, approval callbacks, schema export, and host provider boundary |
-| `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
-| `vv_agent.llm.VvLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
-| `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
-
-## Runtime Boundary
-
-`vv-agent` owns the portable agent runtime: prompt assembly, model calls, tool
-planning, tool execution, memory compaction, typed events, cancellation,
-approval interruption, and replayable run history. Host products own product
-UI, user and workspace resolution, product storage, browser or IM integration,
-and the product-specific tools exposed to the model.
-
-Host products should implement providers instead of patching `vv-agent`
-internals:
-
-- `AppServerHost` maps product profiles, workspaces, tools, approval UI,
-  memory, context, and model settings into App Server `Agent` and `RunConfig`
-  objects when the host uses JSONL process integration.
-- `ApprovalProvider` decides whether a tool call needs approval and returns the
-  allow, deny, session-allow, or timeout decision from product UI or rules.
-- `ContextProvider` contributes product prompt fragments such as profile,
-  workspace, policy, or feature context before each run is compiled.
-- `vv_agent.memory.MemoryProvider` connects product memory stores to memory
-  search/save hooks and compaction lifecycle events.
-- `vv_agent.tools.ToolExecutor` exposes product tools with schema, approval,
-  timeout, error, and execution behavior. `FunctionTool` and `@function_tool`
-  cover normal Python functions; custom executors are routed by
-  `ToolOrchestrator`.
-- `SessionRunEventStore` projects typed `RunEvent` history so app views can replay
-  completed runs and parent/child run graphs.
-
-This boundary keeps `Agent`, `Runner`, `RunConfig`, `RunHandle`, and
-`RunEvent` stable while allowing each host to keep its own account model,
-workspace model, storage backend, and UI workflow outside the framework.
-
-## Memory Compaction
-
-`MemoryManager` measures context size in tokens and compacts history when the
-resolved auto-compaction threshold is exceeded.
-
-- Task-level knobs:
-  - `memory_compact_threshold` (default `250000`; configured ceiling for full compaction)
-  - `memory_threshold_percentage` (warning threshold percentage, default `90`)
-- Compile mapping:
-  - `AgentCompiler` forwards stable agent/run metadata into `AgentTask`.
-  - Resolved model limits are recorded as `model_context_window` and
-    `model_max_output_tokens`; output capability is not copied into
-    `reserved_output_tokens`.
-  - Current durable turn definitions carry the exact configured threshold
-    and capacity metadata used by resume.
-  - Runtime-only compaction knobs remain metadata-backed until promoted into
-    stable public fields.
-- Token budget model:
-  - Context precedence is explicit `model_context_window`, resolved model
-    capability, then a derived planning context. The default is
-    `250000 + 16000 + 13000 = 279000`.
-  - Output reserve precedence is effective `ModelSettings.max_tokens`, explicit
-    `reserved_output_tokens`, then the `16000` framework fallback.
-  - Only the framework fallback reserve may be capped downward by a smaller
-    `model_max_output_tokens`; capability never overrides an explicit request or
-    host reserve.
-  - `derived_prompt_capacity = max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)`
-  - `autocompact_threshold = min(memory_compact_threshold, derived_prompt_capacity)`;
-    a configured threshold of zero selects the derived capacity, and a known
-    derived capacity of zero stays zero.
-  - The default autocompact buffer is `13000`. `MicrocompactionPolicy` defaults
-    to trigger/target ratios of `0.75`/`0.60`, keeps 3 recent cycles, and only
-    considers results longer than 500 characters.
-- Effective-length strategy (backend-aligned):
-  - If previous cycle token usage exists:
-    - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
-  - Otherwise fallback to:
-    - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
-    - If tokenizer resolution fails, use a local CJK-aware estimate
-- Compaction pipeline:
-  1. One microcompaction pass archives eligible old tool results. Age is relative
-     to assistant turns in the current transcript. Failed persistence keeps the
-     original result; calls and results stay paired. A planned summary protects its raw tail.
-  2. If still over threshold, summarize the previous summary and complete history
-     prefix. `memory_keep_recent_messages` defaults to 10 raw messages; a cut inside
-     a tool block moves left to retain the assistant and every corresponding result.
-  3. Extract and normalize the model response, then replace the prefix only after
-     effective-content, context-budget, recovery and token-reduction checks pass.
-     Failure retains history; system messages and the raw tail remain unchanged.
-  4. Summary metadata preserves artifact/cursor evidence deterministically. The
-     model sees paths and retrieval hints; file references never trigger automatic reads.
-  5. Prompt-too-long retries force a summary, then re-summarize with smaller tails.
-     No successful shrink reaches the existing exhaustion boundary. Enabled Session
-     Memory updates its baseline to the accepted summary plus tail.
-- Compaction events:
-  - New `memory_compact_started` producers include the typed trigger and the
-    complete resolved capacity snapshot plus the micro target, candidate count,
-    and estimated reclaimable tokens.
-  - New `memory_compact_completed` producers include the strongest actual mode
-    (`none`, `micro`, `structural`, `summary`, or `emergency`) and a
-    content-aware `changed` flag plus archive count, actual reclaimed tokens,
-    and artifact failure count.
-  - Every current event includes the complete typed capacity and result fields;
-    missing or unknown fields are rejected.
-- Archive recovery:
-  - Every tool defaults to `ToolResultRetention.ARCHIVE`; `PRESERVE` excludes a
-    result only from proactive microcompaction.
-  - Complete text is persisted through the effective `WorkspaceBackend` under
-    the immutable logical `.vv-agent/artifacts/` namespace before replacement.
-    A failed or short write leaves the original message inline.
-  - Microcompaction is disabled when model-visible `read_file` is unavailable,
-    including `use_workspace=False` and explicit tool exclusion.
-  - Existing typed artifacts are reused. The model sees only the compact
-    marker's tool name, artifact path, retrieval hint, and bounded excerpt.
-- Configure proactive compaction with
-  `RunConfig(microcompaction_policy=MicrocompactionPolicy(...))`. The policy is
-  copied to `AgentTask` and frozen/restored under
-  `runtime_controls.microcompaction_policy` in the run definition.
-- The model-visible replacement has this closed shape; byte size and SHA-256
-  remain only in the host-visible `ToolArtifactRef`:
+## How it fits together
 
 ```text
-<Tool Result Compact>
-tool_name: web_search
-artifact_path: .vv-agent/artifacts/<run>/<call>.txt
-retrieval_hint: use read_file on artifact_path if needed
-excerpt:
-<bounded head/tail preview>
-</Tool Result Compact>
+Runner / InteractiveAgentClient / CLI / AppServer
+  -> SessionDriver -> SessionStore (SQLite or PostgreSQL)
+  -> session kernel (vv_agent.session.kernel.drive)
+  -> logged model and tool operations, child sessions
+  -> RunResult / RunEvent / tracing / App Server items
 ```
-- Session Memory behavior:
-  - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
-  - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
-  - New sessions/tasks start without inherited Session Memory from previous sessions/tasks
-  - Loaded once when a new run is compiled and frozen into its first system
-    message as `<Session Memory>`; every cycle reuses the same `PromptBundle`
-  - Entries extracted during the active run are persisted but become visible
-    only when the next new run is compiled
-  - Retained-turn resume reuses the frozen memory section without rereading the
-    store or rewriting the active prompt
-  - Extraction reuses the configured memory summary backend/model
-  - Full compaction resets transcript tracking but preserves persisted memory entries
-  - Sub-tasks disable Session Memory by default to avoid parent/child memory-file contamination
 
-### Runtime metadata keys
+Every entry point goes through the same session kernel. A session store
+transaction owns the session's log, its inbox (queued inputs such as replies and
+steering messages), its leases (a worker's claim to drive it), child admission,
+and the receipts of finished operations. Plain runs use in-memory SQLite.
+Durable SQLite and PostgreSQL stores are opt-in through the session API.
 
-Pass these via `Agent.metadata` or `RunConfig.metadata`; the compiler forwards
-them into `AgentTask.metadata`:
+vv-agent owns the portable runtime: prompt assembly, model calls, tool planning
+and execution, compaction, typed events, cancellation, approvals and replayable
+history. Your product owns its UI, users and workspaces, storage, browser or IM
+integration, and product tools. Connect the two through providers instead of
+patching vv-agent:
 
-- `memory_keep_recent_messages`
-- `model_context_window`
-- `model_max_output_tokens` (resolved model capability; not an implicit request limit)
-- `reserved_output_tokens`
-- `autocompact_buffer_tokens`
-- `include_memory_warning`
-- `session_memory_enabled`
-- `session_memory_min_tokens`
-- `session_memory_max_tokens`
-- `session_memory_min_text_messages`
-- `session_memory_storage_dir`
-- `tool_result_excerpt_head`
-- `tool_result_excerpt_tail`
-- `summary_event_limit`
+| Extension point | What it does |
+| --- | --- |
+| `AppServerHost` | Builds `Agent` and `RunConfig` for the App Server. |
+| `ApprovalProvider` | Decides tool approvals from product rules or UI. |
+| `ContextProvider` | Adds product prompt fragments before each run is compiled. |
+| `vv_agent.memory.MemoryProvider` | Connects product memory search and save, and compaction events. |
+| `vv_agent.tools.ToolExecutor` | Runs product tools with their own schema, approval, timeout and errors. |
+| `SessionRunEventStore` | Replays typed `RunEvent` history, including parent and child runs. |
 
-### Memory summary model selection priority
-
-Priority is strict:
-
-1. `AgentTask.metadata.memory_summary_model`, with optional
-   `memory_summary_backend`.
-2. The current task model through the run's `ModelProvider`.
-
-## Built-in Tools
-
-`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `todo_write`, `ask_user`, `bash`, `check_background_command`, `stop_background_command`, `read_image`, `create_sub_task`, `sub_task_status`, `activate_skill`.
-
-Custom tools can be registered via `ToolRegistry.register()`.
-
-`bash` waits up to `yield_time_ms` (default 1000, integer 0..10000) for the
-command to finish, then returns its current output and a `session_id` while the
-process keeps running. Zero requests an immediate handle. Optional
-`timeout_seconds` (integer 1..86400) sets one execution deadline from process
-start; omission means no execution deadline. Querying does not extend it.
-
-`check_background_command({"session_id":"bg_..."})` reads a current snapshot;
-`stop_background_command({"session_id":"bg_..."})` requests process-tree
-termination. A successful start or running query is a completed `SUCCESS` /
-`continue` management receipt, so the session kernel can call its model
-again. The actual process state is in content and metadata. Nonzero observed
-exit codes remain errors. Sessions belong to their initiating task and workspace;
-a missing local record does not establish whether an external process exited.
-Live oversized output includes an immutable artifact for complete recovery.
-See [Bash process management](docs/bash-process-management.md) for examples and
-termination observations.
-
-## Sub-agents
-
-Use `Agent.as_tool()` when the parent agent should call a child agent and then
-continue. Use `handoff()` when the child agent should take over and finish the
-run. Use `create_sub_task` and `sub_task_status` when the model needs explicit
-background or parallel task management.
-
-Each delegated task is an independently scheduled kernel session. Parent admission
-freezes its identity, prompt, policy, model and budget; the parent adopts only its
-authenticated terminal. Intermediate user waits stay on the child. Batch children
-can drive independently after the parent releases its lease.
-
-Use `sub_task_status` to read owner-scoped progress, wait for completion or admit
-a continuation message. Hosts steer a retained child by pushing a targeted
-`steer` inbox item through its store or interactive session. Child lifecycle events
-carry parent and child identities for subscription and replay.
-
-Configured child runs inherit the same explicit `ModelProvider` as the parent
-and resolve their own model. No settings path or backend fallback is rebuilt
-inside the child runtime.
+Public names are exported from `vv_agent`. Lower-level runtime types such as
+`AgentTask`, `Message` and `ToolCall` live there too, but most code never needs
+them. See [Architecture](docs/architecture.md) for the module map and
+invariants.
 
 ## Examples
 
-The `examples/` directory now contains public SDK cookbook scripts plus a small
-set of lower-level runtime integration examples. See
-[`examples/README.md`](examples/README.md) for the full list.
+`examples/` holds SDK cookbook scripts and a few lower-level integration
+examples. See [`examples/README.md`](examples/README.md) for the list.
 
 ```bash
 uv run python examples/01_quick_start.py
 uv run python examples/24_workspace_backends.py
 ```
 
-## Testing
+## Development
 
 ```bash
-uv run pytest                              # unit tests (no network)
+uv sync --dev
+uv run pytest                              # unit tests, no network
 uv run ruff check .                        # lint
 uv run ty check                            # type check
 
-VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # integration tests (needs real LLM)
+VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # calls a real LLM
 ```
 
-Environment variables for live tests:
+Live tests read these environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
+| Variable | Default | Meaning |
+| --- | --- | --- |
 | `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | Settings file path |
 | `VV_AGENT_LIVE_BACKEND` | `moonshot` | LLM backend |
 | `VV_AGENT_LIVE_MODEL` | `kimi-k3` | Model name |
+
+See [Development](docs/development.md) for test selection and release steps,
+and [the docs index](docs/index.md) for everything else.
