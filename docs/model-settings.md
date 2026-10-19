@@ -1,13 +1,17 @@
 # Model Settings
 
-`vv-agent` reads provider configuration from a local Python settings file. The
-checked-in template is `local_settings.example.py`; real credentials belong in
-`local_settings.py` or another untracked path selected with
-`VV_AGENT_LOCAL_SETTINGS`.
+`vv-agent` reads provider configuration from a local settings file. The
+checked-in template is `local_settings.example.py`. Put real credentials in
+`local_settings.py` or in another untracked file, and point
+`VV_AGENT_LOCAL_SETTINGS` at it.
 
-## Settings Shape
+## Settings shape
 
-At minimum, `LLM_SETTINGS` needs provider backends and endpoints:
+A `.py` settings file must assign `LLM_SETTINGS` a literal mapping. The loader
+parses the file and reads that literal; it does not run the file as code.
+`.json` and `.toml` files hold the same mapping at the top level.
+
+At minimum, `LLM_SETTINGS` needs backends and endpoints:
 
 ```python
 LLM_SETTINGS = {
@@ -39,74 +43,97 @@ LLM_SETTINGS = {
 }
 ```
 
-`VERSION="2"`, `backends`, and `endpoints` are required. Every other top-level
-shape is rejected.
+`VERSION="2"`, a `backends` mapping, and an `endpoints` list are required. A
+settings value without them raises `ConfigError`.
 
-## Exact Model Resolution
+## Exact model resolution
 
 Model keys are exact. `resolve_model_endpoint(settings, backend, model)` looks
-up the requested model key under `LLM_SETTINGS.backends.<backend>.models`.
+up the requested key under `LLM_SETTINGS.backends.<backend>.models`.
 
-Do not rewrite one model key to another. For example,
-`kimi-k2.5` and `kimi-k3` are separate model ids. If only `kimi-k3` is
-configured, requesting `kimi-k2.5` must raise `ConfigError` instead of silently
-using a different model key.
+Never rewrite one model key to another. `kimi-k2.5` and `kimi-k3` are
+separate models. If only `kimi-k3` is configured, a request for `kimi-k2.5`
+raises `ConfigError` instead of quietly using `kimi-k3`.
+`tests/test_config.py` covers this.
 
-This behavior is covered by `tests/test_config.py`.
+### Changing the model in a session
 
-## Kimi K3 Request Profile
+A session can switch models through a `model_selection` inbox input. The
+selection carries a model key, an optional `ModelSettings` object, and a
+`route` reserved for host transport choices such as `backend_type`. Reasoning
+effort belongs in the settings, as `model_settings.reasoning.effort`, not in
+the route. If the selection omits settings, the new model gets empty settings;
+it does not inherit the previous model's settings. Capacity planning then uses
+the selected model's context and output limits and the selected `max_tokens`.
+See [session-model-selection.md](session-model-selection.md).
 
-`kimi-k3` always uses its provider-defined reasoning and sampling profile. The
-LLM bridge sends top-level `reasoning_effort="max"`, omits `temperature`,
-`top_p`, fixed penalty/count fields, and provider `thinking` controls, and
-maps public `max_tokens` to the provider's `max_completion_tokens` field.
-These invariants are applied after public `ModelSettings` are merged so
-provider-specific `extra_body` values cannot override them. Unrelated
-`extra_body` fields continue to pass through.
+For every model request, selected or not, the session kernel overrides
+`ModelSettings.retry` to a single transport attempt. The kernel does its own
+retries as separate logged attempts, so every call the provider sees is
+recorded in the session log.
 
-## Capacity Metadata
+## Kimi K3 request profile
 
-Resolved `context_length` and `max_output_tokens` are model capabilities. The
-compiler projects them to task metadata as `model_context_window` and
-`model_max_output_tokens`. In particular, `model_max_output_tokens` is not a
-request default and is not copied to `reserved_output_tokens`.
+`kimi-k3` always uses the provider's fixed reasoning and sampling profile. The
+model bridge:
 
-Memory capacity reserves effective per-request `ModelSettings.max_tokens`
-first, then explicit task metadata `reserved_output_tokens`, then `16000` as a
-framework fallback. A smaller `model_max_output_tokens` may cap only that
-fallback. This keeps model catalog capability separate from a caller-selected
-request limit.
+- sends top-level `reasoning_effort="max"`;
+- omits `temperature`, `top_p`, the fixed penalty and count fields, and the
+  provider `thinking` controls;
+- sends public `max_tokens` as the provider's `max_completion_tokens` field.
 
-`model_context_window` must be positive to override resolved model capacity.
-Zero or negative metadata falls through to the resolved model. When capacity
-is still unknown, the runtime derives a planning context from the positive
-configured compaction threshold (or `250000`) plus the selected output reserve
-and the `13000` auto-compaction buffer. The default is therefore `279000` and
-does not silently lower the configured threshold. A derived prompt capacity
-may still be zero when an explicit positive context is exhausted by the
-selected reserve and buffer.
+The bridge applies these rules after merging the public `ModelSettings`, so an
+`extra_body` value cannot override them. Other `extra_body` fields pass
+through unchanged.
 
-For multi-turn and tool-call requests, every assistant message retains its
-complete `reasoning_content`; streamed reasoning deltas are collected through
-the end of the provider stream before that message is stored.
+## Capacity metadata
 
-## Cache Usage Accounting
+A model's `context_length` and `max_output_tokens` describe what the model
+can do. The compiler copies them into task metadata as `model_context_window`
+and `model_max_output_tokens`. `model_max_output_tokens` is not a request
+default, and it is not copied to `reserved_output_tokens`.
 
-`vv-agent` 0.7.2 requires `vv-llm` 0.3.107 or newer. Generic
-OpenAI-compatible providers still leave an omitted cache reading unknown, and
-an explicit `cached_tokens: 0` remains an observed zero. Moonshot is the one
-provider-specific exception: when a cold completion omits both top-level
-`cached_tokens` and `prompt_tokens_details`, `vv-llm` projects a zero cache read
-from Moonshot's documented response contract. Explicit `null` or malformed
-values remain unknown.
+Memory planning reserves room for the model's reply. It takes the first value
+that is set:
 
-The Agent runtime consumes the projected `prompt_tokens_details.cached_tokens`
-without rewriting the provider payload. For OpenAI-compatible usage,
-uncached input is `prompt_tokens - cached_tokens`; do not map that value onto
-Anthropic's `cache_read_input_tokens`, whose base `input_tokens` has a different
-meaning.
+1. the effective `ModelSettings.max_tokens` for the request;
+2. explicit task metadata `reserved_output_tokens`;
+3. the framework fallback of `16000`, lowered to `model_max_output_tokens` if
+   that is smaller.
 
-## Current User-Facing Defaults
+Only the fallback is capped, so a limit the caller chose is never changed by
+the model catalog.
+
+`model_context_window` overrides the model's context only when it is
+positive; zero or a negative value falls back to the resolved model. When the
+context size is still unknown, the runtime derives one: the compaction
+threshold (if positive, otherwise `250000`), plus the output reserve, plus the
+`13000` auto-compaction buffer. With defaults this gives `279000`, so the
+configured threshold is never silently lowered. If an explicit context is
+smaller than the reserve plus the buffer, the remaining prompt capacity can be
+zero.
+
+In multi-turn and tool-call requests, every assistant message keeps its full
+`reasoning_content`. Streamed reasoning deltas are collected until the
+provider stream ends, and only then is the message stored.
+
+## Cache usage accounting
+
+`vv-agent` requires `vv-llm` 0.3.107 or newer. For generic OpenAI-compatible
+providers, an omitted cache reading stays unknown, and an explicit
+`cached_tokens: 0` is an observed zero. Moonshot is the one exception. When a
+cold completion omits both top-level `cached_tokens` and
+`prompt_tokens_details`, `vv-llm` reports a zero cache read, as Moonshot's
+documented response format specifies. An explicit
+`null` or a malformed value stays unknown.
+
+The runtime reads `prompt_tokens_details.cached_tokens` as `vv-llm` reports it
+and does not rewrite the provider payload. For OpenAI-compatible usage,
+uncached input is `prompt_tokens - cached_tokens`. Do not map that value onto
+Anthropic's `cache_read_input_tokens`: Anthropic's base `input_tokens` already
+means something different.
+
+## Current user-facing defaults
 
 | Surface | Default |
 | --- | --- |
@@ -120,19 +147,10 @@ meaning.
 When changing a default, update all user-facing surfaces together: CLI, README,
 examples, live-test docs, tests, and `local_settings.example.py`.
 
-## Key Safety
+## Key safety
 
 - Do not commit real keys.
 - Prefer placeholder values in checked-in templates.
 - Do not read key files from sibling projects. Keep this repository's test and
   example settings self-contained.
 - Live tests must stay opt-in through `VV_AGENT_RUN_LIVE_TESTS=1`.
-
-## Session selections
-
-The session model_selection input carries the same closed ModelSettings object.
-Reasoning effort is `model_settings.reasoning.effort`; route is reserved for host
-transport selection such as backend_type. Omitted settings mean empty settings
-for the selected model; settings from a different model are not inherited. The
-kernel forces one transport attempt per logged attempt. Capacity budgeting uses
-the accepted selection's resolved context/output limits and selected max_tokens.

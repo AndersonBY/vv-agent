@@ -1,51 +1,65 @@
-# vv-agent Documentation Index
+# vv-agent documentation
 
-`vv-agent` keeps project knowledge in versioned Markdown so maintainers and
-coding agents can read the repository directly instead of relying on chat
-history.
+These documents are the source of truth for how vv-agent works. They are
+versioned with the code, so a reader or a coding agent can rely on the
+repository instead of chat history. `README.md` (and `README_ZH.md`) is the
+place to start if you are new.
 
-## Core Documents
+## Using vv-agent
 
-[Session model selection](session-model-selection.md) defines durable next-cycle routing.
-[0.24.0 release](releases/0.24.0.md) covers contract 27 adoption.
-
-| Document | Use it for |
+| Document | Read it when you want to |
 | --- | --- |
-| [releases/0.23.1.md](releases/0.23.1.md) | Cache-write usage aliases for vv-llm and Moonshot kimi-k3. |
-| [releases/0.23.0.md](releases/0.23.0.md) | Candidate batch admission, dispatch isolation and host schema update. |
-| [releases/0.22.0.md](releases/0.22.0.md) | Breaking changes, supported extras and central release adoption requirements. |
-| `architecture.md` | Runtime structure, module boundaries, execution flow, and invariants. |
-| `parity-contract.md` | Python producer mapping and local adoption commands for the canonical `vv-agent-contract` release. |
-| `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |
-| `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
-| `session-kernel-capability-matrix.md` | F3 capability gate, Runner/SQLite parity evidence, explicit gaps and short-run benchmark methodology. |
-| [migration-v8.md](migration-v8.md) | Retired API replacements, seed migration and current wire versions. |
-| [session-kernel-baseline.md](session-kernel-baseline.md) | Current measured overhead and M6 capacity with reproducible commands. |
-| `session-kernel.md` | Default session kernel, SQL stores, recovery, compaction, and test isolation. |
-| [host-integration.md](host-integration.md) | Cloud host transactions, runtime factories, wake/drive/tick semantics and host-owned Celery transport. |
-| `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
-| `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and retained operation receipts. |
-| `run-budgets.md` | Token, tool, wall-time, and host-cost limits; retained observations and same-turn resume. |
-| `output-validation.md` | Default-off typed output validation, one tools-free repair callback, and failure semantics. |
-| `app-server.md` | JSONL protocol, lifecycle, approval, schema generation, CLI startup, and host boundary. |
+| [architecture.md](architecture.md) | Understand the runtime layout, module boundaries and invariants. |
+| [model-settings.md](model-settings.md) | Configure `LLM_SETTINGS`, key files, model defaults and exact model resolution. |
+| [runtime-control.md](runtime-control.md) | Wait for and resume replies, approvals, background work, cancellation and events. |
+| [run-budgets.md](run-budgets.md) | Limit tokens, tool calls, wall time or host cost for a run. |
+| [output-validation.md](output-validation.md) | Validate a typed final output and allow one tools-free repair. |
+| [bash-process-management.md](bash-process-management.md) | Run, query and stop shell commands, including background ones. |
 
-## Existing Entry Points
+## Hosting vv-agent
 
-- `README.md` and `README_ZH.md`: user-facing usage guide.
-- `examples/README.md`: runnable example catalog.
-- `local_settings.example.py`: checked-in settings template with placeholder
-  keys.
-- `pyproject.toml`: package metadata, dependency groups, pytest markers, and
-  lint configuration.
-- `tests/`: mechanical behavior contract for runtime, SDK, config, tools,
-  workspace backends, memory, and live smoke tests.
+| Document | Read it when you want to |
+| --- | --- |
+| [host-integration.md](host-integration.md) | Run sessions on many workers against one PostgreSQL database. |
+| [session-model-selection.md](session-model-selection.md) | Let users switch the model of a running session. |
+| [upgrading.md](upgrading.md) | Move a host with stored sessions to a newer release. |
+| [app-server.md](app-server.md) | Talk to vv-agent over the JSONL App Server protocol. |
+| [app-server-host-integration.md](app-server-host-integration.md) | Embed the App Server in a desktop app, IDE or service. |
+| [app-server-runtime-mapping.md](app-server-runtime-mapping.md) | See how App Server threads, turns and items map onto sessions. |
 
-## Documentation Maintenance
+## Working on vv-agent
 
-- Update the narrowest document that owns the changed behavior.
-- Keep `AGENTS.md` concise; add deeper details here instead.
-- Prefer command snippets that can be run from the repository root.
-- Avoid hard-coded machine paths. Use relative paths such as
-  `src/vv_agent/config.py` or `tests/test_config.py`.
-- If a doc describes a behavior that can drift, add or point to a test that
-  enforces it.
+| Document | Read it when you want to |
+| --- | --- |
+| [development.md](development.md) | Set up, test, lint and run live tests. |
+| [session-kernel.md](session-kernel.md) | Change the session kernel: log, inbox, leases, recovery, stores. |
+| [parity-contract.md](parity-contract.md) | Change behavior governed by `vv-agent-contract`. |
+| [session-kernel-capability-matrix.md](session-kernel-capability-matrix.md) | Find the module and test behind each runtime capability. |
+| [session-kernel-baseline.md](session-kernel-baseline.md) | Check or reproduce the kernel performance measurements. |
+
+## Releases
+
+Release notes live in [releases/](releases/): [0.24.0](releases/0.24.0.md),
+[0.23.1](releases/0.23.1.md), [0.23.0](releases/0.23.0.md),
+[0.22.0](releases/0.22.0.md). Store and API changes that hosts must act on are
+collected in [upgrading.md](upgrading.md#version-notes).
+
+## Other entry points
+
+- `examples/README.md`: runnable examples.
+- `local_settings.example.py`: settings template with placeholder keys.
+- `pyproject.toml`: package metadata, dependency groups, pytest markers and
+  lint settings.
+- `tests/`: the executable behavior contract.
+
+## Keeping docs useful
+
+- Put a change in the one document that owns the behavior, and link to it from
+  elsewhere instead of restating it.
+- Describe how things work now. Test counts, gate results and adoption status
+  belong in release notes and the contract support matrix, not in reference
+  docs.
+- Keep `AGENTS.md` short; it points here.
+- Use commands that run from the repository root and relative paths such as
+  `src/vv_agent/config.py`.
+- If a documented behavior can drift, point to the test that pins it.

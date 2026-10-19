@@ -1,22 +1,26 @@
 # App Server runtime mapping
 
-App Server owns transport connections, subscriptions, protocol formatting and
-approval routing. SessionDriver and the kernel own execution. Product modules
-stay behind AppServerHost agent/configuration providers.
+The App Server owns transport connections, subscriptions, protocol formatting
+and approval routing. `SessionDriver` and the session kernel own execution.
+Product modules stay behind the `AppServerHost` agent and configuration
+providers.
 
 | App Server | Kernel owner |
 | --- | --- |
-| Thread | Session record metadata and projected ThreadStatus |
-| Turn | Retained kernel turn identity plus process-local RunHandle |
-| Item | Typed record-derived event projected to protocol item |
-| Approval | Original owner and deadline retained in the parked operation; authenticated inbox answer |
-| Live delta | Volatile RunEvent observation routed to subscribed transports |
-| Read/resume | Retained records and stable item cursor; execution resume drives the original turn |
+| Thread | Session record metadata and the projected `ThreadStatus` |
+| Turn | The retained kernel turn identity, plus a process-local `RunHandle` |
+| Item | A typed event derived from records and projected to a protocol item |
+| Approval | The parked operation keeps the original owner and deadline; the answer is an authenticated inbox input |
+| Model selection | A session-scoped `model_selection` inbox input |
+| Live delta | A volatile `RunEvent` observation routed to subscribed transports |
+| Read and resume | Retained records and a stable item cursor; resuming execution drives the original turn |
 
-SessionRunEventStore supplies durable event history. JsonlRunEventStore is an
-optional sink. thread_store/thread_state hold projected values and local handles;
-they own no queue, transcript or execution ledger. Host controls enter the inbox.
+`SessionRunEventStore` supplies durable event history. `JsonlRunEventStore` is
+an optional sink. `thread_store` and `thread_state` hold projected values and
+local handles; they own no queue, transcript or execution ledger. Host controls
+enter the inbox.
 
-`thread/model/select` maps threadId to session_id and inputId unchanged to
-InboxItem.input_id, kind=model_selection, payload={selection}, with null turn and
-generation. It uses the same kernel/store and introduces no configuration ledger.
+`thread/model/select` maps `threadId` to the session ID and passes `inputId`
+unchanged as `InboxItem.input_id`, with `kind="model_selection"`,
+`payload={"selection": ...}`, and null turn and generation. It uses the same
+kernel and store and keeps no separate configuration ledger.

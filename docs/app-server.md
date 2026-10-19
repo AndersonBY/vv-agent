@@ -9,10 +9,13 @@ Use the Python SDK directly for in-process runs. Use the App Server when the
 host needs a separate process, stable Thread / Turn / Item lifecycle events,
 approval callbacks, replay, and generated schema files.
 
-App Server thread/turn/item state is a projection of SessionStore records. Closed
-threads reject execution and resume. User and approval replies resume the same
-turn through its inbox.
-Lease retry exhaustion produces a typed JSON-RPC error or failure notification.
+Threads, turns and items are projections of the session store's records. A
+thread is a session. User replies and approval answers go into the session's
+inbox and resume the same turn. A closed thread rejects new execution and
+resume. If the server cannot get the session lease after its retries, the
+client gets a typed JSON-RPC error or a failure notification. See
+[runtime mapping](app-server-runtime-mapping.md) for how each App Server object
+maps to the kernel.
 
 ## Startup
 
@@ -93,7 +96,7 @@ returns the same snapshot shape:
 
 Snapshots contain a `thread` object, ordered `turns`, and replayable `items`.
 
-## Thread Lifecycle
+## Thread lifecycle
 
 Use `thread/list` to list active threads. Archived threads are hidden by
 default; pass `includeArchived: true` to include them.
@@ -117,9 +120,9 @@ server emits `thread/closed`.
 {"jsonrpc":"2.0","id":12,"method":"thread/unsubscribe","params":{"threadId":"thread_1"}}
 ```
 
-`thread/status/changed` reports stable lifecycle changes: `running`, `idle`,
+`thread/status/changed` reports lifecycle changes: `running`, `idle`,
 `archived`, and `closed`. Treat these notifications as the source of truth for
-loaded-thread state.
+the state of a loaded thread.
 
 ## Turns
 
@@ -148,6 +151,44 @@ from steering or interrupting a stale turn.
 {"jsonrpc":"2.0","id":7,"method":"turn/followUp","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Write a release note."}]}}
 {"jsonrpc":"2.0","id":8,"method":"turn/interrupt","params":{"threadId":"thread_1","expectedTurnId":"turn_1","reason":"User cancelled from UI"}}
 ```
+
+## Models
+
+Use `model/list` to show the models a client can pick:
+
+```jsonl
+{"jsonrpc":"2.0","id":9,"method":"model/list","params":{}}
+```
+
+The default host returns the models passed to `DefaultAppServerHost`. Product
+hosts implement `AppServerHost.list_models()` from their normal model settings.
+
+### Model selection
+
+Use `thread/model/select` to change the model for later cycles of a thread.
+The params are exactly `threadId`, `inputId` and `selection`. `selection` is
+`{model, model_settings?, route}`, or `null` to go back to the turn's frozen
+model:
+
+```jsonl
+{"jsonrpc":"2.0","id":13,"method":"thread/model/select","params":{"threadId":"thread_1","inputId":"select_1","selection":{"model":"kimi-k3","model_settings":{"reasoning":{"effort":"high"}},"route":{}}}}
+{"jsonrpc":"2.0","id":13,"result":{"threadId":"thread_1","inputId":"select_1","accepted":true}}
+```
+
+The server stores the selection as a `model_selection` input in the thread's
+inbox. `accepted: true` means the input was stored; the session validates and
+applies it at the next cycle boundary, and rejects it there if the thread is
+closed or the model cannot be resolved. Sending the same `inputId` with the
+same selection again is a replay. The same `inputId` with a different
+selection returns `-32602`; an unknown thread returns `-32020`.
+
+The built-in App Server runtime binds no `model_resolver`, and `AppServerHost`
+has no hook for one. A thread therefore accepts only a selection of the model
+ID it already runs, with an empty `route`; that is enough to change settings
+such as reasoning effort, as in the example. Any other model is rejected with
+`model_selection_unresolvable`. See
+[session model selection](session-model-selection.md) for when a selection
+takes effect and how it is billed.
 
 ## Items
 
@@ -181,20 +222,21 @@ Important notification methods:
 | `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
 | `turn/completed` | Mark the turn terminal and persist final output or error. |
 
-Tool planning is deliberately not an App Server item lifecycle. A
-`tool_call_planned` event produces no item or notification and is never shown
-as execution. The existing `tool_call_started` projection still emits a
-`toolCall` `item/started` plus its argument delta; when the tool declared typed
-metadata, the item payload also contains `toolMetadata` with `sideEffect`,
-`idempotency`, `terminal`, `capabilityTags`, and `costDimensions`.
+A planned tool call is not an item. A `tool_call_planned` event produces no
+item or notification, because planning is not execution and should not be
+shown as such.
 
-The existing `tool_call_completed` projection still emits `item/completed`.
-Newly produced completed events add `directive`, `errorCode`,
-`executionStarted`, and `durationMs` to the tool-call payload, plus
-`toolMetadata` when declared. A policy or approval short-circuit has only a
-failed or in-progress completed item and never receives a fabricated started
-item. Completed events missing any required current field are rejected before
-App Server projection.
+A `tool_call_started` event becomes a `toolCall` `item/started` plus its
+argument delta. When the tool declares typed metadata, the item payload also
+contains `toolMetadata` with `sideEffect`, `idempotency`, `terminal`,
+`capabilityTags`, and `costDimensions`.
+
+A `tool_call_completed` event becomes `item/completed`. Its tool-call payload
+contains `directive`, `errorCode`, `executionStarted`, and `durationMs`, plus
+`toolMetadata` when declared. When policy or approval stops a call before it
+runs, the client sees only a failed or in-progress completed item; the server
+never invents a started item for it. A completed event missing any required
+field is rejected before projection.
 
 When a run budget is configured, `turn/completed` may also contain
 `budgetUsage` and `budgetExhaustion`. A budget stop projects as `status:
@@ -204,7 +246,7 @@ a successful task completion.
 Every item carries `itemId`, `threadId`, `turnId`, `type`, `status`, `payload`,
 `createdAt`, and `updatedAt`.
 
-## Notification Opt-Out
+## Notification opt-out
 
 `initialize.params.capabilities.optOutNotificationMethods` accepts exact
 notification method names. The server suppresses only exact matches for that
@@ -214,7 +256,7 @@ connection.
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host"},"capabilities":{"optOutNotificationMethods":["item/agentMessage/delta"]}}}
 ```
 
-## Approval Requests
+## Approval requests
 
 Tools that require approval are routed as server-to-client requests. The App
 Server sends `approval/request` with a request `id` plus approval params:
@@ -263,19 +305,7 @@ decisions `allow`, `allow_session`, `deny`, and `timeout`. The
 `allow_session` is not collapsed to `allow`. Disconnects and expired requests
 resolve as timed-out approval decisions in the runtime.
 
-## Model List
-
-Hosts can expose available models through `model/list`:
-
-```jsonl
-{"jsonrpc":"2.0","id":9,"method":"model/list","params":{}}
-```
-
-The default host returns the models passed to `DefaultAppServerHost`. Product
-hosts should implement `AppServerHost.list_models()` from their normal model
-settings.
-
-## Overload Handling
+## Overload handling
 
 When the server cannot accept more work, it returns JSON-RPC error code
 `-32001` with message `Server overloaded; retry later.` Clients should retry
@@ -283,7 +313,7 @@ with bounded backoff. Stdio clients must keep reading stdout; if a bounded
 transport cannot write outbound messages, the App Server disconnects that
 transport and clears pending server-to-client requests.
 
-## Schema Export
+## Schema export
 
 Generate JSON Schema files for client bindings and drift checks:
 
@@ -322,7 +352,7 @@ The debug client prints a complete JSONL flow for a single message:
 uv run vv-agent debug app-server send-message "hello"
 ```
 
-## Host Provider Boundary
+## Host provider boundary
 
 `vv-agent` owns the protocol, transport, thread state, replay store, approval
 callback bridge, and `Runner.start()` adapter. Product hosts own product
@@ -356,12 +386,3 @@ class ProductHost(AppServerHost):
 The host should map product profiles, workspaces, model settings, memory
 providers, context providers, approval UI, and product tools into `Agent` and
 `RunConfig`. The App Server should not import product modules.
-
-## Model selection
-
-`thread/model/select` accepts exactly threadId, inputId and selection. selection
-is null to clear, or `{model, model_settings?, route}`. It enqueues the kernel's
-session-scoped model_selection input; result `{threadId,inputId,accepted:true}`
-acknowledges admission. The holder validates at the next cycle boundary. Same
-inputId/bytes replay; different bytes return -32602. Closed thread submissions
-remain rejected by the kernel. See [model selection](session-model-selection.md).

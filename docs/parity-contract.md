@@ -1,52 +1,66 @@
-# Python Contract Integration
+# Python contract integration
 
-`vv-agent` is the Python implementation of the language-neutral contract in
-[`AndersonBY/vv-agent-contract`](https://github.com/AndersonBY/vv-agent-contract).
-Normative behavior, fixtures, versioning, and adoption workflow live only in
-that repository.
+`vv-agent` is the Python implementation of a language-neutral contract that
+lives in [`AndersonBY/vv-agent-contract`](https://github.com/AndersonBY/vv-agent-contract).
+That repository owns the normative behavior, the fixtures, the versioning rules
+and the adoption workflow. This page explains how this repository consumes it.
 
-## Pinned Contract
+## Pinned contract
 
-`contract.lock.json` selects the contract version, Git revision, and artifact.
-The current adoption state is not duplicated in this document. Treat
-[`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
-as the machine-readable source for required implementation revisions,
-verification timestamp, central CI run URL, and frozen implementation baselines.
-Schema 2 lists `required_implementations` explicitly and records each
-implementation's own `contract_version`; schema 1 is rejected. Python is the
-required implementation. `vv-agent-rs` is frozen at contract 23.0.0 / package
-series 0.21.x for maintenance only and does not follow new contract releases.
-A newer global contract version or Python verification run does not establish
-newer Rust support. Reactivation requires a new Maker decision and full adoption
-of the then-current contract through the central workflow.
+`contract.lock.json` pins one contract release. It records:
 
-The lock records the exact release artifact, artifact digest, vendored fixture
-path, and canonical fixture-manifest digest. `tests/fixtures/parity/` is a
-generated snapshot, not an editable source.
+- the contract version and Git revision;
+- the immutable release artifact URL and its SHA-256 digest;
+- the path of the vendored fixtures (`tests/fixtures/parity/`);
+- the digest of the canonical fixture manifest.
 
-## Required Workflow
+`tests/fixtures/parity/` is a generated copy of the contract fixtures. Do not
+edit a vendored fixture or digest by hand; resync it instead (see below).
 
-For any shared public, model-visible, runtime, persistence, or wire change:
+This page does not track adoption status. The machine-readable source for that
+is [`support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
+in the contract repository. It lists the required implementations, the
+implementation revision each one was verified at, the verification time, the
+central CI run URL, and any frozen baselines. The support matrix uses schema 2,
+which names `required_implementations` explicitly and records a
+`contract_version` per implementation. The tooling rejects schema 1.
 
-1. Read this repository's lock and `../vv-agent-contract/AGENTS.md`.
-2. Read the central parity, versioning, and change-workflow documents.
-3. Change canonical docs and fixtures in `vv-agent-contract` first.
-4. Sync required implementation snapshots with `scripts/contract_snapshot.py`.
-   Preserve the frozen Rust lock and fixtures.
-5. Update real Python producers and behavior tests, not only fixture parsers.
-6. Run Python's full repository gates and central cross-repository CI with the
-   contract and Python refs. Rust adoption and gates are not required.
+Python is the only required implementation. The Rust implementation
+(`vv-agent-rs`) is frozen at contract 23.0.0 and package series 0.21.x. It gets
+maintenance fixes only and does not follow new contract releases. A newer
+contract version, or a new Python verification run, says nothing about Rust.
+Bringing Rust back needs a new maintainer decision and full adoption of the
+contract that is current at that time, through the central workflow.
 
-Never edit a vendored parity fixture or digest directly.
+## Required workflow
 
-## Snapshot Commands
+Follow these steps for any change that affects the public API, what the model
+sees, runtime behavior, persisted data, or a wire format:
+
+1. Read `contract.lock.json` in this repository and `../vv-agent-contract/AGENTS.md`.
+2. Read the parity, versioning and change-workflow documents in the contract repository.
+3. Change the canonical docs and fixtures in `vv-agent-contract` first.
+4. Sync the vendored snapshot with `scripts/contract_snapshot.py sync`. Leave the
+   frozen Rust lock and fixtures untouched.
+5. Update the real Python producers and their behavior tests. Updating only the
+   fixture parsers is not enough.
+6. Run the full Python test and lint gates, then the central cross-repository CI
+   with the contract and Python revisions. Rust adoption and Rust gates are not
+   required.
+
+## Snapshot commands
+
+Check the lock and the vendored snapshot:
 
 ```bash
 python3 scripts/contract_snapshot.py check
 python3 scripts/contract_snapshot.py check --source ../vv-agent-contract
 ```
 
-After an immutable central release exists:
+The second form also compares the snapshot byte-for-byte with a local checkout
+of the contract repository.
+
+Resync the snapshot once an immutable contract release exists:
 
 ```bash
 python3 scripts/contract_snapshot.py sync \
@@ -56,75 +70,83 @@ python3 scripts/contract_snapshot.py sync \
   --revision <contract-revision>
 ```
 
-## Workspace Edit Producer
+Before a package release, the release workflow requires that the support
+matrix lists Python as verified at a revision contained in the release commit:
 
-`src/vv_agent/tools/handlers/workspace_io.py` produces the canonical edit receipt and
-file metadata. The `builtin_tool_behavior_contract` producer tests consume the
-central success fixture. Workspace tool tests exercise large-file consecutive
-edits, stale baselines, exact replacement, and BOM/CRLF preservation.
+```bash
+python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
+```
 
-## Verification Scope
+## What the tests prove
 
-Public producer tests establish the canonical API, runtime decisions, events,
-strict wire readers, and recovery semantics under the locked contract. Passing
-fixture or snapshot checks alone does not establish those behaviors.
+Fixture and snapshot checks prove only that the vendored files are intact. The
+behavior comes from producer tests: tests that run the real Python code and
+compare its output with the contract. They cover the public API, runtime
+decisions, events, strict wire readers and recovery under the pinned contract.
+Producer and store tests run the execution rules against both SQLite and
+PostgreSQL.
 
-Python producer and store tests cover the current SQLite/PostgreSQL execution
-semantics. The frozen Rust v23 baseline is outside current Python adoption.
+`scripts/session_kernel_fixtures.py` regenerates the session kernel fixtures
+from the real producers. `tests/session/test_session_kernel_fixtures.py`
+compares that output byte-for-byte with the vendored snapshot. The snapshot
+integrity check in `contract_snapshot.py` runs separately.
+
+An implementation counts as verified only after its producer tests and the
+central gates pass. Passing fixture checks alone is not verification.
 
 ## Python producer map
 
-| Surface | Current producer | Evidence |
+Paths are relative to `src/vv_agent/` and `tests/`.
+
+| Surface | Producer | Tests |
 | --- | --- | --- |
-| Public API v11 | package exports, Runner, RunConfig, interactive and App Server | test_parity_evidence_manifests.py |
-| Strict wire | events.py, types.py, message_codec.py, app_server/protocol | event validation, protocol types and session codec tests |
-| Prompt and definition | runtime/compiler.py, prompt/, session/runtime.py | test_run_definition_producer.py, prompt and session fixture tests |
-| Execution and recovery | session/kernel.py, session/sql.py, session/reducer.py | tests/session, App Server durable resume tests |
-| Events, results and tracing | session/projection.py, session/result.py, session/tracing.py | Runner event/terminal/trace and result tests |
-| Children and handoff | session/delegation.py, session/children.py | configured children, continuation, agent tools and handoff tests |
-| Memory and compaction | session/compaction.py, session/memory.py, memory/ | memory lifecycle, local compaction and token usage tests |
-| Budgets | budget.py, session/kernel.py | test_run_budget.py and budget/session fixtures |
-| App Server v2 | app_server/, session/app_server.py | schema, protocol, turn, approval, replay and lifecycle tests |
-| Workspace and tool returns | tools/, workspace/, runtime/tool_results.py | workspace parity, Bash, custom tool and metadata tests |
+| Public API v11 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
+| Strict wire formats | `events.py`, `types.py`, `message_codec.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
+| Prompt and run definition | `runtime/compiler.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
+| Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
+| Events, results and tracing | `session/projection.py`, `session/result.py`, `session/tracing.py` | Runner event, terminal, trace and result tests |
+| Child sessions and handoff | `session/delegation.py`, `session/children.py` | configured child, continuation, agent tool and handoff tests |
+| Memory and compaction | `session/compaction.py`, `session/memory.py`, `memory/` | memory lifecycle, local compaction and token usage tests |
+| Budgets | `budget.py`, `session/kernel.py` | `test_run_budget.py`, budget and session fixtures |
+| Model selection | `session/kernel.py`, `session/runtime.py`, `session/app_server.py` | `tests/session/test_model_selection.py`, `test_app_server_model_selection.py` |
+| Provider usage | `session/kernel.py`, `session/providers.py` | `tests/session/test_provider_usage.py`, `tests/session/test_recovery_matrix.py` |
+| Session supervision and dispatch | `session/supervisor.py`, `session/children.py`, `session/kernel.py` | `tests/session/test_batch_children.py`, `test_supervisor.py`, `test_dispatch.py` |
+| App Server v2 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
+| Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
+
+The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the
+canonical edit receipt and file metadata. `test_builtin_tool_behavior_contract.py`
+checks it against the central success fixture. The workspace tool tests cover
+consecutive edits on large files, stale baselines, exact replacement, and
+preservation of a UTF-8 BOM and CRLF line endings.
 
 ## Current boundaries
 
-RunEvent v6, model-call v2, task-token-usage v3 and strict Message each accept one
-current shape. Missing, stale, unknown and malformed versions reject. Results carry
-session_id/turn_id. App Server
-uses protocol v2 and a single ThreadStatus enum. There is no v23 selector/decoder.
+- RunEvent v6, model-call v2, task-token-usage v3 and the strict `Message` shape
+  each accept exactly one current version. A missing, older, unknown or
+  malformed version is rejected. There is no decoder for contract 23 data. See
+  [upgrading.md](upgrading.md#session-data-and-upgrades) for what this means for
+  stored data.
+- Results carry `session_id` and `turn_id`.
+- The App Server speaks protocol v2 and reports thread state with one
+  `ThreadStatus` enum.
+- The session log is the source of truth for execution. Events, results, the
+  App Server and tracing are projections built from it. JSONL event stores only
+  receive copies.
+- Recovery within the same turn reuses the prompt, model, limits and usage that
+  were frozen when the turn started.
+- Durable stores are opt-in through the session API.
+- Inbox schema 3 requires provider usage that the provider has authenticated.
 
-The session log is execution truth. Events, results, App Server and tracing are
-consumer projections; JSONL event stores are sinks. Same-turn recovery preserves
-frozen prompt, model, limits and usage. Durable stores are opt-in through the
-session-facing API.
+## Model selection
 
-The generated 45-file corpus is compared byte-for-byte with vendored local v27.0.0 candidate
-in one producer generation. Contract snapshot integrity is checked independently.
-An implementation cannot be declared verified before required producer and central
-gates establish it. See [migration-v8.md](migration-v8.md) for host migration.
+Contract 27 adds session model selection. A host pushes
+`InboxItem(kind="model_selection", payload={"selection": ...})` with
+`SessionTx.push`. The kernel passes the retained request to
+`Runtime.model_resolver`, which returns `(LLMClient, ResolvedModelConfig)`.
+`Runtime.resolve_model` then checks the result against the model binding
+recorded in the log. App Server clients use `AppServerClient.select_model` with
+`ThreadModelSelectParams`, which sends `thread/model/select`.
 
-## Current local adoption
-
-The current implementation retains the F5 module-qualified ChildSession,
-InvalidChildBatch, Runtime and RuntimeNotReady; drive accepts a Runtime or a factory, tick accepts host
-dispatch. SessionStore requires defer_drive and defer_projection.
-`tests/session/test_batch_children.py`, `test_supervisor.py` and `test_dispatch.py`
-exercise the canonical session_supervision expectations on PostgreSQL and SQLite.
-Public inventory v11 pins the method/scan signatures and changed
-inbox/accounting rule. Inbox schema 3 requires authenticated provider usage.
-`test_provider_usage.py` compares
-synchronous, late-result and query usage bytes and completed-attempt replay;
-the recovery matrix covers normal and audit billing on PostgreSQL and SQLite.
-The lock selects the contract branch revision and locally built deterministic
-artifact. Before release, re-pin the immutable v27.0.0 release artifact/revision.
-Central CI and verified adoption remain open; Rust stays frozen.
-
-## Model selection mapping
-
-Contract 27 uses InboxItem(kind="model_selection", payload={"selection": ...})
-through SessionTx.push. Runtime.model_resolver receives the retained request and
-returns (LLMClient, ResolvedModelConfig); resolve_model verifies the logged binding.
-AppServerClient.select_model / ThreadModelSelectParams submit thread/model/select.
-Python 0.24.0 implements the closed inbox 3 and public API v11. The local branch
-revision is temporary pending reviewer publication and immutable release re-pin.
+[session-model-selection.md](session-model-selection.md) describes the full
+rules.

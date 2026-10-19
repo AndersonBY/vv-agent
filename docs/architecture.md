@@ -1,306 +1,384 @@
 # Architecture
 
 `vv-agent` is a Python agent runtime extracted from VectorVein's production
-runtime. It is organized around a cycle loop: prepare context, call an LLM,
-dispatch tool calls, update memory/state, and repeat until an explicit tool
-directive or the configured no-tool policy ends or pauses the run.
+runtime. It runs a cycle loop: build the context, call the model, run the tool
+calls the model asked for, update memory and state, and repeat. The loop stops
+or pauses when a tool returns an explicit directive (`finish` or `wait_user`),
+or when the model answers without tools and the no-tool policy says to finish
+or wait.
 
-## Top-Level Flow
+## Top-level flow
 
 ```text
 Runner / ConfiguredRunner / InteractiveAgentClient / CLI / AppServer
   -> SessionDriver and RunHandle
-  -> SessionStore log, inbox, leases and consumer cursors
+  -> SessionStore: log, inbox, leases and consumer cursors
   -> session.kernel.drive
-      -> frozen AgentTask, model operation and tool operation plans
-      -> provider receipts and retained hook/memory boundaries
-      -> atomic child admission and authenticated terminal delivery
+      -> frozen AgentTask, planned model operations and tool operations
+      -> provider receipts, hook and memory boundaries
+      -> child session admission and delivery of the child's final result
   -> RunResult, RunEvent, tracing and App Server projections
 ```
 
-Ordinary runs use SQLite `:memory:`. Durable stores are opt-in. Default no-tool
-policy is finish; explicit continue and wait_user retain their configured cycle
-budget. Waiting is non-terminal and replies resume the same turn. Resource
-budgets govern admission and accounting, not semantic task completion.
+Every entry point runs through the session kernel. An ordinary `Runner` run
+uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
+supply their own store.
 
-## Runtime Boundary
+The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
+does not change the cycle limit. Waiting is not a terminal state: a reply
+resumes the same turn. Resource budgets control what may start and how usage
+is counted; they do not decide whether the task is done.
 
-`vv-agent` is the framework boundary. It owns the portable agent contract:
+## Runtime boundary
+
+`vv-agent` owns the portable agent contract:
 
 - `Agent`, `Runner`, `RunConfig`, `RunHandle`, `RunResult`, and typed
   `RunEvent` objects.
-- Prompt assembly, model calls, tool planning, tool dispatch, approval
-  interruption, cancellation, memory compaction, and runtime hooks.
-- Replayable app history through `SessionRunEventStore`; `JsonlRunEventStore` is an
-  optional file projection sink.
+- Prompt assembly, model calls, tool planning and dispatch, approval
+  interruptions, cancellation, memory compaction, and runtime hooks.
+- Replayable run history through `SessionRunEventStore`. `JsonlRunEventStore`
+  is an optional sink that writes the same events to a file.
 - Tool execution through `vv_agent.tools.ToolExecutor` and
-  `vv_agent.tools.ToolOrchestrator`, with `FunctionTool` and `@function_tool`
-  as the normal public path.
+  `vv_agent.tools.ToolOrchestrator`. Most tools should use `FunctionTool` or
+  the `@function_tool` decorator.
 
-Host products own product concerns outside the framework: product UI, account
-and profile resolution, workspace selection, product persistence, browser or IM
-integration, and product-specific tools. They should connect those concerns by
-implementing providers instead of patching runtime internals:
+The host product owns everything else: UI, accounts and profiles, workspace
+selection, product persistence, browser or IM integration, and product tools.
+Connect those through providers instead of patching runtime internals:
 
-- `ApprovalProvider` for UI prompts, policy checks, and allow/deny decisions.
-- `ContextProvider` for product prompt fragments such as profile, workspace,
-  policy, and feature context.
-- `vv_agent.memory.MemoryProvider` for product memory search/save and
-  compaction lifecycle integration.
-- `vv_agent.tools.ToolExecutor` or `FunctionTool` collections for product
+- `ApprovalProvider` shows approval prompts, applies policy, and returns allow
+  or deny decisions.
+- `ContextProvider` adds prompt fragments such as profile, workspace, policy,
+  and feature context.
+- `vv_agent.memory.MemoryProvider` searches and saves product memory and takes
+  part in compaction.
+- `vv_agent.tools.ToolExecutor` or `FunctionTool` collections add product
   tools.
-- `SessionRunEventStore` for app history and parent/child run graph replay.
-- `AfterCycleHook` for an optional task-neutral observation/control point after
-  a complete cycle. It may steer the next cycle, add tool denials, or stop with
-  failure; it cannot expand permissions or manufacture success/waiting states.
+- `SessionRunEventStore` replays run history, including the parent and child
+  run graph.
+- `AfterCycleHook` observes each completed cycle. It may add steering for the
+  next cycle, deny tools, or stop the run with a failure. It cannot grant
+  permissions or report success or waiting.
 
-The public runtime event boundary is the closed `RunEvent` hierarchy. Runtime
-producers create lifecycle events directly, and LLM adapters project only valid
-assistant/reasoning deltas and model tool-call start/progress events before the
-payload leaves the adapter boundary. Model tool generation uses
-`model_tool_call_*`; actual tool execution uses `tool_call_planned`,
-`tool_call_started`, and `tool_call_completed`, with parked operation records for
-admitted durable external work. Unknown or malformed provider
-payloads are dropped. Reasoning remains private telemetry and is not rendered
-as App Server answer text.
+### Events
 
-Token accounting keeps provider truth separate from derived aggregates.
-`TokenUsage.usage_source` identifies provider-reported, estimated, or missing
-totals. `CacheUsage` distinguishes an explicit zero cache read from missing
-accounting and adapter-declared lack of support. `TaskTokenUsage` exposes a
-cache total only when every included cycle reports that metric.
+`RunEvent` is a closed set of event types. The runtime creates lifecycle
+events directly. Model adapters forward only valid assistant text, reasoning
+deltas, and `model_tool_call_started` and `model_tool_call_progress` events;
+they drop unknown or malformed provider payloads before those payloads leave
+the adapter.
 
-## Module Map
+Two families of events describe tools. `model_tool_call_*` events report the
+model generating a tool call. `tool_call_planned`, `tool_call_started`, and
+`tool_call_completed` report the runtime executing it. Reasoning is private
+telemetry, and the App Server never renders it as answer text.
+
+### Token usage
+
+Token accounting keeps what the provider reported apart from derived totals.
+`TokenUsage.usage_source` says whether a total was `provider_reported`,
+`estimated`, or `accounting_missing`. `CacheUsage` tells apart an explicit
+zero cache read, missing accounting, and an adapter that does not support cache
+accounting. `TaskTokenUsage` exposes a cache total only when every included
+cycle reported that metric.
+
+## Module map
 
 | Path | Responsibility |
 | --- | --- |
 | `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
-| `src/vv_agent/interaction.py` | Host-interaction request values, closed wire validation, and request digests. |
+| `src/vv_agent/interaction.py` | Host-interaction request values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
-| `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes and definitive-result validation; stores own admission and receipts. |
-| `src/vv_agent/llm/errors.py` | Provider prompt-too-long classification and its retry limit, shared by model callers and compaction. |
-| `src/vv_agent/config.py` | Settings-file loading, provider/backend lookup, endpoint resolution, and `vv-llm` settings construction. |
-| `src/vv_agent/cli.py` | Command-line argument parsing and one-shot runtime execution. |
+| `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes, and validation of definitive results. The session store owns admission and receipts. |
+| `src/vv_agent/llm/errors.py` | Prompt-too-long classification and its retry limit, shared by model calls and compaction. |
+| `src/vv_agent/config.py` | Settings-file loading, backend and endpoint lookup, and `vv-llm` settings construction. |
+| `src/vv_agent/cli.py` | Command-line parsing and one-shot runs. |
 | `src/vv_agent/agent.py` | Public `Agent` definition and agent-as-tool helpers. |
-| `src/vv_agent/background_task.py` | Non-blocking background agent task, handle, and snapshot contracts. |
+| `src/vv_agent/handoffs.py` | `Handoff` definition and the `handoff()` helper. |
+| `src/vv_agent/background_task.py` | Non-blocking background agent task, handle, and snapshot types. |
 | `src/vv_agent/runner.py` | Public synchronous run and stream entry points. |
-| `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for event streaming, cancellation, approvals, and final result retrieval. |
-| `src/vv_agent/run_config.py` | Per-run configuration, model provider binding, tool policy, workspace, session, and tracing options. |
+| `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for streaming events, cancellation, approvals, and the final result. |
+| `src/vv_agent/run_config.py` | Per-run configuration: model provider, tool policy, workspace, session, and tracing options. |
+| `src/vv_agent/budget.py` | Run budget limits, host cost readings, and budget usage snapshots. |
 | `src/vv_agent/model_settings.py` | Model call parameters and override merging. |
-| `src/vv_agent/output_validation.py` | Typed host output-validation result, context, and tools-free repair request contracts. |
+| `src/vv_agent/output_validation.py` | Output validation result, context, and tools-free repair request types. |
 | `src/vv_agent/events.py` | Typed run events and dict conversion for UI consumers. |
-| `src/vv_agent/event_store.py` | Run event persistence and replay protocol plus JSONL implementation. |
-| `src/vv_agent/approval.py` | Approval provider protocol, request/decision objects, and in-process approval broker. |
+| `src/vv_agent/event_store.py` | Run event persistence and replay protocol, plus the JSONL implementation. |
+| `src/vv_agent/approval.py` | Approval provider protocol, request and decision objects, and the in-process approval broker. |
 | `src/vv_agent/context_providers.py` | Context provider protocol and deterministic prompt-fragment assembly. |
-| `src/vv_agent/guardrails.py` | Public guardrail result contract and decorators. |
-| `src/vv_agent/interactive.py` | Public stateful session/client API for desktop runtimes, interruptions, follow-ups, cancellation, and shared tool state. |
+| `src/vv_agent/guardrails.py` | Guardrail result type and decorators. |
+| `src/vv_agent/interactive.py` | Stateful session client for desktop hosts: interruptions, follow-ups, cancellation, and shared tool state. |
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
-| `src/vv_agent/tracing.py` | Public trace spans and processor protocol. |
-| `src/vv_agent/runtime/compiler.py` | Compile layer: `Agent + input + RunConfig -> AgentTask`. Import this submodule directly to avoid runtime package initialization cycles. |
-| `src/vv_agent/types.py` | Runtime protocol types: tasks, messages, tool calls, results, statuses, and token usage. |
-| `src/vv_agent/llm/` | LLM protocol adapters, scripted test clients, prompt cache behavior, and `vv-llm` client bridge. |
-| `src/vv_agent/runtime/` | Shared compiler, hooks, lifecycle, cancellation, tool planning/results, token usage and process management. |
+| `src/vv_agent/tracing.py` | Trace spans and the processor protocol. |
+| `src/vv_agent/runtime/compiler.py` | Compiles `Agent + input + RunConfig` into an `AgentTask`. Import this submodule directly to avoid package import cycles. |
+| `src/vv_agent/types.py` | Runtime types: tasks, messages, tool calls, results, statuses, and token usage. |
+| `src/vv_agent/session/` | Session kernel, SQLite and PostgreSQL stores, `SessionDriver`, child sessions, and projections. See [session-kernel.md](session-kernel.md). |
+| `src/vv_agent/app_server/` | App Server protocol, transport, and thread mapping. See [app-server.md](app-server.md). |
+| `src/vv_agent/llm/` | Model protocol adapters, scripted test clients, prompt cache behavior, and the `vv-llm` client bridge. |
+| `src/vv_agent/runtime/` | Compiler, hooks, lifecycle, cancellation, tool planning and results, token usage, and process management. |
 | `src/vv_agent/tools/` | Tool registry, OpenAI-compatible schemas, dispatcher, and built-in handlers. |
-| `src/vv_agent/memory/` | Token counting, history-preserving summary compaction, archive-backed microcompaction, and session memory. |
+| `src/vv_agent/memory/` | Token counting, summary compaction, archive-backed microcompaction, and Session Memory. |
 | `src/vv_agent/prompt/` | System prompt construction and prompt-cache section tracking. |
-| `src/vv_agent/workspace/` | Local, memory, and S3-compatible workspace storage backends. |
-| `src/vv_agent/integrations/` | Direct public module for the SkillIntegration extension protocol. |
+| `src/vv_agent/workspace/` | Local, in-memory, and S3-compatible workspace backends. |
+| `src/vv_agent/integrations/` | The `SkillIntegration` extension protocol. |
 | `src/vv_agent/skills/` | Skill metadata parsing, validation, normalization, and prompt rendering. |
 
 ## Execution and persistence
 
-The session log and inbox are the sole execution ledger. SQL transactions atomically
-admit ordered plans, reserve budgets and append receipts. An execution lease fences
-writes and external dispatch. Consumers have separate acknowledged prefixes and
-need no execution lease. Wake is a hint; scanning discovers due work and consumer
-lag. Durable effects can remain unknown and must reconcile against trusted evidence.
+The session log and inbox are the only record of execution. The log is an
+append-only list of records for one session. The inbox holds inputs that
+arrived but have not been applied yet: user messages, approval answers,
+steering, cancellation, child results.
 
-Blocking and background children use independently scheduled sessions. Parent
-admission freezes identity, prompt, policy, model, JSON state and budget. Parent
-closure targets live descendants atomically. Intermediate user waits stay on the
-child; the parent adopts only an authenticated terminal for the original handle.
+- Admitting an ordered plan of operations, reserving budget for it, and
+  appending a result receipt are each atomic SQL transactions, so a crash
+  never leaves half of a change.
+- A worker must hold the session's execution lease to append records or start
+  external work. A lease is a time-limited claim on a session; it stops two
+  workers from driving the same session at once.
+- Consumers (event projection, tracing, host notifications) each keep their
+  own cursor, the position up to which they have acknowledged records. They do
+  not need the execution lease.
+- `wake(session_id)` is only a hint. Scanning the store finds due work and
+  lagging consumers even if a wake is lost.
+- A durable side effect can end in an unknown state, for example when the
+  process dies mid-call. It stays unknown until trusted evidence, such as a
+  `provider_evidence` input from the host, settles it. The kernel does not
+  guess.
+
+Blocking and background child agents run as their own sessions, scheduled
+independently. When the parent admits a child, it freezes the child's
+identity, prompt, policy, model, JSON state, and budget. Closing the parent
+targets all live descendants in the same transaction. If a child waits for the
+user, that wait stays on the child. The parent accepts only the child's final
+result, and only after checking it belongs to the child it started.
 
 See [session-kernel.md](session-kernel.md) for store transactions and recovery.
 
-## Tool Boundaries
+## Tool boundaries
 
-Tool definitions and behavior are intentionally split:
+Tool definitions and behavior live in separate modules:
 
 - `tools/base.py`: schema and execution result types.
 - `tools/metadata.py`: typed tool capability declarations, normalization, and
-  metadata-policy matching.
-- `tools/function.py`: public `FunctionTool` and `function_tool` decorator,
-  including signature/dataclass/TypedDict/Pydantic schema inference.
-- `tools/outputs.py`: structured public tool output variants.
-- `tools/registry.py`: registration and lookup. Planner extra tools retain their
-  first registration order and are deduplicated, keeping per-task tool schema
-  serialization and digest computation deterministic.
-- `tools/orchestrator.py`: policy/approval gates and the planned, started, and
-  completed executor lifecycle.
+  policy matching.
+- `tools/function.py`: `FunctionTool` and `@function_tool`, including schema
+  inference from signatures, dataclasses, `TypedDict`, and Pydantic models.
+- `tools/outputs.py`: structured tool output variants.
+- `tools/registry.py`: registration and lookup. Extra planner tools keep their
+  first registration order and are deduplicated, so the tool schema list and
+  its digest are the same on every run.
+- `tools/orchestrator.py`: policy and approval gates and the planned, started,
+  and completed lifecycle.
 - `tools/dispatcher.py`: argument normalization and handler dispatch.
-- `tools/handlers/`: concrete built-in behavior.
+- `tools/handlers/`: built-in tool behavior.
 - `constants/tool_names.py` and `constants/workspace.py`: stable tool names and
-  schemas used by prompts/tests.
+  schemas used by prompts and tests.
 
-Do not bury model-visible behavior in ad hoc handler strings without tests. Tool
-schema wording is part of the agent contract.
+Tool schema wording is part of the agent contract, because the model reads it.
+Do not change model-visible behavior through ad hoc handler strings without
+tests.
 
-`ToolMetadata` is an optional closed host declaration carried by
-`FunctionTool`, `ToolSpec`, `ToolExecutor`, and `ToolRegistry`. It contains:
+### Tool metadata
 
-- one `side_effect` value from `unknown`, `none`, `read`, `write`, `execute`,
-  `network`, or `external`, with no inferred hierarchy;
-- the existing tool idempotency classification;
-- `terminal`, which says only that the tool may return `finish` or `wait_user`;
-- opaque exact-match `capability_tags` and `cost_dimensions`. Cost dimensions
-  name possible resource kinds; they are not measurements, prices, or budget
-  observations.
+`ToolMetadata` is an optional declaration a host attaches to a `FunctionTool`,
+`ToolSpec`, `ToolExecutor`, or `ToolRegistry` entry. It has these fields:
 
-Tag and cost-dimension lists trim only tab, LF, CR, and ASCII space, reject
-blank or over-128-code-point labels, deduplicate, sort by UTF-16 code units, and
-allow at most 32 normalized entries. Generic `FunctionTool.metadata` is a
-separate host-owned mapping and is never promoted into `ToolMetadata`. Typed
-metadata is not added to `to_openai_schema()` or registry schema exports, so it
-does not change the model-visible tool contract. `ToolMetadata.idempotency` is
-the only idempotency declaration and reaches execution, events, and durable run
-definitions. `terminal=True` never causes a transition by itself; the result
-directive and completion policy remain authoritative.
+- `side_effect`: one of `unknown`, `none`, `read`, `write`, `execute`,
+  `network`, or `external`. The values have no implied order; denying `write`
+  does not deny `execute`.
+- `idempotency`: `supported`, `unsupported`, or `unknown`. This is the only
+  idempotency declaration. It reaches execution, events, and durable run
+  definitions.
+- `terminal`: says the tool may return `finish` or `wait_user`. It does not
+  end the run by itself; the result directive and completion policy decide.
+- `result_retention`: `archive` (default) or `preserve`. Microcompaction never
+  archives results of a `preserve` tool.
+- `capability_tags` and `cost_dimensions`: opaque labels matched exactly. Cost
+  dimensions name kinds of resources a tool may use. They are not prices or
+  measurements.
 
-`Agent.as_tool()` compiles a child agent into a callable tool. The child result
-is returned as the tool output and the parent agent keeps control. The tool itself
-inherits the active parent scope from `ToolContext`, including when registered
-as an executor or invoked through `ToolOrchestrator`. All agent-as-tool calls
-use the same child-run path; the Runner does not intercept tool metadata to
-start a separate child. Missing runtime/provider scope returns the existing
-`sub_agents_not_enabled` tool error before starting a run. Child cancellation
-is linked to the parent, and child session state remains separate. `handoff()`
-compiles to a transfer tool whose result uses a finish directive; the target
-agent output becomes the run output and a typed `HandoffEvent` is emitted.
+The runtime normalizes each label list. It trims tabs, line feeds, carriage
+returns, and spaces from each label, rejects blank labels and labels longer
+than 128 code points, removes duplicates, and sorts by UTF-16 code units. A
+list may hold at most 32 labels.
 
-`ToolPolicy` is enforced during schema planning and again at executor dispatch.
-In addition to `allowed_tools`, `disallowed_tools`, and `can_use_tool`, it has
-`denied_side_effects`, `denied_capability_tags`, `deny_terminal_tools`, and
-`denied_cost_dimensions`. List values form a normalized set union across Agent,
-configured Runner, and per-run layers; the terminal boolean uses logical OR.
-Configured sub-agents, agent-as-tool runs, and handoff targets inherit the
-effective parent denials and may only add more. Child admission freezes
-that already-effective policy instead of creating another permission layer.
+`ToolMetadata` never appears in `to_openai_schema()` or registry schema
+exports, so declaring it does not change what the model sees.
+`FunctionTool.metadata` is a separate free-form mapping for the host; the
+runtime never reads it as `ToolMetadata`.
 
-These fields only deny declared capabilities. They use exact matching, return
-the existing `tool_not_allowed` error, and report policy sources in
-side-effect, terminal, capability-tag, then cost-dimension order. They cannot
-add a tool or bypass name, argument, approval, budget, planned-name, or runtime
-checks. A tool without typed metadata matches none of the metadata denials.
+### Agents as tools and handoffs
 
-After tool name and arguments normalize, `ToolOrchestrator` emits
-`tool_call_planned` before policy and approval. It emits `tool_call_started`
-only immediately before the executor may cause effects, then emits
-`tool_call_completed` after a `ToolExecutionResult` exists. Parse failures have
-no tool lifecycle. Unknown tools, policy denials, and approval short-circuits
-have planned plus completed but no started event. Completed events add the
-result directive, nullable error code, `execution_started`, nullable monotonic
-`duration_ms`, and the optional declaration. Cancellation or process loss may
-leave a started event without completion; retained session operations own ambiguity and recovery.
+`Agent.as_tool()` turns a child agent into a tool. The child's output becomes
+the tool result, and the parent agent keeps control. The tool takes the
+parent's scope from `ToolContext`, whether it is registered as an executor or
+called through `ToolOrchestrator`. All agent-as-tool calls use the same child
+run path. If no session runtime is available, the tool returns the
+`sub_agents_not_enabled` error without starting a run. Cancelling the parent
+cancels the child. The child keeps its own session state.
 
-When no typed declaration exists, metadata-denial fields do not match that
-tool. Telemetry observation does not change result, policy, approval,
-completion, or event-store failure semantics.
+`handoff()` creates a transfer tool whose result carries a `finish`
+directive. The target agent's output becomes the run output, and the runtime
+emits `HandoffStartedEvent` and `HandoffCompletedEvent`.
 
-`FunctionTool.needs_approval` and `ToolPolicy.approval="always"` interrupt tool
-execution with a wait-user directive before user code runs. The runtime emits
-`ApprovalRequestedEvent` directly. `ToolPolicy.approval="never"` skips
-that approval gate for trusted runs. `approval="default"` is the unset merge
-sentinel, while explicit `approval="on_request"` overrides lower layers and
-follows the selected tool's static or dynamic approval declaration. `always`
-and `never` do not evaluate dynamic tool approval predicates.
+### Tool policy
 
-Interrupted results retain session_id and turn_id. Replies enter the inbox;
-Runner.resume(session_id, turn_id) drives the same retained turn using its durable identity.
+`ToolPolicy` is checked twice: when the runtime builds the tool schema list
+for the model, and again when the executor dispatches a call. Besides
+`allowed_tools`, `disallowed_tools`, and `can_use_tool`, it can deny tools by
+their metadata:
 
-## Guardrails And Tracing
+- `denied_side_effects`
+- `denied_capability_tags`
+- `deny_terminal_tools`
+- `denied_cost_dimensions`
 
-Input guardrails run inside `Runner` before model/provider resolution. A block
-or approval requirement returns a failed run result without calling the model.
-Rewrite results replace the user input before the runtime task is compiled.
+The Agent, the configured Runner, and the per-run config each may set a
+policy. List fields combine as a union across the three layers, and
+`deny_terminal_tools` is true if any layer sets it. Sub-agents, agent-as-tool
+runs, and handoff targets inherit the parent's effective denials and can only
+add more. Child admission freezes that combined policy.
 
-Output guardrails run after the runtime returns. Rewrite results replace
-`RunResult.final_output`; block and approval results convert the public run
-status to failed and expose the guardrail message.
+Metadata denials can only remove tools. They match exactly and return the
+`tool_not_allowed` error. When several apply, the reported source is the first
+match in this order: side effect, terminal, capability tag, cost dimension. A
+tool with no `ToolMetadata` matches no metadata denial. Metadata denials never
+add a tool or skip the name, argument, approval, budget, or runtime checks.
 
-Optional output validation is a separate default-off host extension. After the
-existing terminal observation is persisted, an explicitly enabled typed
-validator may accept the final value or return a coded rejection. A host repair
-callback may supply one replacement, which is coerced through `output_type` and
-validated again. The repair request has no tools, and the framework does not
-infer task or answer semantics. See `output-validation.md`.
+### Tool call lifecycle
 
-Trace processors are read from `RunConfig.tracing["processors"]`. `Runner`
-starts a `run` span for each invocation and starts/ends `tool` spans from typed
-tool events emitted by the runtime.
+`ToolOrchestrator` emits lifecycle events in this order:
 
-## Workspace Boundary
+1. After it parses the arguments, it emits `tool_call_planned`. This happens
+   before policy and approval checks.
+2. Right before the executor may cause effects, it emits `tool_call_started`.
+3. Once a `ToolExecutionResult` exists, it emits `tool_call_completed`. The
+   event includes the result directive, the error code (or null),
+   `execution_started`, `duration_ms` (or null), and the tool's metadata
+   declaration if any.
 
-File tools must go through `WorkspaceBackend`. Local filesystem access,
-in-memory storage, and S3-compatible storage should keep the same behavior for
-read/write/list/grep semantics wherever practical. Path traversal protections
-belong at the workspace boundary and are covered by `tests/test_workspace_backends.py`
-and `tests/test_tools.py`.
+Some calls skip steps. A call whose arguments fail to parse emits no lifecycle
+events. Unknown tools, policy denials, and approval interruptions emit
+`planned` and `completed` but never `started`. If the process is cancelled or
+dies during execution, a `started` event can remain without a `completed`
+event; the session log then decides how to recover the operation. Event
+observers cannot change the result, policy, approval, completion, or
+event-store failure behavior.
+
+### Approval
+
+`FunctionTool.needs_approval` and `ToolPolicy.approval="always"` pause the call
+with a `wait_user` directive before any user code runs. The runtime emits
+`ApprovalRequestedEvent`. The `approval` field takes four values:
+
+| Value | Behavior |
+| --- | --- |
+| `default` | Unset. A higher layer decides; with no setting, the tool's own approval declaration applies. |
+| `on_request` | Use the tool's static or dynamic approval declaration, overriding lower layers. |
+| `always` | Ask for every call. Dynamic approval predicates are not evaluated. |
+| `never` | Skip approval for trusted runs. Dynamic approval predicates are not evaluated. |
+
+The first non-`default` value wins, checked in this order: per-run config,
+Agent, configured Runner.
+
+An interrupted result keeps its `session_id` and `turn_id`. Replies go into
+the inbox, and the same turn continues. See
+[runtime-control.md](runtime-control.md#waiting-and-resuming).
+
+## Guardrails and tracing
+
+Input guardrails run when the turn's task is built, before the model is
+called. A `block` or `require_approval` outcome returns a failed run without
+calling the model. A `rewrite` outcome replaces the user input before the task
+is compiled.
+
+Output guardrails run on the final output. A rewrite replaces
+`RunResult.final_output`. A block or approval outcome turns the run into a
+failure that carries the guardrail message.
+
+Output validation is a separate host extension, off by default. An enabled
+validator can accept the final output or reject it with a code, and an
+optional repair callback can supply one replacement without tools. See
+[output-validation.md](output-validation.md).
+
+Trace processors come from `RunConfig.tracing["processors"]`. The runtime
+builds `run`, `agent`, and `tool` spans from the session log and delivers them
+through their own consumer cursor. Delivery is at most once: the cursor
+advances before processors are called, so a crash can lose spans but never
+repeats them.
+
+## Workspace boundary
+
+File tools must go through `WorkspaceBackend`. The local filesystem, in-memory,
+and S3-compatible backends should behave the same for read, write, list, and
+grep wherever practical. Path traversal protection belongs at the workspace
+boundary; `tests/test_workspace_backends.py` and `tests/test_tools.py` cover
+it.
+
+`read_file` and the check of existing artifacts read the built-in backends in
+chunks. The SHA-256 digest, UTF-8 validation, line counts, and page output all
+come from one pass over the bytes. No page is returned until the whole file
+has been validated. This keeps memory use bounded, although every page request
+still reads the full file. Custom backends are read with their own
+`read_bytes`.
 
 ## Invariants
 
-- Model resolution is exact: requested model keys are not aliased to independent
-  provider models.
-- Runtime terminal states follow no-tool policy, explicit tool outcomes, host
-  hooks, cancellation, failure, and resource bounds, not prose heuristics.
-- Public SDK code should enter through `Agent`, `Runner`, `RunConfig`,
+- Model keys resolve exactly. A requested key is never aliased to a different
+  provider model.
+- Terminal states come from the no-tool policy, explicit tool outcomes, host
+  hooks, cancellation, failures, and resource limits. The runtime never infers
+  them from the wording of an answer.
+- Public SDK code enters through `Agent`, `Runner`, `RunConfig`,
   `ModelSettings`, tools, sessions, typed `RunEvent` objects, or
-  `InteractiveAgentClient` for stateful host-controlled runtimes.
-- Long outputs should keep structured data in metadata and model-facing text in
+  `InteractiveAgentClient` for stateful hosts.
+- Long tool outputs keep structured data in metadata and model-facing text in
   content.
 - Cancellation, streaming, hooks, memory compaction, and session stores must
-  compose without changing public result shapes.
+  work together without changing public result shapes.
 - New public behavior needs tests in the closest `tests/test_*.py` module.
 
-`read_file` and existing-artifact validation scan native Local, Memory, S3,
-and discovery-filtered backends in chunks. SHA-256, UTF-8 validation, line
-statistics, and page output derive from the same byte stream; no page or
-baseline is published before full-source validation finishes. This bounds
-extra memory for native backends while retaining full-source I/O on each page.
-Custom backends retain their existing `read_bytes` behavior. No new public
-workspace capability or cursor wire is introduced.
+## History-preserving compaction
 
-## History-Preserving Compaction
+`MemoryManager` keeps long conversations inside the model's context window in
+two ways:
 
-`MemoryManager` uses one microcompaction planner/application pass. Relative
-transcript age protects recent assistant turns even after recompression. The
-planner and application share message indices; empty assistant filtering runs
-only after a precomputed plan has been applied. Complete tool blocks and images
-are never stripped to make room. Invalid blocks leave history unchanged, except
-an ordered incomplete final tool block remains intact in the raw tail.
+- Microcompaction moves large, older tool results into workspace artifacts and
+  leaves a short marker in the transcript. The model can read the full result
+  again with `read_file`, so microcompaction runs only when `read_file` is
+  available. Recent assistant turns are protected, and tools declared with
+  `result_retention="preserve"` are never archived.
+- Summary compaction replaces the older part of the conversation with one
+  summary message and keeps the most recent messages unchanged.
+  `compact(..., force=True)` skips microcompaction and goes straight to a
+  summary.
 
-Normal summaries retain at least `keep_recent_messages` raw messages (default
-10), moving the cut left across an atomic assistant/tool-results block, including
-an incomplete final block. Image notifications and steering messages after tool
-results are independent messages. Prefix images become deterministic text
-placeholders (`[image omitted from summary input: <content or image>]`) in the
-summary request, without `image_url`; raw-tail images remain unchanged. Only an
-accepted summary removes original prefix images. Force skips pruning. Emergency uses the same accepted-summary
-path with `max(1, floor(keep_recent_messages * (1 - clamp(ratio, 0, 0.95))))`.
+Summary compaction follows these rules:
 
-The localized prompt carries JCS `Previous Summary` and `Conversation Prefix`
-sections without truncation. Callback output is extracted and normalized to the
-closed summary 2.0 shape. Empty effective content, failed callbacks, insufficient
-summary-route input capacity, unavailable recovery, oversized candidates and
-candidates without token reduction cannot replace history. Control-flow errors
-propagate. The standalone local-summary helper serves its fixture only; it is
-never a fallback authorizing history replacement.
+- It keeps at least `keep_recent_messages` raw messages (default 10). It never
+  splits an assistant message from its tool results; the cut moves earlier
+  instead.
+- Images in the summarized part are sent to the summary model as text
+  placeholders such as `[image omitted from summary input: <content or
+  image>]`. Images in the kept tail stay as they are.
+- The new history is system messages, one user message named
+  `memory_summary`, and the unchanged tail. Archived artifacts and file paths
+  from earlier summaries carry forward, so a second summary does not lose the
+  evidence of the first.
+- History changes only when a summary is accepted. A summary that is empty,
+  fails, does not reduce the token count, or does not fit the context is
+  discarded, and the original history stays. A summary that relies on
+  archived evidence is also discarded when `read_file` is not available.
+- After a prompt-too-long error, emergency compaction keeps a smaller tail of
+  `max(1, floor(keep_recent_messages * (1 - clamp(drop_ratio, 0, 0.95))))`
+  messages.
+- Session Memory is notified of a compaction only after the summary is
+  accepted.
 
-Accepted output contains original system messages, one user `memory_summary`,
-and the unchanged tail. `_vv_agent_compaction` metadata merges complete artifact
-and cursor records, previous evidence first, with stable whole-record JCS
-deduplication. Hashes remain host-only; the `Persisted Artifacts` section exposes
-paths and normal read hints. File actions merge by first-seen path without
-filesystem access. A final check after `before_llm` requires a visible recovery
-tool for summary evidence as well as compacted tool markers. Session Memory
-receives `on_compaction` only after acceptance; its token baseline includes the
-tail and the frozen system prompt remains unchanged.
+Inside the session kernel, compaction runs as logged operations, and each
+accepted summary is a log record. See
+[session-kernel.md](session-kernel.md#compaction-through-the-log) for how the
+kernel plans, accepts, and replays compaction, and how hosts consume
+compaction records.
