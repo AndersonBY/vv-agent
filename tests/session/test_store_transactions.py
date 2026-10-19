@@ -524,7 +524,7 @@ def test_native_consumer_cursor_and_host_write_share_transaction(store):
 
 
 @pytest.mark.sqlite_file
-@pytest.mark.parametrize("version", [0, 1, 3])
+@pytest.mark.parametrize("version", [0, 1, 2, 4])
 def test_sqlite_rejects_missing_or_unknown_database_version(store, database, version):
     store.connection.execute(f"PRAGMA user_version={version}")
     with pytest.raises(ValueError, match="schema version"), open_store(database):

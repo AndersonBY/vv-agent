@@ -601,6 +601,7 @@
                 },
                 "kind": {
                   "enum": [
+                    "model_selection",
                     "user",
                     "steer",
                     "follow_up",
@@ -616,7 +617,7 @@
                   "type": "object"
                 },
                 "schema_version": {
-                  "const": 2,
+                  "const": 3,
                   "type": "integer"
                 },
                 "target_turn_id": {
@@ -646,6 +647,56 @@
               "maxLength": 64,
               "pattern": "^[0-9a-f]{64}$",
               "type": "string"
+            },
+            "model_binding": {
+              "additionalProperties": false,
+              "properties": {
+                "backend": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "context_length": {
+                  "anyOf": [
+                    {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "endpoints": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "max_output_tokens": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "backend",
+                "model",
+                "endpoints",
+                "context_length",
+                "max_output_tokens"
+              ],
+              "type": "object"
             },
             "position": {
               "minLength": 1,
@@ -882,6 +933,56 @@
                               },
                               "type": "array"
                             },
+                            "model_binding": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "backend": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "context_length": {
+                                  "anyOf": [
+                                    {
+                                      "minimum": 1,
+                                      "type": "integer"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "endpoints": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array"
+                                },
+                                "max_output_tokens": {
+                                  "anyOf": [
+                                    {
+                                      "minimum": 0,
+                                      "type": "integer"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "model": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "backend",
+                                "model",
+                                "endpoints",
+                                "context_length",
+                                "max_output_tokens"
+                              ],
+                              "type": "object"
+                            },
                             "shared_state": {
                               "type": "object"
                             }
@@ -1052,6 +1153,56 @@
                                 "type": "string"
                               },
                               "type": "array"
+                            },
+                            "model_binding": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "backend": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "context_length": {
+                                  "anyOf": [
+                                    {
+                                      "minimum": 1,
+                                      "type": "integer"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "endpoints": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array"
+                                },
+                                "max_output_tokens": {
+                                  "anyOf": [
+                                    {
+                                      "minimum": 0,
+                                      "type": "integer"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "model": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "backend",
+                                "model",
+                                "endpoints",
+                                "context_length",
+                                "max_output_tokens"
+                              ],
+                              "type": "object"
                             },
                             "shared_state": {
                               "type": "object"

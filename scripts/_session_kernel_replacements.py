@@ -696,12 +696,51 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
-        d.update(contract="vv-agent-public-api-v10", schema_version=10)
+        d.update(contract="vv-agent-public-api-v11", schema_version=11)
         for surface in d["surfaces"]:
             if surface["id"] == "session_InboxItem":
                 surface["behavior"] = (
-                    "strict inbox schema 2; provider_result requires usage object; completed-attempt replay compares "
+                    "strict inbox schema 3 with durable session-scoped model_selection; "
+                    "provider_result requires usage object; completed-attempt replay compares "
                     "result and usage canonical bytes; late audit usage is billable"
+                )
+        for surface in d["surfaces"]:
+            if surface["id"] == "session_Runtime":
+                surface["behavior"] = (
+                    "resolve retained model/settings/route; reject selection before apply; verify planned binding on recovery"
+                )
+                surface["members"] = [m for m in surface["members"] if m["id"] not in {"model_resolver", "resolve_model"}]
+                surface["members"].extend(
+                    [
+                        {
+                            "id": "model_resolver",
+                            "kind": "field",
+                            "python": {"kind": "field", "name": "model_resolver", "declaration": "dataclass_field"},
+                        },
+                        {
+                            "id": "resolve_model",
+                            "kind": "operation",
+                            "python": {
+                                "kind": "method",
+                                "name": "resolve_model",
+                                "signature": signature(resolve(surface["python_target"]).resolve_model),
+                            },
+                        },
+                    ]
+                )
+            if surface["id"] == "app_server_client":
+                operations = surface["protocol_operations"]
+                operations[:] = [m for m in operations if m["id"] != "thread/model/select"]
+                operations.append(
+                    {
+                        "id": "thread/model/select",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "select_model",
+                            "signature": signature(resolve(surface["python_target"]).select_model),
+                        },
+                    }
                 )
         for domain in d["domains"]:
             for capability in domain["capabilities"]:

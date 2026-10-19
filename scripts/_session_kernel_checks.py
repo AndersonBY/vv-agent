@@ -97,7 +97,7 @@ def validate_outputs(values, base: Path, keep, replacements):
         for name, value in baseline.items()
         if isinstance(value.get("schema_version"), str) and name != "run_definition.json"
     )
-    current.add("vv-agent-public-api-v10")
+    current.add("vv-agent-public-api-v11")
     current.add(baseline["memory_local.json"]["microcompact"]["schema_version"])
     for schema in schemas.values():
         current.update(
@@ -182,7 +182,7 @@ def validate_outputs(values, base: Path, keep, replacements):
                             current
                             if isinstance(item, str)
                             else {
-                                10
+                                11
                                 if name == "public_api.json" and not path
                                 else INPUT_SCHEMA["properties"]["schema_version"]["const"]
                                 if "input_id" in node and "available_ms" in node

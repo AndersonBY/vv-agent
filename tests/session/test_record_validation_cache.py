@@ -114,6 +114,8 @@ def example(schema):
         return [example(schema["items"])]
     if kind == "integer":
         return schema["minimum"]
+    if kind == "number":
+        return schema.get("exclusiveMinimum", schema.get("minimum", 0)) + 0.5
     if kind == "string":
         return "0" * 64 if "pattern" in schema else "text"
     return True if kind == "boolean" else None

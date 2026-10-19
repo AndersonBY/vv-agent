@@ -5,9 +5,9 @@ RunHandle, interactive sessions, CLI, App Server and delegated children. Ordinar
 runs own an SQLite `:memory:` store. Hosts opt into durable execution through
 SessionStore, SQLiteStore or PostgresStore. There is no execution selector.
 
-The contract lock selects the local v26.0.0 candidate revision/artifact. Current codecs are RunEvent v6, model-call v2,
+The contract lock selects the local v27.0.0 candidate revision/artifact. Current codecs are RunEvent v6, model-call v2,
 task-token-usage v3, strict Message and App Server protocol v2. Public exports
-match public_api v10. InboxItem uses schema 2; Record remains schema 1. Rust remains frozen at contract 23.0.0 and is outside this
+match public_api v11. InboxItem uses schema 3; Record remains schema 1. Rust remains frozen at contract 23.0.0 and is outside this
 Python adoption. All execution uses the same kernel and retained log.
 
 Runner.resume(session_id, turn_id) reads the retained identity. User and approval
@@ -25,7 +25,7 @@ same cap. A committed terminal completes its original turn without re-dispatch.
 
 ## Modules and logical bytes
 
-- `records.py` defines 14 record variants and eight inbox variants. The
+- `records.py` defines 14 record variants and nine inbox variants. The
   version, envelope, payload, handles, and control discriminators are closed.
   Missing fields, unknown fields, non-integer/stale versions, duplicate JSON
   object keys, invalid identities, and incorrect embedded digests are rejected.
@@ -320,7 +320,7 @@ conflicting decisions are rejected.
 
 ## Authenticated provider usage
 
-Inbox schema 2 requires `provider_result` payload fields `operation_id`,
+Inbox schema 3 requires `provider_result` payload fields `operation_id`,
 `attempt`, `request_digest`, `provider_binding` (nullable), `result`, `usage`
 and `evidence`. `usage` is a required JSON object with the same shape as
 `op_completed.usage`; use `{}` for no observed measurement. Missing, null,
@@ -565,7 +565,7 @@ invalidate a newer turn's completion candidate.
 databases, including process-kill barriers around push/ack, concurrent
 delivery and input replay, identity/evidence rejection, atomic admission,
 background safe points, cancellation, and late-generation audit. Contract
-26.0.0 adoption remains pending; the support matrix owns required implementation
+27.0.0 adoption remains pending; the support matrix owns required implementation
 revisions and central verification. Rust stays frozen at contract 23.0.0.
 
 
@@ -645,7 +645,7 @@ compaction notification.
 
 Current SQL storage adds `sk_session.drive_retry_at_ms` and
 `sk_consumer.project_retry_at_ms` (nonnegative, default zero). SQLite database
-user_version is 2 and rejects version 1. These retry gates are scheduling state,
+user_version is 3 and rejects versions 1 and 2. These retry gates are scheduling state,
 not execution facts; the log codecs remain version 1. No migrations or historical
 decoders are supplied. PostgreSQL host migrations copy the current DDL literal.
 
@@ -656,7 +656,7 @@ The heartbeat factory must borrow the **same store instance** for memory session
 independent connections to the same path. SQLite is single-host only.
 
 SQLite uses STRICT tables, foreign keys, WAL (files), synchronous FULL, a
-5000 ms busy timeout and strict `user_version=2`. The record CHECK accepts
+5000 ms busy timeout and strict `user_version=3`. The record CHECK accepts
 `context_compacted`, including summary, emergency and microcompaction records.
 There are no historical readers or migrations in this internal module.
 
@@ -828,7 +828,7 @@ as a host-only example; backend B1 implements the site's tasks.
 `scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
 forty-five files from real store/kernel/public-surface/App Server producers with
 scripted providers and fixed semantic identities/clocks. It never edits the
-vendored snapshot. One generation compares all forty-five bytes with the vendored v26.0.0 snapshot.
+vendored snapshot. One generation compares all forty-five bytes with the vendored v27.0.0 snapshot.
 Independent Node RFC8785 bytes, digests, record IDs, closed schemas, complete
 kind/stage/handle/optional-field coverage and source-prefix projections are
 revalidated. Deterministic curation preserves each behavioral coverage key.
@@ -837,3 +837,12 @@ the F5 real-store batch/retry/dispatch acceptance expectations. Invalid versions
 negative inputs to current strict readers. The full corpus is limited to 3 MB
 and each output to 512 KB. Producer evidence supplements durable-store
 process-kill, concurrency, rollback and authentication tests.
+
+## Per-cycle model selection
+
+Use the session-scoped model_selection inbox input, not mutable Runtime or Task
+fields. See [design and wire](session-model-selection.md) and
+[host recipe](host-integration.md#model-selection). Accepted selection and resolved
+binding live in input_applied; subsequent primary requests retain model, settings,
+route and binding. A resolver rejection preserves the previous choice. Children
+are unaffected. Existing plans, retries and late receipts keep their identity.

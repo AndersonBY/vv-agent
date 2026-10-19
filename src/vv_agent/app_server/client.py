@@ -12,6 +12,7 @@ from vv_agent.app_server.protocol import (
     ModelListRequest,
     ThreadArchiveParams,
     ThreadListParams,
+    ThreadModelSelectParams,
     ThreadReadParams,
     ThreadResumeParams,
     ThreadStartParams,
@@ -73,6 +74,9 @@ class AppServerClient:
 
     def resume_thread(self, params: ThreadResumeParams) -> dict[str, Any]:
         return self._send_request("thread/resume", params.to_dict())
+
+    def select_model(self, params: ThreadModelSelectParams) -> dict[str, Any]:
+        return self._send_request("thread/model/select", params.to_dict())
 
     def read_thread(self, params: ThreadReadParams) -> dict[str, Any]:
         return self._send_request("thread/read", params.to_dict())

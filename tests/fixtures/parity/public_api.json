@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v10",
+  "contract": "vv-agent-public-api-v11",
   "domains": [
     {
       "capabilities": [
@@ -1168,7 +1168,7 @@
       "id": "exports"
     }
   ],
-  "schema_version": 10,
+  "schema_version": 11,
   "surfaces": [
     {
       "id": "agent",
@@ -3249,6 +3249,29 @@
                 {
                   "kind": "positional_or_keyword",
                   "name": "info",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "thread/model/select",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "select_model",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
                   "required": true
                 }
               ]
@@ -5596,7 +5619,7 @@
       "python_target": "vv_agent.Record"
     },
     {
-      "behavior": "strict inbox schema 2; provider_result requires usage object; completed-attempt replay compares result and usage canonical bytes; late audit usage is billable",
+      "behavior": "strict inbox schema 3 with durable session-scoped model_selection; provider_result requires usage object; completed-attempt replay compares result and usage canonical bytes; late audit usage is billable",
       "id": "session_InboxItem",
       "python_target": "vv_agent.InboxItem"
     },
@@ -5822,7 +5845,7 @@
       "python_target": "vv_agent.session.children.InvalidChildBatch"
     },
     {
-      "behavior": "current runtime bindings; custom callbacks return one child or a nonempty uniform-background sequence",
+      "behavior": "resolve retained model/settings/route; reject selection before apply; verify planned binding on recovery",
       "id": "session_Runtime",
       "members": [
         {
@@ -5832,6 +5855,38 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "children"
+          }
+        },
+        {
+          "id": "model_resolver",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "model_resolver"
+          }
+        },
+        {
+          "id": "resolve_model",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "resolve_model",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "request",
+                  "required": true
+                }
+              ]
+            }
           }
         }
       ],

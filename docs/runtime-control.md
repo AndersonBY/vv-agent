@@ -72,3 +72,8 @@ identity. Tracing uses a separate acknowledged consumer, with at-most-once deliv
 Producer coverage is in test_runner_events_producer_parity.py,
 test_run_handle_live_stream.py, test_approval_protocol.py, test_approval_session.py,
 test_sub_task_manager_continuation_recovery.py, test_run_budget.py and tests/session.
+
+Session model changes use a model_selection input, submitted without a lease.
+They take effect at the next new primary plan after the current batch closes and
+persist across turns. Runtime.model_resolver resolves the retained planned request;
+see [model selection](session-model-selection.md).

@@ -356,3 +356,12 @@ class ProductHost(AppServerHost):
 The host should map product profiles, workspaces, model settings, memory
 providers, context providers, approval UI, and product tools into `Agent` and
 `RunConfig`. The App Server should not import product modules.
+
+## Model selection
+
+`thread/model/select` accepts exactly threadId, inputId and selection. selection
+is null to clear, or `{model, model_settings?, route}`. It enqueues the kernel's
+session-scoped model_selection input; result `{threadId,inputId,accepted:true}`
+acknowledges admission. The holder validates at the next cycle boundary. Same
+inputId/bytes replay; different bytes return -32602. Closed thread submissions
+remain rejected by the kernel. See [model selection](session-model-selection.md).

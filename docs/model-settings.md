@@ -127,3 +127,12 @@ examples, live-test docs, tests, and `local_settings.example.py`.
 - Do not read key files from sibling projects. Keep this repository's test and
   example settings self-contained.
 - Live tests must stay opt-in through `VV_AGENT_RUN_LIVE_TESTS=1`.
+
+## Session selections
+
+The session model_selection input carries the same closed ModelSettings object.
+Reasoning effort is `model_settings.reasoning.effort`; route is reserved for host
+transport selection such as backend_type. Omitted settings mean empty settings
+for the selected model; settings from a different model are not inherited. The
+kernel forces one transport attempt per logged attempt. Capacity budgeting uses
+the accepted selection's resolved context/output limits and selected max_tokens.

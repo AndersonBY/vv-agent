@@ -16,3 +16,7 @@ stay behind AppServerHost agent/configuration providers.
 SessionRunEventStore supplies durable event history. JsonlRunEventStore is an
 optional sink. thread_store/thread_state hold projected values and local handles;
 they own no queue, transcript or execution ledger. Host controls enter the inbox.
+
+`thread/model/select` maps threadId to session_id and inputId unchanged to
+InboxItem.input_id, kind=model_selection, payload={selection}, with null turn and
+generation. It uses the same kernel/store and introduces no configuration ledger.

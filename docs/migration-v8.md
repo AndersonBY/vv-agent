@@ -1,8 +1,8 @@
 # Host migration
 
-Public API v10 selects contract 26.0.0. The execution
+Public API v11 selects contract 27.0.0. The execution
 replacements introduced by v8 still apply; the additional
-[0.23.0 host update](#python-0230--public-api-v10-host-update) below covers scheduling
+[0.24.0 host update](#python-0240--public-api-v11-host-update) below covers scheduling
 and storage. Use the current API throughout a host; older runtimes remain in
 pinned releases. There is no conversion of a running v23 execution. Finish or
 explicitly close old work with its original runtime before switching artifacts.
@@ -193,10 +193,12 @@ pip install 'vv-agent[redis,celery]'
 pip install 'vv-agent[postgres]'
 ```
 
-## Python 0.23.0 / public API v10 host update
+## Python 0.24.0 / public API v11 host update
 
-Python 0.23.0 selects the local contract v26.0.0 candidate. The v8 execution replacements above still apply; F5 adds
-custom child batches and changes the required store/scheduling surface.
+Python 0.24.0 selects the contract v27.0.0 branch candidate. The v8 execution
+replacements and F5 custom child batches/store scheduling below still apply. F8
+adds durable model selection; use [the selection input and resolver](session-model-selection.md)
+instead of changing a frozen Task/Runtime binding.
 
 - Replace inline Celery tick with `tick(..., dispatch=enqueue_drive, project=...)`.
   Expire or coalesce unleased queued duplicates, including wakes. Pass the runtime
@@ -206,14 +208,14 @@ custom child batches and changes the required store/scheduling surface.
   custom stores. Both gate discovery using database time; execution backoff also
   gates acquisition, including ready inbox and direct duplicate wakes.
 - Copy the new PostgreSQL DDL: `drive_retry_at_ms` on sk_session and
-  `project_retry_at_ms` on sk_consumer, default zero. SQLite user_version is 2 and
-  rejects existing v1 files. No automatic migration of old executing sessions.
+  `project_retry_at_ms` on sk_consumer, default zero. SQLite user_version is 3 and
+  rejects existing v1/v2 files; its inbox CHECK includes model_selection. No automatic migration of old executing sessions.
 - Custom callbacks may return a uniform-background nonempty sequence. Host rows
   must use the same admission transaction. InvalidChildBatch rolls the admission
   back; custom batch results include every child in admission order.
 
 See [host integration](host-integration.md) for the complete dispatch, retry and
-transaction contract. Inbox schema 2 requires `provider_result.usage` as a JSON
-object (`{}` for no observed usage); schema 1 rejects. Authenticate usage along
+transaction contract. Inbox schema 3 requires `provider_result.usage` as a JSON
+object (`{}` for no observed usage); older inbox schemas reject. Authenticate usage along
 with result and bill from canonical typed usage, including late audit attempts.
 Record schema 1 and event/App Server wire versions remain current.
