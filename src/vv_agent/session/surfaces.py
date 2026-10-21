@@ -8,12 +8,12 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 from uuid import uuid4
-from weakref import WeakValueDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
 from vv_agent.memory import MemoryManager
-from vv_agent.model import resolve_run_model
+from vv_agent.model import resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
 from vv_agent.run_handle import RunHandle
@@ -30,10 +30,12 @@ from .sqlite import SQLiteStore
 from .store import Conflict, SessionStore
 
 _DRIVERS: WeakValueDictionary[str, SessionDriver] = WeakValueDictionary()
+_STORE_CLOSERS: WeakKeyDictionary[SessionStore, list[Any]] = WeakKeyDictionary()
 
 
 class SessionDriver:
-    def __init__(self, path: str | Path = ":memory:", *, store: SessionStore | None = None) -> None:
+    def __init__(self, path: str | Path = ":memory:", *, store: SessionStore | None = None, model_resolver=None) -> None:
+        self.model_resolver = model_resolver
         self._owns_store = store is None
         self.store = store if store is not None else SQLiteStore(str(path))
         self.path = self.store.path if isinstance(self.store, SQLiteStore) else None
@@ -42,6 +44,7 @@ class SessionDriver:
         self.handles: list[RunHandle] = []
         self._background: dict[str, RunHandle] = {}
         self._background_lock = RLock()
+        self._close_callbacks = []
 
     def _control_runtime(self, sid: str) -> Runtime:
         from vv_agent.model import ScriptedModelProvider
@@ -52,8 +55,19 @@ class SessionDriver:
     def close(self) -> None:
         for handle in self.handles:
             handle.join()
+        callbacks = _STORE_CLOSERS.pop(self.store, []) if self._owns_store else list(self._close_callbacks)
+        for callback in callbacks:
+            callback()
+            retained = _STORE_CLOSERS.get(self.store, [])
+            if callback in retained:
+                retained.remove(callback)
+        self._close_callbacks.clear()
         if self._owns_store and isinstance(self.store, SQLiteStore):
             self.store.connection.close()
+
+    def _on_close(self, callback):
+        self._close_callbacks.append(callback)
+        _STORE_CLOSERS.setdefault(self.store, []).append(callback)
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
         _DRIVERS[sid] = self
@@ -84,7 +98,7 @@ class SessionDriver:
             keep_recent_messages=metadata.get("memory_keep_recent_messages", 10),
             microcompaction_policy=task.microcompaction_policy if task else config.microcompaction_policy,
         )
-        return Runtime(
+        runtime = Runtime(
             agent,
             config,
             resolved,
@@ -92,7 +106,12 @@ class SessionDriver:
             self._heartbeat_store,
             frozen_task=task,
             memory_manager=memory,
+            model_resolver=self.model_resolver,
         )
+        provider = config.model_provider
+        if self.model_resolver is None and provider is not None:
+            runtime.model_resolver = lambda request: resolve_model_selection(provider, request)
+        return runtime
 
     def _heartbeat_store(self):
         if isinstance(self.store, SQLiteStore) and self.store.path != ":memory:":
@@ -135,7 +154,21 @@ class SessionDriver:
                 ),
                 None,
             )
-            tid = state.active_turn_id or (f"{sid}/turn/{queued['input_id']}" if queued else next(reversed(state.turns), ""))
+            pending = next(
+                (
+                    s.item
+                    for s in self.store.peek_inbox(sid)
+                    if s.item.kind in {"user", "follow_up"} and s.item.target_turn_id is None
+                ),
+                None,
+            )
+            tid = state.active_turn_id or (
+                f"{sid}/turn/{queued['input_id']}"
+                if queued
+                else f"{sid}/turn/{pending.input_id}"
+                if pending
+                else next(reversed(state.turns), "")
+            )
         handle = RunHandle(self, sid, tid, runtime, consumer)
         self.handles.append(handle)
         if autostart:
@@ -160,7 +193,7 @@ class SessionDriver:
         state, records, _ = self.store.read_state(sid)
         return [m for m in project_context(records, state) if m.role != "system"]
 
-    def waits(self, sid: str, runtime: Runtime) -> list[tuple[str, Runtime, dict[str, Any]]]:
+    def waits(self, sid: str, runtime: Runtime | None = None) -> list[tuple[str, Runtime | None, dict[str, Any]]]:
         state, _records, _ = self.store.read_state(sid)
         found = []
         tid = state.active_turn_id
@@ -184,7 +217,7 @@ class SessionDriver:
             if handle["kind"] == "child":
                 for child in child_handles(handle):
                     child_id = child["session_id"]
-                    found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id)))
+                    found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id) if runtime else None))
             elif handle["kind"] in {"user", "approval"}:
                 found.append((sid, runtime, handle | {"operation_id": oid, "attempt": number, "turn_id": tid}))
         return found

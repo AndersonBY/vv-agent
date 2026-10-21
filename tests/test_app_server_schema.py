@@ -92,7 +92,9 @@ def test_typescript_generation_is_self_contained(tmp_path) -> None:
     assert "export type ClientRequest" in source
     assert "export interface TurnStartParams" in source
     assert 'export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";' in source
-    assert 'export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";' in source
+    from vv_agent.session.app_server import ThreadStatus
+
+    assert "export type ThreadStatus = " + " | ".join('"' + v.value + '"' for v in ThreadStatus) + ";" in source
     assert "CheckpointSummary" not in source
     assert "InterruptionSummary" not in source
     assert "import " not in source
@@ -174,11 +176,17 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
         "typescript": typescript_schema_bundle(),
     }
     definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
-    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v2"}
+    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v3"}
     assert definitions["AppThread"]["properties"]["status"]["enum"] == [
         "idle",
         "running",
-        "interrupted",
+        "provider_running",
+        "child_running",
+        "user_wait",
+        "approval_wait",
+        "retry_backoff",
+        "suspended",
+        "terminal",
         "archived",
         "closed",
     ]

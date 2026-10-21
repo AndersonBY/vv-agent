@@ -32,16 +32,26 @@ def server(request, tmp_path):
 
 
 def start(server, thread, text="hello"):
-    started = server.run_adapter.start_turn(
-        connection_id="owner", thread_id=thread.thread_id, input=[{"type": "text", "text": text}]
+    state = server.kernel.store.read_state(thread.thread_id)[0]
+    expected = next(reversed(state.turns), None)
+    identity = "turn_1" if expected is None else "turn_2"
+    receipt = server.run_adapter.start_turn(
+        connection_id="owner",
+        thread_id=thread.thread_id,
+        input_id=identity,
+        expected_turn_id=expected,
+        input=[{"type": "text", "text": text}],
     )
-    started.handle.result(timeout=2)
     server.run_adapter.join()
-    return started.turn
+    return next(t for t in server.store.read_thread(thread.thread_id).turns if t.turn_id == receipt["turnId"])
 
 
 def test_create_thread_returns_stable_id_and_stores_metadata(server):
-    thread = server.store.create_thread(agent_key="default", cwd="/tmp/project", metadata={"source": "test"})
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(
+            input_id="thread_1", agent_key="default", cwd="/tmp/project", metadata={"source": "test"}
+        )["threadId"]
+    ).thread
     assert thread.thread_id == "thread_1"
     assert thread.agent_key == "default"
     assert thread.cwd == "/tmp/project"
@@ -51,7 +61,9 @@ def test_create_thread_returns_stable_id_and_stores_metadata(server):
 
 
 def test_real_turn_links_to_thread_and_retains_wire_input(server):
-    thread = server.store.create_thread(agent_key="default")
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+    ).thread
     turn = start(server, thread)
     assert turn.turn_id == turn.run_id == "thread_1/turn/turn_1"
     assert turn.thread_id == thread.thread_id
@@ -60,7 +72,9 @@ def test_real_turn_links_to_thread_and_retains_wire_input(server):
 
 
 def test_read_thread_preserves_turn_and_item_order(server):
-    thread = server.store.create_thread(agent_key="default")
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+    ).thread
     first, second = start(server, thread, "first"), start(server, thread, "second")
     snapshot = server.store.read_thread(thread.thread_id)
     assert [turn.turn_id for turn in snapshot.turns] == [first.turn_id, second.turn_id]
@@ -71,7 +85,9 @@ def test_read_thread_preserves_turn_and_item_order(server):
 
 
 def test_archive_hides_thread_from_active_list(server):
-    thread = server.store.create_thread(agent_key="default")
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+    ).thread
     assert [record.thread_id for record in server.store.list_threads()] == [thread.thread_id]
     server.store.archive_thread(thread.thread_id)
     assert server.store.list_threads() == []
@@ -82,29 +98,35 @@ def test_archive_hides_thread_from_active_list(server):
 def test_projection_reopen_preserves_metadata_turns_items_and_status(server):
     from vv_agent.app_server.thread_store import ThreadStore
 
-    thread = server.store.create_thread(agent_key="default", metadata={"source": "persist"})
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default", metadata={"source": "persist"})["threadId"]
+    ).thread
     start(server, thread)
     reopened = ThreadStore(server.kernel.store)
     assert reopened.read_thread(thread.thread_id) == server.store.read_thread(thread.thread_id)
-    assert reopened.read_thread(thread.thread_id).thread.status == "idle"
+    assert reopened.read_thread(thread.thread_id).thread.status == "terminal"
 
 
 def test_reopening_waiting_thread_retains_original_active_turn(server):
     server.host._run_config.model_provider = ScriptedModelProvider.new(
         "test", "m", [LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Which?"})])]
     )
-    thread = server.store.create_thread(agent_key="default")
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+    ).thread
     turn = start(server, thread)
     from vv_agent.app_server.thread_store import ThreadStore
 
     reopened = ThreadStore(server.kernel.store).read_thread(thread.thread_id)
-    assert reopened.thread.status == "interrupted"
+    assert reopened.thread.status == "user_wait"
     assert reopened.thread.active_turn_id == turn.turn_id
     assert reopened.turns[0].result["waitReason"] == "Which?"
 
 
 def test_item_validation_has_no_second_ledger_and_rejects_fabrication(server):
-    thread = server.store.create_thread(agent_key="default")
+    thread = server.store.read_thread(
+        server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+    ).thread
     start(server, thread)
     before = server.kernel.store.read_state(thread.thread_id)[1]
     item = server.store.read_thread(thread.thread_id).items[-1]

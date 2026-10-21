@@ -11,7 +11,6 @@ from support import FixedModelProvider
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.app_server import (
     AppServer,
-    AppServerErrorCode,
     ChannelTransport,
     DefaultAppServerHost,
 )
@@ -109,8 +108,11 @@ def _kernel_server(path: Path, cut: str | None = None):
                     or (cut == "tool" and record.kind == "op_completed" and record._payload["result"].get("content") == "worked")
                 )
             ):
-                snapshot = server.store.read_thread("thread_1")
-                path.with_suffix(".cursor").write_text(snapshot.items[-1].item_id)
+                from vv_agent.session.replay import list_events
+
+                page = list_events(kernel.store, "thread_1", limit=256)
+                assert not page["more"]
+                path.with_suffix(".cursor").write_text(json.dumps(page["nextCursor"]))
                 os._exit(91)
 
         value.hook = hook
@@ -141,7 +143,9 @@ def _kernel_process(path: str, cut: str):
     import os
 
     kernel, server, transport = _kernel_server(Path(path), cut)
-    server.processor.process_message("owner", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+    server.processor.process_message(
+        "owner", {"params": {"inputId": "thread_1"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"}
+    )
     server.processor.process_message(
         "owner",
         {
@@ -149,6 +153,8 @@ def _kernel_process(path: str, cut: str):
             "id": 2,
             "method": "turn/start",
             "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
                 "threadId": "thread_1",
                 "input": _contract()["input"]["valid"],
             },
@@ -197,82 +203,46 @@ def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(t
         before = server.store.read_thread("thread_1")
         assert len(before.turns) == 1
         assert before.turns[0].input == _contract()["input"]["valid"]
+        from vv_agent.session.replay import list_events
+
         cursor_path = path.with_suffix(".cursor")
-        cursor = cursor_path.read_text() if cursor_path.exists() else None
-        expected = [item.to_dict() for item in before.items]
+        cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else None
         if cursor:
-            marker = next(i for i, item in enumerate(before.items) if item.item_id == cursor)
-            expected = expected[marker + 1 :]
-        approval_request = None
-        if cut == "approval":
-            observer = _KernelTestTransport(connection_id="observer")
-            server.router.register_transport(observer)
-            server.processor.process_message(
-                "observer", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "observer"}}}
-            )
-            assert observer.receive_outbound()["id"] == 0
-            server.processor.process_message("observer", {"jsonrpc": "2.0", "method": "initialized"})
-            server.processor.process_message(
-                "observer", {"jsonrpc": "2.0", "id": 1, "method": "thread/resume", "params": {"threadId": "thread_1"}}
-            )
-            assert observer.receive_outbound()["id"] == 1
-            assert transport.approval_requested.wait(timeout=120)
-            while (approval_request := transport.receive_outbound()).get("method") != "approval/request":
-                pass
-            server.processor.process_message(
-                "observer",
-                {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "approval/resolve",
-                    "params": {
-                        "threadId": "thread_1",
-                        "turnId": before.turns[0].turn_id,
-                        "requestId": approval_request["params"]["requestId"],
-                        "decision": "allow",
-                    },
-                },
-            )
-            observer_messages = []
-            while (message := observer.receive_outbound()).get("id") != 2:
-                observer_messages.append(message)
-            assert message["error"]["code"] == AppServerErrorCode.INVALID_PARAMS
-            assert not any(m.get("method") == "approval/request" for m in observer_messages)
-            assert path.with_suffix(".calls").read_text().splitlines() == ["model"]
+            assert list_events(kernel.store, "thread_1", limit=256, after=cursor)["events"] == []
+        subscriber = _KernelTestTransport(connection_id="reconnected")
+        server.router.register_transport(subscriber)
         server.processor.process_message(
-            "owner",
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "thread/resume",
-                "params": {
-                    "threadId": "thread_1",
-                    **({"afterItemId": cursor} if cursor else {}),
-                },
-            },
+            "reconnected",
+            {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "new-api-client"}}},
         )
-        replay = transport.receive_outbound()
-        assert replay["id"] == 3 and replay["result"]["items"] == expected
+        assert subscriber.receive_outbound()["id"] == 0
+        server.processor.process_message(
+            "reconnected", {"jsonrpc": "2.0", "id": 3, "method": "thread/resume", "params": {"threadId": "thread_1"}}
+        )
+        replay = subscriber.receive_outbound()
+        assert replay["id"] == 3 and replay["result"]["items"] == [item.to_dict() for item in before.items]
         if cut == "approval":
+            assert subscriber.approval_requested.wait(timeout=5)
+            while (approval_request := subscriber.receive_outbound()).get("method") != "approval/request":
+                pass
             original = json.loads(path.with_suffix(".approval").read_text())
-            request = approval_request
-            assert request is not None
-            assert request["id"] == original["id"]
-            params = request["params"]
+            assert approval_request["id"] == original["id"]
+            params = approval_request["params"]
             server.processor.process_message(
-                "owner",
+                "reconnected",
                 {
                     "jsonrpc": "2.0",
                     "id": 4,
                     "method": "approval/resolve",
                     "params": {
-                        "threadId": params["threadId"],
+                        "threadId": "thread_1",
                         "turnId": params["turnId"],
                         "requestId": params["requestId"],
                         "decision": "allow",
                     },
                 },
             )
+        transport = subscriber
         assert transport.turn_completed.wait(timeout=120)
         while (completed := transport.receive_outbound()).get("method") != "turn/completed":
             pass
@@ -374,10 +344,15 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
             )
             kernel = server.kernel
             _send(server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "lease"}}})
-            _send(server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+            _send(server, {"params": {"inputId": "thread_1"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"})
             _send(
                 server,
-                {"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": TURN_INPUT}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "turn/start",
+                    "params": {"inputId": "turn_1", "expectedTurnId": None, "threadId": "thread_1", "input": TURN_INPUT},
+                },
             )
             if surface_name == "approval":
                 assert transport.approval_requested.wait(timeout=30)
@@ -398,8 +373,9 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
                         },
                     },
                 )
-            result = kernel.handles[0].result(timeout=30)
+            kernel.handles[0].result(timeout=30)
             cast(Any, server.run_adapter).join()
+            result = kernel.handles[-1].result(timeout=30)
             assert transport.turn_completed.is_set()
             completed = _drain_until_completed(transport)[-1]
             assert completed["params"]["status"] == "completed"
@@ -432,41 +408,53 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
 
 
 @pytest.mark.parametrize("loss", ["heartbeat", "write"])
-def test_kernel_surface_waits_for_other_writer_after_lease_loss(monkeypatch, tmp_path, loss):
+def test_kernel_surface_yields_to_other_writer_and_host_wakes_after_lease_loss(monkeypatch, tmp_path, loss):
     from vv_agent.session.store import LeaseLost
 
     leases = _inject_lease_loss(monkeypatch, "model", loss, takeover=True)
     kernel, server, transport = _kernel_server(tmp_path / "turn.sqlite")
     blocked = Event()
     original_acquire = kernel.store.acquire
+    denied = []
 
     def acquire(*args, **kwargs):
         lease = original_acquire(*args, **kwargs)
         if lease is None:
+            denied.append(True)
             blocked.set()
         return lease
 
     monkeypatch.setattr(kernel.store, "acquire", acquire)
     try:
-        server.processor.process_message("owner", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+        server.processor.process_message(
+            "owner", {"params": {"inputId": "thread_1"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"}
+        )
         server.processor.process_message(
             "owner",
             {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "turn/start",
-                "params": {"threadId": "thread_1", "input": _contract()["input"]["valid"]},
+                "params": {
+                    "inputId": "turn_1",
+                    "expectedTurnId": None,
+                    "threadId": "thread_1",
+                    "input": _contract()["input"]["valid"],
+                },
             },
         )
         assert blocked.wait(timeout=30)
         assert len(leases) == 2 and leases[1].epoch > leases[0].epoch
-        assert kernel.handles[0]._thread.is_alive()
+        kernel.handles[0].join(timeout=5)
+        server.run_adapter.join()
+        assert kernel.handles[0].done() and denied == [True]
         assert not transport.turn_completed.is_set()
         assert (tmp_path / "turn.calls").read_text().splitlines() == ["model"]
         with pytest.raises(LeaseLost):
             kernel.store.renew(leases[0], ttl_ms=60_000)
         kernel.store.release(leases[1])
-        result = kernel.handles[0].result(timeout=30)
+        server.run_adapter.recover("owner", "thread_1")
+        result = kernel.handles[-1].result(timeout=30)
         server.run_adapter.join()
         assert result.final_output == "done" and transport.turn_completed.is_set()
         assert (tmp_path / "turn.calls").read_text().splitlines() == ["model", "tool", "model"]

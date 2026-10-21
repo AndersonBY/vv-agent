@@ -31,7 +31,8 @@ from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
-from vv_agent.session.app_server import _KernelRunAdapter, _KernelThreadStore
+from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
+from vv_agent.session.store import Conflict
 
 CLIENT_METHODS: tuple[str, ...] = (
     "initialize",
@@ -40,6 +41,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/start",
     "thread/resume",
     "thread/read",
+    "thread/events/list",
     "thread/model/select",
     "thread/status",
     "thread/list",
@@ -59,7 +61,6 @@ SERVER_NOTIFICATION_METHODS: tuple[str, ...] = (
     "thread/started",
     "thread/status/changed",
     "thread/archived",
-    "thread/closed",
     "turn/started",
     "item/started",
     "item/agentMessage/delta",
@@ -168,6 +169,9 @@ class MessageProcessor:
         if request.method == "thread/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
             return
+        if request.method == "thread/events/list":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_events_list(connection_id, request))
+            return
         if request.method == "thread/status":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_status(connection_id, request))
             return
@@ -210,17 +214,35 @@ class MessageProcessor:
         self._router.send_error(connection_id, request.id, AppServerError.method_not_found(request.method))
 
     def _serialize_or_run(self, connection_id: str, request: JsonRpcRequest, handler: Callable[[], None]) -> None:
+        def authorized_dispatch():
+            if request.method.startswith(("thread/", "turn/")) or request.method == "approval/resolve":
+                params = request.params if isinstance(request.params, dict) else {}
+                if not self._host.authorize(connection_id, request.method, params):
+                    self._router.send_error(
+                        connection_id, request.id, AppServerError(AppServerErrorCode.PERMISSION_DENIED, "permission_denied")
+                    )
+                    return
+            handler()
+
         try:
             future = self._serialization_queues.enqueue(
                 key=self._request_scope(request),
                 access=self._request_access(request.method),
-                fn=handler,
+                fn=authorized_dispatch,
             )
         except RequestQueueOverloaded:
             self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
             return
         try:
             future.result()
+        except SubmissionConflict:
+            self._router.send_error(
+                connection_id, request.id, AppServerError(AppServerErrorCode.SUBMISSION_CONFLICT, "submission_conflict")
+            )
+        except TurnMismatch as exc:
+            self._router.send_error(
+                connection_id, request.id, AppServerError(AppServerErrorCode.SUBMISSION_TURN_MISMATCH, str(exc))
+            )
         except Exception as exc:
             self._router.send_error(connection_id, request.id, AppServerError.internal_error(str(exc)))
 
@@ -237,7 +259,7 @@ class MessageProcessor:
         return RequestScope.thread(thread_id or "missing-thread")
 
     def _request_access(self, method: str) -> RequestAccess:
-        if method in {"model/list", "schema/export", "thread/list", "thread/read", "thread/status"}:
+        if method in {"model/list", "schema/export", "thread/list", "thread/read", "thread/status", "thread/events/list"}:
             return "shared_read"
         return "exclusive"
 
@@ -307,7 +329,7 @@ class MessageProcessor:
         state.ready_for_notifications = True
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
-            protocol_version="v2",
+            protocol_version="v3",
             capabilities=SERVER_CAPABILITIES,
         )
         self._router.send_response(connection_id, request.id, response.to_dict())
@@ -333,7 +355,7 @@ class MessageProcessor:
 
     def _handle_disconnect(self, connection_id: str) -> None:
         self._connections.pop(connection_id, None)
-        self._state_manager.unsubscribe_connection(connection_id)
+        self._run_adapter.unsubscribe_connection(connection_id)
 
     def _handle_model_list(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request, allow_missing=True)
@@ -366,15 +388,21 @@ class MessageProcessor:
         if metadata is not None and not isinstance(metadata, dict):
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("metadata must be an object"))
             return
-        thread = self._store.create_thread(
-            agent_key=agent_key,
-            cwd=cwd,
-            metadata=metadata if isinstance(metadata, dict) else None,
-        )
-        self._state_manager.subscribe(thread.thread_id, connection_id)
-        payload = {"threadId": thread.thread_id, "agentKey": thread.agent_key, "cwd": thread.cwd, "status": "idle"}
+        input_id = self._required_identity(connection_id, request, params, "inputId")
+        if input_id is None or not self._closed_params(
+            connection_id, request, params, {"inputId", "agentKey", "cwd", "metadata"}
+        ):
+            return
+        try:
+            payload = self._store.create_thread_receipt(input_id=input_id, agent_key=agent_key, cwd=cwd, metadata=metadata)
+        except Conflict as exc:
+            raise SubmissionConflict("submission_conflict") from exc
+        self._run_adapter.subscribe(input_id, connection_id)
         self._router.send_response(connection_id, request.id, payload)
-        self._router.send_notification(connection_id, "thread/started", payload)
+        if not payload["replayed"]:
+            self._router.send_notification(
+                connection_id, "thread/started", {k: v for k, v in payload.items() if k not in {"accepted", "replayed"}}
+            )
 
     def _handle_model_select(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)
@@ -388,6 +416,8 @@ class MessageProcessor:
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
+        except SubmissionConflict:
+            raise
         except ValueError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
@@ -400,12 +430,10 @@ class MessageProcessor:
         thread_id = self._required_string_param(connection_id, request, params, "threadId")
         if not thread_id:
             return
-        after_item_id = self._optional_string_param(connection_id, request, params, "afterItemId")
-        if after_item_id is _INVALID_PARAM:
+        if not self._closed_params(connection_id, request, params, {"threadId"}):
             return
-        assert after_item_id is None or isinstance(after_item_id, str)
         try:
-            snapshot = self._snapshot_to_dict(thread_id, after_item_id=after_item_id)
+            snapshot = self._snapshot_to_dict(thread_id)
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
@@ -439,26 +467,29 @@ class MessageProcessor:
         if not thread_id:
             return
         subscribe = params.get("subscribe", True)
-        after_item_id = self._optional_string_param(connection_id, request, params, "afterItemId")
-        if after_item_id is _INVALID_PARAM:
+        if not self._closed_params(connection_id, request, params, {"threadId", "subscribe"}):
             return
-        assert after_item_id is None or isinstance(after_item_id, str)
         if not isinstance(subscribe, bool):
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("subscribe must be a boolean"))
             return
         try:
-            if subscribe and self._store.read_thread(thread_id).thread.status == "closed":
+            thread = self._store.read_thread(thread_id).thread
+            if subscribe and thread.status == "closed":
                 self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Thread is closed"))
                 return
+            if subscribe and thread.archived_at is not None:
+                self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
+                return
             if subscribe:
-                snapshot = self._state_manager.subscribe_and_snapshot(
-                    thread_id,
-                    connection_id,
-                    lambda: self._snapshot_to_dict(thread_id, after_item_id=after_item_id, reopen_closed=True),
-                )
+                with self._store.kernel.store.atomic():
+                    snapshot = self._state_manager.subscribe_and_snapshot(
+                        thread_id,
+                        connection_id,
+                        lambda: self._snapshot_to_dict(thread_id),
+                    )
+                    self._run_adapter.subscribe(thread_id, connection_id)
             else:
-                snapshot = self._snapshot_to_dict(thread_id, after_item_id=after_item_id, reopen_closed=True)
-                self._state_manager.reopen(thread_id)
+                snapshot = self._snapshot_to_dict(thread_id)
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
@@ -492,12 +523,13 @@ class MessageProcessor:
             return
         assert limit is None or isinstance(limit, int)
         include_archived = include_archived or archived is True
-        records = self._store.list_threads(include_archived=include_archived)
-        if archived is not None:
-            records = [record for record in records if (record.archived_at is not None) is archived]
-        start = offset or 0
-        end = None if limit is None else start + limit
-        records = records[start:end]
+        records = self._store.list_threads(
+            include_archived=include_archived,
+            authorize=lambda sid: self._host.authorize(connection_id, request.method, params | {"threadId": sid}),
+            archived=archived,
+            offset=offset or 0,
+            limit=limit,
+        )
         self._router.send_response(
             connection_id,
             request.id,
@@ -518,12 +550,13 @@ class MessageProcessor:
             return
         self._state_manager.set_status(thread_id, "archived")
         payload = {"threadId": thread_id, "archived": True}
+        status_payload = self._run_adapter.public_thread_status(thread_id)
         self._router.send_response(connection_id, request.id, payload)
         self._router.send_notification(connection_id, "thread/archived", payload)
         self._router.send_notification(
             connection_id,
             "thread/status/changed",
-            self._run_adapter.public_thread_status(thread_id),
+            status_payload,
         )
 
     def _handle_thread_unsubscribe(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -538,60 +571,65 @@ class MessageProcessor:
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
-        self._state_manager.unsubscribe(thread_id, connection_id)
-        closed = self._state_manager.close_if_idle(thread_id)
-        if closed:
-            self._store.kernel.control(thread_id, "close", "app_server/close")
-        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
-        if closed:
-            self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
-            self._router.send_notification(
-                connection_id,
-                "thread/status/changed",
-                self._run_adapter.public_thread_status(thread_id),
-            )
+        self._run_adapter.unsubscribe(thread_id, connection_id)
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False})
 
-    def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _submission_params(self, connection_id, request):
         params = self._params_object(connection_id, request)
         if params is None:
-            return
-        thread_id = self._required_string_param(connection_id, request, params, "threadId")
-        if not thread_id:
-            return
-        raw_input = params.get("input")
-        if raw_input is None:
-            raw_input = []
-        if not isinstance(raw_input, list) or any(not isinstance(item, dict) for item in raw_input):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("input must be a list of objects"))
-            return
-        input_items = [dict(item) for item in raw_input]
-        metadata = params.get("metadata", {})
-        if not isinstance(metadata, dict):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("metadata must be an object"))
-            return
-        try:
-            snapshot = self._store.read_thread(thread_id)
-        except KeyError:
-            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
-            return
-        if snapshot.thread.archived_at is not None and snapshot.thread.status != "closed":
-            self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
-            return
-        if snapshot.thread.status == "closed":
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Thread is closed"))
-            return
-        if self._state_manager.active_turn(thread_id) is not None or snapshot.thread.active_turn_id is not None:
+            return None
+        fields = {"threadId", "inputId", "expectedTurnId", "input"}
+        allowed = fields | ({"metadata"} if request.method == "turn/start" else set())
+        if not self._closed_params(connection_id, request, params, allowed):
+            return None
+        if not fields <= set(params):
             self._router.send_error(
                 connection_id,
                 request.id,
-                AppServerError.invalid_params("Thread already has an active turn"),
+                AppServerError.invalid_params("Submission requires threadId, inputId, expectedTurnId and input"),
             )
+            return None
+        for key in ("threadId", "inputId"):
+            if self._required_identity(connection_id, request, params, key) is None:
+                return None
+        expected = params["expectedTurnId"]
+        if (expected is not None or request.method != "turn/start") and self._required_identity(
+            connection_id, request, params, "expectedTurnId"
+        ) is None:
+            return None
+        if not isinstance(params["input"], list) or any(not isinstance(x, dict) for x in params["input"]):
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("input must be a list of objects"))
+            return None
+        if not isinstance(params.get("metadata", {}), dict):
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("metadata must be an object"))
+            return None
+        try:
+            thread = self._store.read_thread(params["threadId"]).thread
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return None
+        # Replays must reach the retained admission before lifecycle validation.
+        if not self._store.kernel.store.read_input(params["threadId"], params["inputId"]):
+            if thread.status == "closed":
+                self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Thread is closed"))
+                return None
+            if thread.archived_at is not None:
+                self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
+                return None
+        return params
+
+    def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._submission_params(connection_id, request)
+        if params is None:
             return
+        self._run_adapter.subscribe(params["threadId"], connection_id)
         self._run_adapter.start_turn(
             connection_id=connection_id,
-            thread_id=thread_id,
-            input=input_items,
-            metadata=dict(metadata),
+            thread_id=params["threadId"],
+            input=params["input"],
+            input_id=params["inputId"],
+            expected_turn_id=params["expectedTurnId"],
+            metadata=params.get("metadata"),
             request_id=request.id,
         )
 
@@ -632,39 +670,46 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
 
     def _handle_turn_steer(self, connection_id: str, request: JsonRpcRequest) -> None:
-        control = self._validated_active_turn(connection_id, request)
-        if control is None:
-            return
-        thread_id, turn_id, _reason, input_items = control
-        cast(Any, self._run_adapter).queue_input(
-            thread_id, turn_id, "steer", input_items, connection_id, str(request.id.require_wire())
-        )
-        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
+        self._handle_queue_input(connection_id, request, "steer")
 
     def _handle_turn_follow_up(self, connection_id: str, request: JsonRpcRequest) -> None:
-        control = self._validated_active_turn(connection_id, request)
-        if control is None:
+        self._handle_queue_input(connection_id, request, "follow_up")
+
+    def _handle_queue_input(self, connection_id, request, kind):
+        params = self._submission_params(connection_id, request)
+        if params is None:
             return
-        thread_id, turn_id, _reason, input_items = control
-        cast(Any, self._run_adapter).queue_input(
-            thread_id, turn_id, "follow_up", input_items, connection_id, str(request.id.require_wire())
+        payload, _ = self._run_adapter.submit_input(
+            connection_id=connection_id,
+            thread_id=params["threadId"],
+            input_id=params["inputId"],
+            expected_turn_id=params["expectedTurnId"],
+            kind=kind,
+            input=params["input"],
         )
-        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
+        self._router.send_response(connection_id, request.id, payload)
+        if kind == "follow_up":
+            self._run_adapter.recover(connection_id, params["threadId"])
 
     def _handle_turn_interrupt(self, connection_id: str, request: JsonRpcRequest) -> None:
-        control = self._validated_active_turn(connection_id, request)
-        if control is None:
+        params = self._params_object(connection_id, request)
+        if params is None or not self._closed_params(connection_id, request, params, {"threadId", "expectedTurnId", "actionId"}):
             return
-        thread_id, turn_id, reason, _input_items = control
-        active = self._state_manager.active_turn(thread_id)
-        cancelled = bool(active is not None and active.handle.cancel(reason or "Interrupted by App Server client."))
-        self._router.cancel_matching_server_requests(
-            method="approval/request",
-            thread_id=thread_id,
-            turn_id=turn_id,
-            error=AppServerError(AppServerErrorCode.INTERNAL_ERROR, reason or "turn interrupted"),
-        )
-        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "cancelled": cancelled})
+        for name in ("threadId", "expectedTurnId", "actionId"):
+            if self._required_identity(connection_id, request, params, name) is None:
+                return
+        try:
+            payload = self._run_adapter.controller_action(
+                connection_id=connection_id,
+                thread_id=params["threadId"],
+                turn_id=params["expectedTurnId"],
+                action_id=params["actionId"],
+                action={"kind": "cancel"},
+            )
+        except (KeyError, TurnResumeError) as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        self._router.send_response(connection_id, request.id, payload)
 
     def _handle_turn_action(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)
@@ -694,16 +739,13 @@ class MessageProcessor:
                 turn_id=action.turn_id,
                 action_id=action.action_id,
                 action=action.action,
+                connection_id=connection_id,
             )
         except TurnResumeError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
+        status_payload = self._run_adapter.public_thread_status(action.thread_id)
         self._router.send_response(connection_id, request.id, payload)
-        status_payload = {
-            "threadId": action.thread_id,
-            "status": "running" if payload["status"] == "running" else payload["status"],
-            **({"waitReason": payload["waitReason"]} if "waitReason" in payload else {}),
-        }
         for subscriber in self._state_manager.subscribers(action.thread_id):
             self._router.send_notification(subscriber, "thread/status/changed", status_payload)
 
@@ -737,23 +779,22 @@ class MessageProcessor:
         if not isinstance(decision_metadata, dict):
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("metadata must be an object"))
             return
-        active = self._state_manager.active_turn(thread_id)
-        if active is None:
-            self._router.send_error(connection_id, request.id, AppServerError.active_turn_not_found())
+        if not self._closed_params(
+            connection_id, request, params, {"threadId", "turnId", "requestId", "decision", "reason", "metadata"}
+        ):
             return
-        if active.turn_id != turn_id:
-            self._router.send_error(connection_id, request.id, AppServerError.turn_id_mismatch())
-            return
-        resolved = self._router.resolve_server_request(
-            connection_id,
-            RequestId(approval_request_id),
-            {"decision": decision.value, "reason": reason, "metadata": dict(decision_metadata)},
-            method="approval/request",
-            thread_id=thread_id,
-            turn_id=turn_id,
-        )
-        if not resolved:
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Unknown approval requestId"))
+        try:
+            self._run_adapter.resolve_approval(
+                connection_id=connection_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=approval_request_id,
+                decision={"action": decision.value, "reason": reason, "metadata": decision_metadata},
+            )
+        except SubmissionConflict:
+            raise
+        except (KeyError, ValueError) as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
         self._router.send_response(connection_id, request.id, {})
 
@@ -768,59 +809,12 @@ class MessageProcessor:
             return
         self._router.send_response(connection_id, request.id, export_schema_bundles())
 
-    def _validated_active_turn(
-        self,
-        connection_id: str,
-        request: JsonRpcRequest,
-    ) -> tuple[str, str, str, list[dict[str, Any]]] | None:
-        params = self._params_object(connection_id, request)
-        if params is None:
-            return None
-        thread_id = self._required_string_param(connection_id, request, params, "threadId")
-        if not thread_id:
-            return None
-        expected_turn_id = self._optional_string_param(connection_id, request, params, "expectedTurnId")
-        if expected_turn_id is _INVALID_PARAM:
-            return None
-        assert expected_turn_id is None or isinstance(expected_turn_id, str)
-        reason = self._optional_string_param(connection_id, request, params, "reason")
-        if reason is _INVALID_PARAM:
-            return None
-        assert reason is None or isinstance(reason, str)
-        raw_input = params.get("input", [])
-        if not isinstance(raw_input, list) or any(not isinstance(item, dict) for item in raw_input):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("input must be a list of objects"))
-            return None
-        input_items: list[dict[str, Any]] = [dict(item) for item in raw_input]
-        active = self._state_manager.active_turn(thread_id)
-        if active is None:
-            self._router.send_error(connection_id, request.id, AppServerError.active_turn_not_found())
-            return None
-        if expected_turn_id and active.turn_id != expected_turn_id:
-            self._router.send_error(connection_id, request.id, AppServerError.turn_id_mismatch())
-            return None
-        return thread_id, active.turn_id, reason or "", input_items
-
     def _thread_id_from_request(self, request: JsonRpcRequest) -> str:
         params = request.params if isinstance(request.params, dict) else {}
         return str(params.get("threadId") or "")
 
-    def _snapshot_to_dict(
-        self,
-        thread_id: str,
-        *,
-        after_item_id: str | None = None,
-        reopen_closed: bool = False,
-    ) -> dict[str, Any]:
+    def _snapshot_to_dict(self, thread_id: str) -> dict[str, Any]:
         snapshot = self._store.read_thread(thread_id)
-        reopened_status: str | None = None
-        active_turn_id: str | None = None
-        pass
-        items = snapshot.items
-        if after_item_id is not None:
-            marker = next((index for index, item in enumerate(items) if item.item_id == after_item_id), None)
-            if marker is not None:
-                items = items[marker + 1 :]
         result: dict[str, Any] = {
             "thread": self._thread_record_to_dict(snapshot.thread),
             "turns": [
@@ -836,12 +830,68 @@ class MessageProcessor:
                 }
                 for turn in snapshot.turns
             ],
-            "items": [item.to_dict() for item in items],
+            "items": [item.to_dict() for item in snapshot.items],
         }
-        if reopened_status is not None:
-            self._store.set_active_turn(thread_id, active_turn_id, reopened_status)
-            result["thread"]["status"] = reopened_status
         return result
+
+    def _handle_events_list(self, connection_id, request):
+        from vv_agent.session.replay import InvalidCursor, list_events
+
+        params = self._params_object(connection_id, request)
+        if params is None or not self._closed_params(
+            connection_id, request, params, {"threadId", "afterCursor", "throughCursor", "limit"}
+        ):
+            return
+        sid = self._required_identity(connection_id, request, params, "threadId")
+        if sid is None:
+            return
+        if any(name in params and not isinstance(params[name], dict) for name in ("afterCursor", "throughCursor")):
+            self._router.send_error(
+                connection_id, request.id, AppServerError(AppServerErrorCode.INVALID_CURSOR, "invalid_cursor")
+            )
+            return
+        limit = params.get("limit")
+        if type(limit) is not int or not 1 <= limit <= 256:
+            self._router.send_error(
+                connection_id, request.id, AppServerError.invalid_params("limit must be an integer in 1..256")
+            )
+            return
+        try:
+            result = list_events(
+                self._store.kernel.store, sid, limit=limit, after=params.get("afterCursor"), through=params.get("throughCursor")
+            )
+        except InvalidCursor:
+            self._router.send_error(
+                connection_id, request.id, AppServerError(AppServerErrorCode.INVALID_CURSOR, "invalid_cursor")
+            )
+            return
+        except (KeyError, Conflict):
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, result)
+
+    def _closed_params(self, connection_id, request, params, allowed):
+        if set(params) - allowed:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Unknown parameter"))
+            return False
+        return True
+
+    def _required_identity(self, connection_id, request, params, name):
+        value = params.get(name)
+        if name in {"inputId", "actionId"}:
+            from .protocol.identity import client_id
+
+            try:
+                return client_id(value, name)
+            except ValueError as exc:
+                self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+                return None
+        if not isinstance(value, str) or not value.strip() or "\x00" in value or len(value.encode("utf-8")) > 512:
+            self._router.send_error(
+                connection_id, request.id, AppServerError.invalid_params(f"{name} must be an identity of 1..512 bytes")
+            )
+            return None
+        return value
 
     def _params_object(
         self,

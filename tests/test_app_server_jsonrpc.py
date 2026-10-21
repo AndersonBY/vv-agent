@@ -60,13 +60,13 @@ def test_invalid_wire_message_is_rejected() -> None:
         JsonRpcMessage.from_dict({"params": {}})
 
     with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
-        JsonRpcMessage.from_dict({"jsonrpc": "2.0", "id": [], "method": "thread/start", "params": {}})
+        JsonRpcMessage.from_dict({"jsonrpc": "2.0", "id": [], "method": "thread/start", "params": {"inputId": "thread_1"}})
 
     with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
-        JsonRpcMessage.from_dict({"jsonrpc": "1.0", "id": 1, "method": "thread/start"})
+        JsonRpcMessage.from_dict({"params": {"inputId": "thread_2"}, "jsonrpc": "1.0", "id": 1, "method": "thread/start"})
 
     for payload in (
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "extra": True},
+        {"params": {"inputId": "thread_3"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start", "extra": True},
         {"jsonrpc": "2.0", "method": "initialized", "extra": True},
         {"jsonrpc": "2.0", "id": 1, "result": {}, "extra": True},
         {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "failed"}, "extra": True},
@@ -96,8 +96,10 @@ def test_initialize_payload_uses_camel_case() -> None:
 
 
 def test_thread_and_turn_payloads_have_stable_ids() -> None:
-    thread = ThreadStartParams(agent_key="default", cwd="/tmp/project")
-    turn = TurnStartParams(thread_id="thread_1", input=[{"type": "text", "text": "run tests"}])
+    thread = ThreadStartParams(input_id="thread_1", agent_key="default", cwd="/tmp/project")
+    turn = TurnStartParams(
+        input_id="turn_1", expected_turn_id=None, thread_id="thread_1", input=[{"type": "text", "text": "run tests"}]
+    )
 
     assert thread.to_dict()["agentKey"] == "default"
     assert turn.to_dict()["threadId"] == "thread_1"

@@ -216,6 +216,7 @@ class Runtime:
             lease_retry_sleep=self.lease_retry_sleep,
             model_timeout=self.model_timeout,
             tool_timeout=self.tool_timeout,
+            wake=self.wake,
             memory_manager=replace(self.memory_manager),
         )
 
@@ -278,12 +279,12 @@ class Runtime:
 
     def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
         """Resolve only the retained request; this binding must not submit provider work."""
-        if self.model_resolver is not None:
+        if request["model"] == self.resolved.model_id and not request.get("route", {}):
+            client, resolved = self.llm, self.resolved
+        elif self.model_resolver is not None:
             client, resolved = self.model_resolver(copy_json(request))
         else:
-            if request["model"] != self.resolved.model_id or request.get("route", {}):
-                raise ValueError("Runtime requires a model_resolver for this selection")
-            client, resolved = self.llm, self.resolved
+            raise ValueError("Runtime requires a model_resolver for this selection")
         if resolved.model_id != request["model"]:
             raise ValueError("Resolver changed the requested model")
         validate(self.model_binding(client, resolved), MODEL_BINDING)

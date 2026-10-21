@@ -11,16 +11,26 @@ This guide is for a desktop app, worker, IDE or service that runs the
   permissions and business task records.
 - Pin one `vv-agent` release. Deploy protocol changes together with the
   matching generated schemas or TypeScript bindings.
-- Keep reading stdout while work is active. A slow or disconnected reader
-  triggers transport backpressure, and the App Server then disconnects that
-  transport.
+- Keep reading stdout while work is active. A slow reader can block stdio
+  delivery; the host owns pipe timeouts and restart policy. Broken transports
+  are disconnected. A blocked notification write holds no session-store lock.
 
 ## Host boundary
 
+- `authorize(connection_id, method, params)` runs before every thread read or
+  action, including listing and creation. Return false to reject with typed
+  `-32027 permission_denied`. Thread listing also checks each returned thread.
+  Distributed hosts must implement account and thread permissions here.
+  DefaultAppServerHost is a local, single-user host and allows everything.
+  For thread/start, authorize against params.inputId: that exact value becomes
+  threadId. Validate the requested agentKey, cwd and metadata for that account too.
 - `AppServerHost.resolve_agent()` maps an `agent_key` to the current `Agent`
   instructions and tools.
 - `build_run_config()` supplies context providers, memory providers, workspace
   storage, approvals, tracing metadata, event persistence and execution policy.
+- `resolve_model(request)` resolves the exact provider model ID to a client and config
+  without calling a provider. Enforce model and route permissions here. The frozen
+  model with an empty route reuses its frozen binding before this hook.
 - `list_models()` reads the same canonical model settings that the host's
   scheduler or UI uses.
 - Browser, IM, notifications, product memory, release management and other
@@ -39,9 +49,9 @@ This guide is for a desktop app, worker, IDE or service that runs the
 5. Use `thread/model/select` when the user changes model settings. Give each
    user command a stable `inputId`, so a retried request is a replay rather
    than a second change.
-6. Render the timeline from `item/*` notifications and replayed snapshot
-   `items`. Use thread lifecycle notifications as the source of truth for
-   status.
+6. Page durable history with `thread/events/list`. Persist its nextCursor and
+   retain throughCursor across pages. Reconcile volatile deltas with final items
+   by callId or toolCallId; deduplicate durable events by event_id.
 7. Route `approval/request` to the host UI or policy service and return one
    canonical decision.
 
@@ -51,10 +61,66 @@ This guide is for a desktop app, worker, IDE or service that runs the
 - Keep the original business job identity across retries.
 - Treat parse errors as failures of a single line: record `-32700` and go on
   with later valid JSONL messages.
-- Persist App Server request ids for pending approvals so the right callback
-  is resolved.
-- After a process restart, rebuild state with `thread/read` or
-  `thread/resume`.
+- Keep stable inputIds for thread/start, turn/start, steer and followUp. A lost
+  response is retried with the same body and ID, on any authorized connection.
+- Approval answers may come from another node. The retained request binds the
+  operation and digest; a connection is only a subscriber.
+- Share the session store between API nodes and workers. Resume from execution
+  state. In an embedded host call `server.wake(thread_id)` after the outer inbox
+  transaction commits, or from the scheduler's due-work scan. This trusted host
+  method returns None and tries start-or-attach; it does not accept untrusted wire
+  requests or replace authorize. For example:
+
+  ```python
+  with store.atomic() as tx:
+      tx.push(thread_id, inbox_item)
+  server.wake(thread_id)
+  ```
+
+  Scan due work as a fallback
+  when a wake is lost. Use rich thread/status for machine and human waits.
+- The built-in server retries a blocked drive at the observed holder's lease
+  expiry. Renewal, progress and replacement epochs keep recovery pending;
+  while a live lease exists it waits for the new expiry without acquiring.
+  Another failed acquisition after expiry emits error/warning(code=lease_retry_exhausted).
+  A foreground child's blocked lease follows the same rule, and committed child
+  delivery wakes the parent. Wake and retries select a registered subscriber;
+  without one, execution creates no subscription and approvals wait durably for
+  approval/resolve from any authorized connection, subject to their retained deadline.
+- Each API node observes durable turn records with independent per-session
+  polling backoff (50 ms to 1 s), at most 32 due sessions and 256 records per
+  session per pass. Transient read errors warn at most once per second per session,
+  back off and keep observing. Snapshot record reads do not lock session rows;
+  projection, host stream callbacks and transport writes run outside store
+  transactions and connection locks. Close its SessionDriver
+  before closing a borrowed store. Local pumps flush notifications when joined.
+- Unsubscribing does not close the session. Hosts close sessions explicitly
+  through the kernel when their business lifecycle ends.
+- The last local unsubscribe or disconnect releases its notification position.
+  Re-subscription begins at the head, or just before the active turn's start.
+  Page past turns with thread/events/list; they are not replayed as live notices.
+- thread/list authorizes session IDs before loading metadata and never projects
+  full turn results or items. Sorting and archive filtering scan the creation row
+  and consumed control facts for each authorized session, then fold state only
+  for the requested page. offset/limit bound those folds and the response, not
+  the catalog scan; avoid frequent global listing on a large store.
+
+## Custom stores
+
+The SQL stores implement the App Server reads and admission lock. A custom
+SessionStore also implements `read_input(session_id, input_id)`, including
+consumed inputs, and `projection_context(session_id, records)`, which returns
+only the indexed dependencies needed to project those records. These reads
+must preserve the page bound. `SessionTx.lock_session(session_id)` serializes
+admission with other writers until the outer transaction commits. None of
+these methods adds a storage schema or another execution log.
+`lease_status(session_id)` returns (head sequence, lease epoch, remaining lease
+milliseconds), measured using database time, without a session row lock.
+`read()` captures a head and reads immutable records by seq without a write
+transaction or row lock; it never reads beyond that captured head.
+`control_records(session_id, through_seq=...)` returns consumed control records
+through the captured head, without folding history or locking writers, for catalog
+archive filtering. It includes rejected controls so callers check disposition.
 
 ## What to test
 

@@ -64,7 +64,9 @@ def run_case(scenario: str, workspace: Path) -> float | None:
                 "benchmark", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "benchmark"}}}
             )
             server.processor.process_message("benchmark", {"jsonrpc": "2.0", "method": "initialized"})
-            server.processor.process_message("benchmark", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+            server.processor.process_message(
+                "benchmark", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1"}}
+            )
             while transport.receive_outbound(timeout=5).get("method") != "thread/started":
                 pass
             started_ns = time.perf_counter_ns()
@@ -74,7 +76,12 @@ def run_case(scenario: str, workspace: Path) -> float | None:
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "turn/start",
-                    "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+                    "params": {
+                        "threadId": "thread_1",
+                        "inputId": "turn_1",
+                        "expectedTurnId": None,
+                        "input": [{"type": "text", "text": "go"}],
+                    },
                 },
             )
             while (message := transport.receive_outbound(timeout=5)).get("method") != "turn/completed":

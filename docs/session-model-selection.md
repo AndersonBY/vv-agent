@@ -141,11 +141,20 @@ App Server clients use `thread/model/select`:
 The method pushes the same `model_selection` input into the thread's session;
 `inputId` becomes the input ID unchanged. `accepted: true` means the input was
 stored. The resolver runs later, when the holder applies the input. Reusing an
-`inputId` with a different selection returns `-32602`.
+`inputId` with a different selection returns `-32024 submission_conflict`.
 
-The built-in App Server runtime binds no `model_resolver`, so it uses the
-default: only the thread's current model ID with an empty route is accepted.
-See [App Server](app-server.md#model-selection).
+The built-in App Server binds `AppServerHost.resolve_model`. Its default uses
+the configured ModelProvider to resolve an exact provider model ID with an empty
+route. For `{"a": {"id": "a-2024"}}`, select `a-2024`; CLI startup still takes
+settings key `a`. The default resolver filters the configured backend first and
+matches the resolved model_id, including endpoint model_id overrides, as advertised
+by model/list. Multiple entries in that effective backend for one selected ID are rejected as
+model_selection_unresolvable, as are unknown IDs; there are no aliases.
+CLI and interactive use the same default provider resolver through SessionDriver;
+only App Server binds the host hook. The frozen model with an empty route always
+reuses its frozen client and config before any resolver.
+Custom hosts supply routing and authorization through the hook. See
+[App Server](app-server.md#models).
 
 ## Why an inbox input rather than a host callback
 

@@ -34,7 +34,9 @@ def _initialized_processor(
 
 def test_thread_list_returns_active_threads(surface) -> None:
     processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}}
+    )
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 2, "method": "thread/list"})
 
     start_response = transport.receive_outbound(timeout=1)
@@ -50,7 +52,9 @@ def test_thread_list_returns_active_threads(surface) -> None:
 
 def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
     processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}}
+    )
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
 
@@ -70,7 +74,16 @@ def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
     assert status_notification == {
         "jsonrpc": "2.0",
         "method": "thread/status/changed",
-        "params": {"threadId": "thread_1", "status": "archived"},
+        "params": {
+            "threadId": "thread_1",
+            "status": "archived",
+            "phase": "idle",
+            "waitKind": None,
+            "nextDriveAt": None,
+            "pendingInteraction": None,
+            "unconfirmedCount": 0,
+            "projectionWatermark": 2,
+        },
     }
     assert list_response["result"]["threads"] == []
     assert archived_list_response["result"]["threads"][0]["status"] == "archived"
@@ -78,7 +91,9 @@ def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
 
 def test_turn_start_rejects_archived_thread(surface) -> None:
     processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}}
+    )
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
     processor.process_message(
@@ -94,7 +109,12 @@ def test_turn_start_rejects_archived_thread(surface) -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     response = transport.receive_outbound(timeout=1)
@@ -103,111 +123,41 @@ def test_turn_start_rejects_archived_thread(surface) -> None:
     assert response["error"]["code"] == AppServerErrorCode.THREAD_ARCHIVED
 
 
-def test_thread_unsubscribe_closes_idle_thread(surface) -> None:
-    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+def test_thread_unsubscribe_preserves_durable_session(surface) -> None:
+    processor, transport, _router, state = _initialized_processor(store=surface.store)
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1"}})
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
-
     processor.process_message(
         "conn_1", {"jsonrpc": "2.0", "id": 2, "method": "thread/unsubscribe", "params": {"threadId": "thread_1"}}
     )
-    response = transport.receive_outbound(timeout=1)
-    closed_notification = transport.receive_outbound(timeout=1)
-    status_notification = transport.receive_outbound(timeout=1)
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
-    read_response = transport.receive_outbound(timeout=1)
-
-    assert response == {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "result": {"threadId": "thread_1", "subscribed": False, "closed": True},
-    }
-    assert closed_notification == {
-        "jsonrpc": "2.0",
-        "method": "thread/closed",
-        "params": {"threadId": "thread_1"},
-    }
-    assert status_notification == {
-        "jsonrpc": "2.0",
-        "method": "thread/status/changed",
-        "params": {"threadId": "thread_1", "status": "closed"},
-    }
-    assert read_response["result"]["thread"]["status"] == "closed"
+    assert transport.receive_outbound(timeout=1)["result"] == {"threadId": "thread_1", "subscribed": False}
+    assert not state.is_subscribed("thread_1", "conn_1")
+    assert not surface.store.read_state("thread_1")[0].closed
+    with pytest.raises(queue.Empty):
+        transport.receive_outbound(timeout=0.01)
 
 
 @pytest.mark.parametrize("subscribe", [True, False])
-def test_thread_resume_reopens_closed_thread(surface, subscribe: bool) -> None:
-    processor, transport, _router, state_manager = _initialized_processor(store=surface.store)
+@pytest.mark.parametrize("reopen", [True, False])
+def test_thread_resume_retains_explicit_host_close(surface, subscribe, reopen) -> None:
+    store = ThreadStore(surface.store)
+    store.create_thread_receipt(input_id="thread_1", agent_key="default")
+    store.kernel.control("thread_1", "close", "host-close")
+    if reopen:
+        store = ThreadStore(surface.store)
+    processor, transport, _router, state = _initialized_processor(store=store)
     processor.process_message(
         "conn_1",
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}},
-    )
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-    processor.process_message(
-        "conn_1",
-        {"jsonrpc": "2.0", "id": 2, "method": "thread/unsubscribe", "params": {"threadId": "thread_1"}},
-    )
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-
-    processor.process_message(
-        "conn_1",
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "thread/resume",
-            "params": {"threadId": "thread_1", "subscribe": subscribe},
-        },
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/resume", "params": {"threadId": "thread_1", "subscribe": subscribe}},
     )
     response = transport.receive_outbound(timeout=1)
-
-    if subscribe:
-        assert response["error"] == {"code": -32602, "message": "Thread is closed"}
-        assert not state_manager.is_subscribed("thread_1", "conn_1")
-    else:
-        assert response["result"]["thread"]["status"] == "closed"
-        assert state_manager.load("thread_1").status == "idle"
-        assert state_manager.is_subscribed("thread_1", "conn_1") is subscribe
-
-
-@pytest.mark.parametrize("subscribe", [True, False])
-def test_thread_resume_reopens_persisted_closed_thread(subscribe: bool) -> None:
-    store = ThreadStore()
-    processor, transport, _router, _state_manager = _initialized_processor(store=store)
-    processor.process_message(
-        "conn_1",
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}},
-    )
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-    processor.process_message(
-        "conn_1",
-        {"jsonrpc": "2.0", "id": 2, "method": "thread/unsubscribe", "params": {"threadId": "thread_1"}},
-    )
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-    transport.receive_outbound(timeout=1)
-    store.set_active_turn("thread_1", None, "closed")
-
-    processor.process_message(
-        "conn_1",
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "thread/resume",
-            "params": {"threadId": "thread_1", "subscribe": subscribe},
-        },
-    )
-    response = transport.receive_outbound(timeout=1)
-
     if subscribe:
         assert response["error"] == {"code": -32602, "message": "Thread is closed"}
     else:
         assert response["result"]["thread"]["status"] == "closed"
-    assert store.read_thread("thread_1").thread.status == "closed"
+    assert not state.is_subscribed("thread_1", "conn_1")
+    assert surface.store.read_state("thread_1")[0].closed
 
 
 def test_thread_archive_notifies_only_requester_without_subscribing_it() -> None:
@@ -221,7 +171,7 @@ def test_thread_archive_notifies_only_requester_without_subscribing_it() -> None
     second.receive_outbound(timeout=1)
     processor.process_message(
         "conn_1",
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}},
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
     )
     first.receive_outbound(timeout=1)
     first.receive_outbound(timeout=1)
@@ -243,11 +193,13 @@ def test_active_turn_state_is_persisted_through_processor_owned_state_manager() 
     store = ThreadStore()
     state_manager = ThreadStateManager()
     MessageProcessor(router=OutgoingRouter(), store=store, state_manager=state_manager)
-    thread = store.create_thread(agent_key="default")
+    thread = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]).thread
 
     state_manager.set_active_turn(thread_id=thread.thread_id, turn_id="turn_1", handle=object())
     running = store.read_thread(thread.thread_id).thread
-    state_manager.clear_active_turn(thread.thread_id, "turn_1")
+    active = state_manager.active_turn(thread.thread_id)
+    assert active is not None
+    state_manager.clear_active_turn(thread.thread_id, "turn_1", handle=active.handle)
     idle = store.read_thread(thread.thread_id).thread
 
     assert (running.status, running.active_turn_id) == ("idle", None)

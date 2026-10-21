@@ -231,16 +231,87 @@ class SQLStore:
         _natural(after_seq, "after_seq")
         if through_seq is not None:
             _natural(through_seq, "through_seq")
-        with self._transaction():
-            head, inbox = self._one(
-                f"SELECT head_seq,inbox_seq FROM sk_session WHERE session_id=%s{self.read_lock_clause}", (session_id,)
-            )
+        # Records are immutable: cap by the captured head without locking writers.
+        head, inbox = self._one("SELECT head_seq,inbox_seq FROM sk_session WHERE session_id=%s", (session_id,))
+        rows = self._rows(
+            "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
+            "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
+            (session_id, after_seq, min(head, through_seq) if through_seq is not None else head, limit),
+        )
+        return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
+
+    def lease_status(self, session_id: str) -> tuple[int, int, int]:
+        head, epoch, until, now = self._one(
+            f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} FROM sk_session WHERE session_id=%s",
+            (session_id,),
+        )
+        return head, epoch, max(0, (until or now) - now)
+
+    def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
+        rows = self._rows(
+            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox WHERE session_id=%s AND input_id=%s",
+            (session_id, input_id),
+        )
+        if not rows:
+            return None
+        body, seq, received, consumed, checksum = rows[0]
+        if sha256(body).hexdigest() != checksum:
+            raise Conflict("stored input digest mismatch")
+        return StoredInput(InboxItem.parse(body), seq, received, consumed)
+
+    def control_records(self, session_id: str, *, through_seq: int) -> tuple[StoredRecord, ...]:
+        """Read consumed control facts for catalog filtering without folding turns."""
+        _natural(through_seq, "through_seq")
+        rows = self._rows(
+            "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
+            "FROM sk_inbox i JOIN sk_record r ON r.session_id=i.session_id AND r.seq=i.consumed_seq "
+            "WHERE i.session_id=%s AND i.kind='control' AND r.seq<=%s ORDER BY r.seq",
+            (session_id, through_seq),
+        )
+        return tuple(self._stored(session_id, row) for row in rows)
+
+    def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]:
+        """Indexed dependencies for a bounded event page, without folding session history."""
+        found = {r.seq: r for r in records}
+        through = max(found, default=0)
+        turns = {r.record.turn_id for r in records if r.record.turn_id}
+        seen = set()
+
+        def operation(oid, attempt):
+            if (oid, attempt) in seen:
+                return
+            seen.add((oid, attempt))
             rows = self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
-                (session_id, after_seq, min(head, through_seq) if through_seq is not None else head, limit),
+                "WHERE session_id=%s AND operation_id=%s AND attempt=%s AND seq<=%s "
+                "AND kind IN ('op_planned','op_prepared','op_parked') ORDER BY seq",
+                (session_id, oid, attempt, through),
             )
-            return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
+            for row in rows:
+                stored = self._stored(session_id, row)
+                found[stored.seq] = stored
+                if stored.record.kind == "op_planned" and stored.record._payload["op_kind"] != "model":
+                    operation(stored.record._payload["dependencies"][0], 1)
+
+        for r in records:
+            if r.record.operation_id:
+                operation(r.record.operation_id, r.record.attempt)
+            elif r.record.kind == "input_applied":
+                data = r.record._payload
+                item = data["input"]
+                oid = data["target_operation_id"] or item["payload"].get("operation_id")
+                if oid:
+                    operation(oid, item["payload"].get("attempt", 1))
+        for tid in turns:
+            rows = self._rows(
+                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
+                "WHERE session_id=%s AND turn_id=%s AND kind='turn_started' AND seq<=%s ORDER BY seq LIMIT 1",
+                (session_id, tid, through),
+            )
+            for row in rows:
+                stored = self._stored(session_id, row)
+                found[stored.seq] = stored
+        return tuple(found[k] for k in sorted(found))
 
     def peek_inbox(self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256) -> tuple[StoredInput, ...]:
         _positive(limit, "limit")
@@ -462,6 +533,10 @@ class SQLSessionTx:
                 now,
             ),
         )
+
+    def lock_session(self, session_id: str) -> None:
+        self._active()
+        self.store._lock(session_id)
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         self._active()

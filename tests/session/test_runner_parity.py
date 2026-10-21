@@ -762,12 +762,17 @@ def test_lease_recovery_exhaustion_reaches_public_caller(monkeypatch, tmp_path, 
         for payload in (
             {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "lease"}}},
             {"jsonrpc": "2.0", "method": "initialized"},
-            {"jsonrpc": "2.0", "id": 1, "method": "thread/start"},
+            {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1"}},
             {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "turn/start",
-                "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+                "params": {
+                    "threadId": "thread_1",
+                    "inputId": "turn_1",
+                    "expectedTurnId": None,
+                    "input": [{"type": "text", "text": "go"}],
+                },
             },
         ):
             server.processor.process_message("lease", payload)

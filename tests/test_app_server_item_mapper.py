@@ -275,18 +275,10 @@ def test_host_interaction_and_suspended_state_map_to_status_notifications_withou
     suspended_projection = map_run_event(suspended, thread_id="thread_1", turn_id="turn_1")
 
     assert requested_projection.item is None
-    assert requested_projection.notification_method == "thread/status/changed"
-    assert requested_projection.notification_params == {
-        "threadId": "thread_1",
-        "status": "interrupted",
-        "waitReason": "host_interaction",
-    }
-    assert "prompt" not in requested_projection.notification_params
-    assert suspended_projection.notification_params == {
-        "threadId": "thread_1",
-        "status": "interrupted",
-        "waitReason": "suspended",
-    }
+    assert requested_projection.notification_method is None
+    assert requested_projection.notification_params == {}
+    assert suspended_projection.notification_method is None
+    assert suspended_projection.notification_params == {}
 
 
 def test_approval_events_map_to_approval_items() -> None:

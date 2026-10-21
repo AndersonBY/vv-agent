@@ -60,10 +60,17 @@ class RunHandle:
         self._cancel_bound = False
         self._error: BaseException | None = None
         self._deliver_to_parent = False
+        self._wait_for_lease = True
+        self._lease_acquired = False
+        self._lease_unavailable = False
+        self._lease_unavailable_session: str | None = None
+        self._lease_retry_allowed = True
         self._thread = Thread(target=self._run, name="session-surface-driver")
         original_hook = runtime.hook
 
         def hook(point, record):
+            if point in {"after_commit", "after_drive"}:
+                self._lease_acquired = True
             original_hook(point, record)
             if point == "after_commit":
                 self._bind_cancel()
@@ -157,7 +164,13 @@ class RunHandle:
         losses = 0
         while True:
             try:
-                drive(self.kernel.store, sid, runtime=runtime, _one_turn=True, _wait_for_lease=True)
+                acquired = drive(self.kernel.store, sid, runtime=runtime, _one_turn=True, _wait_for_lease=self._wait_for_lease)
+                if not acquired:
+                    self._lease_unavailable = True
+                    self._lease_unavailable_session = sid
+                    return
+                if sid == self.session_id:
+                    self._lease_acquired = True
             except LeaseLost as exc:
                 state = None
                 with suppress(LeaseLost):
@@ -179,12 +192,25 @@ class RunHandle:
                 for child in child_handles(handle):
                     child_id = child["session_id"]
                     self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
-                    with self.kernel.store.atomic() as tx:
-                        delivered = child_delivery(self.kernel.store, tx, child_id)
+                    delivered = self._deliver_child(child_id, runtime)
                     child_state, _, _ = self.kernel.store.read_state(child_id)
                     completed |= bool(delivered and child_state.turns[child["turn_id"]].ended)
             if not completed:
                 return
+
+    def _deliver_child(self, sid: str, runtime: Runtime) -> int:
+        pushed = False
+
+        def hook(point):
+            nonlocal pushed
+            pushed |= point == "after_parent_inbox"
+
+        with self.kernel.store.atomic() as tx:
+            delivered = child_delivery(self.kernel.store, tx, sid, hook=hook)
+        if pushed:
+            created = self.kernel.store.read(sid, limit=1).records[0].record
+            runtime.wake(created._payload["parent_session_id"])
+        return delivered
 
     def _run(self) -> None:
         try:
@@ -193,8 +219,7 @@ class RunHandle:
             self._schedule_background()
             self._drive_tree(self.session_id, self.runtime, self.run_id)
             if self._deliver_to_parent:
-                with self.kernel.store.atomic() as tx:
-                    child_delivery(self.kernel.store, tx, self.session_id)
+                self._deliver_child(self.session_id, self.runtime)
             self._publish()
         except BaseException as exc:
             self._error = exc

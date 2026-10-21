@@ -7,7 +7,7 @@ change a behavior and which tests to run afterwards.
 
 The "Difference from 0.21.x" column is filled in only where the kernel behaves
 differently from the in-process runtime of package 0.21.x (contract 23). These
-differences are deliberate. The contract fixtures and public API v11 define the
+differences are deliberate. The contract fixtures and public API v12 define the
 supported behavior.
 
 ## How to read the table
@@ -103,7 +103,7 @@ kept.
 | Interactive steer, follow-up, resume, archive, close | `interactive.py`, `session/surfaces.py` | `tests/test_interactive_session_api.py`: `test_interactive_real_same_turn_user_reply`, `test_interactive_live_steer_and_durable_follow_up`, `test_interactive_child_wait_reply_keeps_child_identity`, `test_interactive_close_during_model_call_is_idempotent`; `tests/test_interactive_session_persistence.py`: `test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates` | The session is a view over records and the inbox. Replies go to the same turn or to the waiting child. Archive and close are durable. |
 | CLI single run, streaming and persistent sessions | `cli.py`, `session/surfaces.py` | `tests/test_cli_contract.py`: `test_cli_real_single_run_and_stream_channels`, `test_cli_kernel_persistent_session_survives_owner_restart`. Covers SQLite memory and file owners, the default, and output channels. | |
 | App Server threads, turns, approvals, replay, non-text input | `app_server/server.py`, `session/app_server.py` | The thread, turn, approval and replay suites; `test_kernel_process_restart_retains_calls_approval_image_and_client_cursor` (`tests/test_app_server_durable_resume.py`), `test_child_wait_user_is_exposed_and_reply_targets_child` (`tests/test_app_server_thread_turn.py`), `test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items` (`tests/test_app_server_controller_action.py`) | Thread state comes from the session log; the App Server keeps no second ledger. Suspend, reply, resume and terminal controls are inbox items. |
-| App Server `model/list`, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | `test_model_list_forwards_optional_filters_and_emits_canonical_superset` (`tests/test_app_server_contract_parity.py`), `test_schema_export_request_returns_json_and_typescript_bundles` (`tests/test_app_server_schema.py`). The exported protocol v2 schema and TypeScript bundle bytes are pinned. | |
+| App Server `model/list`, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | `test_model_list_forwards_optional_filters_and_emits_canonical_superset` (`tests/test_app_server_contract_parity.py`), `test_schema_export_request_returns_json_and_typescript_bundles` (`tests/test_app_server_schema.py`). The exported protocol v3 schema and TypeScript bundle bytes are pinned. | |
 
 ## Scheduling, dispatch and durability
 
@@ -127,7 +127,7 @@ All of them run on PostgreSQL and SQLite.
 fixtures from the real producers and compares them byte-for-byte with the
 vendored snapshot. `test_public_api_manifest_resolves_real_python_exports` in
 `tests/test_parity_evidence_manifests.py` resolves every capability and member
-in the public API v11 inventory and fails on extra or missing exports. The
+in the public API v12 inventory and fails on extra or missing exports. The
 snapshot integrity check runs separately; see
 [parity-contract.md](parity-contract.md).
 

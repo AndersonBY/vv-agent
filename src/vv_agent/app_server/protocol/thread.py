@@ -7,11 +7,12 @@ from typing import Any
 @dataclass(frozen=True, slots=True)
 class ThreadStartParams:
     agent_key: str
+    input_id: str
     cwd: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"agentKey": self.agent_key}
+        payload: dict[str, Any] = {"agentKey": self.agent_key, "inputId": self.input_id}
         if self.cwd is not None:
             payload["cwd"] = self.cwd
         if self.metadata:
@@ -31,12 +32,9 @@ class ThreadResumeParams:
 @dataclass(frozen=True, slots=True)
 class ThreadReadParams:
     thread_id: str
-    after_item_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"threadId": self.thread_id}
-        if self.after_item_id is not None:
-            payload["afterItemId"] = self.after_item_id
         return payload
 
 
@@ -99,8 +97,27 @@ class ThreadModelSelectParams:
         for key in ("threadId", "inputId"):
             if not isinstance(value[key], str) or not value[key] or len(value[key].encode("utf-8")) > 512:
                 raise ValueError(f"{key} must be a nonempty identity of at most 512 bytes")
+        from .identity import client_id
+
+        client_id(value["inputId"], "inputId")
         InboxItem(value["inputId"], "model_selection", {"selection": value["selection"]}).encode()
         return cls(value["threadId"], value["inputId"], value["selection"])
 
     def to_dict(self) -> dict[str, Any]:
         return {"threadId": self.thread_id, "inputId": self.input_id, "selection": self.selection}
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadEventsListParams:
+    thread_id: str
+    limit: int
+    after_cursor: dict[str, Any] | None = None
+    through_cursor: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"threadId": self.thread_id, "limit": self.limit}
+        if self.after_cursor is not None:
+            result["afterCursor"] = self.after_cursor
+        if self.through_cursor is not None:
+            result["throughCursor"] = self.through_cursor
+        return result

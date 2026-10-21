@@ -59,7 +59,7 @@ raises `ConfigError` instead of quietly using `kimi-k3`.
 ### Changing the model in a session
 
 A session can switch models through a `model_selection` inbox input. The
-selection carries a model key, an optional `ModelSettings` object, and a
+selection carries the resolved provider model ID, an optional `ModelSettings` object, and a
 `route` reserved for host transport choices such as `backend_type`. Reasoning
 effort belongs in the settings, as `model_settings.reasoning.effort`, not in
 the route. If the selection omits settings, the new model gets empty settings;

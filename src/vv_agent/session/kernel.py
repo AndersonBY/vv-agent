@@ -1699,17 +1699,19 @@ def drive(
     failure_backoff_ms: int = 1000,
     _one_turn: bool = False,
     _wait_for_lease: bool = False,
-) -> None:
+) -> bool:
     if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
         raise ValueError("failure_backoff_ms must be a positive integer")
     scheduled = not isinstance(runtime, Runtime)
     ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else 15000
     lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
+    delay = 0.05
     while lease is None and _wait_for_lease:
-        time.sleep(0.01)
+        time.sleep(delay)
+        delay = min(1.0, delay * 2)
         lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     if lease is None:
-        return
+        return False
     if not isinstance(runtime, Runtime):
         try:
             runtime = runtime(session_id)
@@ -1719,7 +1721,7 @@ def drive(
                 _defer_after_error(store, lease, exc.retry_after_ms, exc)
             finally:
                 store.release(lease)
-            return
+            return True
         except Exception as exc:
             try:
                 _defer_after_error(store, lease, failure_backoff_ms, exc)
@@ -1759,3 +1761,4 @@ def drive(
         with suppress(Exception):
             if store.is_runnable(session_id):
                 runtime.wake(session_id)
+    return True

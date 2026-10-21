@@ -23,6 +23,7 @@ class ThreadState:
     active_turn: ActiveTurn | None = None
     subscribers: set[str] = field(default_factory=set)
     listener_generation: int = 0
+    turn_lock: Any = field(default_factory=RLock, repr=False)
 
 
 class ThreadStateManager:
@@ -41,7 +42,6 @@ class ThreadStateManager:
     def subscribe(self, thread_id: str, connection_id: str) -> None:
         with self._lock:
             state = self.load(thread_id)
-            self._reopen(state)
             state.subscribers.add(connection_id)
 
     def unsubscribe(self, thread_id: str, connection_id: str) -> None:
@@ -65,21 +65,12 @@ class ThreadStateManager:
         with self._lock:
             self.load(thread_id).status = status
 
-    def close_if_idle(self, thread_id: str) -> bool:
-        with self._lock:
-            state = self.load(thread_id)
-            if state.subscribers or state.active_turn is not None:
-                return False
-            state.status = "closed"
-            return True
-
     def subscribe_and_snapshot(self, thread_id: str, connection_id: str, snapshot_fn: Callable[[], T]) -> T:
         with self._lock:
             state = self.load(thread_id)
             previous_status = state.status
             inserted = connection_id not in state.subscribers
             state.subscribers.add(connection_id)
-            self._reopen(state)
             try:
                 return snapshot_fn()
             except BaseException:
@@ -87,10 +78,6 @@ class ThreadStateManager:
                     state.subscribers.discard(connection_id)
                 state.status = previous_status
                 raise
-
-    def reopen(self, thread_id: str) -> None:
-        with self._lock:
-            self._reopen(self.load(thread_id))
 
     def set_active_turn(
         self,
@@ -101,6 +88,8 @@ class ThreadStateManager:
         run_id: str | None = None,
     ) -> None:
         with self._lock:
+            if self.load(thread_id).active_turn is not None:
+                raise RuntimeError("Thread already has a local handle")
             self.load(thread_id).active_turn = ActiveTurn(
                 thread_id=thread_id,
                 turn_id=turn_id,
@@ -108,17 +97,17 @@ class ThreadStateManager:
                 run_id=run_id,
             )
 
-    def clear_active_turn(self, thread_id: str, turn_id: str) -> None:
+    def clear_active_turn(self, thread_id: str, turn_id: str, *, handle: Any) -> bool:
         with self._lock:
             state = self.load(thread_id)
-            if state.active_turn is not None and state.active_turn.turn_id == turn_id:
+            if state.active_turn is not None and state.active_turn.turn_id == turn_id and state.active_turn.handle is handle:
                 state.active_turn = None
+                return True
+            return False
+
+    def turn_lock(self, thread_id: str):
+        return self.load(thread_id).turn_lock
 
     def active_turn(self, thread_id: str) -> ActiveTurn | None:
         with self._lock:
             return self.load(thread_id).active_turn
-
-    @staticmethod
-    def _reopen(state: ThreadState) -> None:
-        if state.status == "closed":
-            state.status = "running" if state.active_turn is not None else "idle"

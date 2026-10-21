@@ -273,6 +273,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         "thread/resume": "ThreadResumeResponse",
         "thread/model/select": "ThreadModelSelectResponse",
         "turn/start": "TurnStartResponse",
+        "thread/events/list": "ThreadEventsListResponse",
         "turn/resume": "TurnResumeResponse",
     }
     for entry in app["transcripts"]:
@@ -282,18 +283,29 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         if request is not None:
             errors = list(Draft202012Validator(schemas["ClientRequest"]).iter_errors(request))
             if errors:
+                if request["method"] == "thread/events/list":
+                    assert entry["responses"][0]["error"]["code"] == -32026
+                    continue
                 assert entry["responses"][0]["error"]["code"] == -32602
-                bad_fields = {"turn/resume": "checkpointKey", "thread/model/select": "extra"}
-                assert bad_fields[request["method"]] in request["params"]
+                if request["method"] == "thread/start":
+                    from vv_agent.app_server.protocol.identity import client_id
+
+                    with pytest.raises(ValueError):
+                        client_id(request["params"]["inputId"], "inputId")
+                else:
+                    bad_fields = {"turn/resume": "checkpointKey", "thread/model/select": "extra"}
+                    assert bad_fields[request["method"]] in request["params"]
             for response in entry["responses"]:
                 envelope.validate(response)
                 if "result" in response and request["method"] in results:
                     name = results[request["method"]]
-                    result_schema = schemas.get(name, schemas["ClientRequest"]["$defs"].get(name))
+                    result_schema = schemas.get(name)
+                    if result_schema is None:
+                        result_schema = {"$ref": f"#/$defs/{name}", "$defs": schemas["ClientRequest"]["$defs"]}
                     Draft202012Validator(result_schema).validate(response["result"])
         for notification in entry.get("notifications", []):
             envelope.validate(notification)
-    assert app["facts"]["observer_cannot_approve"] and app["facts"]["timeout_at_absolute_deadline"]
+    assert app["facts"]["observer_can_approve"] and app["facts"]["timeout_at_absolute_deadline"]
 
 
 def test_host_interaction_wire_references_use_current_owner(generated_fixtures):

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .identity import client_id
+
 
 def _text(value: Any, field_name: str, *, max_bytes: int = 512) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -31,7 +33,7 @@ class TurnActionParams:
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", _text(self.thread_id, "threadId"))
         object.__setattr__(self, "turn_id", _text(self.turn_id, "turnId"))
-        object.__setattr__(self, "action_id", _text(self.action_id, "actionId"))
+        object.__setattr__(self, "action_id", client_id(self.action_id, "actionId"))
         if not isinstance(self.action, dict):
             raise ValueError("action must be an object")
         kind = self.action.get("kind")
@@ -74,7 +76,6 @@ class TurnActionResponse:
     action_id: str
     accepted: bool
     status: str
-    wait_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -84,19 +85,24 @@ class TurnActionResponse:
             "accepted": self.accepted,
             "status": self.status,
         }
-        if self.wait_reason is not None:
-            payload["waitReason"] = self.wait_reason
         return payload
 
 
 @dataclass(frozen=True, slots=True)
 class TurnStartParams:
     thread_id: str
+    input_id: str
+    expected_turn_id: str | None
     input: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"threadId": self.thread_id, "input": [dict(item) for item in self.input]}
+        payload: dict[str, Any] = {
+            "threadId": self.thread_id,
+            "inputId": self.input_id,
+            "expectedTurnId": self.expected_turn_id,
+            "input": [dict(item) for item in self.input],
+        }
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload
@@ -149,6 +155,7 @@ class TurnResumeResponse:
 @dataclass(frozen=True, slots=True)
 class TurnSteerParams:
     thread_id: str
+    input_id: str
     expected_turn_id: str
     input: list[dict[str, Any]] = field(default_factory=list)
 
@@ -156,6 +163,7 @@ class TurnSteerParams:
         return {
             "threadId": self.thread_id,
             "expectedTurnId": self.expected_turn_id,
+            "inputId": self.input_id,
             "input": [dict(item) for item in self.input],
         }
 
@@ -163,6 +171,7 @@ class TurnSteerParams:
 @dataclass(frozen=True, slots=True)
 class TurnFollowUpParams:
     thread_id: str
+    input_id: str
     expected_turn_id: str
     input: list[dict[str, Any]] = field(default_factory=list)
 
@@ -170,6 +179,7 @@ class TurnFollowUpParams:
         return {
             "threadId": self.thread_id,
             "expectedTurnId": self.expected_turn_id,
+            "inputId": self.input_id,
             "input": [dict(item) for item in self.input],
         }
 
@@ -177,11 +187,9 @@ class TurnFollowUpParams:
 @dataclass(frozen=True, slots=True)
 class TurnInterruptParams:
     thread_id: str
+    action_id: str
     expected_turn_id: str
-    reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {"threadId": self.thread_id, "expectedTurnId": self.expected_turn_id}
-        if self.reason:
-            payload["reason"] = self.reason
+        payload = {"threadId": self.thread_id, "expectedTurnId": self.expected_turn_id, "actionId": self.action_id}
         return payload

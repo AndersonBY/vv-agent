@@ -22,7 +22,7 @@ def test_channel_transport_processes_jsonrpc_request() -> None:
 
     response = transport.receive_outbound(timeout=1)
     assert response["id"] == 1
-    assert response["result"]["protocolVersion"] == "v2"
+    assert response["result"]["protocolVersion"] == "v3"
 
 
 def test_channel_transport_outbound_overflow_is_reported() -> None:
@@ -62,7 +62,7 @@ def test_stdio_malformed_json_returns_parse_error_and_keeps_processing() -> None
         "error": {"code": AppServerErrorCode.INVALID_REQUEST, "message": "Invalid Request"},
     }
     assert messages[3]["id"] == 1
-    assert messages[3]["result"]["protocolVersion"] == "v2"
+    assert messages[3]["result"]["protocolVersion"] == "v3"
 
 
 def test_channel_transport_runs_generic_loop_and_disconnects_on_close() -> None:
@@ -91,7 +91,7 @@ def test_generic_server_overload_disconnects_and_cleans_pending_and_subscription
     transport.receive_outbound(timeout=1)
     server.processor.process_message(
         "conn_1",
-        {"jsonrpc": "2.0", "id": 2, "method": "thread/start", "params": {"agentKey": "default"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
     )
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
@@ -135,7 +135,7 @@ def test_outbound_failure_disconnects_only_failed_connection() -> None:
     healthy.receive_outbound(timeout=1)
     processor.process_message(
         "failed",
-        {"jsonrpc": "2.0", "id": 2, "method": "thread/start", "params": {"agentKey": "default"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
     )
     failed.outbound.clear()
 

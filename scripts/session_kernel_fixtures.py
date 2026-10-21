@@ -1069,16 +1069,56 @@ class Fixtures:
             notices.clear()
             return result
 
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v2"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v3"
         request(None, "initialized")
-        request(1, "thread/start", {"agentKey": "default", "cwd": "/fixture"})
-        request(2, "turn/start", {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]})
+        request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
+        request(
+            2,
+            "turn/start",
+            {"inputId": "turn_1", "expectedTurnId": None, "threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+        )
         server.run_adapter.join()
         drain()
-        assert request(3, "thread/read", {"threadId": "thread_1"})["result"]["thread"]["status"] == "idle"
-        assert request(4, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "idle"
+        assert request(3, "thread/read", {"threadId": "thread_1"})["result"]["thread"]["status"] == "terminal"
+        assert request(4, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "terminal"
+        original_transport = transport
+        transport = ChannelTransport(connection_id="reconnected")
+        server.router.register_transport(transport)
+        request(40, "initialize", {"clientInfo": {"name": "reconnected"}})
+        original_submission = {
+            "threadId": "thread_1",
+            "inputId": "turn_1",
+            "expectedTurnId": None,
+            "input": [{"type": "text", "text": "go"}],
+        }
+        assert request(41, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})["result"][
+            "replayed"
+        ]
+        assert request(42, "turn/start", original_submission)["result"]["replayed"]
+        assert request(43, "turn/start", original_submission | {"input": []})["error"]["code"] == -32024
+        assert (
+            request(44, "turn/start", original_submission | {"inputId": "stale", "expectedTurnId": "wrong"})["error"]["code"]
+            == -32025
+        )
+        # Invalid client IDs are producer rejections and canonical wire negatives.
+        for index, bad_id in enumerate(
+            (
+                "thread_1/child/digest",
+                "approval/rid/answer",
+                "app_server/archive",
+                "controller/hash",
+                " leading",
+                "trailing ",
+                "x" * 129,
+            ),
+            50,
+        ):
+            assert request(index, "thread/start", {"inputId": bad_id})["error"]["code"] == -32602
+        drain()
+        transport = original_transport
         request(5, "turn/resume", {"threadId": "thread_1", "turnId": "thread_1/turn/turn_1", "checkpointKey": "old"})
         request(6, "thread/unsubscribe", {"threadId": "thread_1"})
+        self.kernel.control("thread_1", "close", "host/close")
         selection_params = {"threadId": "thread_1", "inputId": "select-app", "selection": {"model": "m", "route": {}}}
         assert request(16, "thread/model/select", selection_params)["result"] == {
             "threadId": "thread_1",
@@ -1086,13 +1126,17 @@ class Fixtures:
             "accepted": True,
         }
         assert request(17, "thread/model/select", selection_params)["result"]["accepted"] is True
-        assert request(18, "thread/model/select", selection_params | {"selection": None})["error"]["code"] == -32602
+        assert request(18, "thread/model/select", selection_params | {"selection": None})["error"]["code"] == -32024
         assert request(19, "thread/model/select", selection_params | {"extra": True})["error"]["code"] == -32602
         request(13, "thread/archive", {"threadId": "thread_1"})
         assert request(14, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "closed"
         for i, method, params in (
             (7, "turn/resume", {"threadId": "thread_1", "turnId": "thread_1/turn/turn_1"}),
-            (8, "turn/start", {"threadId": "thread_1", "input": []}),
+            (
+                8,
+                "turn/start",
+                {"inputId": "turn_2", "expectedTurnId": "thread_1/turn/turn_1", "threadId": "thread_1", "input": []},
+            ),
             (9, "thread/resume", {"threadId": "thread_1", "subscribe": True}),
             (15, "thread/resume", {"threadId": "thread_1"}),
         ):
@@ -1137,14 +1181,18 @@ class Fixtures:
         )
         request(20, "initialize", {"clientInfo": {"name": "child-owner"}})
         request(None, "initialized")
-        sid = request(21, "thread/start")["result"]["threadId"]
-        request(22, "turn/start", {"threadId": sid, "input": [{"type": "text", "text": "delegate"}]})
+        sid = request(21, "thread/start", {"inputId": "thread_2"})["result"]["threadId"]
+        request(
+            22,
+            "turn/start",
+            {"inputId": "turn_1", "expectedTurnId": None, "threadId": sid, "input": [{"type": "text", "text": "delegate"}]},
+        )
         server.run_adapter.join()
         drain()
         status = request(23, "thread/status", {"threadId": sid})["result"]
         snapshot = request(24, "thread/read", {"threadId": sid})["result"]
-        assert status["status"] == snapshot["thread"]["status"] == "interrupted"
-        child_sid = status["interactions"][0]["sessionId"]
+        assert status["status"] == snapshot["thread"]["status"] == "child_running"
+        child_sid = status["pendingInteraction"]["sessionId"]
         assert child_sid != sid
         tid = self.state(sid).active_turn_id
         action = {
@@ -1168,14 +1216,25 @@ class Fixtures:
                 }
             ]
         )[0]
-        command_id = sha256(b"vv-agent.controller-command-id.v1\0" + len(body).to_bytes(8, "big") + body).hexdigest()
+        command_id = (
+            "controller/" + sha256(b"vv-agent.controller-command-id.v1\0" + len(body).to_bytes(8, "big") + body).hexdigest()
+        )
         assert self.state(child_sid).applied_inputs[command_id].payload["input"]["payload"]["content"]["text"] == "answer"
         head = self.kernel.store.read(sid).head_seq
         request(27, "turn/action", action)
         assert self.kernel.store.read(sid).head_seq == head
         assert "error" in request(28, "turn/action", action | {"action": {"kind": "cancel"}})
-        cursor = snapshot["items"][-1]["itemId"]
-        assert request(29, "thread/resume", {"threadId": sid, "subscribe": False, "afterItemId": cursor})["result"]["items"] == []
+        assert request(45, "thread/events/list", {"threadId": sid, "limit": 1, "afterCursor": {}})["error"]["code"] == -32026
+        page = request(38, "thread/events/list", {"threadId": sid, "limit": 256})["result"]
+        assert not page["more"]
+        assert (
+            request(
+                29,
+                "thread/events/list",
+                {"threadId": sid, "limit": 1, "afterCursor": page["nextCursor"], "throughCursor": page["throughCursor"]},
+            )["result"]["events"]
+            == []
+        )
         drain()
 
         transport = ChannelTransport(connection_id="approval-owner")
@@ -1184,7 +1243,14 @@ class Fixtures:
             agent=Agent("app", "Approve.", model="m", tools=[approved]),
             run_config=RunConfig(
                 model_provider=ScriptedModelProvider.new(
-                    "scripted", "m", [LLMResponse("", [ToolCall("approved", "approved", {})]), LLMResponse("denied safely")]
+                    "scripted",
+                    "m",
+                    [
+                        LLMResponse("", [ToolCall("approved", "approved", {})]),
+                        LLMResponse("denied safely"),
+                        LLMResponse("", [ToolCall("approved-again", "approved", {})]),
+                        LLMResponse("timed out safely"),
+                    ],
                 ),
                 workspace="/fixture",
                 approval_timeout_seconds=60,
@@ -1194,8 +1260,12 @@ class Fixtures:
         server = AppServer(transport=transport, store=self.kernel.store, host=approval_host)
         request(30, "initialize", {"clientInfo": {"name": "approval-owner"}})
         request(None, "initialized")
-        sid = request(31, "thread/start")["result"]["threadId"]
-        request(32, "turn/start", {"threadId": sid, "input": [{"type": "text", "text": "approve"}]})
+        sid = request(31, "thread/start", {"inputId": "thread_3"})["result"]["threadId"]
+        request(
+            32,
+            "turn/start",
+            {"inputId": "turn_1", "expectedTurnId": None, "threadId": sid, "input": [{"type": "text", "text": "approve"}]},
+        )
         while True:
             message = transport.receive_outbound(timeout=5)
             notices.append(message)
@@ -1209,29 +1279,48 @@ class Fixtures:
         transport = observer
         request(33, "initialize", {"clientInfo": {"name": "observer"}})
         request(None, "initialized")
-        denied = request(
+        resolved_by_observer = request(
             34,
             "approval/resolve",
-            {"threadId": sid, "turnId": approval["turnId"], "requestId": approval["requestId"], "decision": "allow"},
+            {"threadId": sid, "turnId": approval["turnId"], "requestId": approval["requestId"], "decision": "deny"},
         )
-        assert "error" in denied
+        assert resolved_by_observer["result"] == {}
+        server.run_adapter.join()
+        drain()
+        assert len(APPROVED_EFFECTS) == effects_before
+        request(
+            37,
+            "turn/start",
+            {
+                "threadId": sid,
+                "inputId": "turn_2",
+                "expectedTurnId": approval["turnId"],
+                "input": [{"type": "text", "text": "timeout"}],
+            },
+        )
+        while (message := transport.receive_outbound(timeout=5)).get("method") != "approval/request":
+            notices.append(message)
+        notices.append(message)
         server.router.unregister_transport(owner.connection_id)
+        server.router.unregister_transport(transport.connection_id)
         server.run_adapter.join()
         drain()
         # A fresh App Server has no process-local owner state; only the log supplies it.
         server = AppServer(transport=observer, store=self.kernel.store, host=approval_host)
         request(35, "initialize", {"clientInfo": {"name": "observer-restart"}})
         request(None, "initialized")
-        request(36, "thread/resume", {"threadId": sid})
-        server.run_adapter.join()
+        request(36, "thread/resume", {"threadId": sid, "subscribe": False})
         drain()
         state = self.state(sid)
         deadline = next(iter(state.waits.values()))["deadline_ms"]
-        assert server.run_adapter._owner(sid, state.active_turn_id) == "approval-owner"
         self.clock = deadline - 1
+        server.router.unregister_transport("observer")
         server.run_adapter.recover("observer", sid)
         server.run_adapter.join()
         assert self.state(sid).active_turn_id is not None
+        server.router.register_transport(observer)
+        request(39, "initialize", {"clientInfo": {"name": "observer-again"}})
+        server.state_manager.subscribe(sid, "observer")
         drain()
         self.clock = deadline
         server.run_adapter.recover("observer", sid)
@@ -1258,15 +1347,15 @@ class Fixtures:
         assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
         assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
         return {
-            "protocol_version": "v2",
+            "protocol_version": "v3",
             "host_interaction_values": {"request": request_value, "outcome": outcome_value},
             "transcripts": transcript,
             "schemas": exported,
             "facts": {
                 "child_reply_command_id": command_id,
-                "owner": "approval-owner",
+                "approval_authority": "authenticated_connection",
                 "deadline_ms": deadline,
-                "observer_cannot_approve": True,
+                "observer_can_approve": True,
                 "timeout_at_absolute_deadline": True,
             },
         }

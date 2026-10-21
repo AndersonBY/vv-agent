@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from threading import RLock
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
 from .sql import SQLSessionTx, SQLStore
@@ -78,7 +79,7 @@ def _connection_conninfo(connection: Connection[Any]) -> str:
 
 
 class PostgresStore(SQLStore):
-    """One connection per thread. atomic() nests as a savepoint in host transactions."""
+    """A serialized connection; atomic() nests as a savepoint in host transactions."""
 
     lock_clause = " FOR UPDATE"
     read_lock_clause = " FOR SHARE"
@@ -86,6 +87,7 @@ class PostgresStore(SQLStore):
 
     def __init__(self, connection: Connection[Any]):
         self.connection = connection
+        self._connection_lock = RLock()
 
     @classmethod
     @contextmanager
@@ -98,14 +100,14 @@ class PostgresStore(SQLStore):
     def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         from psycopg.rows import tuple_row
 
-        with self.connection.cursor(row_factory=tuple_row) as cursor:
+        with self._connection_lock, self.connection.cursor(row_factory=tuple_row) as cursor:
             cursor.execute(cast(LiteralString, query), params)
             return cursor.fetchall() if cursor.description is not None else []
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         try:
-            with self.connection.transaction():
+            with self._connection_lock, self.connection.transaction():
                 yield
         except BaseException:
             self._fold_cache = None

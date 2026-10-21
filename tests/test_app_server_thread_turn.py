@@ -7,7 +7,7 @@ import pytest
 from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig
-from vv_agent.app_server import AppServer, AppServerErrorCode, ChannelTransport
+from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import LlmRequest, ScriptedLLM
@@ -55,12 +55,22 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     for payload in [
         {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
         {"jsonrpc": "2.0", "method": "initialized"},
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "/tmp/work"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "thread/start",
+            "params": {"inputId": "thread_1", "agentKey": "default", "cwd": "/tmp/work"},
+        },
         {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     ]:
         transport.send_inbound(payload)
@@ -96,7 +106,11 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:
     server, transport = _server_with_scripted_steps([LLMResponse(content="done")])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         transport,
         server,
@@ -104,7 +118,12 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
 
@@ -117,7 +136,7 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
         if isinstance(params, dict):
             status_changes.append(cast(dict[str, object], params).get("status"))
 
-    assert status_changes == ["running", "idle"]
+    assert status_changes == ["running", "terminal"]
 
 
 def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
@@ -141,7 +160,11 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
 
     server, transport = _server_with_scripted_steps([first_step, second_step], max_cycles=3)
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         transport,
         server,
@@ -149,7 +172,12 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     assert first_step_ready.wait(timeout=2)
@@ -162,6 +190,7 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
             "id": 3,
             "method": "turn/steer",
             "params": {
+                "inputId": "steer_1",
                 "threadId": "thread_1",
                 "expectedTurnId": _active_turn_id(server),
                 "input": [{"type": "text", "text": "queued from app server"}],
@@ -191,7 +220,11 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
 
     server, transport = _server_with_scripted_steps([first_step])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         transport,
         server,
@@ -199,7 +232,12 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     assert first_step_ready.wait(timeout=2)
@@ -211,7 +249,12 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/steer",
-            "params": {"threadId": "thread_1", "expectedTurnId": "wrong", "input": [{"type": "text", "text": "ignored"}]},
+            "params": {
+                "inputId": "steer_1",
+                "threadId": "thread_1",
+                "expectedTurnId": "wrong",
+                "input": [{"type": "text", "text": "ignored"}],
+            },
         },
     )
 
@@ -219,7 +262,7 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
     assert response == {
         "jsonrpc": "2.0",
         "id": 3,
-        "error": {"code": AppServerErrorCode.TURN_ID_MISMATCH, "message": "Turn id mismatch"},
+        "error": {"code": -32025, "message": "turn_mismatch"},
     }
     first_step_can_finish.set()
     _drain_until_turn_completed(transport)
@@ -243,7 +286,11 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
 
     server, transport = _server_with_scripted_steps([first_step, second_step])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         transport,
         server,
@@ -251,7 +298,12 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     assert first_step_ready.wait(timeout=2)
@@ -263,6 +315,7 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
             "id": 3,
             "method": "turn/followUp",
             "params": {
+                "inputId": "follow_1",
                 "threadId": "thread_1",
                 "expectedTurnId": _active_turn_id(server),
                 "input": [{"type": "text", "text": "continue"}],
@@ -291,7 +344,11 @@ def test_turn_interrupt_cancels_active_turn() -> None:
 
     server, transport = _server_with_scripted_steps([first_step], max_cycles=2)
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         transport,
         server,
@@ -299,7 +356,12 @@ def test_turn_interrupt_cancels_active_turn() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     assert first_step_ready.wait(timeout=2)
@@ -311,7 +373,11 @@ def test_turn_interrupt_cancels_active_turn() -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/interrupt",
-            "params": {"threadId": "thread_1", "expectedTurnId": _active_turn_id(server), "reason": "stop"},
+            "params": {
+                "actionId": "interrupt_1",
+                "threadId": "thread_1",
+                "expectedTurnId": _active_turn_id(server),
+            },
         },
     )
     response = _receive_response(transport, 3)
@@ -326,7 +392,9 @@ def test_turn_interrupt_cancels_active_turn() -> None:
         "result": {
             "threadId": "thread_1",
             "turnId": ("thread_1/turn/turn_1"),
-            "cancelled": True,
+            "actionId": "interrupt_1",
+            "accepted": True,
+            "status": "running",
         },
     }
     assert isinstance(completed_params, dict)
@@ -403,7 +471,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         ),
     )
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+    _send(transport, server, {"params": {"inputId": "thread_1"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"})
     _send(
         transport,
         server,
@@ -412,6 +480,8 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
             "id": 2,
             "method": "turn/start",
             "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
                 "threadId": "thread_1",
                 "input": [{"type": "text", "text": "delegate"}],
             },
@@ -422,9 +492,9 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     interrupted = next(
         m
         for m in first
-        if m.get("method") == "thread/status/changed" and cast(dict[str, Any], m["params"])["status"] == "interrupted"
+        if m.get("method") == "thread/status/changed" and cast(dict[str, Any], m["params"])["status"] == "child_running"
     )
-    wait = cast(dict[str, Any], interrupted["params"])["interactions"][0]
+    wait = cast(dict[str, Any], interrupted["params"])["pendingInteraction"]
     assert wait["prompt"] == "child needs answer" and wait["sessionId"] != "thread_1"
     assert set(wait) == {"sessionId", "turnId", "prompt", "interactionId"}
     parent = surface.store.read_state("thread_1")[0]
@@ -451,7 +521,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     cast(Any, server.run_adapter).join()
     from vv_agent.interaction import derive_controller_command_id
 
-    input_id = derive_controller_command_id("thread_1", parent_tid, "reply-child")
+    input_id = "controller/" + derive_controller_command_id("thread_1", parent_tid, "reply-child")
     child_state = surface.store.read_state(wait["sessionId"])[0]
     assert child_state.applied_inputs[input_id]._payload["input"]["payload"]["content"]["text"] == "approved child answer"
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
@@ -465,16 +535,20 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     retained_handles = len(surface.handles)
     adapter = cast(Any, server.run_adapter)
     replay = adapter.controller_action(
+        connection_id="conn_1",
         thread_id="thread_1",
         turn_id=parent_tid,
         action_id="reply-child",
         action={"kind": "respond", "message": {"role": "user", "content": "approved child answer"}},
     )
     assert replay["accepted"]
-    from vv_agent.app_server.run_adapter import TurnResumeError
 
-    with pytest.raises(TurnResumeError):
-        adapter.controller_action(thread_id="thread_1", turn_id=parent_tid, action_id="reply-child", action={"kind": "cancel"})
+    from vv_agent.session.app_server import SubmissionConflict
+
+    with pytest.raises(SubmissionConflict):
+        adapter.controller_action(
+            connection_id="conn_1", thread_id="thread_1", turn_id=parent_tid, action_id="reply-child", action={"kind": "cancel"}
+        )
     assert surface.store.read_state("thread_1")[1][-1].seq == retained_head and len(surface.handles) == retained_handles
     assert not llm.steps
 
