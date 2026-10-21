@@ -110,9 +110,9 @@ def _approval_client(calls: list[str]) -> AppServerClient:
 def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
     client = _client()
     initialized = client.initialize(ClientInfo(name="test-client"))
-    assert initialized["protocolVersion"] == "v2"
+    assert initialized["protocolVersion"] == "v3"
 
-    thread = client.start_thread(ThreadStartParams(agent_key="default"))
+    thread = client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))
     thread_id = str(thread["threadId"])
     assert client.select_model(ThreadModelSelectParams(thread_id, "model-choice", {"model": "test-model", "route": {}})) == {
         "threadId": thread_id,
@@ -129,9 +129,8 @@ def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
 
     unsubscribed = client.unsubscribe_thread(ThreadUnsubscribeParams(thread_id=thread_id))
     assert unsubscribed["subscribed"] is False
-    assert unsubscribed["closed"] is True
-    with pytest.raises(AppServerClientError, match="Thread is closed"):
-        client.resume_thread(ThreadResumeParams(thread_id=thread_id))
+    assert set(unsubscribed) == {"threadId", "subscribed"}
+    assert client.resume_thread(ThreadResumeParams(thread_id=thread_id))["thread"]["status"] == "idle"
     assert client.archive_thread(ThreadArchiveParams(thread_id=thread_id))["archived"] is True
     assert client.close() is True
     assert client.close() is False
@@ -142,11 +141,13 @@ def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
 def test_client_preserves_notifications_while_waiting_for_responses() -> None:
     client = _client(final_output="client result")
     client.initialize(ClientInfo(name="test-client"))
-    thread = client.start_thread(ThreadStartParams(agent_key="default"))
+    thread = client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))
     thread_id = str(thread["threadId"])
 
     turn = client.start_turn(
         TurnStartParams(
+            input_id="turn_1",
+            expected_turn_id=None,
             thread_id=thread_id,
             input=[{"type": "text", "text": "finish"}],
         )
@@ -169,16 +170,20 @@ def test_client_preserves_notifications_while_waiting_for_responses() -> None:
 def test_client_exposes_turn_control_methods_and_server_errors() -> None:
     client = _client()
     client.initialize(ClientInfo(name="test-client"))
-    thread_id = str(client.start_thread(ThreadStartParams(agent_key="default"))["threadId"])
+    thread_id = str(client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))["threadId"])
 
     for invoke in (
-        lambda: client.steer_turn(TurnSteerParams(thread_id=thread_id, expected_turn_id="turn_1", input=[])),
-        lambda: client.follow_up_turn(TurnFollowUpParams(thread_id=thread_id, expected_turn_id="turn_1", input=[])),
-        lambda: client.interrupt_turn(TurnInterruptParams(thread_id=thread_id, expected_turn_id="turn_1")),
+        lambda: client.steer_turn(TurnSteerParams(input_id="input_1", thread_id=thread_id, expected_turn_id="turn_1", input=[])),
+        lambda: client.follow_up_turn(
+            TurnFollowUpParams(input_id="input_1", thread_id=thread_id, expected_turn_id="turn_1", input=[])
+        ),
+        lambda: client.interrupt_turn(
+            TurnInterruptParams(action_id="interrupt_1", thread_id=thread_id, expected_turn_id="turn_1")
+        ),
     ):
-        with pytest.raises(AppServerClientError, match="Active turn not found") as caught:
+        with pytest.raises(AppServerClientError, match=r"turn_mismatch|Turn does not belong") as caught:
             invoke()
-        assert caught.value.code == AppServerErrorCode.ACTIVE_TURN_NOT_FOUND
+        assert caught.value.code in {-32025, AppServerErrorCode.INVALID_PARAMS}
 
     with pytest.raises(AppServerClientError, match="Method not found") as caught:
         client._send_request("missing/method", {})
@@ -233,10 +238,12 @@ def test_client_resolves_approval_through_stable_request_method() -> None:
     calls: list[str] = []
     client = _approval_client(calls)
     client.initialize(ClientInfo(name="test-client"))
-    thread_id = str(client.start_thread(ThreadStartParams(agent_key="default"))["threadId"])
+    thread_id = str(client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))["threadId"])
     turn_id = str(
         client.start_turn(
             TurnStartParams(
+                input_id="turn_1",
+                expected_turn_id=None,
                 thread_id=thread_id,
                 input=[{"type": "text", "text": "run approval tool"}],
             )
@@ -287,6 +294,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "thread/start": "start_thread",
         "thread/resume": "resume_thread",
         "thread/read": "read_thread",
+        "thread/events/list": "list_events",
         "thread/model/select": "select_model",
         "thread/status": "thread_status",
         "thread/list": "list_threads",
@@ -302,7 +310,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "schema/export": "export_schema",
     }
 
-    assert len(CLIENT_METHOD_SPECS) == 19
+    assert len(CLIENT_METHOD_SPECS) == 20
     assert set(facade_methods) == set(CLIENT_METHOD_SPECS)
     assert all(callable(getattr(AppServerClient, method)) for method in facade_methods.values())
     assert callable(AppServerClient.send_response)

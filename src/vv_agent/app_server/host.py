@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from vv_agent.agent import Agent
 from vv_agent.app_server.outgoing import OutgoingRouter
@@ -19,6 +21,9 @@ from vv_agent.app_server.protocol import (
 )
 from vv_agent.approval import ApprovalDecision as RuntimeApprovalDecision
 from vv_agent.approval import ApprovalProvider, ApprovalRequest
+from vv_agent.config import ResolvedModelConfig
+from vv_agent.llm.base import LLMClient
+from vv_agent.model import resolve_model_selection
 from vv_agent.run_config import RunConfig
 
 
@@ -39,6 +44,12 @@ class RunConfigResolutionRequest:
 
 
 class AppServerHost(Protocol):
+    def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
+        raise NotImplementedError
+
+    def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
+        raise NotImplementedError
+
     def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
         raise NotImplementedError
 
@@ -61,6 +72,10 @@ class DefaultAppServerHost:
         self._run_config = run_config
         self._models = list(models or [])
 
+    def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
+        """Local, single-user host: all initialized connections are trusted."""
+        return True
+
     def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
         if self._agent is not None:
             return self._agent
@@ -73,6 +88,12 @@ class DefaultAppServerHost:
         if self._run_config is not None:
             return self._run_config
         return RunConfig(workspace=request.cwd, metadata={"agent_key": request.agent_key})
+
+    def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
+        provider = self._run_config.model_provider if self._run_config else None
+        if provider is None:
+            raise ValueError("ModelProvider is required for model selection")
+        return resolve_model_selection(provider, request)
 
     def list_models(self, request: ModelListRequest) -> ModelListResponse:
         del request
@@ -88,12 +109,14 @@ class AppServerApprovalProvider(ApprovalProvider):
         turn_id: str,
         router: OutgoingRouter,
         timeout_seconds: float | None,
+        has_durable_answer: Callable[[ApprovalRequest], bool],
     ) -> None:
         self._connection_id = connection_id
         self._thread_id = thread_id
         self._turn_id = turn_id
         self._router = router
         self._timeout_seconds = timeout_seconds
+        self._has_durable_answer = has_durable_answer
 
     def should_request(self, request: ApprovalRequest) -> bool:
         del request
@@ -117,17 +140,29 @@ class AppServerApprovalProvider(ApprovalProvider):
             request_id=RequestId(request.request_id),
         )
         try:
-            result = pending.result(timeout=request.metadata.get("timeout_seconds", self._timeout_seconds))
+            timeout = request.metadata.get("timeout_seconds", self._timeout_seconds)
+            deadline = time.monotonic() + timeout if timeout is not None else None
+            delay = 0.05
+            while True:
+                if self._has_durable_answer(request):
+                    self._router.cancel_server_request(pending.request_id)
+                    return None
+                remaining = max(0, deadline - time.monotonic()) if deadline is not None else delay
+                try:
+                    result = pending.result(timeout=min(delay, remaining))
+                    break
+                except TimeoutError:
+                    delay = min(1.0, delay * 2)
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise
         except TimeoutError:
             self._router.cancel_server_request(
                 pending.request_id,
                 AppServerError(AppServerErrorCode.INTERNAL_ERROR, "approval_timeout"),
             )
             return RuntimeApprovalDecision.timeout("Approval request timed out.")
-        except RuntimeError as exc:
-            if not self._router.is_registered(self._connection_id):
-                return None
-            return RuntimeApprovalDecision.timeout(str(exc) or "client_disconnected")
+        except RuntimeError:
+            return None
 
         return self._decision_from_payload(result or {}, pending.request_id.require_wire())
 

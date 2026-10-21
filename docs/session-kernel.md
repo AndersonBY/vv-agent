@@ -12,8 +12,8 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
 The package implements contract 27.0.0, pinned in `contract.lock.json`. Current
-versions: public API v11, inbox schema 3, record schema 1, RunEvent v6,
-model-call v2, task-token-usage v3, strict Message, App Server protocol v2 and
+versions: public API v12, inbox schema 3, record schema 1, RunEvent v6,
+model-call v2, task-token-usage v3, strict Message, App Server protocol v3 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
 ## Terms
@@ -403,11 +403,17 @@ processors cannot change results.
 
 The App Server keeps no thread ledger of its own. Its metadata is the closed
 `session_created.attributes.app_server` object (`agent_key`, `cwd`, `metadata`).
-It resumes active turns from records and the original approval owner, after
-any existing lease is released or expires. Child waits expose safe session,
+It resumes active turns from records after any existing lease is released or
+expires. Any authorized connection can control or approve the retained turn. Child waits expose safe session,
 turn and interaction identities, and responses go to the child's inbox. Timeline
-replay uses stable item IDs and `afterItemId`; notifications acknowledge the
-`app_server` cursor only after transport projection. Archive and close use
+replay uses bounded record cursors with event offsets. The `app_server` consumer
+copies events into the local handle queue and acknowledges that batch; a separate
+pump performs host callbacks and transport projection outside the store transaction.
+Live notifications are volatile. Each node separately tails lifecycle records with
+per-session backoff, releases positions on unsubscribe and recovers from read errors.
+Use thread/events/list for durable delivery after a disconnect. Embedded schedulers
+call AppServer.wake(thread_id) after commit; the built-in host also makes one
+automatic attempt at a blocked holder's lease expiry. Archive and close use
 stable control identities: equal bytes replay, different bytes conflict, closed
 turns never revive.
 

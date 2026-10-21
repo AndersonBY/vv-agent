@@ -100,7 +100,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |
 | --- | --- | --- |
-| Public API v11 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
+| Public API v12 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
 | Strict wire formats | `events.py`, `types.py`, `message_codec.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
 | Prompt and run definition | `runtime/compiler.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
 | Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
@@ -111,7 +111,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | Model selection | `session/kernel.py`, `session/runtime.py`, `session/app_server.py` | `tests/session/test_model_selection.py`, `test_app_server_model_selection.py` |
 | Provider usage | `session/kernel.py`, `session/providers.py` | `tests/session/test_provider_usage.py`, `tests/session/test_recovery_matrix.py` |
 | Session supervision and dispatch | `session/supervisor.py`, `session/children.py`, `session/kernel.py` | `tests/session/test_batch_children.py`, `test_supervisor.py`, `test_dispatch.py` |
-| App Server v2 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
+| App Server v3 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
 | Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
 
 The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the
@@ -128,7 +128,7 @@ preservation of a UTF-8 BOM and CRLF line endings.
   [upgrading.md](upgrading.md#session-data-and-upgrades) for what this means for
   stored data.
 - Results carry `session_id` and `turn_id`.
-- The App Server speaks protocol v2 and reports thread state with one
+- The App Server speaks protocol v3 and reports thread state with one
   `ThreadStatus` enum.
 - The session log is the source of truth for execution. Events, results, the
   App Server and tracing are projections built from it. JSONL event stores only
@@ -150,3 +150,17 @@ recorded in the log. App Server clients use `AppServerClient.select_model` with
 
 [session-model-selection.md](session-model-selection.md) describes the full
 rules.
+
+## App Server A1
+
+Contract 28 replaces the wire with v3: stable submission receipts, controls and
+approvals across connections, bounded record cursor replay and rich status.
+`SessionDriver.model_resolver` binds AppServerHost.resolve_model; its provider
+default is also used by CLI and interactive sessions. Read ranges use indexed
+projection dependencies. The SQLite and PostgreSQL DDL, record schema 1 and
+inbox schema 3 stay unchanged. This release is not a store boundary.
+Embedded hosts use AppServer.wake(thread_id) after commit. The built-in host
+retries blocked leases at expiry, deferring to renewed or replacement holders
+until their new expiry. Child delivery wakes the parent after commit. Node observers use independent
+per-session backoff without holding store locks across projection or transport I/O.
+The public API inventory records the wake entry point; Rust remains frozen.

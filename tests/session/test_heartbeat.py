@@ -82,6 +82,7 @@ def password_postgres_dsn(database):
         if not (privileged and privileged[0]):
             pytest.skip("test PostgreSQL role lacks CREATEROLE for a temporary password login")
         admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(sql.Identifier(role), sql.Literal(password)))
+        admin.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(role), sql.Identifier(admin.info.user)))
         try:
             admin.execute(sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(role)))
             dsn = make_conninfo(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 from vv_agent.session.records import (
@@ -215,8 +216,18 @@ def entry_keys(name, item):
         )
     if name == "app_server_protocol.json":
         request = item.get("request", {})
+        if not request and "rejected_request" in item:
+            request = json.loads(base64.b64decode(item["rejected_request"]["bytes_base64"], validate=True))
         keys = {"request=" + request["method"]} if request else set()
         if request:
+            from vv_agent.app_server.protocol.identity import client_id
+
+            if request["method"] == "thread/start":
+                value = request.get("params", {}).get("inputId")
+                try:
+                    client_id(value, "inputId")
+                except ValueError:
+                    keys.add("invalid_client_id=" + str(value))
             keys.add("lifecycle=" + item["connection_id"] + ":" + request["method"])
             if request["method"] == "thread/resume":
                 for response in item["responses"]:
@@ -228,7 +239,13 @@ def entry_keys(name, item):
                     )
         for response in item.get("responses", []):
             if "error" in response:
-                keys.add("error=" + str(response["error"]["code"]) + ":" + response["error"]["message"])
+                error = str(response["error"]["code"]) + ":" + response["error"]["message"]
+                keys.add("error=" + error)
+                keys.add("request_outcome=" + request["method"] + ":" + error)
+            elif request and "result" in response:
+                result = response["result"]
+                if isinstance(result, dict) and "replayed" in result:
+                    keys.add("replayed=" + request["method"] + ":" + str(result["replayed"]))
         for notice in item.get("notifications", []):
             keys.add("notification=" + notice["method"])
         return keys | shape_keys({k: v for k, v in item.items() if k not in {"bytes_base64", "sha256", "record_id"}})
@@ -331,7 +348,16 @@ def curate(output, streams, semantics, independent, facts):
     vectors = select(
         "session_codec_vectors.json",
         all_vectors,
-        required=tuple(i for i, vector in enumerate(all_vectors) if vector["wire"].get("record_id") in receipts),
+        required=tuple(
+            i
+            for i, vector in enumerate(all_vectors)
+            if vector["wire"].get("record_id") in receipts
+            or (
+                vector["session_id"] == "c1c/approval_deny"
+                and vector["type"] == "inbox"
+                and vector["wire"]["kind"] == "approval_answer"
+            )
+        ),
     )
     values["session_codec_vectors.json"]["vectors"] = vectors
     for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):

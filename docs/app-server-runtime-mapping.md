@@ -10,10 +10,10 @@ providers.
 | Thread | Session record metadata and the projected `ThreadStatus` |
 | Turn | The retained kernel turn identity, plus a process-local `RunHandle` |
 | Item | A typed event derived from records and projected to a protocol item |
-| Approval | The parked operation keeps the original owner and deadline; the answer is an authenticated inbox input |
+| Approval | The parked operation keeps the request binding and deadline; any authorized connection may answer |
 | Model selection | A session-scoped `model_selection` inbox input |
 | Live delta | A volatile `RunEvent` observation routed to subscribed transports |
-| Read and resume | Retained records and a stable item cursor; resuming execution drives the original turn |
+| Read and resume | Retained records and bounded (seq, event offset, recordDigest) cursors; resume drives the retained turn |
 
 `SessionRunEventStore` supplies durable event history. `JsonlRunEventStore` is
 an optional sink. `thread_store` and `thread_state` hold projected values and
@@ -24,3 +24,9 @@ enter the inbox.
 unchanged as `InboxItem.input_id`, with `kind="model_selection"`,
 `payload={"selection": ...}`, and null turn and generation. It uses the same
 kernel and store and keeps no separate configuration ledger.
+
+Submission IDs are stored unchanged in the existing inbox. Thread creation uses
+the host's stable ID as session identity and the atomic creation receipt.
+turn/action and interrupt submit existing durable controls. App Server keeps no
+execution owner connection and no second ledger. SessionDriver binds the host
+model resolver; CLI and interactive paths resolve through their ModelProvider.

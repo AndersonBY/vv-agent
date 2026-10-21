@@ -8,6 +8,7 @@ import pytest
 from vv_agent.app_server import AppServer
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.app_server.run_adapter import TurnResumeError
+from vv_agent.session.app_server import SubmissionConflict
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 
@@ -34,13 +35,14 @@ def test_turn_action_rejects_identity_over_utf8_limit_without_store_access(
     }
     kwargs[field] = value
     with pytest.raises(TurnResumeError, match="UTF-8 byte limit"):
-        adapter.controller_action(**kwargs)
+        adapter.controller_action(connection_id="conn_1", **kwargs)
 
 
 def test_turn_action_rejects_message_unknown_fields_before_durable_lookup(surface) -> None:
     adapter = AppServer(store=surface.store).run_adapter
     with pytest.raises(TurnResumeError, match="respond message"):
         adapter.controller_action(
+            connection_id="conn_1",
             thread_id="thread-1",
             turn_id="turn-1",
             action_id="action-1",
@@ -65,7 +67,9 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
             host=DefaultAppServerHost(agent=agent, run_config=RunConfig(model_provider=provider, workspace=tmp_path)),
             store=kernel.store,
         )
-        thread = server.store.create_thread(agent_key="default")
+        thread = server.store.read_thread(
+            server.store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]
+        ).thread
         handle = kernel.start(
             thread.thread_id,
             agent,
@@ -76,24 +80,44 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
         cast(Any, server.store).runtimes[thread.thread_id] = handle.runtime
         adapter = server.run_adapter
         tid = handle.run_id
-        adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "suspend"})
+        adapter.controller_action(
+            connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "suspend"}
+        )
+        server.run_adapter.join()
         pending = kernel.store.peek_inbox(thread.thread_id)
         before = kernel.store.read(thread.thread_id).head_seq
-        adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "suspend"})
+        adapter.controller_action(
+            connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "suspend"}
+        )
         assert kernel.store.peek_inbox(thread.thread_id) == pending
-        with pytest.raises(TurnResumeError, match="different bytes"):
-            adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "cancel"})
-        assert kernel.store.peek_inbox(thread.thread_id) == pending and kernel.store.read(thread.thread_id).head_seq == before
+        with pytest.raises(SubmissionConflict, match="submission_conflict"):
+            adapter.controller_action(
+                connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="suspend", action={"kind": "cancel"}
+            )
+        server.run_adapter.join()
+        assert kernel.store.read(thread.thread_id).head_seq == before
+        assert kernel.store.peek_inbox(thread.thread_id) == pending
         drive(kernel.store, thread.thread_id, runtime=handle.runtime, _one_turn=True)
-        assert adapter.public_thread_status(thread.thread_id)["waitReason"] == "suspended"
+        assert adapter.public_thread_status(thread.thread_id)["status"] == "suspended"
         assert server.store.read_thread(thread.thread_id).turns[0].result["waitReason"] == "suspended"
         reply = {"kind": "respond", "message": {"role": "user", "content": "value"}}
-        adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="reply", action=reply)
+        adapter.controller_action(
+            connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="reply", action=reply
+        )
         drive(kernel.store, thread.thread_id, runtime=handle.runtime, _one_turn=True)
         assert kernel.store.read_state(thread.thread_id)[0].phase == "suspended"
-        adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="resume", action={"kind": "resume"})
-        adapter.controller_action(thread_id=thread.thread_id, turn_id=tid, action_id="terminal", action={"kind": terminal_action})
-        drive(kernel.store, thread.thread_id, runtime=handle.runtime, _one_turn=True)
+        with kernel.store.atomic():
+            adapter.controller_action(
+                connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="resume", action={"kind": "resume"}
+            )
+            adapter.controller_action(
+                connection_id="conn_1",
+                thread_id=thread.thread_id,
+                turn_id=tid,
+                action_id="terminal",
+                action={"kind": terminal_action},
+            )
+        server.run_adapter.join()
         state, records, _ = kernel.store.read_state(thread.thread_id)
         assert state.turns[tid].ended
         assert [r.record._payload["status"] for r in records if r.record.kind == "turn_ended"] == [
@@ -102,4 +126,5 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
         assert sum(r.record.kind == "op_started" and r.record._payload["mode"] == "sync" for r in records) == 1
         assert {r.record._payload["input"]["kind"] for r in records if r.record.kind == "input_applied"} == {"user", "control"}
     finally:
+        server.run_adapter.join()
         kernel.close()

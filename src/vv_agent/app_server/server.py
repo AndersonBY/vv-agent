@@ -37,6 +37,10 @@ class AppServer:
         )
         self.router.register_transport(self.transport)
 
+    def wake(self, thread_id: str) -> None:
+        """Try pending work after an inbox commit; trusted host/scheduler entry point."""
+        self.run_adapter.wake(thread_id)
+
     def run_forever(self) -> None:
         connection_id = self.transport.connection_id
         try:

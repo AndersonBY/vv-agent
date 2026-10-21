@@ -96,7 +96,11 @@ def test_resume_during_active_turn_subscribes_before_later_notifications(surface
     _send(
         first_transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "first"}}}
     )
-    _send(first_transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        first_transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
     _send(
         first_transport,
         server,
@@ -104,7 +108,12 @@ def test_resume_during_active_turn_subscribes_before_later_notifications(surface
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
         },
     )
     assert first_step_ready.wait(timeout=2)
@@ -149,11 +158,10 @@ def test_resume_during_active_turn_subscribes_before_later_notifications(surface
     assert len(surface.handles) == handles
 
 
-def test_resume_subscription_and_reopen_are_installed_before_snapshot() -> None:
+def test_resume_subscription_is_installed_before_snapshot() -> None:
     state_manager = ThreadStateManager()
     state_manager.subscribe("thread_1", "old_connection")
     state_manager.unsubscribe("thread_1", "old_connection")
-    assert state_manager.close_if_idle("thread_1") is True
 
     def snapshot() -> str:
         assert state_manager.subscribers("thread_1") == {"new_connection"}
@@ -163,11 +171,10 @@ def test_resume_subscription_and_reopen_are_installed_before_snapshot() -> None:
     assert state_manager.subscribe_and_snapshot("thread_1", "new_connection", snapshot) == "snapshot"
 
 
-def test_resume_snapshot_runtime_error_rolls_back_new_subscription_and_closed_state() -> None:
+def test_resume_snapshot_runtime_error_rolls_back_new_subscription() -> None:
     state_manager = ThreadStateManager()
     state_manager.subscribe("thread_1", "old_connection")
     state_manager.unsubscribe("thread_1", "old_connection")
-    assert state_manager.close_if_idle("thread_1") is True
 
     def fail_snapshot() -> None:
         raise RuntimeError("snapshot failed")
@@ -176,7 +183,7 @@ def test_resume_snapshot_runtime_error_rolls_back_new_subscription_and_closed_st
         state_manager.subscribe_and_snapshot("thread_1", "new_connection", fail_snapshot)
 
     assert state_manager.subscribers("thread_1") == set()
-    assert state_manager.load("thread_1").status == "closed"
+    assert state_manager.load("thread_1").status == "idle"
 
 
 def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTransport]:
@@ -196,10 +203,17 @@ def _finish_response(message: str) -> LLMResponse:
 
 def _initialize_and_start_thread(server: AppServer, transport: ChannelTransport) -> None:
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
 
 
 def _start_turn_and_drain(server: AppServer, transport: ChannelTransport, *, text: str) -> list[dict[str, object]]:
+    state = server.kernel.store.read_state("thread_1")[0]
+    expected = next(reversed(state.turns), None)
+    identity = "turn_1" if expected is None else "turn_2"
     _send(
         transport,
         server,
@@ -207,7 +221,12 @@ def _start_turn_and_drain(server: AppServer, transport: ChannelTransport, *, tex
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": text}]},
+            "params": {
+                "inputId": identity,
+                "expectedTurnId": expected,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": text}],
+            },
         },
     )
     return _drain_until(transport, lambda message: message.get("method") == "turn/completed")

@@ -16,7 +16,9 @@ def test_thread_mutations_are_serialized_by_processor() -> None:
     transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
 
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}}
+    )
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
     processor.process_message(
@@ -40,7 +42,9 @@ def test_processor_returns_overloaded_when_serialization_queue_is_full() -> None
     transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
 
-    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}}
+    )
     response = transport.receive_outbound(timeout=1)
 
     assert response["id"] == 1

@@ -4,12 +4,12 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vv_agent.session.app_server import _KernelRunAdapter
+    from vv_agent.session.app_server import _KernelRunAdapter, _KernelThreadStore
 
 from vv_agent.app_server.host import AppServerApprovalProvider, AppServerHost
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.thread_state import ThreadStateManager
-from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnRecord
+from vv_agent.app_server.thread_store import ThreadRecord, TurnRecord
 from vv_agent.run_handle import RunHandle
 
 
@@ -30,7 +30,7 @@ class _RunAdapterFormatting:
         self,
         *,
         host: AppServerHost,
-        store: ThreadStore,
+        store: _KernelThreadStore,
         state_manager: ThreadStateManager,
         router: OutgoingRouter,
     ) -> None:
@@ -90,7 +90,7 @@ class _RunAdapterFormatting:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)
 
-    def _with_app_server_controls(self, run_config, *, connection_id: str, thread_id: str, turn_id: str):
+    def _with_app_server_controls(self, run_config, *, connection_id: str | None, thread_id: str, turn_id: str):
         return replace(
             run_config,
             metadata={
@@ -100,14 +100,30 @@ class _RunAdapterFormatting:
                 "session_id": thread_id,
             },
             approval_provider=run_config.approval_provider
-            or AppServerApprovalProvider(
-                connection_id=connection_id,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                router=self._router,
-                timeout_seconds=run_config.approval_timeout_seconds,
+            or (
+                AppServerApprovalProvider(
+                    connection_id=connection_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    router=self._router,
+                    timeout_seconds=run_config.approval_timeout_seconds,
+                    has_durable_answer=lambda request: self._has_durable_answer(thread_id, request.request_id),
+                )
+                if connection_id is not None
+                else None
             ),
         )
+
+    def _has_durable_answer(self, thread_id: str, request_id: str) -> bool:
+        kernel = self._store.kernel
+        for sid, _, wait in kernel.waits(thread_id):
+            if wait.get("request_id") == request_id and any(
+                item.item.kind == "control"
+                or (item.item.kind == "approval_answer" and item.item.payload["request_id"] == request_id)
+                for item in kernel.store.peek_inbox(sid)
+            ):
+                return True
+        return any(item.item.kind == "control" for item in kernel.store.peek_inbox(thread_id))
 
     def _notify_subscribers(
         self,

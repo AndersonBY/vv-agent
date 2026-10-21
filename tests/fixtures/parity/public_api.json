@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v11",
+  "contract": "vv-agent-public-api-v12",
   "domains": [
     {
       "capabilities": [
@@ -1168,7 +1168,7 @@
       "id": "exports"
     }
   ],
-  "schema_version": 11,
+  "schema_version": 12,
   "surfaces": [
     {
       "id": "agent",
@@ -2885,6 +2885,29 @@
               ]
             }
           }
+        },
+        {
+          "id": "wake",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "wake",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "thread_id",
+                  "required": true
+                }
+              ]
+            }
+          }
         }
       ],
       "python_target": "vv_agent.AppServer"
@@ -3249,6 +3272,29 @@
                 {
                   "kind": "positional_or_keyword",
                   "name": "info",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "thread/events/list",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "list_events",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
                   "required": true
                 }
               ]
@@ -5896,6 +5942,68 @@
       "behavior": "host preparation deferred without a failed turn",
       "id": "session_RuntimeNotReady",
       "python_target": "vv_agent.session.runtime.RuntimeNotReady"
+    },
+    {
+      "id": "app_server_host",
+      "members": [
+        {
+          "id": "resolve_model",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "resolve_model",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "request",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "authorize",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "authorize",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "connection_id",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "method",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "python_target": "vv_agent.AppServerHost"
     }
   ],
   "verification": {

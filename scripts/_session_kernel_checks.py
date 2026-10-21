@@ -85,7 +85,7 @@ def validate_outputs(values, base: Path, keep, replacements):
         {
             "run_definition.json": 6,
             "result_public.json": 7,
-            "app_server_observable.json": 4,
+            "app_server_observable.json": 5,
             "runner_terminal.json": "v2",
             "runner_trace_spans.json": "v2",
             "run_handle.json": "v2",
@@ -97,7 +97,7 @@ def validate_outputs(values, base: Path, keep, replacements):
         for name, value in baseline.items()
         if isinstance(value.get("schema_version"), str) and name != "run_definition.json"
     )
-    current.add("vv-agent-public-api-v11")
+    current.add("vv-agent-public-api-v12")
     current.add(baseline["memory_local.json"]["microcompact"]["schema_version"])
     for schema in schemas.values():
         current.update(
@@ -182,7 +182,7 @@ def validate_outputs(values, base: Path, keep, replacements):
                             current
                             if isinstance(item, str)
                             else {
-                                11
+                                12
                                 if name == "public_api.json" and not path
                                 else INPUT_SCHEMA["properties"]["schema_version"]["const"]
                                 if "input_id" in node and "available_ms" in node

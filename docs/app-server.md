@@ -1,388 +1,199 @@
 # App Server
 
-The App Server is the preferred integration boundary for long-running hosts
-such as desktop apps, background services, IDE adapters, and workers. It wraps
-the normal `Agent`, `Runner`, `RunConfig`, `RunHandle`, and `RunEvent`
-contracts behind a bidirectional JSON-RPC protocol.
-
-Use the Python SDK directly for in-process runs. Use the App Server when the
-host needs a separate process, stable Thread / Turn / Item lifecycle events,
-approval callbacks, replay, and generated schema files.
-
-Threads, turns and items are projections of the session store's records. A
-thread is a session. User replies and approval answers go into the session's
-inbox and resume the same turn. A closed thread rejects new execution and
-resume. If the server cannot get the session lease after its retries, the
-client gets a typed JSON-RPC error or a failure notification. See
-[runtime mapping](app-server-runtime-mapping.md) for how each App Server object
-maps to the kernel.
+The App Server exposes sessions over JSON-RPC 2.0. A thread is a session, a
+turn is a retained kernel turn, and an item is a projection of a durable event.
+The log and inbox own execution. Connections subscribe to it; they do not own it.
+The host supplies authentication, authorize(connection_id, method, params), and
+wake scheduling. A refusal returns -32027 permission_denied before dispatch.
+DefaultAppServerHost is local and single-user: it allows every connection.
 
 ## Startup
 
-The first transport is JSONL over stdio:
-
 ```bash
 uv run vv-agent app-server --listen stdio \
-  --settings local_settings.py \
-  --backend moonshot \
-  --model kimi-k3 \
-  --timeout-seconds 90
+  --settings settings.json --backend moonshot --model kimi-k3
 ```
 
-The listen transport, settings file, backend, and model must each be provided
-exactly once, in any order; `--key=value` syntax is also accepted. They are
-resolved before the stdio loop starts, so a missing file, backend, model,
-endpoint, or key fails at process startup instead of failing the first turn.
-`--timeout-seconds` is optional and defaults to 90 seconds. Production turns use
-a 30-second approval timeout.
+Settings, backend, model and transport must each be provided once. They resolve
+before the stdio loop starts. The model timeout defaults to 90 seconds and
+approval timeout to 30 seconds. Live provider tests are opt-in.
 
-Each inbound and outbound line is one JSON object. Every request, response,
-notification, and error uses the standard `"jsonrpc": "2.0"` field. Request
-`id` values may be strings or integers.
+Every line is one JSON object. Requests and notifications carry
+`jsonrpc: "2.0"`. Initialize each new connection before other requests:
 
 ```jsonl
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":[]}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"host"}}}
 {"jsonrpc":"2.0","method":"initialized"}
 ```
 
-The server responds to `initialize` with the user agent, protocol version, and
-capabilities:
+The response reports `protocolVersion: "v3"`. Schema exports describe the
+current closed wire shapes. Regenerate client bindings when upgrading.
+Malformed JSON returns `-32700`; an invalid message returns `-32600`.
 
-```json
-{"jsonrpc":"2.0","id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v2","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true,"schemaExport":true,"approvalResolve":true}}}
-```
+## Stable submissions
 
-Requests other than `initialize` are rejected until the connection has been
-initialized. After receiving the initialize response, clients send
-`{"jsonrpc":"2.0","method":"initialized"}` as the client-side handshake
-confirmation. The initialize response marks the connection ready, so runtime
-notifications may follow that response; the confirmation notification is
-idempotent.
-
-Malformed JSONL input returns error code `-32700` with a null id, and the stdio
-server continues reading later lines. A valid JSON value that is not a request,
-notification, response, or error object returns `-32600`.
-
-## Threads
-
-A thread is the App Server conversation and replay scope. `thread/start`
-creates a thread, resolves the host agent key later during `turn/start`, and
-subscribes the current connection to live notifications for that thread.
+Choose a globally unique `inputId` for thread creation. The same value becomes
+the `threadId`; creation does not list existing sessions. Keep IDs in the host's
+business record before submitting, so retries reuse them. Client inputId and
+actionId values contain 1..128 ASCII letters, digits, `.`, `_`, `:` or `-`.
+Slashes and whitespace are rejected, keeping internal session and inbox IDs private.
 
 ```jsonl
-{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{"agentKey":"default","cwd":"./workspace","metadata":{"profile":"assistant"}}}
+{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{"inputId":"thread_1","agentKey":"default","cwd":"./workspace"}}
+{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"threadId":"thread_1","inputId":"prompt_1","expectedTurnId":null,"input":[{"type":"text","text":"Inspect the workspace."}]}}
 ```
 
-The server emits `thread/started` and returns the same thread identity:
+`thread/start` returns threadId, agentKey, cwd, current status, accepted and
+replayed. `turn/start`, `turn/steer` and `turn/followUp` return threadId, turnId,
+inputId, inputSeq, accepted and replayed. Accepted means the input was committed,
+not that execution finished. The stable input ID is stored unchanged in the
+inbox. JSON-RPC request IDs and connection IDs never enter its bytes.
 
-```json
-{"method":"thread/started","params":{"threadId":"thread_1","agentKey":"default","cwd":"./workspace","status":"idle"}}
-{"id":2,"result":{"threadId":"thread_1","agentKey":"default","cwd":"./workspace","status":"idle"}}
-```
-
-Use `thread/read` to read a persisted snapshot without subscribing another
-connection:
+Repeat the same ID and body to receive the original admission with
+`replayed: true`, even after the turn finishes. A different body returns
+`-32024 submission_conflict`. For turn/start, expectedTurnId is null for the
+first turn and otherwise the last admitted turn. It also rejects an active turn.
+Steer requires the active turn; follow-up requires the last admitted turn and
+queues the next turn. Stale expected turns return `-32025 turn_mismatch`.
 
 ```jsonl
-{"jsonrpc":"2.0","id":3,"method":"thread/read","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":4,"method":"turn/steer","params":{"threadId":"thread_1","inputId":"context_1","expectedTurnId":"thread_1/turn/prompt_1","input":[{"type":"text","text":"Check tests too."}]}}
+{"jsonrpc":"2.0","id":5,"method":"turn/followUp","params":{"threadId":"thread_1","inputId":"next_1","expectedTurnId":"thread_1/turn/prompt_1","input":[{"type":"text","text":"Write the release note."}]}}
 ```
 
-Use `thread/resume` after reconnecting. It subscribes the new connection and
-returns the same snapshot shape:
+## Control and resume
+
+Any authorized connection, including one on another API node, can submit
+`turn/action`. The closed actions are cancel, suspend, resume, abort, and respond.
+Respond takes `message: {role: "user", content: "..."}`. The server derives a
+stable inbox command from threadId, turnId and actionId. Retried actions do not
+repeat side effects. Replies keep their retained interaction target.
 
 ```jsonl
-{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":6,"method":"turn/action","params":{"threadId":"thread_1","turnId":"thread_1/turn/prompt_1","actionId":"pause_1","action":{"kind":"suspend"}}}
+{"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"threadId":"thread_1","expectedTurnId":"thread_1/turn/prompt_1","actionId":"cancel_1"}}
+{"jsonrpc":"2.0","id":8,"method":"turn/resume","params":{"threadId":"thread_1","turnId":"thread_1/turn/prompt_1"}}
 ```
 
-Snapshots contain a `thread` object, ordered `turns`, and replayable `items`.
+Interrupt submits durable cancel, including when that API node has no handle.
+Its result is the turn/action receipt. Resume checks durable execution state,
+reuses an available local handle and respects the session lease. It never needs
+the original connection. A terminal turn returns its retained result.
 
-## Thread lifecycle
+`thread/read` returns a full snapshot with thread, turns and items.
+`thread/resume` returns the same snapshot and subscribes by default; use
+`subscribe: false` for a read-only snapshot. Neither accepts afterItemId.
+`thread/unsubscribe` only removes a subscription and returns only threadId and subscribed=false;
+leaving a connection never closes a durable session. Closed sessions reject
+execution; archived sessions return `-32021`. `thread/list` and `thread/archive`
+retain their normal lifecycle roles.
 
-Use `thread/list` to list active threads. Archived threads are hidden by
-default; pass `includeArchived: true` to include them.
+## Bounded replay
 
-```jsonl
-{"jsonrpc":"2.0","id":10,"method":"thread/list","params":{"includeArchived":true}}
-```
+Use `thread/events/list` for a long thread. Supply threadId and a limit from 1
+to 256, plus optional afterCursor and throughCursor. The result contains events,
+nextCursor, throughCursor and more. Each event entry contains its cursor and
+the canonical RunEvent wire.
 
-Use `thread/archive` to mark a thread archived. The server rejects future
-`turn/start` requests for archived threads with error code `-32021`.
+A cursor has threadId, a durable record seq, an event offset within that record,
+and recordDigest (SHA-256 of the canonical record bytes). Offset counts events already consumed; zero means before the
+first event. This handles several events from one record without losing any.
+The returned throughCursor fixes the head captured by the first page. Reuse it
+on later pages for a stable replay window.
 
-```jsonl
-{"jsonrpc":"2.0","id":11,"method":"thread/archive","params":{"threadId":"thread_1"}}
-```
+Each page reads at most limit records and emits at most limit events, plus
+indexed plan dependencies and cursor checks. Records that emit no events may
+produce an empty page with more=true; continue from nextCursor. Unknown,
+cross-thread, stale and malformed cursors return `-32026 invalid_cursor`.
 
-Use `thread/unsubscribe` to remove the current connection from a thread
-subscription. If the loaded thread has no subscribers and no active turn, the
-server emits `thread/closed`.
+Persist the last cursor and deduplicate by event_id after reconnect. Live deltas
+are volatile and have no durable cursor. Reconcile their text or arguments with
+the final durable event/item using callId or toolCallId. Item IDs identify events,
+not a mutable UI entity: `item_{event_id}`.
 
-```jsonl
-{"jsonrpc":"2.0","id":12,"method":"thread/unsubscribe","params":{"threadId":"thread_1"}}
-```
+## Execution status
 
-`thread/status/changed` reports lifecycle changes: `running`, `idle`,
-`archived`, and `closed`. Treat these notifications as the source of truth for
-the state of a loaded thread.
+`thread/status` and `thread/status/changed` contain exactly:
 
-## Turns
+- threadId, status and kernel phase;
+- waitKind: provider, child, user, approval, retry, or null;
+- nextDriveAt: Unix milliseconds, or null when unknown;
+- pendingInteraction: sessionId, turnId and optional prompt/interactionId/requestId, or null;
+- unconfirmedCount: operations in the current turn (the latest turn when terminal) with an attempt that has no definitive completion;
+- projectionWatermark: the last record sequence used for this projection.
 
-A turn is one `Runner.start()` execution inside a thread. Start a turn by
-passing input items:
+Statuses distinguish provider_running, child_running, user_wait, approval_wait,
+retry_backoff, suspended and terminal. Idle means no turn yet; running means
+work is admitted or ready. Archived and closed retain their lifecycle meanings.
+A child can expose a pending interaction while the parent is child_running.
+No provider handles, job secrets, arguments or digests appear in status.
 
-```jsonl
-{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"thread_1","input":[{"type":"text","text":"Inspect this workspace and summarize the findings."}]}}
-```
-
-The server responds when the turn is accepted, then streams lifecycle
-notifications:
-
-```json
-{"id":5,"result":{"threadId":"thread_1","turnId":"turn_1","status":"running"}}
-{"method":"turn/started","params":{"threadId":"thread_1","turnId":"turn_1"}}
-```
-
-Use `turn/steer` to queue additional user context for the active turn. Use
-`turn/followUp` to queue the next turn after the current one completes. Use
-`turn/interrupt` to cancel the active handle. `expectedTurnId` protects hosts
-from steering or interrupting a stale turn.
-
-```jsonl
-{"jsonrpc":"2.0","id":6,"method":"turn/steer","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Also check the tests."}]}}
-{"jsonrpc":"2.0","id":7,"method":"turn/followUp","params":{"threadId":"thread_1","expectedTurnId":"turn_1","input":[{"type":"text","text":"Write a release note."}]}}
-{"jsonrpc":"2.0","id":8,"method":"turn/interrupt","params":{"threadId":"thread_1","expectedTurnId":"turn_1","reason":"User cancelled from UI"}}
-```
+A turn/completed notification can describe an interrupted execution attempt.
+Only a retained turn_ended record makes a turn terminal. Each node tails durable
+turn records for lifecycle notifications, including follow-ups. A non-holder
+attempts the lease once and schedules a retry at the holder's lease expiry,
+including when a foreground child is blocked. Renewal, record progress or a
+new holder epoch keep recovery pending; a live lease postpones the check until
+its new expiry without another acquire. This also recovers when a replacement
+holder dies. An acquisition that still fails after expiry emits
+error/warning(code=lease_retry_exhausted) and stops that retry.
+Child result delivery wakes its parent after commit. Embedded hosts can call
+AppServer.wake(thread_id) after an inbox commit. Wake and retries use a currently
+registered subscriber, or execute without subscribing if none exists. Approvals
+then remain durably parked for approval/resolve from any authorized connection,
+subject to the retained deadline. Notification
+observers never acquire execution leases. Read status or replay
+records to recover after missing a notification.
+Each subscribed session backs off independently from 50 ms to 1 s, including
+after transient store failures. The last local unsubscribe drops its position;
+the next subscription starts at the head or the active turn's start. Use
+thread/events/list for older history.
 
 ## Models
 
-Use `model/list` to show the models a client can pick:
+`model/list` lists the host's configured models. `thread/model/select` takes
+threadId, stable inputId and selection (or null to restore the frozen default).
+See [session model selection](session-model-selection.md) for application
+boundaries, retained retry plans and billing.
 
-```jsonl
-{"jsonrpc":"2.0","id":9,"method":"model/list","params":{}}
-```
+`AppServerHost.resolve_model(request)` returns a client and resolved config
+without submitting a provider call. DefaultAppServerHost resolves the exact provider model ID
+through its configured ModelProvider and accepts only an empty route. A settings
+key is not a model ID: `{"a": {"id": "a-2024"}}` is selected as `a-2024`.
+The configured backend is filtered first. Selection and model/list use the resolved
+model_id, including a first endpoint's model_id override. Zero or multiple matches
+within that effective backend are logged as model_selection_unresolvable.
+The frozen model with an empty route reuses its client and config before any
+host resolver. Custom hosts enforce model routing permissions in this hook.
+CLI and interactive use the same default provider resolver through SessionDriver;
+only App Server binds AppServerHost.resolve_model. Bill from each retained
+model call's actual model/backend and call ID.
 
-The default host returns the models passed to `DefaultAppServerHost`. Product
-hosts implement `AppServerHost.list_models()` from their normal model settings.
+## Approval
 
-### Model selection
+The durable approval wait retains request, operation, attempt, scope, request
+digest and absolute deadline. The server emits approval/requested before the
+approval/request callback. Any authorized connection can use approval/resolve
+with threadId, turnId, requestId and decision (allow, allow_session, deny or
+timeout), plus optional reason and metadata. The server binds the answer to the
+retained wait; callers cannot supply operation or digest fields. A disconnected
+subscriber does not change the deadline or remove the wait.
 
-Use `thread/model/select` to change the model for later cycles of a thread.
-The params are exactly `threadId`, `inputId` and `selection`. `selection` is
-`{model, model_settings?, route}`, or `null` to go back to the turn's frozen
-model:
+## Items, notifications and exports
 
-```jsonl
-{"jsonrpc":"2.0","id":13,"method":"thread/model/select","params":{"threadId":"thread_1","inputId":"select_1","selection":{"model":"kimi-k3","model_settings":{"reasoning":{"effort":"high"}},"route":{}}}}
-{"jsonrpc":"2.0","id":13,"result":{"threadId":"thread_1","inputId":"select_1","accepted":true}}
-```
+Render userMessage, agentMessage, modelCall, toolCall, approval and error items
+from item/started and item/completed. Deltas append volatile progress. Planning a
+tool call alone emits no item. Tool completion carries executionStarted,
+directive, errorCode and durationMs. Reasoning is private telemetry.
 
-The server stores the selection as a `model_selection` input in the thread's
-inbox. `accepted: true` means the input was stored; the session validates and
-applies it at the next cycle boundary, and rejects it there if the thread is
-closed or the model cannot be resolved. Sending the same `inputId` with the
-same selection again is a replay. The same `inputId` with a different
-selection returns `-32602`; an unknown thread returns `-32020`.
-
-The built-in App Server runtime binds no `model_resolver`, and `AppServerHost`
-has no hook for one. A thread therefore accepts only a selection of the model
-ID it already runs, with an empty `route`; that is enough to change settings
-such as reasoning effort, as in the example. Any other model is rejected with
-`model_selection_unresolvable`. See
-[session model selection](session-model-selection.md) for when a selection
-takes effect and how it is billed.
-
-## Items
-
-Items are UI-ready projections of typed `RunEvent` objects. Hosts should render
-timelines from `item/*` notifications and from replayed snapshot `items`. App
-Server has no untyped runtime event input.
-
-Current item types include:
-
-| Item type | Meaning |
-| --- | --- |
-| `userMessage` | The accepted user input for the run. |
-| `agentMessage` | Assistant text, either as deltas or completed text. |
-| `toolCall` | Tool call started and completed states. |
-| `approval` | Tool approval request and resolution lifecycle. |
-| `error` | Run failure projected into the timeline. |
-
-Important notification methods:
-
-| Method | Use |
-| --- | --- |
-| `item/started` | Create or mark an item as started. |
-| `item/agentMessage/delta` | Append assistant text delta to the active agent message. |
-| `item/toolCall/delta` | Report streamed tool-call argument progress. |
-| `item/completed` | Mark an item completed and merge its final payload. |
-| `approval/requested` | Show a pending tool approval in the client. |
-| `approval/resolved` | Reconcile the final approval decision. |
-| `error/warning` | Surface a non-protocol runtime or event-stream warning. |
-| `thread/status/changed` | Update loaded-thread status such as running, idle, archived, or closed. |
-| `thread/archived` | Mark a thread archived in the client. |
-| `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
-| `turn/completed` | Mark the turn terminal and persist final output or error. |
-
-A planned tool call is not an item. A `tool_call_planned` event produces no
-item or notification, because planning is not execution and should not be
-shown as such.
-
-A `tool_call_started` event becomes a `toolCall` `item/started` plus its
-argument delta. When the tool declares typed metadata, the item payload also
-contains `toolMetadata` with `sideEffect`, `idempotency`, `terminal`,
-`capabilityTags`, and `costDimensions`.
-
-A `tool_call_completed` event becomes `item/completed`. Its tool-call payload
-contains `directive`, `errorCode`, `executionStarted`, and `durationMs`, plus
-`toolMetadata` when declared. When policy or approval stops a call before it
-runs, the client sees only a failed or in-progress completed item; the server
-never invents a started item for it. A completed event missing any required
-field is rejected before projection.
-
-When a run budget is configured, `turn/completed` may also contain
-`budgetUsage` and `budgetExhaustion`. A budget stop projects as `status:
-"failed"` with `completionReason: "budget_exhausted"`; it is never reported as
-a successful task completion.
-
-Every item carries `itemId`, `threadId`, `turnId`, `type`, `status`, `payload`,
-`createdAt`, and `updatedAt`.
-
-## Notification opt-out
-
-`initialize.params.capabilities.optOutNotificationMethods` accepts exact
-notification method names. The server suppresses only exact matches for that
-connection.
-
-```jsonl
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host"},"capabilities":{"optOutNotificationMethods":["item/agentMessage/delta"]}}}
-```
-
-## Approval requests
-
-Tools that require approval are routed as server-to-client requests. The App
-Server sends `approval/request` with a request `id` plus approval params:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "approval_1",
-  "method": "approval/request",
-  "params": {
-    "requestId": "approval_1",
-    "threadId": "thread_1",
-    "turnId": "turn_1",
-    "toolCallId": "call_1",
-    "toolName": "write_file",
-    "preview": "Approval required for tool write_file.",
-    "arguments": {
-      "path": "notes.md"
-    }
-  }
-}
-```
-
-The client must answer with a normal response whose `id` matches the server
-request id:
-
-```jsonl
-{"jsonrpc":"2.0","id":"approval_1","result":{"decision":"allow_session","message":"Approved for this tool during the session"}}
-```
-
-Clients that prefer request-only control can resolve the same pending callback
-with `approval/resolve`. Its `threadId`, `turnId`, and `requestId` must match the
-active approval:
-
-```jsonl
-{"jsonrpc":"2.0","id":8,"method":"approval/resolve","params":{"threadId":"thread_1","turnId":"turn_1","requestId":"approval_1","decision":"allow_session"}}
-{"jsonrpc":"2.0","id":8,"result":{}}
-```
-
-The server also emits `approval/requested` and `approval/resolved` notifications
-so timeline state does not depend on observing the bidirectional request alone.
-
-Normal response envelopes and `approval/resolve` both support the canonical
-decisions `allow`, `allow_session`, `deny`, and `timeout`. The
-`approval/resolved` notification preserves the selected decision;
-`allow_session` is not collapsed to `allow`. Disconnects and expired requests
-resolve as timed-out approval decisions in the runtime.
-
-## Overload handling
-
-When the server cannot accept more work, it returns JSON-RPC error code
-`-32001` with message `Server overloaded; retry later.` Clients should retry
-with bounded backoff. Stdio clients must keep reading stdout; if a bounded
-transport cannot write outbound messages, the App Server disconnects that
-transport and clears pending server-to-client requests.
-
-## Schema export
-
-Generate JSON Schema files for client bindings and drift checks:
+Notification opt-out accepts exact method names in initialize's
+capabilities.optOutNotificationMethods. It affects only that connection.
 
 ```bash
-uv run vv-agent app-server schema --out ./app-server-schema
-uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
+uv run python -m vv_agent app-server schema --out /tmp/vv-agent-schema
+uv run python -m vv_agent app-server generate-ts --out /tmp/vv-agent-schema/typescript
 ```
 
-The command writes:
-
-- `json/ClientRequest.json`
-- `json/ServerNotification.json`
-- `json/ServerRequest.json`
-- lifecycle schemas `json/AppItem.json`, `json/AppThread.json`, and
-  `json/AppTurn.json`
-- response schemas including `json/ThreadStartResponse.json` and
-  `json/TurnStartResponse.json`
-- `json/vv_agent_app_server.schemas.json`
-
-Request params such as `turn/start` are represented inside
-`json/ClientRequest.json`; the command does not write a separate
-`json/TurnStartParams.json`. Every method variant uses a method discriminator
-and typed params. The TypeScript files are self-contained and do not rely on
-generated imports.
-
-Initialized clients can also fetch the same JSON Schema and TypeScript bundles
-without filesystem access:
-
-```jsonl
-{"jsonrpc":"2.0","id":9,"method":"schema/export","params":{}}
-```
-
-The debug client prints a complete JSONL flow for a single message:
-
-```bash
-uv run vv-agent debug app-server send-message "hello"
-```
-
-## Host provider boundary
-
-`vv-agent` owns the protocol, transport, thread state, replay store, approval
-callback bridge, and `Runner.start()` adapter. Product hosts own product
-identity, storage, permissions, tools, UI, billing, and deployment.
-
-Implement `AppServerHost` to keep that boundary explicit:
-
-```python
-from vv_agent import Agent, RunConfig
-from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, RunConfigResolutionRequest
-from vv_agent.app_server.protocol import ModelListRequest, ModelListResponse
-
-class ProductHost(AppServerHost):
-    def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
-        return Agent(
-            name=request.agent_key,
-            instructions="Resolve product instructions here.",
-            tools=[],
-        )
-
-    def build_run_config(self, request: RunConfigResolutionRequest) -> RunConfig:
-        return RunConfig(
-            workspace=request.cwd,
-            metadata={"thread_id": request.thread_id, **(request.metadata or {})},
-        )
-
-    def list_models(self, request: ModelListRequest) -> ModelListResponse:
-        return ModelListResponse(models=[])
-```
-
-The host should map product profiles, workspaces, model settings, memory
-providers, context providers, approval UI, and product tools into `Agent` and
-`RunConfig`. The App Server should not import product modules.
+schema/export returns the same self-contained JSON Schema and TypeScript
+bundles. Tests in test_app_server_distributed.py, test_app_server_model_selection.py
+and the App Server producer suites pin these behaviors.

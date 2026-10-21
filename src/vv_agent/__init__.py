@@ -9,6 +9,7 @@ from vv_agent.app_server import (
     MessageProcessor,
     OutgoingRouter,
     RunConfigResolutionRequest,
+    ThreadEventsListParams,
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest
 from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskHandle, BackgroundAgentTaskSnapshot
@@ -302,6 +303,7 @@ __all__ = [
     "SubRunStartedEvent",
     "TaskTokenUsage",
     "TaskTokenUsageTotals",
+    "ThreadEventsListParams",
     "TokenUsage",
     "Tool",
     "ToolArtifactRef",

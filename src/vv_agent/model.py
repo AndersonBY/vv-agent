@@ -261,3 +261,27 @@ def resolve_run_model(*, agent: Agent, run_config: RunConfig) -> tuple[LLMClient
         raise ValueError("Agent.model, RunConfig.model, or ModelProvider.default_model_ref() is required.")
     resolved = provider.resolve(ModelRef.coerce(model))
     return provider.client(resolved), resolved
+
+
+def resolve_model_selection(provider: ModelProvider, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
+    """Resolve an exact provider model ID without submitting a model call."""
+    if request.get("route", {}):
+        raise ValueError("The default model resolver requires an empty route")
+    if isinstance(provider, VvLlmModelProvider):
+        settings = load_llm_settings_from_file(provider.settings_file)
+        matches = []
+        for backend, config in settings["backends"].items():
+            if provider.default_backend is not None and backend != provider.default_backend:
+                continue
+            for key in config.get("models", {}):
+                resolved = resolve_model_endpoint(settings, backend=backend, model=key)
+                if resolved.model_id == request["model"]:
+                    matches.append(resolved)
+        if len(matches) != 1:
+            raise ModelError("Model ID must identify exactly one configured model")
+        resolved = matches[0]
+    else:
+        resolved = provider.resolve(ModelRef.named(request["model"]))
+    if resolved.model_id != request["model"]:
+        raise ValueError("Resolver changed the requested model")
+    return provider.client(resolved), resolved

@@ -137,7 +137,7 @@ RETIRED_KINDS = frozenset(
 )
 REASONS = {
     "after_cycle_hook.json": "section 4 F2d-1 hooks / F2d-2 boundary wire: committed boundary decisions",
-    "app_server_observable.json": "section 5 and Q5-Q8: one status projection, retained owner, v2 wire",
+    "app_server_observable.json": "App Server v3: durable submissions, shared control, bounded replay and execution status",
     "approval_tool_policy.json": "section 4 F2d-1 approval deadline and Q7: absolute deadline and retained owner",
     "bounded_tool_result.json": "section 4 execution authority: record receipts replace old carriers; strict recovery retained",
     "budget_events.jsonl": "section 4 F2d-2 tool budget/internal tokens: record-derived accounting",
@@ -696,8 +696,48 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
-        d.update(contract="vv-agent-public-api-v11", schema_version=11)
+        d.update(contract="vv-agent-public-api-v12", schema_version=12)
+        d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "app_server_host"]
+        d["surfaces"].append(
+            {
+                "id": "app_server_host",
+                "python_target": "vv_agent.AppServerHost",
+                "members": [
+                    {
+                        "id": "resolve_model",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "resolve_model",
+                            "signature": signature(resolve("vv_agent.AppServerHost").resolve_model),
+                        },
+                    },
+                    {
+                        "id": "authorize",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "authorize",
+                            "signature": signature(resolve("vv_agent.AppServerHost").authorize),
+                        },
+                    },
+                ],
+            }
+        )
         for surface in d["surfaces"]:
+            if surface["id"] == "app_server":
+                surface["members"] = [m for m in surface["members"] if m["id"] != "wake"]
+                surface["members"].append(
+                    {
+                        "id": "wake",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "wake",
+                            "signature": signature(resolve(surface["python_target"]).wake),
+                        },
+                    }
+                )
             if surface["id"] == "session_InboxItem":
                 surface["behavior"] = (
                     "strict inbox schema 3 with durable session-scoped model_selection; "
@@ -731,6 +771,18 @@ class Author:
             if surface["id"] == "app_server_client":
                 operations = surface["protocol_operations"]
                 operations[:] = [m for m in operations if m["id"] != "thread/model/select"]
+                operations[:] = [m for m in operations if m["id"] != "thread/events/list"]
+                operations.append(
+                    {
+                        "id": "thread/events/list",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "list_events",
+                            "signature": signature(resolve(surface["python_target"]).list_events),
+                        },
+                    }
+                )
                 operations.append(
                     {
                         "id": "thread/model/select",
@@ -955,13 +1007,15 @@ class Author:
         def named(method):
             return [m for m in notices if m.get("method") == method]
 
-        d["version"] = 4
+        d["version"] = 5
         d["protocolVersion"] = app["protocol_version"]
         d["restart"]["staleRunningThreadStatus"] = "running"
-        d["approval"]["disconnectDecision"] = "retained_owner_until_absolute_deadline"
-        d["approval"]["owner"] = app["facts"]["owner"]
+        d["approval"]["disconnectDecision"] = "retained_deadline_any_authenticated_connection"
+        d["approval"].pop("owner", None)
+        d["approval"].pop("observerCannotApprove", None)
+        d["approval"]["authority"] = app["facts"]["approval_authority"]
         d["approval"]["deadline_ms"] = app["facts"]["deadline_ms"]
-        d["approval"]["observerCannotApprove"] = app["facts"]["observer_cannot_approve"]
+        d["approval"]["observerCanApprove"] = app["facts"]["observer_can_approve"]
         d["terminal"]["tokenUsageProjection"].update(
             sourceSchemaVersion="vv-agent.task-token-usage.v3",
             value=next(m["params"]["tokenUsage"] for m in named("turn/completed") if "tokenUsage" in m["params"]),
@@ -974,7 +1028,10 @@ class Author:
         terminal = json.loads(app["schemas"]["jsonSchema"]["ServerNotification"])["$defs"]["TurnCompletedParams"]
         assert terminal["additionalProperties"] is False
         d["terminal"]["optionalFieldsOmittedWhenAbsent"] = sorted(set(terminal["properties"]) - set(terminal["required"]))
-        d["terminal"]["threadStatusValues"] = ["idle", "running", "interrupted", "archived", "closed"]
+        from vv_agent.session.app_server import ThreadStatus
+
+        d["terminal"]["threadStatusValues"] = [v.value for v in ThreadStatus]
+        d["terminal"]["threadStatusAfterTurn"] = "terminal"
         d["liveReplay"]["item"] = next(m["params"] for m in named("item/completed"))
         started = [m for m in named("item/started") if m["params"]["type"] == "toolCall"]
         completed = [m for m in named("item/completed") if m["params"]["type"] == "toolCall"]
@@ -1001,6 +1058,11 @@ class Author:
                 row["rejected_request"] = self.facts(raw)
                 row.pop("request", None)
         action = d["actionAdmission"]
+        action["actionId"]["same_action_id_different_payload"] = (
+            "same derived command_id; reject submission_conflict without a write"
+        )
+        action["commandIdCases"][1]["outcome"] = "submission_conflict"
+        action["strictCases"]["action_id_replay_different_payload"] = "submission_conflict"
         for key in (
             "frameworkReceipt",
             "serverDerivedCommand",
@@ -1015,9 +1077,11 @@ class Author:
         action["askUserSameTurnContinuation"] = True
         action.pop("askUserTerminalSemanticsUnchanged", None)
         action["hostPromptProjection"] = {
-            "status": "interrupted",
-            "fields": ["threadId", "status", "waitReason", "prompt", "interactionId", "sessionId", "childTurnId", "interactions"],
-            "readSurface": [r["result"] for r in responses if r["result"].get("status") == "interrupted"],
+            "status": "child_running",
+            "fields": list(
+                json.loads(app["schemas"]["jsonSchema"]["ServerNotification"])["$defs"]["ThreadStatusChangedParams"]["properties"]
+            ),
+            "readSurface": [r["result"] for r in responses if r["result"].get("status") == "child_running"],
         }
         for vector in action["commandIdCases"]:
             self.action_id(vector)

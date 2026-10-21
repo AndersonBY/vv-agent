@@ -77,6 +77,34 @@ old-version session.
 
 ## Version notes
 
+### 0.25.0
+
+Contract 28.0.0 changes the App Server wire to v3. This is **not a store
+boundary**: record schema 1, inbox schema 3 and the SQL schemas are unchanged.
+Existing 0.24.0 sessions remain readable. Regenerate App Server bindings and
+update callers to supply stable inputIds and expected turns. Replace afterItemId
+with thread/events/list cursors and replace the old status fields with the rich
+status object. Any authorized connection may control or approve a retained
+turn. Unsubscribing no longer closes the session. Custom AppServerHost
+implementations resolve selected model IDs without submitting provider work;
+the frozen empty-route model reuses its original client. Distributed hosts must
+implement authorize(connection_id, method, params); the local default allows all.
+Client inputId/actionId values contain 1..128 ASCII letters, digits, dot,
+underscore, colon or hyphen. Update callers of thread/unsubscribe and turn/action
+to their current responses; turn/interrupt no longer accepts reason.
+Custom stores also implement the App Server read and admission-lock methods
+listed in [host integration](app-server-host-integration.md#custom-stores).
+
+Controller inputs now use controller/ plus the command digest. **actionIds
+submitted before this upgrade are not deduplicated afterwards.** Drain those
+actions on 0.24.0, or do not retry them across the upgrade. There is no legacy
+digest lookup, even though the stored sessions remain readable.
+
+`session.kernel.drive()` now returns bool: true means it acquired a lease
+(including a deferred runtime); false means another holder prevented acquisition.
+It does not report whether a turn completed. `AppServer.wake(thread_id)` is the
+public embedded-host wake entry point and returns None.
+
 ### 0.24.0
 
 Contract 27.0.0, public API v11, inbox schema 3.

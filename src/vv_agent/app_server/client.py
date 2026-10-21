@@ -11,6 +11,7 @@ from vv_agent.app_server.protocol import (
     InitializeParams,
     ModelListRequest,
     ThreadArchiveParams,
+    ThreadEventsListParams,
     ThreadListParams,
     ThreadModelSelectParams,
     ThreadReadParams,
@@ -80,6 +81,9 @@ class AppServerClient:
 
     def read_thread(self, params: ThreadReadParams) -> dict[str, Any]:
         return self._send_request("thread/read", params.to_dict())
+
+    def list_events(self, params: ThreadEventsListParams) -> dict[str, Any]:
+        return self._send_request("thread/events/list", params.to_dict())
 
     def thread_status(self, params: ThreadStatusParams) -> dict[str, Any]:
         return self._send_request("thread/status", params.to_dict())
@@ -224,9 +228,11 @@ def run_debug_message(message: str) -> list[dict[str, object]]:
         connection_id="debug",
     )
     client.initialize(ClientInfo(name="debug"))
-    thread = client.start_thread(ThreadStartParams(agent_key="default"))
+    thread = client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))
     client.start_turn(
         TurnStartParams(
+            input_id="turn_1",
+            expected_turn_id=None,
             thread_id=str(thread["threadId"]),
             input=[{"type": "text", "text": message}],
         )

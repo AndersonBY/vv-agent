@@ -103,13 +103,18 @@ def _run_parent(entrypoint, child, config, parent_llm):
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "thread/start",
-                "params": {"agentKey": "default", "cwd": str(config.workspace)},
+                "params": {"inputId": "thread_1", "agentKey": "default", "cwd": str(config.workspace)},
             },
             {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "turn/start",
-                "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+                "params": {
+                    "threadId": "thread_1",
+                    "inputId": "turn_1",
+                    "expectedTurnId": None,
+                    "input": [{"type": "text", "text": "go"}],
+                },
             },
         ]:
             transport.send_inbound(payload)

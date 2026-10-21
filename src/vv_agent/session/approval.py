@@ -68,7 +68,11 @@ def resolve_approval(driver: _Driver, attempt: Attempt) -> bool:
                 if request.request_id in broker._decisions:
                     decision = broker.wait(request.request_id, timeout=0)
     if decision is None:
-        return False
+        # A transport can return after another node committed the bound answer.
+        return any(
+            item.item.kind == "approval_answer" and item.item.payload["request_id"] == handle["request_id"]
+            for item in driver.store.peek_inbox(driver.sid)
+        )
     payload = {
         "operation_id": plan.operation_id,
         "attempt": plan.attempt,

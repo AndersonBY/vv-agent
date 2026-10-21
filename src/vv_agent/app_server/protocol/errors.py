@@ -15,6 +15,10 @@ class AppServerErrorCode:
     ALREADY_INITIALIZED: ClassVar[int] = -32011
     THREAD_NOT_FOUND: ClassVar[int] = -32020
     THREAD_ARCHIVED: ClassVar[int] = -32021
+    SUBMISSION_CONFLICT: ClassVar[int] = -32024
+    SUBMISSION_TURN_MISMATCH: ClassVar[int] = -32025
+    INVALID_CURSOR: ClassVar[int] = -32026
+    PERMISSION_DENIED: ClassVar[int] = -32027
     ACTIVE_TURN_NOT_FOUND: ClassVar[int] = -32030
     TURN_ID_MISMATCH: ClassVar[int] = -32031
 

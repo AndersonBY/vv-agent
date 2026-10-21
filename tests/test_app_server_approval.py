@@ -110,8 +110,7 @@ def test_app_server_approval_disconnect_resolves_at_retained_deadline(surface) -
     wait = next(iter(state.waits.values()))
     deadline_ms = wait["deadline_ms"]
     assert isinstance(deadline_ms, int)
-    assert server.store.read_thread("thread_1").thread.status == "interrupted"
-    assert cast(Any, server.run_adapter)._owner("thread_1", state.active_turn_id) == "conn_1"
+    assert server.store.read_thread("thread_1").thread.status == "approval_wait"
     surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms - 1)
     cast(Any, server.run_adapter).recover("observer", "thread_1")
     cast(Any, server.run_adapter).join()
@@ -131,7 +130,7 @@ def test_app_server_approval_disconnect_resolves_at_retained_deadline(surface) -
     assert snapshot.turns[-1].status == "completed"
 
 
-def test_app_server_approval_is_owned_by_turn_starter_and_not_reassigned_on_disconnect(surface) -> None:
+def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(surface) -> None:
     calls: list[str] = []
     server, owner = _server_with_approval_tool(calls, approval_timeout_seconds=1)
     observer = ChannelTransport(connection_id="conn_2")
@@ -153,7 +152,12 @@ def test_app_server_approval_is_owned_by_turn_starter_and_not_reassigned_on_disc
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": thread_id, "input": [{"type": "text", "text": "run tool"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "run tool"}],
+            },
         },
     )
     approval_request = _drain_until(owner, lambda message: message.get("method") == "approval/request")
@@ -176,7 +180,7 @@ def test_app_server_approval_is_owned_by_turn_starter_and_not_reassigned_on_disc
     assert calls == []
 
 
-def test_app_server_follow_up_preserves_original_approval_owner() -> None:
+def test_app_server_follow_up_routes_callback_to_driving_subscriber() -> None:
     calls: list[str] = []
     server, owner = _server_with_approval_tool(calls)
     observer = ChannelTransport(connection_id="conn_2")
@@ -198,7 +202,12 @@ def test_app_server_follow_up_preserves_original_approval_owner() -> None:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": thread_id, "input": [{"type": "text", "text": "first"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "first"}],
+            },
         },
     )
     first_approval = _drain_until(owner, lambda message: message.get("method") == "approval/request")
@@ -211,6 +220,7 @@ def test_app_server_follow_up_preserves_original_approval_owner() -> None:
             "id": 12,
             "method": "turn/followUp",
             "params": {
+                "inputId": "follow_1",
                 "threadId": thread_id,
                 "expectedTurnId": first_params["turnId"],
                 "input": [{"type": "text", "text": "second"}],
@@ -251,9 +261,9 @@ def test_app_server_approval_interrupt_releases_pending_request_without_waiting_
             "id": 3,
             "method": "turn/interrupt",
             "params": {
+                "actionId": "interrupt_1",
                 "threadId": approval_params["threadId"],
                 "expectedTurnId": approval_params["turnId"],
-                "reason": "turn interrupted",
             },
         },
     )
@@ -267,11 +277,13 @@ def test_app_server_approval_interrupt_releases_pending_request_without_waiting_
         == {
             "threadId": approval_params["threadId"],
             "turnId": approval_params["turnId"],
-            "cancelled": True,
+            "actionId": "interrupt_1",
+            "accepted": True,
+            "status": "running",
         }
         for message in outbound
     )
-    assert _approval_resolutions(outbound) == ["timeout"]
+    assert _approval_resolutions(outbound) == []
     assert _completed_status(outbound) == "failed"
 
 
@@ -314,7 +326,7 @@ def test_app_server_approval_allow_session_can_be_resolved_by_client_request() -
         if message.get("method") == "approval/resolved" and isinstance(message.get("params"), dict)
     )
     assert resolved["reason"] == "approved by owner"
-    assert resolved["metadata"] == {"ticket": 7, "server_request_id": approval_params["requestId"]}
+    assert resolved["metadata"] == {"ticket": 7}
 
 
 def test_server_request_response_is_bound_to_connection_thread_and_turn() -> None:
@@ -398,7 +410,12 @@ def _start_and_wait_for_approval(server: AppServer, transport: ChannelTransport)
             "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
-            "params": {"threadId": thread_id, "input": [{"type": "text", "text": "run tool"}]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "run tool"}],
+            },
         },
     )
     requested = None
@@ -437,7 +454,7 @@ def _start_thread(server: AppServer, transport: ChannelTransport, *, request_id:
     _send(
         transport,
         server,
-        {"jsonrpc": "2.0", "id": request_id, "method": "thread/start", "params": {"agentKey": "default"}},
+        {"jsonrpc": "2.0", "id": request_id, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
     )
     response = _drain_until(transport, lambda message: message.get("id") == request_id)
     result = cast(dict[str, object], response["result"])

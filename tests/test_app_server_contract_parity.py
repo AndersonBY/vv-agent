@@ -136,7 +136,7 @@ def test_terminal_token_usage_projection_matches_shared_fixture_and_store():
         assert server.store.read_thread("thread_1").turns[0].result["tokenUsage"] == expected
 
 
-class _ContractHost:
+class _ContractHost(DefaultAppServerHost):
     def __init__(self) -> None:
         self.model_requests: list[ModelListRequest] = []
         self.agent_requests: list[AgentResolutionRequest] = []
@@ -149,6 +149,13 @@ class _ContractHost:
     def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
         self.agent_requests.append(request)
         return Agent(name=request.agent_key, instructions="Test agent.")
+
+    def resolve_model(self, request):
+        from vv_agent.model import resolve_model_selection
+
+        provider = self.base_config.model_provider
+        assert provider is not None
+        return resolve_model_selection(provider, request)
 
     def build_run_config(self, request: RunConfigResolutionRequest) -> RunConfig:
         self.config_requests.append(request)
@@ -237,10 +244,13 @@ def test_shared_fixture_enforces_json_rpc_version_and_request_ids() -> None:
 def test_shared_fixture_requires_object_input_items(surface) -> None:
     contract = _observable_contract()["input"]
     valid = contract["valid"]
-    assert TurnStartParams(thread_id="thread_contract", input=valid).to_dict()["input"] == valid
+    assert (
+        TurnStartParams(input_id="turn_1", expected_turn_id=None, thread_id="thread_contract", input=valid).to_dict()["input"]
+        == valid
+    )
 
     processor, transport, store, _state = _initialized_processor(store=surface.store)
-    thread = store.create_thread(agent_key="default")
+    thread = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]).thread
     for request_id, invalid_item in enumerate(contract["invalid"], start=1):
         processor.process_message(
             "conn_1",
@@ -248,7 +258,7 @@ def test_shared_fixture_requires_object_input_items(surface) -> None:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": "turn/start",
-                "params": {"threadId": thread.thread_id, "input": [invalid_item]},
+                "params": {"inputId": "turn_1", "expectedTurnId": None, "threadId": thread.thread_id, "input": [invalid_item]},
             },
         )
         assert _response(transport, request_id)["error"]["code"] == AppServerErrorCode.INVALID_PARAMS
@@ -270,7 +280,7 @@ def test_shared_fixture_thread_start_order_and_nullability(surface) -> None:
     processor, transport, _store, _state = _initialized_processor(store=surface.store)
     processor.process_message(
         "conn_1",
-        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {}},
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1"}},
     )
     response = transport.receive_outbound(timeout=1)
     notification = transport.receive_outbound(timeout=1)
@@ -285,7 +295,7 @@ def test_shared_fixture_turn_start_and_terminal_order(surface) -> None:
     provider = ScriptedModelProvider.new("test", "m", [LLMResponse("done")])
     host = DefaultAppServerHost(agent=Agent("default", "Work.", model="m"), run_config=RunConfig(model_provider=provider))
     processor, transport, store, state = _initialized_processor(host=host, store=surface.store)
-    thread = store.create_thread(agent_key="default")
+    thread = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]).thread
     state.subscribe(thread.thread_id, "conn_1")
     processor.process_message(
         "conn_1",
@@ -293,7 +303,12 @@ def test_shared_fixture_turn_start_and_terminal_order(surface) -> None:
             "jsonrpc": "2.0",
             "id": 1,
             "method": "turn/start",
-            "params": {"threadId": thread.thread_id, "input": contract["input"]["valid"]},
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": thread.thread_id,
+                "input": contract["input"]["valid"],
+            },
         },
     )
     started_messages = [transport.receive_outbound(timeout=2) for _ in range(3)]
@@ -327,7 +342,7 @@ def test_wait_user_turn_projects_as_interrupted_without_failure_error():
         state, rows, _ = server.kernel.store.read_state("thread_1")
         assert state.active_turn_id == "thread_1/turn/turn_1"
         assert not any(row.record.kind == "turn_ended" for row in rows)
-        assert server.store.read_thread("thread_1").thread.status == "interrupted"
+        assert server.store.read_thread("thread_1").thread.status == "user_wait"
 
 
 def test_cancelled_turn_projects_as_failed_with_error():
@@ -366,7 +381,7 @@ def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path):
             before = server.store.read_thread("thread_1")
             reopened = ThreadStore(store).read_thread("thread_1")
             assert reopened == before
-            assert reopened.thread.status == "interrupted"
+            assert reopened.thread.status == "user_wait"
             assert reopened.thread.cwd is None
             assert reopened.thread.archived_at is None
             assert reopened.turns[0].completed_at is None
@@ -416,7 +431,7 @@ def test_shared_fixture_duplicate_id_disconnect_cleanup_and_case_sensitivity() -
     assert router.pending_server_request_count() == 0
     with pytest.raises(RuntimeError, match="client_disconnected"):
         pending.result(timeout=0)
-    assert contract["approval"]["disconnectDecision"] == "retained_owner_until_absolute_deadline"
+    assert contract["approval"]["disconnectDecision"] == "retained_deadline_any_authenticated_connection"
 
     for decision in contract["approval"]["decisions"]:
         assert ApprovalDecision.from_wire(decision).value == decision
@@ -464,10 +479,10 @@ def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surfa
 
 def test_thread_resume_read_and_list_options_are_applied() -> None:
     processor, transport, store, state = _initialized_processor()
-    active_1 = store.create_thread(agent_key="a")
-    archived_1 = store.create_thread(agent_key="b")
-    active_2 = store.create_thread(agent_key="c")
-    archived_2 = store.create_thread(agent_key="d")
+    active_1 = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="a")["threadId"]).thread
+    archived_1 = store.read_thread(store.create_thread_receipt(input_id="thread_2", agent_key="b")["threadId"]).thread
+    active_2 = store.read_thread(store.create_thread_receipt(input_id="thread_3", agent_key="c")["threadId"]).thread
+    archived_2 = store.read_thread(store.create_thread_receipt(input_id="thread_4", agent_key="d")["threadId"]).thread
     store.archive_thread(archived_1.thread_id)
     store.archive_thread(archived_2.thread_id)
     store.kernel.start(
@@ -486,10 +501,10 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
             "jsonrpc": "2.0",
             "id": 1,
             "method": "thread/read",
-            "params": {"threadId": active_1.thread_id, "afterItemId": items[0].item_id},
+            "params": {"threadId": active_1.thread_id},
         },
     )
-    assert [item["itemId"] for item in _response(transport, 1)["result"]["items"]] == [item.item_id for item in items[1:]]
+    assert [item["itemId"] for item in _response(transport, 1)["result"]["items"]] == [item.item_id for item in items]
 
     processor.process_message(
         "conn_1",
@@ -516,7 +531,11 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
 def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config():
     host = _ContractHost()
     processor, transport, store, state = _initialized_processor(host=host)
-    thread = store.create_thread(agent_key="default", metadata={"thread": "base", "shared": "thread"})
+    thread = store.read_thread(
+        store.create_thread_receipt(input_id="thread_1", agent_key="default", metadata={"thread": "base", "shared": "thread"})[
+            "threadId"
+        ]
+    ).thread
     state.subscribe(thread.thread_id, "conn_1")
     try:
         for index, metadata in enumerate(({"shared": "turn", "turnOnly": 1}, {"second": 2}), 1):
@@ -526,7 +545,13 @@ def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config():
                     "jsonrpc": "2.0",
                     "id": index,
                     "method": "turn/start",
-                    "params": {"threadId": thread.thread_id, "input": [{"type": "text", "text": "go"}], "metadata": metadata},
+                    "params": {
+                        "inputId": f"turn_{index}",
+                        "expectedTurnId": None if index == 1 else "thread_1/turn/turn_1",
+                        "threadId": thread.thread_id,
+                        "input": [{"type": "text", "text": "go"}],
+                        "metadata": metadata,
+                    },
                 },
             )
             _response(transport, index)
@@ -546,11 +571,16 @@ def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config():
 
 def test_active_turn_and_missing_required_params_are_rejected() -> None:
     processor, transport, store, state = _initialized_processor()
-    thread = store.create_thread(agent_key="default")
+    thread = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="default")["threadId"]).thread
     state.set_active_turn(thread_id=thread.thread_id, turn_id="turn_active", handle=object())
     processor.process_message(
         "conn_1",
-        {"jsonrpc": "2.0", "id": 1, "method": "turn/start", "params": {"threadId": thread.thread_id}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "turn/start",
+            "params": {"inputId": "turn_1", "expectedTurnId": None, "threadId": thread.thread_id},
+        },
     )
     assert _response(transport, 1)["error"]["code"] == AppServerErrorCode.INVALID_PARAMS
 
@@ -585,14 +615,15 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
         "provider": {"type": "string"},
     }
     assert definitions["ThreadResumeParams"]["properties"]["subscribe"] == {"type": "boolean"}
-    assert definitions["ThreadReadParams"]["properties"]["afterItemId"] == {"type": "string"}
+    assert set(definitions["ThreadReadParams"]["properties"]) == {"threadId"}
+    assert definitions["ThreadEventsListParams"]["required"] == ["threadId", "limit"]
     assert set(definitions["ThreadListParams"]["properties"]) == {
         "includeArchived",
         "archived",
         "offset",
         "limit",
     }
-    assert definitions["TurnStartParams"]["required"] == ["threadId"]
+    assert definitions["TurnStartParams"]["required"] == ["threadId", "inputId", "expectedTurnId", "input"]
     assert definitions["TurnResumeParams"]["required"] == durable_resume["requestFields"]
     assert set(definitions["TurnResumeParams"]["properties"]) == set(durable_resume["requestFields"])
     assert set(definitions["TurnResumeResponse"]["properties"]) == set(durable_resume["responseFields"])
@@ -600,7 +631,7 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
     assert "InterruptionSummary" not in definitions
     assert definitions["ModelSummary"]["required"] == ["id", "supportsTools"]
     assert "params" not in variants["model/list"]["required"]
-    assert "params" not in variants["thread/start"]["required"]
+    assert "params" in variants["thread/start"]["required"]
     assert "params" not in variants["thread/list"]["required"]
     assert "params" not in variants["schema/export"]["required"]
     assert "params" in variants["thread/read"]["required"]
@@ -608,7 +639,8 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
 
     typescript = typescript_schema_bundle()["ClientRequest.ts"]
     assert "provider?: string" in typescript
-    assert "afterItemId?: string" in typescript
+    assert "afterItemId" not in typescript
+    assert "afterCursor?: EventCursor" in typescript
     assert "supportsTools: boolean" in typescript
     assert "export interface TurnResumeParams" in typescript
     assert "export interface TurnResumeResponse" in typescript
@@ -647,9 +679,9 @@ def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None):
         )
         _response(transport, 0)
         server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
-        for _ in range(thread_number - 1):
-            server.store.create_thread(agent_key="default")
-        server.processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+        server.processor.process_message(
+            "conn_1", {"params": {"inputId": f"thread_{thread_number}"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"}
+        )
         thread = _response(transport, 1)["result"]["threadId"]
         transport.receive_outbound(timeout=1)
         server.processor.process_message(
@@ -658,7 +690,12 @@ def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None):
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "turn/start",
-                "params": {"threadId": thread, "input": [{"type": "text", "text": "go"}]},
+                "params": {
+                    "inputId": "turn_1",
+                    "expectedTurnId": None,
+                    "threadId": thread,
+                    "input": [{"type": "text", "text": "go"}],
+                },
             },
         )
         _response(transport, 2)
