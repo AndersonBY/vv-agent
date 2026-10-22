@@ -478,7 +478,8 @@ def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surfa
 
 
 def test_thread_resume_read_and_list_options_are_applied() -> None:
-    processor, transport, store, state = _initialized_processor()
+    config = RunConfig(model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")]))
+    processor, transport, store, state = _initialized_processor(host=DefaultAppServerHost(run_config=config))
     active_1 = store.read_thread(store.create_thread_receipt(input_id="thread_1", agent_key="a")["threadId"]).thread
     archived_1 = store.read_thread(store.create_thread_receipt(input_id="thread_2", agent_key="b")["threadId"]).thread
     active_2 = store.read_thread(store.create_thread_receipt(input_id="thread_3", agent_key="c")["threadId"]).thread
@@ -488,7 +489,7 @@ def test_thread_resume_read_and_list_options_are_applied() -> None:
     store.kernel.start(
         active_1.thread_id,
         Agent("fixture", "Answer."),
-        RunConfig(model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])),
+        config,
         {"text": "go", "app_server": {"owner": "conn_1", "input": [], "metadata": {}}},
         input_id="initial",
     ).result()

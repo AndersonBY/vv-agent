@@ -27,7 +27,7 @@ def record_output(server, monkeypatch):
     return messages
 
 
-def test_frozen_runtime_bypasses_unimplemented_custom_host_resolver(tmp_path, monkeypatch):
+def test_default_runtime_uses_custom_host_resolver(tmp_path, monkeypatch):
     import json
 
     from vv_agent.model import ModelRef, VvLlmModelProvider
@@ -47,7 +47,15 @@ def test_frozen_runtime_bypasses_unimplemented_custom_host_resolver(tmp_path, mo
         VvLlmModelProvider, "client", lambda *args: ScriptedModelProvider.new("test", "a-2024", [LLMResponse("done")]).llm
     )
 
+    resolved_requests = []
+
     class Host(AppServerHost):
+        def resolve_model(self, request):
+            resolved_requests.append(request)
+            assert request["model"] == "a-2024" and request["route"] == {}
+            resolved = provider.resolve(ModelRef.backend("test", "a"))
+            return provider.client(resolved), resolved
+
         def authorize(self, connection_id, method, params):
             return True
 
@@ -67,6 +75,7 @@ def test_frozen_runtime_bypasses_unimplemented_custom_host_resolver(tmp_path, mo
         request(server, 2, "turn/start", submission())
         server.run_adapter.join()
         assert server.store.read_thread("thread").turns[0].result["finalOutput"] == "done"
+        assert len(resolved_requests) == 2
     finally:
         server.kernel.close()
 

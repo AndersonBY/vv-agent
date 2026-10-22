@@ -288,19 +288,12 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt.unknown_consumed = True
     order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
     if order is not None:
-        # Output repair is an independently frozen host callback.
-        binding = (
-            turn.start._payload["definition"].get("model_binding", {})
-            if p["purpose"] == "output_repair"
-            else p["request"].get("metadata", {}).get("vv_session", {}).get("model_binding", {})
-        )
         require(
             op.kind == "model"
             and isinstance(order, list)
             and bool(order)
             and all(isinstance(e, str) and bool(e) for e in order)
-            and len(set(order)) == len(order)
-            and set(order) == set(binding.get("endpoints", [])),
+            and len(set(order)) == len(order),
             "invalid frozen endpoint order",
         )
     op.attempts[number] = Attempt(record, prepared=previous.prepared if number > 1 else None)

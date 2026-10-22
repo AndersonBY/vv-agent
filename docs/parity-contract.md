@@ -133,7 +133,7 @@ preservation of a UTF-8 BOM and CRLF line endings.
 - The session log is the source of truth for execution. Events, results, the
   App Server and tracing are projections built from it. JSONL event stores only
   receive copies.
-- Recovery within the same turn reuses the prompt, model, limits and usage that
+- Recovery within the same turn reuses the prompt, logical model, limits and usage that
   were frozen when the turn started.
 - Durable stores are opt-in through the session API.
 - Inbox schema 3 requires provider usage that the provider has authenticated.
@@ -144,7 +144,7 @@ Contract 27 adds session model selection. A host pushes
 `InboxItem(kind="model_selection", payload={"selection": ...})` with
 `SessionTx.push`. The kernel passes the retained request to
 `Runtime.model_resolver`, which returns `(LLMClient, ResolvedModelConfig)`.
-`Runtime.resolve_model` then checks the result against the model binding
+`Runtime.resolve_model` then checks the logical model identity against the binding
 recorded in the log. App Server clients use `AppServerClient.select_model` with
 `ThreadModelSelectParams`, which sends `thread/model/select`.
 
@@ -164,3 +164,11 @@ retries blocked leases at expiry, deferring to renewed or replacement holders
 until their new expiry. Child delivery wakes the parent after commit. Node observers use independent
 per-session backoff without holding store locks across projection or transport I/O.
 The public API inventory records the wake entry point; Rust remains frozen.
+
+## Endpoint routing
+
+Contract 29 keeps endpoint IDs out of model and definition identity. Python
+uses `Runtime.resolve_model` to obtain current primary clients and
+`VvLlmClient.ordered_targets` to freeze each operation's routing. Historical
+endpoint fields remain readable evidence. Record schema 1 and inbox schema 3
+are unchanged. See [model selection](session-model-selection.md#resolver-contract).

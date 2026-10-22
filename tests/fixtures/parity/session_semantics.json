@@ -1,6 +1,46 @@
 {
   "cases": [
     {
+      "bytes_base64": "eyJjYWxscyI6WyJCIiwiQyJdLCJjYXNlIjoiZW5kcG9pbnRfcm91dGluZyIsIm1pc3NpbmciOnsiYXR0ZW1wdCI6MSwia2luZCI6Im9wX2NvbXBsZXRlZCIsIm9wZXJhdGlvbl9pZCI6ImVuZHBvaW50LXJvdXRpbmcvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMiIsInBheWxvYWQiOnsiY29udGV4dCI6Im5vcm1hbCIsImV2aWRlbmNlIjpbXSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOmZhbHNlLCJwcm92aWRlcl9iaW5kaW5nIjoibW9kZWwiLCJyZXF1ZXN0X2RpZ2VzdCI6IjQzOWViY2YwZGI3ZWZmMTVmMDFhN2NlZTBkNzJmZjgwZjVjMjk0NmRjYTUzMWMxY2YwNjRhYjA1YzZhODRkYmMiLCJyZXN1bHQiOnsiY29udGVudCI6IiIsImVycm9yX2NvZGUiOiJlbmRwb2ludF91bmF2YWlsYWJsZSIsInRvb2xfY2FsbHMiOltdfSwicmVzdWx0X2RpZ2VzdCI6Ijg4NDliNDRlMzhlYzVlZTFlMTJmNGE0OWEzMDdiY2ZmYjk2ZjlmYTQyZTVlMjc0NjllZDFlYWMzZTAyYTc2MjMiLCJzaGFyZWRfc3RhdGUiOm51bGwsInVzYWdlIjp7fX0sInJlY29yZF9pZCI6Im9wL2VuZHBvaW50LXJvdXRpbmcvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMi8xL3Jlc3VsdCIsInNjaGVtYV92ZXJzaW9uIjoxLCJzZXNzaW9uX2lkIjoiZW5kcG9pbnQtcm91dGluZyIsInR1cm5faWQiOiJlbmRwb2ludC1yb3V0aW5nL3R1cm4vaW5pdGlhbCJ9LCJwcmVmZXJlbmNlcyI6W251bGwsIkIiLCJCIl0sInNlc3Npb25faWQiOiJlbmRwb2ludC1yb3V0aW5nIn0=",
+      "calls": [
+        "B",
+        "C"
+      ],
+      "case": "endpoint_routing",
+      "missing": {
+        "attempt": 1,
+        "kind": "op_completed",
+        "operation_id": "endpoint-routing/turn/initial/model/primary/2",
+        "payload": {
+          "context": "normal",
+          "evidence": [],
+          "execution_started": false,
+          "provider_binding": "model",
+          "request_digest": "439ebcf0db7eff15f01a7cee0d72ff80f5c2946dca531c1cf064ab05c6a84dbc",
+          "result": {
+            "content": "",
+            "error_code": "endpoint_unavailable",
+            "tool_calls": []
+          },
+          "result_digest": "8849b44e38ec5ee1e12f4a49a307bcffb96f9fa42e5e27469ed1eac3e02a7623",
+          "shared_state": null,
+          "usage": {}
+        },
+        "record_id": "op/endpoint-routing/turn/initial/model/primary/2/1/result",
+        "schema_version": 1,
+        "session_id": "endpoint-routing",
+        "turn_id": "endpoint-routing/turn/initial"
+      },
+      "preferences": [
+        null,
+        "B",
+        "B"
+      ],
+      "record_id": null,
+      "session_id": "endpoint-routing",
+      "sha256": "33fcc895e90a5cd908dea5960f48325be2283257873446bf4de68681e3eebd26"
+    },
+    {
       "billable_models": [
         "m",
         "m",

@@ -293,7 +293,8 @@ def test_interactive_sub_agent_uses_model_provider_for_child_model(tmp_path) -> 
     assert run.result.status == AgentStatus.COMPLETED
     assert run.result.final_answer == "parent done"
     assert model_provider.resolved_models[0] == "parent-model"
-    assert model_provider.resolved_models[-1] == "child-model"
+    assert "child-model" in model_provider.resolved_models
+    assert model_provider.resolved_models[-1] == "parent-model"
     sub_task_payload = json.loads(run.result.cycles[0].tool_results[0].content)
     assert sub_task_payload["status"] == "completed"
     assert sub_task_payload["final_answer"] == "child done"

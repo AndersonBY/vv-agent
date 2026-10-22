@@ -375,7 +375,67 @@ class Fixtures:
             }
         )
 
+    def endpoint_routing(self):
+        from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
+
+        sid = "endpoint-routing"
+        routes = {"m": ["B"], "selected": ["A", "B"]}
+        calls, preferences = [], []
+
+        class HostOrder(VvLlmClient):
+            def ordered_targets(self, preferred_endpoint_id=None):
+                preferences.append(preferred_endpoint_id)
+                return list(self.endpoint_targets)
+
+        def client(model):
+            return HostOrder([EndpointTarget(e, "unused", "https://example.invalid") for e in routes[model]])
+
+        rt = self.admit(sid, [])
+        rt.llm = client("m")
+        rt.model_resolver = lambda request: (client(request["model"]), replace(rt.resolved, model_id=request["model"]))
+
+        def remove(point, record):
+            if (
+                point == "after_commit"
+                and record.kind == "op_planned"
+                and routes["selected"] == ["A", "B"]
+                and record.payload["request"].get("model") == "selected"
+            ):
+                routes["selected"] = ["C", "B"]
+
+        rt.hook = remove
+
+        def complete(current, request):
+            calls.append(current.endpoint_targets[0].endpoint_id)
+            if len(calls) == 1:
+                self.push(sid, InboxItem("select", "model_selection", {"selection": {"model": "selected", "route": {}}}))
+                return LLMResponse("", [ToolCall("echo", "echo", {"text": "continue"})], raw={"usage": USAGE})
+            return LLMResponse("done", raw={"usage": USAGE})
+
+        with patch.object(VvLlmClient, "complete", complete):
+            self.run(sid)
+        records = [r.record for r in self.kernel.store.read_state(sid)[1]]
+        plans = [r for r in records if r.kind == "op_planned" and r.payload["op_kind"] == "model"]
+        missing = next(
+            r for r in records if r.kind == "op_completed" and r.payload["result"].get("error_code") == "endpoint_unavailable"
+        )
+        assert calls == ["B", "C"] and preferences == [None, "B", "B"]
+        assert plans[1].payload["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
+        assert not missing.payload["execution_started"] and missing.payload["usage"] == {} and missing.payload["evidence"] == []
+        assert not any(r.kind == "op_unknown" for r in records)
+        assert self.result(sid).final_output == "done"
+        self.semantics.append(
+            {
+                "case": "endpoint_routing",
+                "session_id": sid,
+                "calls": calls,
+                "preferences": preferences,
+                "missing": missing.to_dict(),
+            }
+        )
+
     def produce(self):
+        self.endpoint_routing()
         self.model_selection()
         self.provider_usage()
         opaque = {"😀": 1e-7, "\ue000": -0.0, "null": None, "bool": True, "integer": 1, "float": 1.5}
@@ -583,11 +643,12 @@ class Fixtures:
         rt.llm = VvLlmClient(
             [EndpointTarget("endpoint", "unused", "https://example.invalid")], backend="openai", randomize_endpoints=False
         )
+        rt.model_resolver = lambda request: (rt.llm, rt.resolved)
         complete = rt.complete
 
-        def dispatched(request, attempt, stream_callback=None, *, planned_request=None):
+        def dispatched(request, attempt, stream_callback=None, *, planned_request=None, prepared_client=None):
             self.semantics.append({"case": "dispatch_request", "metadata": deepcopy(request.metadata)})
-            return complete(request, attempt, stream_callback, planned_request=planned_request)
+            return complete(request, attempt, stream_callback, planned_request=planned_request, prepared_client=prepared_client)
 
         rt.complete = dispatched
         with (
