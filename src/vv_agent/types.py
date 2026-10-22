@@ -772,6 +772,8 @@ class ToolExecutionResult:
                 raise ValueError(f"tool_result_invalid: {name} must be a string when present")
         if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
             raise ValueError("tool_result_invalid: metadata must be an object with string keys")
+        if "request_compaction" in self.metadata and self.metadata["request_compaction"] is not True:
+            raise ValueError("tool_result_invalid: request_compaction must be true when present")
         forbidden_metadata = sorted(set(self.metadata).intersection(_TOOL_RESULT_FORBIDDEN_METADATA_KEYS))
         if forbidden_metadata:
             raise ValueError(f"tool_result_invalid: metadata contains model-visible payload keys: {forbidden_metadata}")

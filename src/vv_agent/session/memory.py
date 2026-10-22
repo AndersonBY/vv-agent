@@ -133,10 +133,14 @@ def pending_memory(driver: _Driver):
     return None
 
 
-def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str, prune=None) -> bool:
+def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str, prune=None, requested_by=None) -> bool:
     if pending_memory(driver):
         return False
-    key = digest([driver.state.active_turn_id, [m.to_dict() for m in source], trigger])
+    key = (
+        digest([driver.state.active_turn_id, [m.to_dict() for m in source], trigger, requested_by])
+        if requested_by
+        else digest([driver.state.active_turn_id, [m.to_dict() for m in source], trigger])
+    )
     if driver.boundary("memory_started", key):
         return False
     event = MemoryCompactStarted(
@@ -168,6 +172,8 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}})
     metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
     object.__setattr__(event, "version", "v6")
+    if requested_by:
+        metadata = metadata | {"requested_by": requested_by}
     payload = event.to_dict() | {"metadata": metadata}
     driver.commit([driver.boundary_record("memory_started", key, {"event": payload})], guarded=True)
     return True
@@ -215,6 +221,8 @@ def finish_compact(
     )
     object.__setattr__(event, "version", "v6")
     metadata = call_after_memory_providers(driver.runtime.config.memory_providers, event)
+    if "requested_by" in start.get("metadata", {}):
+        metadata = metadata | {"requested_by": start["metadata"]["requested_by"]}
     records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
     if changed and mode in {"summary", "emergency"} and driver.task().metadata.get("session_memory_enabled"):
         memory = restore_memory(driver)

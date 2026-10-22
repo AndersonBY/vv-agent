@@ -77,6 +77,19 @@ old-version session.
 
 ## Version notes
 
+### 0.27.0
+
+This release adopts contract 29.1.0 and public API inventory v13. Record schema
+1, inbox schema 3, SQL layouts, RunEvent v6 and App Server v3 are unchanged.
+Existing 0.26 records still load. There is no store boundary.
+
+Hosts can offer a compact tool and bind children that require fresh parent
+summaries. See [the binding examples](host-integration.md#a-compact-tool-and-fresh-child-summaries).
+Change the host handler version when changing child binding semantics. A 0.26
+reader loads the new records but ignores compaction intent and does not enforce
+summary-dependent admission. Do not downgrade sessions with pending requests.
+
+
 ### 0.26.0
 
 Contract 29.0.0 separates model identity from endpoint routing. This is not a

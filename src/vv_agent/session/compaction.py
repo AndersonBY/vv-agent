@@ -109,6 +109,8 @@ def finish_summary(driver: _Driver) -> bool:
         consumed = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
         source = project_context(prefix, fold(logical, consumed_inputs=consumed))
         meta = a.plan._payload["request"]["metadata"]
+        if meta.get("mode") == "child_summary":
+            continue
         if digest([m.to_dict() for m in driver.transcript()]) != meta["source_digest"]:
             continue
         manager = manager_for(driver)
@@ -123,7 +125,7 @@ def finish_summary(driver: _Driver) -> bool:
     return False
 
 
-def compact_context(driver: _Driver) -> bool:
+def compact_context(driver: _Driver, *, requested_by: list[str] | None = None) -> bool:
     """One prune pass, then one ordinary logged summary operation for the exact source."""
     manager = manager_for(driver)
     source = driver.transcript()
@@ -187,7 +189,7 @@ def compact_context(driver: _Driver) -> bool:
         ),
         None,
     )
-    if last_change and last_change.kind == "context_compacted" and last_change._payload["mode"] != "micro":
+    if not requested_by and last_change and last_change.kind == "context_compacted" and last_change._payload["mode"] != "micro":
         return False
     try:
         manager.compaction_evidence(source)
@@ -196,19 +198,20 @@ def compact_context(driver: _Driver) -> bool:
         return False
     if not failures:
         current_tokens = tokens(manager, source)
-        if extract_memory(driver, source, current_tokens, cycle):
+        if not requested_by and extract_memory(driver, source, current_tokens, cycle):
             return True
         prune = manager.plan_microcompaction(source, cycle_index=cycle, current_tokens=current_tokens)
-        if ((prune and prune.candidates) or current_tokens > manager.autocompact_threshold) and start_compact(
+        if (requested_by or (prune and prune.candidates) or current_tokens > manager.autocompact_threshold) and start_compact(
             driver,
             manager,
             source,
             cycle=cycle,
-            trigger="full_threshold" if current_tokens > manager.autocompact_threshold else "micro_threshold",
+            trigger="full_threshold" if requested_by or current_tokens > manager.autocompact_threshold else "micro_threshold",
             prune=prune,
+            requested_by=requested_by,
         ):
             return True
-        if prune and prune.candidates and not (last_change and last_change.kind == "context_compacted"):
+        if not requested_by and prune and prune.candidates and not (last_change and last_change.kind == "context_compacted"):
             result = manager.apply_microcompaction(source, plan=prune)
             if result.archived_count:
                 record = replacement_record(driver, manager, source, result.messages, mode="micro")
@@ -226,7 +229,7 @@ def compact_context(driver: _Driver) -> bool:
                 driver.runtime.hook("after_microcompact_artifacts", record)
                 driver.commit([record], guarded=True)
                 return True
-        if current_tokens <= manager.autocompact_threshold:
+        if not requested_by and current_tokens <= manager.autocompact_threshold:
             return finish_compact(driver, manager, source, mode="none", changed=False)
     elif start_compact(driver, manager, source, cycle=cycle, trigger="prompt_too_long"):
         return True
@@ -240,7 +243,7 @@ def compact_context(driver: _Driver) -> bool:
     ):
         return finish_compact(driver, manager, source, mode="none", changed=False)
     plan = manager.plan_summary(source, drop_ratio=min(0.2 * failures, 0.95) if failures > 1 else 0)
-    if plan is None:
+    if plan is None or (requested_by and not plan.previous and not any(m.role in {"assistant", "tool"} for m in plan.prefix)):
         return finish_compact(driver, manager, source, mode="none", changed=False)
     # Equal source and tail targets reuse even rejected receipts across PTL retries.
     oid = f"{driver.state.active_turn_id}/model/compaction/{source_digest}/{mode}/{plan.keep_recent}"
@@ -263,6 +266,6 @@ def compact_context(driver: _Driver) -> bool:
         "model_settings": task.model_settings.to_dict() if task.model_settings else None,
     }
     if tokens(manager, [Message("user", plan.prompt)]) >= manager.model_context_window:
-        return False
+        return finish_compact(driver, manager, source, mode="none", changed=False)
     driver.commit([driver.plan(oid, request, "model", purpose="compaction")], guarded=True)
     return True

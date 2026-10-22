@@ -479,6 +479,25 @@ class MemoryManager:
             list(messages), systems, previous, prefix, tail, self._build_compress_memory_prompt(prefix, previous=previous), keep
         )
 
+    def plan_full_summary(self, messages: list[Message]) -> SummaryPlan | None:
+        """Summarize the full history without changing the caller's context."""
+        parts = self._summary_parts(messages, 1)
+        if parts is None:
+            return None
+        systems, previous, prefix, tail = parts
+        prefix = [*prefix, *tail]
+        if not prefix and not previous:
+            return None
+        return SummaryPlan(
+            list(messages),
+            systems,
+            previous,
+            prefix,
+            [],
+            self._build_compress_memory_prompt(prefix, previous=previous),
+            0,
+        )
+
     def _summarize_prefix(
         self, messages: list[Message], *, keep_recent: int, drop_ratio: float = 0
     ) -> tuple[list[Message], bool]:
@@ -489,7 +508,9 @@ class MemoryManager:
             return list(messages), False
         return self.accept_summary(plan, self._generate_summary(plan.prompt))
 
-    def accept_summary(self, plan: SummaryPlan, text: str, *, notify: bool = True) -> tuple[list[Message], bool]:
+    def accept_summary(
+        self, plan: SummaryPlan, text: str, *, notify: bool = True, require_reduction: bool = True
+    ) -> tuple[list[Message], bool]:
         """Validate a retained model result. Log owners defer notification until commit."""
         messages, systems, previous, prefix, tail = plan.messages, plan.systems, plan.previous, plan.prefix, plan.tail
         summary = self._normalize_summary_payload(self._parse_summary_payload(self._normalize_summary_output(text)))
@@ -526,7 +547,7 @@ class MemoryManager:
             *tail,
         ]
         tokens = self._calculate_message_length(candidate)
-        if tokens >= self._calculate_message_length(messages) or tokens > self.effective_context_window:
+        if (require_reduction and tokens >= self._calculate_message_length(messages)) or tokens > self.effective_context_window:
             return list(messages), False
         if notify and self.session_memory is not None:
             self.session_memory.on_compaction(current_tokens=tokens)

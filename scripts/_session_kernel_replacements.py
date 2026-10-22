@@ -696,7 +696,7 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
-        d.update(contract="vv-agent-public-api-v12", schema_version=12)
+        d.update(contract="vv-agent-public-api-v13", schema_version=13)
         d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "app_server_host"]
         d["surfaces"].append(
             {

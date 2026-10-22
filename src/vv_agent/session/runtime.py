@@ -54,7 +54,7 @@ from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .bindings import bind_shared_state, durable_shared_state
-from .children import ChildSession
+from .children import ChildSession, SummaryChildTool
 from .providers import FunctionProvider, Provider
 from .records import MODEL_BINDING, Record, copy_json, validate
 from .reducer import ExecutionState
@@ -87,7 +87,9 @@ class Runtime:
     llm: LLMClient
     heartbeat_store: Callable[[], AbstractContextManager[SessionStore]]
     providers: dict[str, Provider] = field(default_factory=dict)  # tool name -> trusted adapter
-    children: dict[str, Callable[[Record], ChildSession | Sequence[ChildSession]]] = field(default_factory=dict)
+    children: dict[str, Callable[[Record], ChildSession | Sequence[ChildSession]] | SummaryChildTool] = field(
+        default_factory=dict
+    )
     host_bindings: dict[str, Any] = field(default_factory=dict)
     model_resolver: Callable[[dict[str, Any]], tuple[LLMClient, ResolvedModelConfig]] | None = None
     frozen_task: AgentTask | None = None

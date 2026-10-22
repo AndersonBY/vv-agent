@@ -118,6 +118,7 @@ from vv_agent.runtime.lifecycle import (
     NativeCycleOutcomeKind,
 )
 from vv_agent.session.bindings import MissingHostBinding
+from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.providers import Accepted, Definitive, Unknown
@@ -301,6 +302,7 @@ __all__ = [
     "SubAgentConfig",
     "SubRunCompletedEvent",
     "SubRunStartedEvent",
+    "SummaryChildTool",
     "TaskTokenUsage",
     "TaskTokenUsageTotals",
     "ThreadEventsListParams",

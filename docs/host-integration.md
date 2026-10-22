@@ -344,6 +344,65 @@ commit together.
 - A single child keeps the single-result shape. Children configured through
   the SDK use the same admission and delivery path.
 
+### A compact tool and fresh child summaries
+
+A host may offer a `compact` tool through its usual registry. Return intent
+from the handler; the kernel makes the paid call after the tool batch:
+
+```python
+from vv_agent import ToolExecutionResult, function_tool
+
+@function_tool
+def compact() -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "", "Compaction requested.", metadata={"request_compaction": True}
+    )
+```
+
+The kernel adds the source operation and context digest to the receipt.
+`continue` remains the directive. Finish or wait-user in the same batch takes
+precedence. Finish ends the turn without a summary; wait-user defers the intent
+until a valid reply resumes that turn. Empty history, rejected output, and exhausted summary failures keep
+the context. Requests in one batch share one operation, including when the
+threshold also fires. The result acknowledges intent; it does not claim the
+summary already succeeded. Memory lifecycle event metadata carries
+`requested_by` with the source tool operation IDs. Its trigger category is
+`full_threshold`, including forced full compaction below that threshold.
+
+For a child tool that needs current parent history, bind `SummaryChildTool`:
+
+```python
+from vv_agent import SummaryChildTool
+
+def admit_child(plan, summary):
+    # Write host rows and return ChildSession values on the admission transaction.
+    # Include summary in the child's input when it is not None.
+    return make_child(plan, parent_summary=summary)
+
+runtime.children["create_sub_task"] = SummaryChildTool(
+    requires_summary=lambda plan: bool(
+        plan.payload["request"]["arguments"].get("include_main_summary", False)
+    ),
+    admit=admit_child,
+)
+```
+
+The predicate must be pure. Change `handler_version` when the binding's behavior changes, as for any
+host callback. The callback receives `None` when the predicate is false.
+Otherwise it receives accepted summary text, including its memory and evidence
+tags. Strip parent-only artifact references in the host when appropriate.
+The driver freezes the completed parent history before the current tool batch,
+including its recent tail, and logs a tools-free summary operation. It leaves
+the parent's context intact. Late input does not change this frozen source.
+
+The callback runs only after selection and acceptance of the saved receipt.
+It must not call a model. Invalid or oversized source, invalid output, and
+exhausted failures return `child_summary_unavailable` without admitting a child.
+Model attempts, usage, endpoint failover and Unknown outcomes follow the normal
+kernel rules. A request sent without a durable receipt may be retried with the
+existing duplicate-cost warning. Hosts bill durable model receipts by operation
+and attempt and retain unknown usage as unavailable.
+
 ### Streaming and cancellation
 
 Live token, reasoning and tool-argument deltas can go through a host side

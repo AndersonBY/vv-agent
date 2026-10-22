@@ -29,6 +29,7 @@ from .approval import resolve_approval
 from .children import (
     ChildSession,
     InvalidChildBatch,
+    SummaryChildTool,
     cancel_children,
     child_handles,
     create_child,
@@ -45,6 +46,7 @@ from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
+from .summary_requests import child_summary, pending_compaction_requests, summary_pending
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -362,12 +364,32 @@ class _Driver:
                     {"operation_id": key, "attempt": n}
                     for key, op in self.state.operations.items()
                     for n, a in op.attempts.items()
-                    if kind == "model" and op.turn_id == self.state.active_turn_id and a.state == "unknown" and op.kind != "model"
+                    if kind == "model"
+                    and request["metadata"].get("mode") != "child_summary"
+                    and op.turn_id == self.state.active_turn_id
+                    and a.state == "unknown"
+                    and op.kind != "model"
                 ],
             },
         )
 
+    def compaction_intent(self, plan: Record, result: dict[str, Any]) -> dict[str, Any]:
+        if plan._payload["op_kind"] == "model" or result.get("metadata", {}).get("request_compaction") is not True:
+            return result
+        source = self.state.operations[plan._payload["dependencies"][0]]
+        source_plan = source.attempts[source.selected_attempt or 1].plan
+        return result | {
+            "metadata": result["metadata"]
+            | {
+                "compaction_source": {
+                    "operation_id": plan.operation_id,
+                    "context_digest": digest(source_plan._payload["request"]["messages"]),
+                }
+            }
+        }
+
     def completed(self, plan: Record, outcome: Definitive) -> list[Record]:
+        outcome = replace(outcome, result=self.compaction_intent(plan, outcome.result))
         assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
         op = self.state.operations[plan.operation_id]
         attempt = op.attempts[plan.attempt]
@@ -596,7 +618,12 @@ class _Driver:
                         disposition = (
                             "noop"
                             if all(
-                                canonical_json_bytes(attempt.result._payload[key]) == canonical_json_bytes(item.payload[key])
+                                canonical_json_bytes(attempt.result._payload[key])
+                                == canonical_json_bytes(
+                                    self.compaction_intent(attempt.execution_plan, item.payload[key])
+                                    if key == "result"
+                                    else item.payload[key]
+                                )
                                 for key in ("result", "usage")
                             )
                             else "rejected"
@@ -1241,6 +1268,12 @@ class _Driver:
             order = plan._payload["request"]["metadata"]["vv_session"]["endpoint_order"]
             started = replace(started, payload=started._payload | {"endpoint_id": order[((plan.attempt or 1) - 1) % len(order)]})
         name = plan._payload["request"].get("name")
+        summary = None
+        binding = self.runtime.children.get(name)
+        if kind != "model" and isinstance(binding, SummaryChildTool):
+            ready, summary = child_summary(self, plan, binding)
+            if not ready:
+                return
         if kind != "model" and (name in self.runtime.children or name in self.runtime.delegated_tools):
             child_specs = None if name in self.runtime.children else assemble(self.runtime, plan, context, task, self.store)
             if isinstance(child_specs, ToolExecutionResult):
@@ -1253,7 +1286,10 @@ class _Driver:
                 assert plan.turn_id is not None
 
                 def admit_child(tx: SessionTx) -> list[Record]:
-                    specs = self.runtime.children[name](plan) if name in self.runtime.children else child_specs
+                    if isinstance(binding, SummaryChildTool):
+                        specs = binding.admit(plan, summary)
+                    else:
+                        specs = binding(plan) if binding is not None else child_specs
                     if isinstance(specs, ChildSession):
                         specs = [specs]
                     if not isinstance(specs, Sequence) or not specs or any(not isinstance(c, ChildSession) for c in specs):
@@ -1576,6 +1612,8 @@ class _Driver:
             if a.state == "planned" or (a.state == "parked" and a.approval and a.wait and a.wait["handle"]["kind"] == "approval"):
                 if (a.plan._payload["not_before_ms"] or 0) > self.scope.poll(self.store).db_now_ms:
                     return False
+                if summary_pending(self, oid):
+                    continue
                 self.dispatch(a)
                 return True
             if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "approval":
@@ -1674,7 +1712,7 @@ class _Driver:
                 guarded=True,
             )
             return True
-        if compact_context(self):
+        if compact_context(self, requested_by=pending_compaction_requests(self)):
             return True
         plan = self.model_plan()
         if plan is not None:
