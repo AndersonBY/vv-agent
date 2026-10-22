@@ -1156,7 +1156,7 @@
     "backend": "session-memory-backend",
     "model": "session-memory-model",
     "request_model": "session-memory-model",
-    "resolution_count": 1
+    "resolution_count": 4
   },
   "session_memory": {
     "accepted_aliases": [],
@@ -1415,7 +1415,7 @@
     "backend": "memory-backend",
     "model": "memory-model",
     "request_model": "memory-model",
-    "resolution_count": 1
+    "resolution_count": 4
   },
   "version": "memory_lifecycle"
 }

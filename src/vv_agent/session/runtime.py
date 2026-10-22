@@ -71,6 +71,14 @@ class RuntimeNotReady(Exception):
         super().__init__(f"Runtime not ready; retry after {retry_after_ms} ms")
 
 
+class EndpointUnavailable(Exception):
+    """The frozen endpoint disappeared before dispatch."""
+
+
+def _model_identity(binding: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in binding.items() if key != "endpoints"}
+
+
 @dataclass
 class Runtime:
     agent: Agent
@@ -241,7 +249,12 @@ class Runtime:
         )
 
     def model_route(self, purpose: str) -> tuple[LLMClient, ResolvedModelConfig]:
-        return self._memory_routes.get(purpose, (self.llm, self.resolved))
+        route = self._memory_routes.get(purpose)
+        if route is not None and self.config.model_provider is not None:
+            provider = self.config.model_provider
+            resolved = provider.resolve(ModelRef.backend(route[1].backend, route[1].requested_model))
+            return provider.client(resolved), resolved
+        return route or self.resolve_model({"model": self.resolved.model_id, "route": {}})
 
     def _memory_bindings(self, task: AgentTask) -> dict[str, Any]:
         meta = task.metadata
@@ -268,28 +281,29 @@ class Runtime:
                     raise ValueError("RunConfig.model_provider is required.")
                 resolved = provider.resolve(ModelRef.backend(backend, model) if backend else ModelRef.named(model))
                 self._memory_clients[client_key] = (provider.client(resolved), resolved)
-            client, resolved = self._memory_routes[purpose] = self._memory_clients[client_key]
+            _client, resolved = self._memory_routes[purpose] = self._memory_clients[client_key]
             bindings[purpose] = {
                 "backend": resolved.backend,
                 "model": resolved.model_id,
-                "endpoints": [t.endpoint_id for t in client.endpoint_targets] if isinstance(client, VvLlmClient) else [],
+                "context_length": resolved.context_length,
+                "max_output_tokens": resolved.max_output_tokens,
             }
         self._memory_binding_key, self._memory_binding = key, bindings
         return bindings
 
     def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
         """Resolve only the retained request; this binding must not submit provider work."""
-        if request["model"] == self.resolved.model_id and not request.get("route", {}):
-            client, resolved = self.llm, self.resolved
-        elif self.model_resolver is not None:
+        if self.model_resolver is not None:
             client, resolved = self.model_resolver(copy_json(request))
+        elif request["model"] == self.resolved.model_id and not request.get("route", {}):
+            client, resolved = self.llm, self.resolved
         else:
             raise ValueError("Runtime requires a model_resolver for this selection")
         if resolved.model_id != request["model"]:
             raise ValueError("Resolver changed the requested model")
         validate(self.model_binding(client, resolved), MODEL_BINDING)
         retained = request.get("metadata", {}).get("vv_session", {}).get("model_binding")
-        if retained is not None and self.model_binding(client, resolved) != retained:
+        if retained is not None and _model_identity(self.model_binding(client, resolved)) != _model_identity(retained):
             raise ValueError("Resolved model binding differs from the retained plan")
         return client, resolved
 
@@ -303,26 +317,31 @@ class Runtime:
             "max_output_tokens": resolved.max_output_tokens,
         }
 
-    def complete(self, request: LlmRequest, attempt: int, stream_callback=None, *, planned_request=None) -> LLMResponse:
-        client, _ = (
-            self.resolve_model(planned_request)
-            if planned_request is not None and request.metadata.get("purpose") == "primary"
-            else self.model_route(request.metadata.get("purpose", "primary"))
-        )
+    def prepare_model(self, planned_request: dict[str, Any], purpose: str, attempt: int) -> LLMClient:
+        """Bind one current endpoint before admitting a dispatch."""
+        client, resolved = self.resolve_model(planned_request) if purpose == "primary" else self.model_route(purpose)
+        retained = planned_request.get("metadata", {}).get("vv_session", {}).get("model_binding")
+        if retained is not None and _model_identity(self.model_binding(client, resolved)) != _model_identity(retained):
+            raise ValueError("Resolved model binding differs from the retained plan")
         if isinstance(client, VvLlmClient):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
-            targets = client.endpoint_targets
-            if not targets:
-                raise ValueError("No endpoint targets configured")
+            order = planned_request.get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
+            endpoint_id = order[(attempt - 1) % len(order)] if order else None
+            target = next((t for t in client.endpoint_targets if t.endpoint_id == endpoint_id), None)
+            if target is None:
+                raise EndpointUnavailable("The planned endpoint is no longer available")
             client = copy(client)
-            endpoint_id = request.metadata.get("vv_session", {}).get("endpoint_id")
-            client.endpoint_targets = (
-                [next(t for t in targets if t.endpoint_id == endpoint_id)]
-                if endpoint_id
-                else [targets[(attempt - 1) % len(targets)]]
-            )
+            client.endpoint_targets = [target]
             client.max_retries_per_endpoint = 1
             client.randomize_endpoints = False
+        return client
+
+    def complete(
+        self, request: LlmRequest, attempt: int, stream_callback=None, *, planned_request=None, prepared_client=None
+    ) -> LLMResponse:
+        if planned_request is None:
+            planned_request = {"model": request.model, "metadata": request.metadata, "route": {}}
+        client = prepared_client or self.prepare_model(planned_request, request.metadata.get("purpose", "primary"), attempt)
         if stream_callback is not None:
             return client.complete_with_stream(request, stream_callback)
         return client.complete(request)
@@ -481,7 +500,24 @@ class Runtime:
         return copy_json(self._definition(task))
 
     def definition_digest(self, task: AgentTask | Record) -> str:
-        self._definition(task)
+        current = self._definition(task)
+        if isinstance(task, Record) and "endpoints" in task._payload["definition"]["model_binding"]:
+            # Reproduce stored bytes without treating their historical routes as identity.
+            current = copy_json(current)
+            retained = task._payload["definition"]["model_binding"]
+            for binding, old in [
+                (current["model_binding"], retained),
+                *[
+                    (value, retained.get("internal", {}).get(purpose, {}))
+                    for purpose, value in current["model_binding"].get("internal", {}).items()
+                ],
+            ]:
+                if "endpoints" in old:
+                    binding["endpoints"] = old["endpoints"]
+                    for limit in ("context_length", "max_output_tokens"):
+                        if limit not in old:
+                            binding.pop(limit, None)
+            return sha256(canonical_json_bytes(current)).hexdigest()
         return self._definition_digest
 
     def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
@@ -515,11 +551,7 @@ class Runtime:
             }
         }
         memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
-        model_binding: dict[str, Any] = {
-            "backend": self.resolved.backend,
-            "model": self.resolved.model_id,
-            "endpoints": [t.endpoint_id for t in self.llm.endpoint_targets] if isinstance(self.llm, VvLlmClient) else [],
-        }
+        model_binding = _model_identity(self.model_binding(self.llm, self.resolved))
         memory_bindings = self._memory_bindings(task)
         if memory_bindings:
             model_binding["internal"] = memory_bindings

@@ -369,6 +369,23 @@ The [dispatch tests](../tests/session/test_dispatch.py) show these guarantees
 with a controlled at-least-once queue against SQLite files and PostgreSQL. They
 need no broker.
 
+## Model routing
+
+Resolve the default model and selected models from current host settings.
+Endpoint IDs are routing, so adding, removing or renaming one does not change
+the session definition. Use `Runtime.definition_digest(turn_started_record)`
+when checking a retained definition. Keep checks for logical model identity,
+tools and host authorization.
+
+A custom `VvLlmClient.ordered_targets` decides every new model operation's
+order, including after a selection. For example, a host can always put its
+own endpoints before a shared pool. See [the resolver and ordering rules](session-model-selection.md#resolver-contract).
+
+Treat a completion with `execution_started=false`, empty usage and
+`error_code=endpoint_unavailable` as non-chargeable. It has no provider dispatch
+to reconcile. A removed endpoint on an already-started attempt still needs the
+ordinary receipt and Unknown handling.
+
 ## Billing
 
 Bill from canonical per-call usage, keyed by the stable `call_id`. Read it from

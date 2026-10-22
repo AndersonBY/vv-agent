@@ -709,7 +709,7 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
             plan = internal_plans[0]
             assert plan.payload["request"]["metadata"]["vv_session"]["endpoint_order"] == ["memory-endpoint"]
             assert requests[0].model == "memory-model"
-            assert provider.resolved_models == ["main-model", "memory-model"]
+            assert provider.resolved_models == ["main-model", *["memory-model"] * 4, "main-model", "main-model"]
             from vv_agent.session.result import project_result
 
             result = project_result(kernel.store, "route", "route/turn/initial", runtime=rt)
@@ -717,13 +717,18 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
             assert call.backend == "memory" and call.usage.total_tokens == 5
             drive(kernel.store, "route", runtime=rt, _one_turn=True)
             assert kernel.store.read_state("route")[1] == rows
-            assert len(requests) == 1 and provider.resolved_models == ["main-model", "memory-model"]
-        # Repeated definition reads reuse a frozen route, while new selections clear it.
+            assert len(requests) == 1
+            assert provider.resolved_models == ["main-model", *["memory-model"] * 4, "main-model", "main-model"]
+        # Definitions retain logical identity while route preparation uses current endpoints.
         task = rt.compile("next", "route/turn/next")
         binding = rt._memory_bindings(task)
         assert binding == rt._memory_bindings(task)
         internal_client.endpoint_targets = [EndpointTarget("changed-endpoint", "unused", "https://example.invalid")]
-        assert rt._memory_bindings(task)[purpose]["endpoints"] == ["changed-endpoint"]
+        assert rt._memory_bindings(task) == binding
+        assert "endpoints" not in binding[purpose]
+        routed_client = rt.model_route(purpose)[0]
+        assert isinstance(routed_client, VvLlmClient)
+        assert routed_client.endpoint_targets[0].endpoint_id == "changed-endpoint"
         internal_client.endpoint_targets = [EndpointTarget("memory-endpoint", "unused", "https://example.invalid")]
         task.metadata[prefix + "_backend"] = "main"
         task.metadata[prefix + "_model"] = "main-model"
@@ -731,8 +736,15 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
         assert rt.model_route(purpose)[0] is rt.llm
         task.metadata[prefix + "_backend"] = "memory"
         task.metadata[prefix + "_model"] = "memory-model"
-        assert rt._memory_bindings(task)[purpose]["endpoints"] == ["memory-endpoint"]
+        assert rt._memory_bindings(task) == binding
         assert rt.model_route(purpose)[0] is internal_client
-        assert provider.resolved_models == ["main-model", "memory-model"]
+        assert provider.resolved_models == [
+            "main-model",
+            *["memory-model"] * 4,
+            *["main-model"] * 2,
+            "memory-model",
+            "main-model",
+            "memory-model",
+        ]
     finally:
         kernel.close()

@@ -77,6 +77,31 @@ old-version session.
 
 ## Version notes
 
+### 0.26.0
+
+Contract 29.0.0 separates model identity from endpoint routing. This is not a
+store boundary: record schema 1, inbox schema 3, SQLite user_version 3 and the
+SQL schemas stay unchanged. Records written by 0.24 and 0.25 remain readable.
+Their recorded endpoints remain evidence but no longer cause definition drift.
+The binding's required `endpoints` field remains routing evidence, with the
+same record and inbox schemas as before.
+Existing definitions did not record model limits in their binding, so those
+missing fields cannot be checked retroactively. New definitions record both.
+
+Operators can add, remove or rename endpoints without ending live sessions.
+New operations use current routing. If an endpoint disappears before its
+planned attempt starts, the operation closes with a non-chargeable
+`endpoint_unavailable` result; the next primary cycle replans under its normal
+limits. Started attempts retain their endpoint evidence and Unknown rules.
+
+Hosts with custom `VvLlmClient.ordered_targets` now get that ordering policy
+after model selection too. The resolver must handle the default model as well
+as selected models. Remove host checks that compare endpoint lists as identity.
+Use `Runtime.definition_digest(turn_started_record)` for a retained definition;
+passing only its task cannot reproduce historical definition bytes. Preserve
+logical-model, tool, authorization and unknown-outcome checks. See
+[session model selection](session-model-selection.md#resolver-contract).
+
 ### 0.25.0
 
 Contract 28.0.0 changes the App Server wire to v3. This is **not a store

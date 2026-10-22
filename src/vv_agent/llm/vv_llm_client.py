@@ -418,6 +418,11 @@ class VvLlmClient(LLMClient):
         return fallback
 
     def ordered_targets(self, preferred_endpoint_id: str | None = None) -> list[EndpointTarget]:
+        """Host ordering policy for each new kernel plan, including selected models.
+
+        A known preferred ID is a hint; overrides may keep stricter ordering.
+        The kernel freezes this order and dispatches one endpoint per attempt.
+        """
         targets = list(self.endpoint_targets)
 
         preferred_endpoint_id = preferred_endpoint_id or self._preferred_endpoint_id

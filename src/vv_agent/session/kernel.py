@@ -43,7 +43,7 @@ from .output import prepare_output, serializable_output
 from .providers import Accepted, Definitive, Outcome, Unknown
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, Fold
-from .runtime import Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
+from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 
 
@@ -315,39 +315,19 @@ class _Driver:
         capability: dict[str, Any] | None = None,
         purpose: str = "primary",
     ) -> Record:
-        client = self.runtime.model_route(purpose)[0] if kind == "model" and purpose != "primary" else None
-        if kind == "model" and purpose == "primary":
-            endpoints = request["metadata"]["vv_session"]["model_binding"]["endpoints"]
-            if endpoints:
-                if self.state.model_selection is None and isinstance(self.runtime.llm, VvLlmClient):
-                    endpoints = [t.endpoint_id for t in self.runtime.llm.ordered_targets(self.state.preferred_endpoint_id)]
-                elif self.state.preferred_endpoint_id in endpoints:
-                    endpoints = [
-                        self.state.preferred_endpoint_id,
-                        *[e for e in endpoints if e != self.state.preferred_endpoint_id],
-                    ]
-                request["metadata"]["vv_session"]["endpoint_order"] = endpoints
-        if kind == "model" and purpose in {"compaction", "session_memory"}:
-            memory_client, memory_resolved = self.runtime.model_route(purpose)
-            request = request | {
-                "metadata": request["metadata"]
-                | {
-                    "vv_session": request["metadata"].get("vv_session", {})
-                    | {"model_binding": self.runtime.model_binding(memory_client, memory_resolved)}
-                }
-            }
-        if (
-            kind == "model"
-            and isinstance(client, VvLlmClient)
-            and "endpoint_order" not in request["metadata"].get("vv_session", {})
-        ):
-            request = request | {
-                "metadata": request["metadata"]
-                | {
-                    "vv_session": request["metadata"].get("vv_session", {})
-                    | {"endpoint_order": [t.endpoint_id for t in client.ordered_targets(self.state.preferred_endpoint_id)]}
-                }
-            }
+        if kind == "model":
+            client, resolved = self.runtime.resolve_model(request) if purpose == "primary" else self.runtime.model_route(purpose)
+            session = request["metadata"].get("vv_session", {})
+            if purpose != "output_repair":
+                session = session | {"model_binding": self.runtime.model_binding(client, resolved)}
+            if isinstance(client, VvLlmClient):
+                preferred = self.state.preferred_endpoint_id
+                if preferred not in {t.endpoint_id for t in client.endpoint_targets}:
+                    preferred = None
+                order = [t.endpoint_id for t in client.ordered_targets(preferred)]
+                if order:
+                    session = session | {"endpoint_order": order}
+            request = request | {"metadata": request["metadata"] | {"vv_session": session}}
         if kind == "model" and self.state.active_turn_id is not None:
             source = self.state.turns[self.state.active_turn_id].start
             tools = request.get("tools")
@@ -417,6 +397,8 @@ class _Driver:
         op = self.state.operations[plan.operation_id]
         turn = self.state.turns[plan.turn_id]
         if op.kind == "model" and context == "normal":
+            if not op.attempts[plan.attempt].started:
+                return records
             if any(
                 r._payload["data"]["exhaustion"]
                 for (tid, stage, _), r in self.state.boundaries.items()
@@ -1184,6 +1166,18 @@ class _Driver:
                         self.completed(plan, self.finalize_tool(plan, context, Definitive(preflight.to_dict(), ()))), guarded=True
                     )
                 return
+        prepared_client = None
+        if kind == "model":
+            try:
+                prepared_client = self.runtime.prepare_model(
+                    plan._payload["request"], plan._payload["purpose"], plan.attempt or 1
+                )
+            except EndpointUnavailable:
+                self.commit(
+                    self.completed(plan, Definitive({"content": "", "tool_calls": [], "error_code": "endpoint_unavailable"}, ())),
+                    guarded=True,
+                )
+                return
         evaluator = self.live_budget()
         exhaustion = None
         budget_records = []
@@ -1351,7 +1345,13 @@ class _Driver:
                             with suppress(Exception):
                                 stream(event)
 
-                response = self.runtime.complete(request, plan.attempt or 1, callback, planned_request=plan._payload["request"])
+                response = self.runtime.complete(
+                    request,
+                    plan.attempt or 1,
+                    callback,
+                    planned_request=plan._payload["request"],
+                    prepared_client=prepared_client,
+                )
             except Exception as exc:
                 if is_prompt_too_long_error(exc):
                     return Definitive({"error_code": "prompt_too_long", "content": "", "tool_calls": []})

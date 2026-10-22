@@ -51,7 +51,7 @@ conflict.
 The lease holder reads selections in inbox order. It applies one only when the
 current turn has no open operation batch: no planned, started or parked
 operation and no pending retry. It then logs an `input_applied` record that
-carries the resolved binding: backend, model, endpoints, context length and
+carries the logical model binding: backend, model, context length and
 maximum output tokens.
 
 The next primary model call plans with the selected model, settings and route.
@@ -82,25 +82,48 @@ runtime = Runtime(..., model_resolver=resolve_request)
 
 `model_resolver(request)` returns `(LLMClient, ResolvedModelConfig)`.
 
-- It must be deterministic for a given request.
+- It must preserve the logical model for a given request. Endpoint routing may
+  change with the host settings.
 - It must not submit anything to a provider.
 - It resolves the exact model ID; `resolved_config.model_id` must equal
   `request["model"]`, or the selection is rejected.
 - It enforces host authorization and may raise for unknown or unauthorized
   models and routes.
 
-Without a resolver, the runtime accepts only a selection of its own frozen
-model with an empty route.
+The runtime calls the resolver for every primary plan and when preparing its
+attempt, including its default model with an empty route. Hosts must resolve
+both default and selected requests. Without a resolver, the runtime accepts
+only its current default client and model with an empty route.
 
-Every primary call plan retains the effective model, the complete settings, the
-route and the resolved binding. At execution time the runtime resolves from that
-retained request alone and checks that the binding still matches. Retries reuse
-the exact plan. Endpoint order is checked against the retained binding too,
-including after a switch to another backend, instead of the turn's default
-endpoints.
+Every primary call plan retains the effective model, complete settings, route
+and logical binding. Identity checks compare backend, model ID, context length
+and maximum output tokens. Endpoint IDs describe current routing and do not
+participate in those checks.
+The binding still carries `endpoints` as routing evidence. Its stored shape
+stays unchanged; endpoint order is frozen separately for each operation.
 
-Keep the frozen `Runtime` binding stable across recovery, and resolve clients
-for selected plans through the resolver.
+For each new operation, the kernel resolves the current client and freezes
+`client.ordered_targets(preferred_endpoint_id)` as `endpoint_order`.
+`VvLlmClient.ordered_targets` is the host's single ordering policy, including
+after a model selection. The kernel passes a known preference as a hint; it
+never promotes an endpoint itself. Unknown preferences are ignored. A host
+that always orders A before B keeps that policy even when B succeeded for the
+previous model. Internal model purposes use the same hook on their own routes.
+An output repair callback owns its own provider calls; the kernel does not
+redirect it to the selected primary model.
+
+Retries reuse the exact frozen order, with one endpoint and one transport
+attempt per logged attempt. Before dispatch, the runtime prepares the current
+client for the frozen endpoint. If that endpoint has disappeared, the kernel
+closes the operation with `endpoint_unavailable`, empty usage and
+`execution_started=false`. It makes no provider call and adds no duplicate-cost
+risk. The next primary cycle plans from current routing, subject to the normal
+cycle and budget limits. The Unknown retry limit stays
+`max(2, len(endpoint_order))`.
+
+A dispatched attempt keeps its original endpoint ID and evidence after a
+routing edit. Crash recovery and late receipts use that evidence. They do not
+reinterpret it as an undispatched failure.
 
 ## Rejection
 
@@ -151,8 +174,8 @@ matches the resolved model_id, including endpoint model_id overrides, as adverti
 by model/list. Multiple entries in that effective backend for one selected ID are rejected as
 model_selection_unresolvable, as are unknown IDs; there are no aliases.
 CLI and interactive use the same default provider resolver through SessionDriver;
-only App Server binds the host hook. The frozen model with an empty route always
-reuses its frozen client and config before any resolver.
+only App Server binds the host hook. The default model with an empty route also
+passes through that resolver.
 Custom hosts supply routing and authorization through the hook. See
 [App Server](app-server.md#models).
 

@@ -1686,6 +1686,7 @@ class Author:
             config=RunConfig(max_cycles=3, no_tool_policy="continue", stream=emitted.append),
         )
         rt.llm = Streaming()
+        rt.model_resolver = lambda request: (rt.llm, rt.resolved)
         from vv_agent import events as event_module
 
         with (
@@ -1948,12 +1949,12 @@ class Author:
                 "request_model": requests[0].model,
                 "resolution_count": provider.resolved_models.count(expected["model"]),
             }
-            assert actual == expected
+            assert actual == expected | {"resolution_count": 4}, (actual, expected)
             lifecycle[key] = actual
             # Retained projections must neither resolve nor call the internal provider again.
             self.f.run(sid)
             assert len(requests) == 1
-            assert provider.resolved_models.count(expected["model"]) == 1
+            assert provider.resolved_models.count(expected["model"]) == 4
 
     def metadata_approval(self):
         from vv_agent.tools.base import ToolContext
