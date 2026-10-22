@@ -96,7 +96,8 @@ class SQLiteStore(SQLStore):
         try:
             yield store
         finally:
-            store.connection.close()
+            with store._connection_lock:
+                store.connection.close()
 
     def _rows(self, query: str, params: tuple = ()) -> list[tuple]:
         with self._connection_lock:

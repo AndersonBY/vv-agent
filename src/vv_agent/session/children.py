@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +22,18 @@ class ChildSession:
     generation: int = 0
     consumers: tuple[str, ...] = ()
     background: bool = False
+
+
+@dataclass(frozen=True)
+class SummaryChildTool:
+    """Prepare a logged fresh summary, then admit children on the host transaction.
+
+    The predicate must be pure. Change handler_version when its behavior changes.
+    The admission callback receives None when the predicate returns False.
+    """
+
+    requires_summary: Callable[[Record], bool]
+    admit: Callable[[Record, str | None], ChildSession | Sequence[ChildSession]]
 
 
 class InvalidChildBatch(ValueError):

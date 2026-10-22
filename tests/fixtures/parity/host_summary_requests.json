@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "record_schema_version": 1,
+  "inbox_schema_version": 3,
+  "parent_replaced_for_child": false,
+  "terminal_precedence": [
+    "finish",
+    "wait_user"
+  ],
+  "batch_requests_coalesce": true,
+  "vectors": [
+    {
+      "wire": {
+        "id": "tool_compaction",
+        "summary_plan": {
+          "attempt": 1,
+          "kind": "op_planned",
+          "operation_id": "s/turn/initial/model/compaction/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/1",
+          "payload": {
+            "budget_admission": {},
+            "consumed_unknowns": [],
+            "context_version": "16",
+            "dependencies": [],
+            "idempotency_key": "s/s/turn/initial/model/compaction/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/1",
+            "not_before_ms": null,
+            "op_kind": "model",
+            "provider_binding": "model",
+            "purpose": "compaction",
+            "request": {
+              "messages": [
+                {
+                  "content": "你正在总结一段用户与 AI 编程助手的对话。\n请先在 <analysis> 标签中进行思考 (该部分后续会被剥离), 然后输出结构化 JSON 摘要。\n\n<analysis>\n请逐步思考: 哪些信息必须保留, 哪些用户原话不能丢, 哪些文件/错误/当前状态会影响后续继续执行。\n</analysis>\n\n<Previous Summary>\n[]\n</Previous Summary>\n\n<Conversation Prefix>\n[{\"content\":\"original request\",\"role\":\"user\"},{\"content\":\"old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts \",\"role\":\"assistant\"},{\"content\":\"go\",\"role\":\"user\"}]\n</Conversation Prefix>\n\n请将以上对话压缩为结构化 JSON「Task Status Summary」, 让 Agent 能快速恢复任务, 并保留用户约束、关键决策、文件操作与当前工作状态。\n\n要求:\n- 只输出 JSON, 不要 Markdown。\n- 字段内容简洁、可检索, 短句表达。\n- 没有信息的字段使用 [] 或 \"\"。\n- `original_user_messages` 字段至关重要: 尽量保留用户原话, 不要做概括式改写。\n\nJSON Schema:\n{\n  \"summary_version\": \"2.0\",\n  \"original_user_messages\": [\"...\"],\n  \"user_constraints\": [\"...\"],\n  \"decisions\": [\"...\"],\n  \"files_examined_or_modified\": [\n    {\"path\": \"...\", \"action\": \"read|created|modified|deleted\", \"summary\": \"...\"}\n  ],\n  \"errors_and_fixes\": [\n    {\"error\": \"...\", \"fix\": \"...\", \"file\": \"...\"}\n  ],\n  \"progress\": [\"最多保留 40 条关键进展\"],\n  \"key_facts\": [\"...\"],\n  \"open_issues\": [\"...\"],\n  \"current_work_state\": \"...\",\n  \"next_steps\": [\"...\"]\n}\n",
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "keep_recent": 1,
+                "mode": "summary",
+                "purpose": "compaction",
+                "source_digest": "4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc",
+                "vv_session": {
+                  "cycle_index": 2,
+                  "model_binding": {
+                    "backend": "scripted",
+                    "context_length": null,
+                    "endpoints": [],
+                    "max_output_tokens": null,
+                    "model": "scripted"
+                  }
+                }
+              },
+              "model": "scripted",
+              "model_settings": {
+                "retry": {
+                  "backoff_seconds": 0,
+                  "max_attempts": 1
+                }
+              },
+              "prompt_bundle": null,
+              "tools": []
+            },
+            "request_digest": "eba18772ebba090cb1107be7f1ad7efb9abed18d20152f8ab8416b8de2fd110c",
+            "tool": null
+          },
+          "record_id": "op/s/turn/initial/model/compaction/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/1/1/planned",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        "summary_result": {
+          "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+          "raw": {
+            "usage": {
+              "completion_tokens": 300,
+              "prompt_tokens": 12000,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "reasoning_content": null,
+          "tool_calls": []
+        },
+        "summary_usage": {
+          "completion_tokens": 300,
+          "prompt_tokens": 12000,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "context_replacements": [
+          {
+            "attempt": null,
+            "kind": "context_compacted",
+            "operation_id": null,
+            "payload": {
+              "evidence_manifest": {
+                "artifacts": [],
+                "cursors": []
+              },
+              "mode": "summary",
+              "prefix_ids": [
+                "1/11193ef53ccc3f99dc78eccb227ed455c58053585e75b434d0b84abe3ffc150d",
+                "2/1912e2fae6144b4b4e072da0878cba25aff39e5ccb7fd7e33300edd866075b8f",
+                "3/16f97dfe4556587c505d591608c2de0e882c521ae2075c22d3c19e2632f15d76"
+              ],
+              "replacement": [
+                {
+                  "content": "Be precise.",
+                  "metadata": {
+                    "_vv_agent_tool_policy_approval": "default",
+                    "_vv_agent_tool_use_behavior": "run_llm_again",
+                    "session_memory_enabled": false,
+                    "trace_id": "s/turn/initial"
+                  },
+                  "role": "system"
+                },
+                {
+                  "content": "<Original User Request>\noriginal request\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue the task\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"original request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
+                  "metadata": {
+                    "_vv_agent_compaction": {
+                      "artifacts": [],
+                      "cursors": []
+                    }
+                  },
+                  "name": "memory_summary",
+                  "role": "user"
+                },
+                {
+                  "content": "",
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{}",
+                        "name": "compact"
+                      },
+                      "id": "request",
+                      "type": "function"
+                    }
+                  ]
+                },
+                {
+                  "content": "Compaction requested.",
+                  "role": "tool",
+                  "tool_call_id": "request"
+                }
+              ],
+              "source_digest": "4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc",
+              "summary_operation_id": "s/turn/initial/model/compaction/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/1",
+              "tail_ids": [
+                "0/9f9d3f2179b02e8227da0daf2d86be802337104a52eb433f0f683d55e3940a08",
+                "4/87b22e152e8328a9a9c170bcd87bce6a74ec74d5be4042af0f551f8897e58fbd",
+                "5/710e44eec90ac45f95f49c2c193d8e864b8c34f7abd625594effb2dc61de3d36"
+              ]
+            },
+            "record_id": "compact/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/s/turn/initial/model/compaction/4f2af3680cedc9058df5433ddae90a5df2b352ef4a4550d43e676e8b382925dc/summary/1",
+            "schema_version": 1,
+            "session_id": "s",
+            "turn_id": "s/turn/initial"
+          }
+        ],
+        "child_input": null,
+        "tool_result": {
+          "content": "Compaction requested.",
+          "directive": "continue",
+          "metadata": {
+            "compaction_source": {
+              "context_digest": "d659c7f56299d9827f0e3896c1a4f5783c195d9c8ff8b52e0d6831e2801eca94",
+              "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0"
+            },
+            "request_compaction": true
+          },
+          "status_code": "SUCCESS",
+          "tool_call_id": "request"
+        }
+      },
+      "bytes_base64": "eyJjaGlsZF9pbnB1dCI6bnVsbCwiY29udGV4dF9yZXBsYWNlbWVudHMiOlt7ImF0dGVtcHQiOm51bGwsImtpbmQiOiJjb250ZXh0X2NvbXBhY3RlZCIsIm9wZXJhdGlvbl9pZCI6bnVsbCwicGF5bG9hZCI6eyJldmlkZW5jZV9tYW5pZmVzdCI6eyJhcnRpZmFjdHMiOltdLCJjdXJzb3JzIjpbXX0sIm1vZGUiOiJzdW1tYXJ5IiwicHJlZml4X2lkcyI6WyIxLzExMTkzZWY1M2NjYzNmOTlkYzc4ZWNjYjIyN2VkNDU1YzU4MDUzNTg1ZTc1YjQzNGQwYjg0YWJlM2ZmYzE1MGQiLCIyLzE5MTJlMmZhZTYxNDRiNGI0ZTA3MmRhMDg3OGNiYTI1YWZmMzllNWNjYjdmZDdlMzMzMDBlZGQ4NjYwNzViOGYiLCIzLzE2Zjk3ZGZlNDU1NjU4N2M1MDVkNTkxNjA4YzJkZTBlODgyYzUyMWFlMjA3NWMyMmQzYzE5ZTI2MzJmMTVkNzYiXSwicmVwbGFjZW1lbnQiOlt7ImNvbnRlbnQiOiJCZSBwcmVjaXNlLiIsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF90b29sX3BvbGljeV9hcHByb3ZhbCI6ImRlZmF1bHQiLCJfdnZfYWdlbnRfdG9vbF91c2VfYmVoYXZpb3IiOiJydW5fbGxtX2FnYWluIiwic2Vzc2lvbl9tZW1vcnlfZW5hYmxlZCI6ZmFsc2UsInRyYWNlX2lkIjoicy90dXJuL2luaXRpYWwifSwicm9sZSI6InN5c3RlbSJ9LHsiY29udGVudCI6IjxPcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XG5vcmlnaW5hbCByZXF1ZXN0XG48L09yaWdpbmFsIFVzZXIgUmVxdWVzdD5cblxuPENvbXByZXNzZWQgQWdlbnQgTWVtb3J5Plxue1wiY3VycmVudF93b3JrX3N0YXRlXCI6XCJDb250aW51ZSB0aGUgdGFza1wiLFwiZGVjaXNpb25zXCI6W10sXCJlcnJvcnNfYW5kX2ZpeGVzXCI6W10sXCJmaWxlc19leGFtaW5lZF9vcl9tb2RpZmllZFwiOltdLFwia2V5X2ZhY3RzXCI6W10sXCJuZXh0X3N0ZXBzXCI6W10sXCJvcGVuX2lzc3Vlc1wiOltdLFwib3JpZ2luYWxfdXNlcl9tZXNzYWdlc1wiOltcIm9yaWdpbmFsIHJlcXVlc3RcIl0sXCJwcm9ncmVzc1wiOltdLFwic3VtbWFyeV92ZXJzaW9uXCI6XCIyLjBcIixcInVzZXJfY29uc3RyYWludHNcIjpbXX1cbjwvQ29tcHJlc3NlZCBBZ2VudCBNZW1vcnk+XG5cbjxQZXJzaXN0ZWQgQXJ0aWZhY3RzPlxuPC9QZXJzaXN0ZWQgQXJ0aWZhY3RzPiIsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF9jb21wYWN0aW9uIjp7ImFydGlmYWN0cyI6W10sImN1cnNvcnMiOltdfX0sIm5hbWUiOiJtZW1vcnlfc3VtbWFyeSIsInJvbGUiOiJ1c2VyIn0seyJjb250ZW50IjoiIiwicm9sZSI6ImFzc2lzdGFudCIsInRvb2xfY2FsbHMiOlt7ImZ1bmN0aW9uIjp7ImFyZ3VtZW50cyI6Int9IiwibmFtZSI6ImNvbXBhY3QifSwiaWQiOiJyZXF1ZXN0IiwidHlwZSI6ImZ1bmN0aW9uIn1dfSx7ImNvbnRlbnQiOiJDb21wYWN0aW9uIHJlcXVlc3RlZC4iLCJyb2xlIjoidG9vbCIsInRvb2xfY2FsbF9pZCI6InJlcXVlc3QifV0sInNvdXJjZV9kaWdlc3QiOiI0ZjJhZjM2ODBjZWRjOTA1OGRmNTQzM2RkYWU5MGE1ZGYyYjM1MmVmNGE0NTUwZDQzZTY3NmU4YjM4MjkyNWRjIiwic3VtbWFyeV9vcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzRmMmFmMzY4MGNlZGM5MDU4ZGY1NDMzZGRhZTkwYTVkZjJiMzUyZWY0YTQ1NTBkNDNlNjc2ZThiMzgyOTI1ZGMvc3VtbWFyeS8xIiwidGFpbF9pZHMiOlsiMC85ZjlkM2YyMTc5YjAyZTgyMjdkYTBkYWYyZDg2YmU4MDIzMzcxMDRhNTJlYjQzM2YwZjY4M2Q1NWUzOTQwYTA4IiwiNC84N2IyMmUxNTJlODMyOGE5YTljMTcwYmNkODdiY2U2YTc0ZWM3NGQ1YmU0MDQyYWYwZjU1MWY4ODk3ZTU4ZmJkIiwiNS83MTBlNDRlZWM5MGFjNDVmOTVmNDljMmMxOTNkOGU4NjRiOGMzNGY3YWJkNjI1NTk0ZWZmYjJkYzYxZGUzZDM2Il19LCJyZWNvcmRfaWQiOiJjb21wYWN0LzRmMmFmMzY4MGNlZGM5MDU4ZGY1NDMzZGRhZTkwYTVkZjJiMzUyZWY0YTQ1NTBkNDNlNjc2ZThiMzgyOTI1ZGMvc3VtbWFyeS9zL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzRmMmFmMzY4MGNlZGM5MDU4ZGY1NDMzZGRhZTkwYTVkZjJiMzUyZWY0YTQ1NTBkNDNlNjc2ZThiMzgyOTI1ZGMvc3VtbWFyeS8xIiwic2NoZW1hX3ZlcnNpb24iOjEsInNlc3Npb25faWQiOiJzIiwidHVybl9pZCI6InMvdHVybi9pbml0aWFsIn1dLCJpZCI6InRvb2xfY29tcGFjdGlvbiIsInN1bW1hcnlfcGxhbiI6eyJhdHRlbXB0IjoxLCJraW5kIjoib3BfcGxhbm5lZCIsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL2NvbXBhY3Rpb24vNGYyYWYzNjgwY2VkYzkwNThkZjU0MzNkZGFlOTBhNWRmMmIzNTJlZjRhNDU1MGQ0M2U2NzZlOGIzODI5MjVkYy9zdW1tYXJ5LzEiLCJwYXlsb2FkIjp7ImJ1ZGdldF9hZG1pc3Npb24iOnt9LCJjb25zdW1lZF91bmtub3ducyI6W10sImNvbnRleHRfdmVyc2lvbiI6IjE2IiwiZGVwZW5kZW5jaWVzIjpbXSwiaWRlbXBvdGVuY3lfa2V5Ijoicy9zL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzRmMmFmMzY4MGNlZGM5MDU4ZGY1NDMzZGRhZTkwYTVkZjJiMzUyZWY0YTQ1NTBkNDNlNjc2ZThiMzgyOTI1ZGMvc3VtbWFyeS8xIiwibm90X2JlZm9yZV9tcyI6bnVsbCwib3Bfa2luZCI6Im1vZGVsIiwicHJvdmlkZXJfYmluZGluZyI6Im1vZGVsIiwicHVycG9zZSI6ImNvbXBhY3Rpb24iLCJyZXF1ZXN0Ijp7Im1lc3NhZ2VzIjpbeyJjb250ZW50Ijoi5L2g5q2j5Zyo5oC757uT5LiA5q6155So5oi35LiOIEFJIOe8lueoi+WKqeaJi+eahOWvueivneOAglxu6K+35YWI5ZyoIDxhbmFseXNpcz4g5qCH562+5Lit6L+b6KGM5oCd6ICDICjor6Xpg6jliIblkI7nu63kvJrooqvliaXnprspLCDnhLblkI7ovpPlh7rnu5PmnoTljJYgSlNPTiDmkZjopoHjgIJcblxuPGFuYWx5c2lzPlxu6K+36YCQ5q2l5oCd6ICDOiDlk6rkupvkv6Hmga/lv4Xpobvkv53nlZksIOWTquS6m+eUqOaIt+WOn+ivneS4jeiDveS4oiwg5ZOq5Lqb5paH5Lu2L+mUmeivry/lvZPliY3nirbmgIHkvJrlvbHlk43lkI7nu63nu6fnu63miafooYzjgIJcbjwvYW5hbHlzaXM+XG5cbjxQcmV2aW91cyBTdW1tYXJ5PlxuW11cbjwvUHJldmlvdXMgU3VtbWFyeT5cblxuPENvbnZlcnNhdGlvbiBQcmVmaXg+XG5be1wiY29udGVudFwiOlwib3JpZ2luYWwgcmVxdWVzdFwiLFwicm9sZVwiOlwidXNlclwifSx7XCJjb250ZW50XCI6XCJvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIFwiLFwicm9sZVwiOlwiYXNzaXN0YW50XCJ9LHtcImNvbnRlbnRcIjpcImdvXCIsXCJyb2xlXCI6XCJ1c2VyXCJ9XVxuPC9Db252ZXJzYXRpb24gUHJlZml4PlxuXG7or7flsIbku6XkuIrlr7nor53ljovnvKnkuLrnu5PmnoTljJYgSlNPTuOAjFRhc2sgU3RhdHVzIFN1bW1hcnnjgI0sIOiuqSBBZ2VudCDog73lv6vpgJ/mgaLlpI3ku7vliqEsIOW5tuS/neeVmeeUqOaIt+e6puadn+OAgeWFs+mUruWGs+etluOAgeaWh+S7tuaTjeS9nOS4juW9k+WJjeW3peS9nOeKtuaAgeOAglxuXG7opoHmsYI6XG4tIOWPqui+k+WHuiBKU09OLCDkuI3opoEgTWFya2Rvd27jgIJcbi0g5a2X5q615YaF5a65566A5rSB44CB5Y+v5qOA57SiLCDnn63lj6Xooajovr7jgIJcbi0g5rKh5pyJ5L+h5oGv55qE5a2X5q615L2/55SoIFtdIOaIliBcIlwi44CCXG4tIGBvcmlnaW5hbF91c2VyX21lc3NhZ2VzYCDlrZfmrrXoh7PlhbPph43opoE6IOWwvemHj+S/neeVmeeUqOaIt+WOn+ivnSwg5LiN6KaB5YGa5qaC5ous5byP5pS55YaZ44CCXG5cbkpTT04gU2NoZW1hOlxue1xuICBcInN1bW1hcnlfdmVyc2lvblwiOiBcIjIuMFwiLFxuICBcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIjogW1wiLi4uXCJdLFxuICBcInVzZXJfY29uc3RyYWludHNcIjogW1wiLi4uXCJdLFxuICBcImRlY2lzaW9uc1wiOiBbXCIuLi5cIl0sXG4gIFwiZmlsZXNfZXhhbWluZWRfb3JfbW9kaWZpZWRcIjogW1xuICAgIHtcInBhdGhcIjogXCIuLi5cIiwgXCJhY3Rpb25cIjogXCJyZWFkfGNyZWF0ZWR8bW9kaWZpZWR8ZGVsZXRlZFwiLCBcInN1bW1hcnlcIjogXCIuLi5cIn1cbiAgXSxcbiAgXCJlcnJvcnNfYW5kX2ZpeGVzXCI6IFtcbiAgICB7XCJlcnJvclwiOiBcIi4uLlwiLCBcImZpeFwiOiBcIi4uLlwiLCBcImZpbGVcIjogXCIuLi5cIn1cbiAgXSxcbiAgXCJwcm9ncmVzc1wiOiBbXCLmnIDlpJrkv53nlZkgNDAg5p2h5YWz6ZSu6L+b5bGVXCJdLFxuICBcImtleV9mYWN0c1wiOiBbXCIuLi5cIl0sXG4gIFwib3Blbl9pc3N1ZXNcIjogW1wiLi4uXCJdLFxuICBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIi4uLlwiLFxuICBcIm5leHRfc3RlcHNcIjogW1wiLi4uXCJdXG59XG4iLCJyb2xlIjoidXNlciJ9XSwibWV0YWRhdGEiOnsia2VlcF9yZWNlbnQiOjEsIm1vZGUiOiJzdW1tYXJ5IiwicHVycG9zZSI6ImNvbXBhY3Rpb24iLCJzb3VyY2VfZGlnZXN0IjoiNGYyYWYzNjgwY2VkYzkwNThkZjU0MzNkZGFlOTBhNWRmMmIzNTJlZjRhNDU1MGQ0M2U2NzZlOGIzODI5MjVkYyIsInZ2X3Nlc3Npb24iOnsiY3ljbGVfaW5kZXgiOjIsIm1vZGVsX2JpbmRpbmciOnsiYmFja2VuZCI6InNjcmlwdGVkIiwiY29udGV4dF9sZW5ndGgiOm51bGwsImVuZHBvaW50cyI6W10sIm1heF9vdXRwdXRfdG9rZW5zIjpudWxsLCJtb2RlbCI6InNjcmlwdGVkIn19fSwibW9kZWwiOiJzY3JpcHRlZCIsIm1vZGVsX3NldHRpbmdzIjp7InJldHJ5Ijp7ImJhY2tvZmZfc2Vjb25kcyI6MCwibWF4X2F0dGVtcHRzIjoxfX0sInByb21wdF9idW5kbGUiOm51bGwsInRvb2xzIjpbXX0sInJlcXVlc3RfZGlnZXN0IjoiZWJhMTg3NzJlYmJhMDkwY2IxMTA3YmU3ZjFhZDdlZmI5YWJlZDE4ZDIwMTUyZjhhYjg0MTZiOGRlMmZkMTEwYyIsInRvb2wiOm51bGx9LCJyZWNvcmRfaWQiOiJvcC9zL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzRmMmFmMzY4MGNlZGM5MDU4ZGY1NDMzZGRhZTkwYTVkZjJiMzUyZWY0YTQ1NTBkNDNlNjc2ZThiMzgyOTI1ZGMvc3VtbWFyeS8xLzEvcGxhbm5lZCIsInNjaGVtYV92ZXJzaW9uIjoxLCJzZXNzaW9uX2lkIjoicyIsInR1cm5faWQiOiJzL3R1cm4vaW5pdGlhbCJ9LCJzdW1tYXJ5X3Jlc3VsdCI6eyJjb250ZW50Ijoie1wib3JpZ2luYWxfdXNlcl9tZXNzYWdlc1wiOiBbXCJvcmlnaW5hbCByZXF1ZXN0XCJdLCBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIkNvbnRpbnVlIHRoZSB0YXNrXCJ9IiwicmF3Ijp7InVzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjozMDAsInByb21wdF90b2tlbnMiOjEyMDAwLCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MH19fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfSwic3VtbWFyeV91c2FnZSI6eyJjb21wbGV0aW9uX3Rva2VucyI6MzAwLCJwcm9tcHRfdG9rZW5zIjoxMjAwMCwicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjB9fSwidG9vbF9yZXN1bHQiOnsiY29udGVudCI6IkNvbXBhY3Rpb24gcmVxdWVzdGVkLiIsImRpcmVjdGl2ZSI6ImNvbnRpbnVlIiwibWV0YWRhdGEiOnsiY29tcGFjdGlvbl9zb3VyY2UiOnsiY29udGV4dF9kaWdlc3QiOiJkNjU5YzdmNTYyOTlkOTgyN2YwZTM4OTZjMWE0ZjU3ODNjMTk1ZDljOGZmOGI1MmUwZDY4MzFlMjgwMWVjYTk0Iiwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAifSwicmVxdWVzdF9jb21wYWN0aW9uIjp0cnVlfSwic3RhdHVzX2NvZGUiOiJTVUNDRVNTIiwidG9vbF9jYWxsX2lkIjoicmVxdWVzdCJ9fQ==",
+      "sha256": "1702c8530654aeaa2668c5e1f82fef1a16d5bd5cbc3360730a2300109fbb0c6a"
+    },
+    {
+      "wire": {
+        "id": "child_summary",
+        "summary_plan": {
+          "attempt": 1,
+          "kind": "op_planned",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0/summary",
+          "payload": {
+            "budget_admission": {},
+            "consumed_unknowns": [],
+            "context_version": "10",
+            "dependencies": [],
+            "idempotency_key": "s/s/turn/initial/model/primary/1/attempt/1/tool/0/summary",
+            "not_before_ms": null,
+            "op_kind": "model",
+            "provider_binding": "model",
+            "purpose": "compaction",
+            "request": {
+              "messages": [
+                {
+                  "content": "你正在总结一段用户与 AI 编程助手的对话。\n请先在 <analysis> 标签中进行思考 (该部分后续会被剥离), 然后输出结构化 JSON 摘要。\n\n<analysis>\n请逐步思考: 哪些信息必须保留, 哪些用户原话不能丢, 哪些文件/错误/当前状态会影响后续继续执行。\n</analysis>\n\n<Previous Summary>\n[]\n</Previous Summary>\n\n<Conversation Prefix>\n[{\"content\":\"original request\",\"role\":\"user\"},{\"content\":\"old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts old facts \",\"role\":\"assistant\"},{\"content\":\"go\",\"role\":\"user\"}]\n</Conversation Prefix>\n\n请将以上对话压缩为结构化 JSON「Task Status Summary」, 让 Agent 能快速恢复任务, 并保留用户约束、关键决策、文件操作与当前工作状态。\n\n要求:\n- 只输出 JSON, 不要 Markdown。\n- 字段内容简洁、可检索, 短句表达。\n- 没有信息的字段使用 [] 或 \"\"。\n- `original_user_messages` 字段至关重要: 尽量保留用户原话, 不要做概括式改写。\n\nJSON Schema:\n{\n  \"summary_version\": \"2.0\",\n  \"original_user_messages\": [\"...\"],\n  \"user_constraints\": [\"...\"],\n  \"decisions\": [\"...\"],\n  \"files_examined_or_modified\": [\n    {\"path\": \"...\", \"action\": \"read|created|modified|deleted\", \"summary\": \"...\"}\n  ],\n  \"errors_and_fixes\": [\n    {\"error\": \"...\", \"fix\": \"...\", \"file\": \"...\"}\n  ],\n  \"progress\": [\"最多保留 40 条关键进展\"],\n  \"key_facts\": [\"...\"],\n  \"open_issues\": [\"...\"],\n  \"current_work_state\": \"...\",\n  \"next_steps\": [\"...\"]\n}\n",
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "child_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "mode": "child_summary",
+                "purpose": "compaction",
+                "source_context_version": "8",
+                "source_digest": "d659c7f56299d9827f0e3896c1a4f5783c195d9c8ff8b52e0d6831e2801eca94",
+                "vv_session": {
+                  "cycle_index": 1,
+                  "model_binding": {
+                    "backend": "scripted",
+                    "context_length": null,
+                    "endpoints": [],
+                    "max_output_tokens": null,
+                    "model": "scripted"
+                  }
+                }
+              },
+              "model": "scripted",
+              "model_settings": {
+                "retry": {
+                  "backoff_seconds": 0,
+                  "max_attempts": 1
+                }
+              },
+              "prompt_bundle": null,
+              "tools": []
+            },
+            "request_digest": "6b8d48badeaa78d3eb1c9839c5aa6194fb41aed7fa30dc4d4c8a8628697744b7",
+            "tool": null
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/summary/1/planned",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        "summary_result": {
+          "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+          "raw": {
+            "usage": {
+              "completion_tokens": 300,
+              "prompt_tokens": 12000,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "reasoning_content": null,
+          "tool_calls": []
+        },
+        "summary_usage": {
+          "completion_tokens": 300,
+          "prompt_tokens": 12000,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "context_replacements": [],
+        "child_input": "child input\n<Original User Request>\noriginal request\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue the task\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"original request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
+        "tool_result": {
+          "content": "{\"kind\": \"child\", \"session_id\": \"child\", \"turn_id\": \"child/turn/start\", \"delivery_target\": {\"session_id\": \"s\", \"turn_id\": \"s/turn/initial\", \"generation\": 0, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"attempt\": 1}, \"generation\": 0, \"background\": true}",
+          "directive": "continue",
+          "metadata": {
+            "child": {
+              "background": true,
+              "delivery_target": {
+                "attempt": 1,
+                "generation": 0,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "session_id": "s",
+                "turn_id": "s/turn/initial"
+              },
+              "generation": 0,
+              "kind": "child",
+              "session_id": "child",
+              "turn_id": "child/turn/start"
+            }
+          },
+          "status_code": "SUCCESS",
+          "tool_call_id": "request"
+        }
+      },
+      "bytes_base64": "eyJjaGlsZF9pbnB1dCI6ImNoaWxkIGlucHV0XG48T3JpZ2luYWwgVXNlciBSZXF1ZXN0Plxub3JpZ2luYWwgcmVxdWVzdFxuPC9PcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XG5cbjxDb21wcmVzc2VkIEFnZW50IE1lbW9yeT5cbntcImN1cnJlbnRfd29ya19zdGF0ZVwiOlwiQ29udGludWUgdGhlIHRhc2tcIixcImRlY2lzaW9uc1wiOltdLFwiZXJyb3JzX2FuZF9maXhlc1wiOltdLFwiZmlsZXNfZXhhbWluZWRfb3JfbW9kaWZpZWRcIjpbXSxcImtleV9mYWN0c1wiOltdLFwibmV4dF9zdGVwc1wiOltdLFwib3Blbl9pc3N1ZXNcIjpbXSxcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIjpbXCJvcmlnaW5hbCByZXF1ZXN0XCJdLFwicHJvZ3Jlc3NcIjpbXSxcInN1bW1hcnlfdmVyc2lvblwiOlwiMi4wXCIsXCJ1c2VyX2NvbnN0cmFpbnRzXCI6W119XG48L0NvbXByZXNzZWQgQWdlbnQgTWVtb3J5PlxuXG48UGVyc2lzdGVkIEFydGlmYWN0cz5cbjwvUGVyc2lzdGVkIEFydGlmYWN0cz4iLCJjb250ZXh0X3JlcGxhY2VtZW50cyI6W10sImlkIjoiY2hpbGRfc3VtbWFyeSIsInN1bW1hcnlfcGxhbiI6eyJhdHRlbXB0IjoxLCJraW5kIjoib3BfcGxhbm5lZCIsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wL3N1bW1hcnkiLCJwYXlsb2FkIjp7ImJ1ZGdldF9hZG1pc3Npb24iOnt9LCJjb25zdW1lZF91bmtub3ducyI6W10sImNvbnRleHRfdmVyc2lvbiI6IjEwIiwiZGVwZW5kZW5jaWVzIjpbXSwiaWRlbXBvdGVuY3lfa2V5Ijoicy9zL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC9zdW1tYXJ5Iiwibm90X2JlZm9yZV9tcyI6bnVsbCwib3Bfa2luZCI6Im1vZGVsIiwicHJvdmlkZXJfYmluZGluZyI6Im1vZGVsIiwicHVycG9zZSI6ImNvbXBhY3Rpb24iLCJyZXF1ZXN0Ijp7Im1lc3NhZ2VzIjpbeyJjb250ZW50Ijoi5L2g5q2j5Zyo5oC757uT5LiA5q6155So5oi35LiOIEFJIOe8lueoi+WKqeaJi+eahOWvueivneOAglxu6K+35YWI5ZyoIDxhbmFseXNpcz4g5qCH562+5Lit6L+b6KGM5oCd6ICDICjor6Xpg6jliIblkI7nu63kvJrooqvliaXnprspLCDnhLblkI7ovpPlh7rnu5PmnoTljJYgSlNPTiDmkZjopoHjgIJcblxuPGFuYWx5c2lzPlxu6K+36YCQ5q2l5oCd6ICDOiDlk6rkupvkv6Hmga/lv4Xpobvkv53nlZksIOWTquS6m+eUqOaIt+WOn+ivneS4jeiDveS4oiwg5ZOq5Lqb5paH5Lu2L+mUmeivry/lvZPliY3nirbmgIHkvJrlvbHlk43lkI7nu63nu6fnu63miafooYzjgIJcbjwvYW5hbHlzaXM+XG5cbjxQcmV2aW91cyBTdW1tYXJ5PlxuW11cbjwvUHJldmlvdXMgU3VtbWFyeT5cblxuPENvbnZlcnNhdGlvbiBQcmVmaXg+XG5be1wiY29udGVudFwiOlwib3JpZ2luYWwgcmVxdWVzdFwiLFwicm9sZVwiOlwidXNlclwifSx7XCJjb250ZW50XCI6XCJvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIG9sZCBmYWN0cyBvbGQgZmFjdHMgb2xkIGZhY3RzIFwiLFwicm9sZVwiOlwiYXNzaXN0YW50XCJ9LHtcImNvbnRlbnRcIjpcImdvXCIsXCJyb2xlXCI6XCJ1c2VyXCJ9XVxuPC9Db252ZXJzYXRpb24gUHJlZml4PlxuXG7or7flsIbku6XkuIrlr7nor53ljovnvKnkuLrnu5PmnoTljJYgSlNPTuOAjFRhc2sgU3RhdHVzIFN1bW1hcnnjgI0sIOiuqSBBZ2VudCDog73lv6vpgJ/mgaLlpI3ku7vliqEsIOW5tuS/neeVmeeUqOaIt+e6puadn+OAgeWFs+mUruWGs+etluOAgeaWh+S7tuaTjeS9nOS4juW9k+WJjeW3peS9nOeKtuaAgeOAglxuXG7opoHmsYI6XG4tIOWPqui+k+WHuiBKU09OLCDkuI3opoEgTWFya2Rvd27jgIJcbi0g5a2X5q615YaF5a65566A5rSB44CB5Y+v5qOA57SiLCDnn63lj6Xooajovr7jgIJcbi0g5rKh5pyJ5L+h5oGv55qE5a2X5q615L2/55SoIFtdIOaIliBcIlwi44CCXG4tIGBvcmlnaW5hbF91c2VyX21lc3NhZ2VzYCDlrZfmrrXoh7PlhbPph43opoE6IOWwvemHj+S/neeVmeeUqOaIt+WOn+ivnSwg5LiN6KaB5YGa5qaC5ous5byP5pS55YaZ44CCXG5cbkpTT04gU2NoZW1hOlxue1xuICBcInN1bW1hcnlfdmVyc2lvblwiOiBcIjIuMFwiLFxuICBcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIjogW1wiLi4uXCJdLFxuICBcInVzZXJfY29uc3RyYWludHNcIjogW1wiLi4uXCJdLFxuICBcImRlY2lzaW9uc1wiOiBbXCIuLi5cIl0sXG4gIFwiZmlsZXNfZXhhbWluZWRfb3JfbW9kaWZpZWRcIjogW1xuICAgIHtcInBhdGhcIjogXCIuLi5cIiwgXCJhY3Rpb25cIjogXCJyZWFkfGNyZWF0ZWR8bW9kaWZpZWR8ZGVsZXRlZFwiLCBcInN1bW1hcnlcIjogXCIuLi5cIn1cbiAgXSxcbiAgXCJlcnJvcnNfYW5kX2ZpeGVzXCI6IFtcbiAgICB7XCJlcnJvclwiOiBcIi4uLlwiLCBcImZpeFwiOiBcIi4uLlwiLCBcImZpbGVcIjogXCIuLi5cIn1cbiAgXSxcbiAgXCJwcm9ncmVzc1wiOiBbXCLmnIDlpJrkv53nlZkgNDAg5p2h5YWz6ZSu6L+b5bGVXCJdLFxuICBcImtleV9mYWN0c1wiOiBbXCIuLi5cIl0sXG4gIFwib3Blbl9pc3N1ZXNcIjogW1wiLi4uXCJdLFxuICBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIi4uLlwiLFxuICBcIm5leHRfc3RlcHNcIjogW1wiLi4uXCJdXG59XG4iLCJyb2xlIjoidXNlciJ9XSwibWV0YWRhdGEiOnsiY2hpbGRfb3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAiLCJtb2RlIjoiY2hpbGRfc3VtbWFyeSIsInB1cnBvc2UiOiJjb21wYWN0aW9uIiwic291cmNlX2NvbnRleHRfdmVyc2lvbiI6IjgiLCJzb3VyY2VfZGlnZXN0IjoiZDY1OWM3ZjU2Mjk5ZDk4MjdmMGUzODk2YzFhNGY1NzgzYzE5NWQ5YzhmZjhiNTJlMGQ2ODMxZTI4MDFlY2E5NCIsInZ2X3Nlc3Npb24iOnsiY3ljbGVfaW5kZXgiOjEsIm1vZGVsX2JpbmRpbmciOnsiYmFja2VuZCI6InNjcmlwdGVkIiwiY29udGV4dF9sZW5ndGgiOm51bGwsImVuZHBvaW50cyI6W10sIm1heF9vdXRwdXRfdG9rZW5zIjpudWxsLCJtb2RlbCI6InNjcmlwdGVkIn19fSwibW9kZWwiOiJzY3JpcHRlZCIsIm1vZGVsX3NldHRpbmdzIjp7InJldHJ5Ijp7ImJhY2tvZmZfc2Vjb25kcyI6MCwibWF4X2F0dGVtcHRzIjoxfX0sInByb21wdF9idW5kbGUiOm51bGwsInRvb2xzIjpbXX0sInJlcXVlc3RfZGlnZXN0IjoiNmI4ZDQ4YmFkZWFhNzhkM2ViMWM5ODM5YzVhYTYxOTRmYjQxYWVkN2ZhMzBkYzRkNGM4YTg2Mjg2OTc3NDRiNyIsInRvb2wiOm51bGx9LCJyZWNvcmRfaWQiOiJvcC9zL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC9zdW1tYXJ5LzEvcGxhbm5lZCIsInNjaGVtYV92ZXJzaW9uIjoxLCJzZXNzaW9uX2lkIjoicyIsInR1cm5faWQiOiJzL3R1cm4vaW5pdGlhbCJ9LCJzdW1tYXJ5X3Jlc3VsdCI6eyJjb250ZW50Ijoie1wib3JpZ2luYWxfdXNlcl9tZXNzYWdlc1wiOiBbXCJvcmlnaW5hbCByZXF1ZXN0XCJdLCBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIkNvbnRpbnVlIHRoZSB0YXNrXCJ9IiwicmF3Ijp7InVzYWdlIjp7ImNvbXBsZXRpb25fdG9rZW5zIjozMDAsInByb21wdF90b2tlbnMiOjEyMDAwLCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MH19fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfSwic3VtbWFyeV91c2FnZSI6eyJjb21wbGV0aW9uX3Rva2VucyI6MzAwLCJwcm9tcHRfdG9rZW5zIjoxMjAwMCwicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjB9fSwidG9vbF9yZXN1bHQiOnsiY29udGVudCI6IntcImtpbmRcIjogXCJjaGlsZFwiLCBcInNlc3Npb25faWRcIjogXCJjaGlsZFwiLCBcInR1cm5faWRcIjogXCJjaGlsZC90dXJuL3N0YXJ0XCIsIFwiZGVsaXZlcnlfdGFyZ2V0XCI6IHtcInNlc3Npb25faWRcIjogXCJzXCIsIFwidHVybl9pZFwiOiBcInMvdHVybi9pbml0aWFsXCIsIFwiZ2VuZXJhdGlvblwiOiAwLCBcIm9wZXJhdGlvbl9pZFwiOiBcInMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wXCIsIFwiYXR0ZW1wdFwiOiAxfSwgXCJnZW5lcmF0aW9uXCI6IDAsIFwiYmFja2dyb3VuZFwiOiB0cnVlfSIsImRpcmVjdGl2ZSI6ImNvbnRpbnVlIiwibWV0YWRhdGEiOnsiY2hpbGQiOnsiYmFja2dyb3VuZCI6dHJ1ZSwiZGVsaXZlcnlfdGFyZ2V0Ijp7ImF0dGVtcHQiOjEsImdlbmVyYXRpb24iOjAsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wIiwic2Vzc2lvbl9pZCI6InMiLCJ0dXJuX2lkIjoicy90dXJuL2luaXRpYWwifSwiZ2VuZXJhdGlvbiI6MCwia2luZCI6ImNoaWxkIiwic2Vzc2lvbl9pZCI6ImNoaWxkIiwidHVybl9pZCI6ImNoaWxkL3R1cm4vc3RhcnQifX0sInN0YXR1c19jb2RlIjoiU1VDQ0VTUyIsInRvb2xfY2FsbF9pZCI6InJlcXVlc3QifX0=",
+      "sha256": "f83aa2bc7177278dbb54ead68e3300dd0ff690d58a76a492616fd71f014d20da"
+    }
+  ]
+}

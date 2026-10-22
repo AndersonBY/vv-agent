@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v12",
+  "contract": "vv-agent-public-api-v13",
   "domains": [
     {
       "capabilities": [
@@ -42,6 +42,10 @@
         {
           "id": "agent.guardrail_outcome",
           "python": "vv_agent.GuardrailResult"
+        },
+        {
+          "id": "agent.summary_child_tool",
+          "python": "vv_agent.SummaryChildTool"
         }
       ],
       "id": "agent"
@@ -1168,7 +1172,7 @@
       "id": "exports"
     }
   ],
-  "schema_version": 12,
+  "schema_version": 13,
   "surfaces": [
     {
       "id": "agent",
@@ -5942,6 +5946,11 @@
       "behavior": "host preparation deferred without a failed turn",
       "id": "session_RuntimeNotReady",
       "python_target": "vv_agent.session.runtime.RuntimeNotReady"
+    },
+    {
+      "behavior": "pure requires_summary predicate; logged full-history summary before atomic admit(plan, summary) callback",
+      "id": "session_SummaryChildTool",
+      "python_target": "vv_agent.SummaryChildTool"
     },
     {
       "id": "app_server_host",

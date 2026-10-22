@@ -508,6 +508,12 @@ is pickled, and mutations to host objects are not rolled back.
 
 ## Compaction through the log
 
+Tools may request compaction and child bindings may require a fresh summary.
+See [host summary bindings](host-integration.md#a-compact-tool-and-fresh-child-summaries).
+Both use ordinary compaction model operations. Child preparation uses
+`metadata.mode=child_summary` and never appends `context_compacted`.
+
+
 The host supplies `Runtime.memory_manager`; its settings are frozen in the turn
 definition. The kernel never calls the legacy summary callback or the Session
 Memory extraction loop. It reuses `MemoryManager.plan_summary`,

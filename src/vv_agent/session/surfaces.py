@@ -63,7 +63,8 @@ class SessionDriver:
                 retained.remove(callback)
         self._close_callbacks.clear()
         if self._owns_store and isinstance(self.store, SQLiteStore):
-            self.store.connection.close()
+            with self.store._connection_lock:
+                self.store.connection.close()
 
     def _on_close(self, callback):
         self._close_callbacks.append(callback)
