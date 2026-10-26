@@ -207,7 +207,12 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             else:
                 require(not turn.cancelled, "cannot resume or suspend a cancelled turn")
                 turn.suspended = action == "suspend"
-    if item.kind == "user" and tid in state.turns and state.turns[tid].wait is not None:
+    if (
+        item.kind == "user"
+        and p["reason"] != "host compaction request"
+        and tid in state.turns
+        and state.turns[tid].wait is not None
+    ):
         waiting = state.turns[tid].wait
         assert waiting is not None
         content = item.payload["content"]

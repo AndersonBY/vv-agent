@@ -19,6 +19,7 @@ class AppServerErrorCode:
     SUBMISSION_TURN_MISMATCH: ClassVar[int] = -32025
     INVALID_CURSOR: ClassVar[int] = -32026
     PERMISSION_DENIED: ClassVar[int] = -32027
+    CONTEXT_VERSION_MISMATCH: ClassVar[int] = -32028
     ACTIVE_TURN_NOT_FOUND: ClassVar[int] = -32030
     TURN_ID_MISMATCH: ClassVar[int] = -32031
 

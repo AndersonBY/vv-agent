@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from .kernel import _Driver
 
 
+def compaction_request(item: InboxItem) -> dict | None:
+    content = item.payload.get("content")
+    if item.kind != "user" or not isinstance(content, dict):
+        return None
+    metadata = content.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("request_compaction") is not True:
+        return None
+    request = content.get("app_server_compaction")
+    return request if isinstance(request, dict) else None
+
+
 def pending_compaction_requests(driver: _Driver) -> list[str]:
     consumed = {
         oid
@@ -24,7 +35,21 @@ def pending_compaction_requests(driver: _Driver) -> list[str]:
         if tid == driver.state.active_turn_id and stage == "memory_completed"
         for oid in record._payload["data"]["event"].get("metadata", {}).get("requested_by", [])
     }
-    return [
+    controls = [
+        key
+        for key, r in driver.state.applied_inputs.items()
+        if (
+            r.turn_id == driver.state.active_turn_id
+            or (
+                driver.state.active_turn_id is not None
+                and key in driver.state.turns[driver.state.active_turn_id].start._payload["input_ids"]
+            )
+        )
+        and r._payload["disposition"] in {"applied", "queued"}
+        and compaction_request(InboxItem(**r._payload["input"])) is not None
+        and key not in consumed
+    ]
+    return controls + [
         oid
         for oid, op in driver.state.operations.items()
         if op.turn_id == driver.state.active_turn_id

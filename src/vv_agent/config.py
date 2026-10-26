@@ -4,7 +4,7 @@ import ast
 import json
 import tomllib
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +38,7 @@ class ResolvedModelConfig:
     function_call_available: bool = False
     response_format_available: bool = False
     native_multimodal: bool = False
+    capabilities: dict[str, Any] = field(default_factory=dict)
 
     @property
     def endpoint(self) -> EndpointConfig:
@@ -214,6 +215,20 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
         function_call_available=model_config.get("function_call_available") is True,
         response_format_available=model_config.get("response_format_available") is True,
         native_multimodal=model_config.get("native_multimodal") is True,
+        capabilities={
+            key: model_config[key]
+            for key in (
+                "function_call_available",
+                "native_multimodal",
+                "input_modalities",
+                "reasoning_available",
+                "supported_reasoning_efforts",
+                "default_reasoning_effort",
+                "prompt_cache_available",
+                "continuation_available",
+            )
+            if key in model_config
+        },
     )
 
 

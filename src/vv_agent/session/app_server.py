@@ -20,8 +20,9 @@ from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.types import AgentStatus, Message
 
+from .context_view import context_view
 from .projection import project_records
-from .records import InboxItem, SessionSpec
+from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict
@@ -98,6 +99,10 @@ class SubmissionConflict(ValueError):
     pass
 
 
+class ContextVersionMismatch(ValueError):
+    pass
+
+
 class TurnMismatch(ValueError):
     pass
 
@@ -116,24 +121,43 @@ class _KernelThreadStore:
         self.kernel = kernel
         self.runtimes: dict[str, Any] = {}
 
-    def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None):
-        with self.kernel.store.atomic() as tx:
-            receipt = tx.create(
-                SessionSpec(
-                    input_id,
-                    "local",
-                    cwd or ".",
-                    attributes={"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}},
-                ),
-                consumers=("events", "app_server", "traces"),
-            )
+    def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None, context=None):
+        attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
+        try:
+            with self.kernel.store.atomic() as tx:
+                receipt = tx.create(
+                    SessionSpec(
+                        input_id,
+                        "local",
+                        cwd or ".",
+                        attributes=attributes | ({"app_server_context": context} if context is not None else {}),
+                    ),
+                    consumers=("events", "app_server", "traces"),
+                )
+            replayed = receipt.replayed
+        except Conflict:
+            # Only client creation bytes decide replay; the first node freezes the baseline.
+            creation = self.kernel.store.read(input_id, limit=1).records[0].record._payload
+            prior = creation["attributes"]
+            if (creation["principal"], creation["workspace"], creation["parent_session_id"], creation["parent_operation_id"]) != (
+                "local",
+                cwd or ".",
+                None,
+                None,
+            ):
+                raise
+            if canonical_json_bytes({k: v for k, v in prior.items() if k != "app_server_context"}) != canonical_json_bytes(
+                attributes
+            ):
+                raise
+            replayed = True
         return {
             "threadId": input_id,
             "agentKey": agent_key,
             "cwd": cwd,
             "status": self.read_thread(input_id).thread.status,
             "accepted": True,
-            "replayed": receipt.replayed,
+            "replayed": replayed,
         }
 
     def _thread_metadata(self, thread_id, state, records):
@@ -429,7 +453,7 @@ class _KernelRunAdapter(RunAdapter):
             for stored in rows:
                 record = stored.record
                 if record.kind == "turn_started":
-                    notifications.append(("turn/started", {"threadId": sid, "turnId": record.turn_id}))
+                    notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
                 elif record.kind == "turn_ended":
                     if snapshot is None:
                         snapshot = self.kernel.store.read_state(sid)
@@ -438,6 +462,7 @@ class _KernelRunAdapter(RunAdapter):
                     )
                     notifications.append(
                         (
+                            stored.seq,
                             "turn/completed",
                             {
                                 "threadId": sid,
@@ -447,12 +472,23 @@ class _KernelRunAdapter(RunAdapter):
                             },
                         )
                     )
+            if rows:
+                sequences = {row.seq for row in rows}
+                for event in project_records(self.kernel.store.projection_context(sid, rows)):
+                    if event.metadata["session_seq"] not in sequences:
+                        continue
+                    projection = map_run_event(event, thread_id=sid, turn_id=event.run_id)
+                    notifications.extend(
+                        (event.metadata["session_seq"], m, p)
+                        for m, p in projection.additional_notifications
+                        if m.startswith("contextCompaction/")
+                    )
             with self._notification_lock:
                 if self._notification_positions.get(sid) is not position:
                     return False
                 if rows:
                     position.seq = rows[-1].seq
-            for method, params in notifications:
+            for _, method, params in sorted(notifications, key=lambda entry: (entry[0], entry[1] == "turn/completed")):
                 self._notify_subscribers(sid, method, params)
             return position.seq != previous
 
@@ -620,7 +656,8 @@ class _KernelRunAdapter(RunAdapter):
                 if projection.notification_method:
                     self._notify_subscribers(thread_id, projection.notification_method, projection.notification_params)
                 for method, params in projection.additional_notifications:
-                    self._notify_subscribers(thread_id, method, params)
+                    if not method.startswith("contextCompaction/"):
+                        self._notify_subscribers(thread_id, method, params)
 
             # SessionRunEventStore commits its cursor inside consume(); pump delivery
             # keeps host callbacks and transport writes outside that transaction.
@@ -771,6 +808,59 @@ class _KernelRunAdapter(RunAdapter):
             }
             for wait in waits
         ]
+
+    def read_context(self, thread_id):
+        return context_view(self.kernel.store, thread_id)
+
+    def compact_thread(self, *, thread_id, action_id, expected_context_version=None, connection_id=None):
+        params = {"threadId": thread_id, "actionId": action_id}
+        if expected_context_version is not None:
+            params["expectedContextVersion"] = expected_context_version
+        request_id = "compaction/" + digest([thread_id, action_id])
+        item = InboxItem(
+            request_id,
+            "user",
+            {
+                "content": {
+                    "text": "",
+                    "messages": [],
+                    "metadata": {"request_compaction": True},
+                    "app_server_compaction": params,
+                }
+            },
+        )
+        try:
+            with self.kernel.store.atomic() as tx:
+                tx.lock_session(thread_id)
+                previous = self.kernel.store.read_input(thread_id, request_id)
+                if previous is not None:
+                    if previous.item.encode() != item.encode():
+                        raise SubmissionConflict("submission_conflict")
+                else:
+                    state, _, _ = self.kernel.store.read_state(thread_id)
+                    if state.closed or state.archived:
+                        raise TurnResumeError("Thread is closed or archived")
+                    if (
+                        expected_context_version is not None
+                        and self.read_context(thread_id)["contextVersion"] != expected_context_version
+                    ):
+                        raise ContextVersionMismatch("context_version_mismatch")
+                receipt = tx.push(thread_id, item)
+        except Conflict as exc:
+            if str(exc) == "session or cursor not found":
+                raise KeyError(thread_id) from exc
+            raise SubmissionConflict("submission_conflict") from exc
+        result = {
+            "threadId": thread_id,
+            "actionId": action_id,
+            "requestId": request_id,
+            "inputSeq": receipt.input_seq,
+            "accepted": True,
+            "replayed": receipt.replayed,
+        }
+        if not receipt.replayed:
+            self.recover(connection_id, thread_id)
+        return result
 
     def select_model(self, *, thread_id, input_id, selection):
         self._store.read_thread(thread_id)

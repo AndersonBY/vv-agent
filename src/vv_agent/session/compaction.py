@@ -19,15 +19,12 @@ if TYPE_CHECKING:
     from .kernel import _Driver
 
 
-def manager_for(driver: _Driver) -> MemoryManager:
-    assert driver.state.active_turn_id is not None
-    start = driver.state.turns[driver.state.active_turn_id].start
-    task = start._task()
-    definition = start._payload["definition"]
+def memory_settings(definition: dict[str, Any], selection: Record | None) -> dict[str, Any]:
+    """Resolve policy from durable bindings; shared by execution and context reads."""
     settings: dict[str, Any] = dict(definition["memory_settings"])
-    if driver.state.model_selection is not None:
-        effective = driver.effective_model()
-        binding = effective["binding"]
+    if selection is not None:
+        effective = selection._payload["input"]["payload"]["selection"]
+        binding = selection._payload["model_binding"]
         settings["model"] = effective["model"]
         settings["model_max_output_tokens"] = binding["max_output_tokens"]
         reserve = effective.get("model_settings", {}).get("max_tokens")
@@ -45,6 +42,15 @@ def manager_for(driver: _Driver) -> MemoryManager:
             + settings["reserved_output_tokens"]
             + settings["autocompact_buffer_tokens"]
         )
+    return settings
+
+
+def manager_for(driver: _Driver) -> MemoryManager:
+    assert driver.state.active_turn_id is not None
+    start = driver.state.turns[driver.state.active_turn_id].start
+    task = start._task()
+    definition = start._payload["definition"]
+    settings = memory_settings(definition, driver.state.model_selection)
     settings["artifact_scope"] = f"session/{driver.sid}/{task.task_id}"
     return MemoryManager(
         **settings,
@@ -96,6 +102,15 @@ def replacement_record(
 def finish_summary(driver: _Driver) -> bool:
     """Accept a saved receipt before consuming inputs that could change its source view."""
     tid = driver.state.active_turn_id
+    generation = driver.state.turns[tid].start._payload["generation"] if tid else None
+    if any(
+        row.item.kind == "control"
+        and row.item.payload["action"] in {"cancel", "abort", "close", "suspend"}
+        and row.item.target_turn_id in {None, tid}
+        and row.item.generation in {None, generation}
+        for row in driver.store.peek_inbox(driver.sid, through_input_seq=driver.watermark)
+    ):
+        return False
     accepted = {r._payload["summary_operation_id"] for r in driver.state.compactions}
     for oid, op in driver.state.operations.items():
         if op.turn_id != tid or op.kind != "model" or op.selected_attempt is None or oid in accepted:

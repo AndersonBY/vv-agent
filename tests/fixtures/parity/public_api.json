@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v13",
+  "contract": "vv-agent-public-api-v14",
   "domains": [
     {
       "capabilities": [
@@ -320,6 +320,14 @@
         {
           "id": "app_server.turn_resume_response",
           "python": "vv_agent.app_server.TurnResumeResponse"
+        },
+        {
+          "id": "app_server.ThreadContextReadParams",
+          "python": "vv_agent.ThreadContextReadParams"
+        },
+        {
+          "id": "app_server.ThreadCompactStartParams",
+          "python": "vv_agent.ThreadCompactStartParams"
         }
       ],
       "id": "app_server"
@@ -1167,12 +1175,20 @@
           "behavior": "retained current Python export",
           "id": "export.resolve_model_endpoint",
           "python": "vv_agent.resolve_model_endpoint"
+        },
+        {
+          "id": "export.ThreadContextReadParams",
+          "python": "vv_agent.ThreadContextReadParams"
+        },
+        {
+          "id": "export.ThreadCompactStartParams",
+          "python": "vv_agent.ThreadCompactStartParams"
         }
       ],
       "id": "exports"
     }
   ],
-  "schema_version": 13,
+  "schema_version": 14,
   "surfaces": [
     {
       "id": "agent",
@@ -3311,6 +3327,52 @@
           "python": {
             "kind": "method",
             "name": "select_model",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "thread/context/read",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "read_context",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "thread/compact/start",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "compact_thread",
             "signature": {
               "async": false,
               "parameters": [

@@ -26,7 +26,7 @@ Every line is one JSON object. Requests and notifications carry
 {"jsonrpc":"2.0","method":"initialized"}
 ```
 
-The response reports `protocolVersion: "v3"`. Schema exports describe the
+The response reports `protocolVersion: "v4"`. Schema exports describe the
 current closed wire shapes. Regenerate client bindings when upgrading.
 Malformed JSON returns `-32700`; an invalid message returns `-32600`.
 
@@ -149,9 +149,64 @@ after transient store failures. The last local unsubscribe drops its position;
 the next subscription starts at the head or the active turn's start. Use
 thread/events/list for older history.
 
+## Context and manual compaction
+
+`thread/context/read` takes only threadId. It reads the shared log and inbox
+without acquiring a lease, driving a turn or calling the host. contextVersion
+is a SHA-256 digest of durable model-visible messages, tools, effective model
+binding/settings, memory policy and ordered accepted pending input. An execution
+receipt that does not change that view leaves the version unchanged. The same
+cut gives the same version after a restart or on another API node.
+
+estimates separates instructions, tools, history, active summary and pending
+input. Its local CJK character estimator uses 1.5 tokens per CJK character and
+0.25 per other character over compact JSON. These are estimates, including for
+images. limits reports catalog contextWindow and maxOutputTokens as null when
+unknown, alongside the runtime's actual fallback window, output reserve and
+compaction threshold. The runtime and projection share the policy resolver.
+counts separates raw records and uncompacted history from the visible context.
+lastCompaction identifies the retained replacement, its turn, sequence, time,
+removed message count and accepted summary. It returns no private reasoning or
+raw provider payloads.
+
+projectionStage is durable_pre_hooks. Future host callbacks and unapplied model
+selections can change a new plan; a read does not invoke them. New threads keep
+a compiled baseline in creation attributes. Sessions with no admitted definition
+and no baseline report unknown instruction, tool and limit values, and a null
+token total. The baseline does not run input guardrails or context providers.
+
+```jsonl
+{"jsonrpc":"2.0","id":30,"method":"thread/context/read","params":{"threadId":"thread_1"}}
+{"jsonrpc":"2.0","id":31,"method":"thread/compact/start","params":{"threadId":"thread_1","actionId":"compact_1"}}
+```
+
+compact/start also accepts expectedContextVersion, a 64-character lowercase
+SHA-256 digest. A stale version returns -32028 context_version_mismatch. The
+same actionId and params replay the original requestId and inputSeq, even after
+completion; changed params return -32024 submission_conflict. Admission means
+the intent is durable. Persist the actionId before sending it.
+
+The request uses the authenticated inbox and host wake path. Running work reaches
+a batch boundary first. A suspended turn or human wait keeps the request pending
+until resume or reply. An idle session opens a compaction-only turn; it makes no
+primary model call and adds no user message. An existing summary at the same
+boundary is reused. Concurrent input survives replacement, and cancel prevents
+summary acceptance once it is visible at that boundary.
+
+contextCompaction/started, /completed and /failed carry threadId, turnId,
+requestId, eventId, changed and nullable error. No eligible history completes
+with changed=false. A rejected summary or interrupted request fails and keeps
+history. Notifications derive from durable memory and terminal records. Replay
+thread/events/list and map its RunEvents to recover after a disconnect.
+
 ## Models
 
-`model/list` lists the host's configured models. `thread/model/select` takes
+`model/list` lists the host's configured models. Each entry has nullable
+contextLength, maxOutputTokens, supportsTools, supportsVision, inputModalities,
+supportsReasoning, supportedReasoningEfforts, defaultReasoningEffort,
+supportsPromptCache and supportsContinuation. Null means the catalog does not
+know. The default host uses the same resolved model and allowlisted catalog
+capabilities as execution; it does not infer support from a model's name. `thread/model/select` takes
 threadId, stable inputId and selection (or null to restore the frozen default).
 See [session model selection](session-model-selection.md) for application
 boundaries, retained retry plans and billing.

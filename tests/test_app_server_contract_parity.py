@@ -464,13 +464,30 @@ def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surfa
                 "id": "minimal",
                 "provider": "minimal-provider",
                 "displayName": "Minimal",
-                "supportsTools": False,
+                "supportsTools": None,
+                "contextLength": None,
+                "maxOutputTokens": None,
+                "supportsVision": None,
+                "inputModalities": None,
+                "supportsReasoning": None,
+                "supportedReasoningEfforts": None,
+                "defaultReasoningEffort": None,
+                "supportsPromptCache": None,
+                "supportsContinuation": None,
                 "metadata": {"tier": "standard"},
             },
             {
                 "id": "modern",
                 "contextLength": 128_000,
                 "supportsTools": True,
+                "maxOutputTokens": None,
+                "supportsVision": None,
+                "inputModalities": None,
+                "supportsReasoning": None,
+                "supportedReasoningEfforts": None,
+                "defaultReasoningEffort": None,
+                "supportsPromptCache": None,
+                "supportsContinuation": None,
                 "metadata": {"tier": "new"},
             },
         ]
@@ -630,7 +647,19 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
     assert set(definitions["TurnResumeResponse"]["properties"]) == set(durable_resume["responseFields"])
     assert "CheckpointSummary" not in definitions
     assert "InterruptionSummary" not in definitions
-    assert definitions["ModelSummary"]["required"] == ["id", "supportsTools"]
+    assert set(definitions["ModelSummary"]["required"]) == {
+        "id",
+        "contextLength",
+        "maxOutputTokens",
+        "supportsTools",
+        "supportsVision",
+        "inputModalities",
+        "supportsReasoning",
+        "supportedReasoningEfforts",
+        "defaultReasoningEffort",
+        "supportsPromptCache",
+        "supportsContinuation",
+    }
     assert "params" not in variants["model/list"]["required"]
     assert "params" in variants["thread/start"]["required"]
     assert "params" not in variants["thread/list"]["required"]

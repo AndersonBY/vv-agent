@@ -24,17 +24,35 @@ class ModelSummary:
     provider: str | None = None
     display_name: str | None = None
     context_length: int | None = None
-    supports_tools: bool = False
+    supports_tools: bool | None = None
+    max_output_tokens: int | None = None
+    supports_vision: bool | None = None
+    input_modalities: list[str] | None = None
+    supports_reasoning: bool | None = None
+    supported_reasoning_efforts: list[str] | None = None
+    default_reasoning_effort: str | None = None
+    supports_prompt_cache: bool | None = None
+    supports_continuation: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"id": self.id, "supportsTools": self.supports_tools}
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "supportsTools": self.supports_tools,
+            "contextLength": self.context_length,
+            "maxOutputTokens": self.max_output_tokens,
+            "supportsVision": self.supports_vision,
+            "inputModalities": self.input_modalities,
+            "supportsReasoning": self.supports_reasoning,
+            "supportedReasoningEfforts": self.supported_reasoning_efforts,
+            "defaultReasoningEffort": self.default_reasoning_effort,
+            "supportsPromptCache": self.supports_prompt_cache,
+            "supportsContinuation": self.supports_continuation,
+        }
         if self.provider is not None:
             payload["provider"] = self.provider
         if self.display_name is not None:
             payload["displayName"] = self.display_name
-        if self.context_length is not None:
-            payload["contextLength"] = self.context_length
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload

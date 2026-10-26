@@ -3053,13 +3053,13 @@
       "writer_epoch": 1
     },
     {
-      "bytes_base64": "eyJhdHRlbXB0IjpudWxsLCJraW5kIjoic2Vzc2lvbl9jcmVhdGVkIiwib3BlcmF0aW9uX2lkIjpudWxsLCJwYXlsb2FkIjp7ImF0dHJpYnV0ZXMiOnsiYXBwX3NlcnZlciI6eyJhZ2VudF9rZXkiOiJkZWZhdWx0IiwiY3dkIjoiL2ZpeHR1cmUiLCJtZXRhZGF0YSI6e319fSwicGFyZW50X29wZXJhdGlvbl9pZCI6bnVsbCwicGFyZW50X3Nlc3Npb25faWQiOm51bGwsInByaW5jaXBhbCI6ImxvY2FsIiwid29ya3NwYWNlIjoiL2ZpeHR1cmUifSwicmVjb3JkX2lkIjoic2Vzc2lvbi90aHJlYWRfMS9jcmVhdGVkIiwic2NoZW1hX3ZlcnNpb24iOjEsInNlc3Npb25faWQiOiJ0aHJlYWRfMSIsInR1cm5faWQiOm51bGx9",
+      "bytes_base64": "eyJhdHRlbXB0IjpudWxsLCJraW5kIjoic2Vzc2lvbl9jcmVhdGVkIiwib3BlcmF0aW9uX2lkIjpudWxsLCJwYXlsb2FkIjp7ImF0dHJpYnV0ZXMiOnsiYXBwX3NlcnZlciI6eyJhZ2VudF9rZXkiOiJkZWZhdWx0IiwiY3dkIjoiL2ZpeHR1cmUiLCJtZXRhZGF0YSI6e319LCJhcHBfc2VydmVyX2NvbnRleHQiOnsiYWdlbnRfbmFtZSI6ImFwcCIsImNhcGFiaWxpdGllcyI6e30sImNoaWxkX3Rvb2xzIjpbXSwibWVtb3J5X3NldHRpbmdzIjp7ImFydGlmYWN0X3Njb3BlIjoicnVuIiwiYXV0b2NvbXBhY3RfYnVmZmVyX3Rva2VucyI6MTMwMDAsImJhc2Vfc3lzdGVtX3Byb21wdCI6IiIsImNvbXBhY3RfdGhyZXNob2xkIjoyNTAwMDAsImluY2x1ZGVfbWVtb3J5X3dhcm5pbmciOmZhbHNlLCJrZWVwX3JlY2VudF9tZXNzYWdlcyI6MTAsImxhbmd1YWdlIjoiemgtQ04iLCJtaWNyb2NvbXBhY3Rpb25fcG9saWN5Ijp7ImtlZXBfcmVjZW50X2N5Y2xlcyI6MywibWluX3Jlc3VsdF9jaGFycyI6NTAwLCJ0YXJnZXRfcmF0aW8iOjAuNiwidHJpZ2dlcl9yYXRpbyI6MC43NX0sIm1vZGVsIjoiIiwibW9kZWxfY29udGV4dF93aW5kb3ciOjEyODAwMCwibW9kZWxfbWF4X291dHB1dF90b2tlbnMiOjE2Mzg0LCJyZXNlcnZlZF9vdXRwdXRfc291cmNlIjoiZnJhbWV3b3JrX2ZhbGxiYWNrIiwicmVzZXJ2ZWRfb3V0cHV0X3Rva2VucyI6MTYwMDAsInN1bW1hcnlfYmFja2VuZCI6bnVsbCwic3VtbWFyeV9ldmVudF9saW1pdCI6NDAsInN1bW1hcnlfbW9kZWwiOm51bGwsInRvb2xfcmVzdWx0X2V4Y2VycHRfaGVhZCI6MjAwLCJ0b29sX3Jlc3VsdF9leGNlcnB0X3RhaWwiOjIwMCwidG9vbF9yZXN1bHRfcmV0ZW50aW9ucyI6e30sIndhcm5pbmdfdGhyZXNob2xkX3BlcmNlbnRhZ2UiOjkwfSwibW9kZWxfYmluZGluZyI6eyJiYWNrZW5kIjoic2NyaXB0ZWQiLCJjb250ZXh0X2xlbmd0aCI6MTI4MDAwLCJtYXhfb3V0cHV0X3Rva2VucyI6MTYzODQsIm1vZGVsIjoibSJ9LCJ0YXNrIjp7ImFnZW50X3R5cGUiOm51bGwsImFsbG93X2ludGVycnVwdGlvbiI6dHJ1ZSwiZXhjbHVkZV90b29scyI6W10sImV4dHJhX3Rvb2xfbmFtZXMiOltdLCJpbml0aWFsX21lc3NhZ2VzIjpbXSwiaW5pdGlhbF9zaGFyZWRfc3RhdGUiOnsidG9kb19saXN0IjpbXX0sIm1heF9jeWNsZXMiOjEwLCJtZW1vcnlfY29tcGFjdF90aHJlc2hvbGQiOjI1MDAwMCwibWVtb3J5X3RocmVzaG9sZF9wZXJjZW50YWdlIjo5MCwibWV0YWRhdGEiOnsiX3Z2X2FnZW50X3Rvb2xfcG9saWN5X2FwcHJvdmFsIjoiZGVmYXVsdCIsIl92dl9hZ2VudF90b29sX3VzZV9iZWhhdmlvciI6InJ1bl9sbG1fYWdhaW4iLCJtb2RlbF9jb250ZXh0X3dpbmRvdyI6MTI4MDAwLCJtb2RlbF9tYXhfb3V0cHV0X3Rva2VucyI6MTYzODQsInNlc3Npb25fbWVtb3J5X2VuYWJsZWQiOmZhbHNlLCJ0cmFjZV9pZCI6InRocmVhZF8xL2NvbnRleHQifSwibWljcm9jb21wYWN0aW9uX3BvbGljeSI6eyJrZWVwX3JlY2VudF9jeWNsZXMiOjMsIm1pbl9yZXN1bHRfY2hhcnMiOjUwMCwidGFyZ2V0X3JhdGlvIjowLjYsInRyaWdnZXJfcmF0aW8iOjAuNzV9LCJtb2RlbCI6Im0iLCJtb2RlbF9zZXR0aW5ncyI6eyJyZXRyeSI6eyJiYWNrb2ZmX3NlY29uZHMiOjAsIm1heF9hdHRlbXB0cyI6MX19LCJuYXRpdmVfbXVsdGltb2RhbCI6ZmFsc2UsIm5vX3Rvb2xfcG9saWN5IjoiZmluaXNoIiwicHJvbXB0X2J1bmRsZSI6eyJzZWN0aW9ucyI6W3siaWQiOiJhZ2VudF9pbnN0cnVjdGlvbnMiLCJzb3VyY2UiOiJhZ2VudC5pbnN0cnVjdGlvbnMiLCJzdGFibGUiOnRydWUsInRleHQiOiJCZSBwcmVjaXNlLiJ9XSwic3RhYmxlX2hhc2giOiI1YzU5ZjQwNjcxOGUzZjE4NTJjZjI2N2E1ZWRkOTJmYzUxYzlkYWU2NGRjMTkyNDA2YjViMTYwZmY3MzlhNGQyIn0sInN1Yl9hZ2VudHMiOnt9LCJ0YXNrX2lkIjoidGhyZWFkXzEvY29udGV4dCIsInVzZV93b3Jrc3BhY2UiOnRydWUsInVzZXJfcHJvbXB0IjoiIn0sInRvb2xzIjpbXX19LCJwYXJlbnRfb3BlcmF0aW9uX2lkIjpudWxsLCJwYXJlbnRfc2Vzc2lvbl9pZCI6bnVsbCwicHJpbmNpcGFsIjoibG9jYWwiLCJ3b3Jrc3BhY2UiOiIvZml4dHVyZSJ9LCJyZWNvcmRfaWQiOiJzZXNzaW9uL3RocmVhZF8xL2NyZWF0ZWQiLCJzY2hlbWFfdmVyc2lvbiI6MSwic2Vzc2lvbl9pZCI6InRocmVhZF8xIiwidHVybl9pZCI6bnVsbH0=",
       "commit_id": "session/create",
       "created_ms": 1041102,
       "record_id": "session/thread_1/created",
       "seq": 1,
       "session_id": "thread_1",
-      "sha256": "f04819f25ee2d0c19795e204ba9d54b0cb9fb1113b9f5fd3aa532857ff46a8d1",
+      "sha256": "9085903adad9202bf2bdc9e6264b84746afcf76179ae76d62e9383e4bff0be1d",
       "type": "record",
       "wire": {
         "attempt": null,
@@ -3071,6 +3071,96 @@
               "agent_key": "default",
               "cwd": "/fixture",
               "metadata": {}
+            },
+            "app_server_context": {
+              "agent_name": "app",
+              "capabilities": {},
+              "child_tools": [],
+              "memory_settings": {
+                "artifact_scope": "run",
+                "autocompact_buffer_tokens": 13000,
+                "base_system_prompt": "",
+                "compact_threshold": 250000,
+                "include_memory_warning": false,
+                "keep_recent_messages": 10,
+                "language": "zh-CN",
+                "microcompaction_policy": {
+                  "keep_recent_cycles": 3,
+                  "min_result_chars": 500,
+                  "target_ratio": 0.6,
+                  "trigger_ratio": 0.75
+                },
+                "model": "",
+                "model_context_window": 128000,
+                "model_max_output_tokens": 16384,
+                "reserved_output_source": "framework_fallback",
+                "reserved_output_tokens": 16000,
+                "summary_backend": null,
+                "summary_event_limit": 40,
+                "summary_model": null,
+                "tool_result_excerpt_head": 200,
+                "tool_result_excerpt_tail": 200,
+                "tool_result_retentions": {},
+                "warning_threshold_percentage": 90
+              },
+              "model_binding": {
+                "backend": "scripted",
+                "context_length": 128000,
+                "max_output_tokens": 16384,
+                "model": "m"
+              },
+              "task": {
+                "agent_type": null,
+                "allow_interruption": true,
+                "exclude_tools": [],
+                "extra_tool_names": [],
+                "initial_messages": [],
+                "initial_shared_state": {
+                  "todo_list": []
+                },
+                "max_cycles": 10,
+                "memory_compact_threshold": 250000,
+                "memory_threshold_percentage": 90,
+                "metadata": {
+                  "_vv_agent_tool_policy_approval": "default",
+                  "_vv_agent_tool_use_behavior": "run_llm_again",
+                  "model_context_window": 128000,
+                  "model_max_output_tokens": 16384,
+                  "session_memory_enabled": false,
+                  "trace_id": "thread_1/context"
+                },
+                "microcompaction_policy": {
+                  "keep_recent_cycles": 3,
+                  "min_result_chars": 500,
+                  "target_ratio": 0.6,
+                  "trigger_ratio": 0.75
+                },
+                "model": "m",
+                "model_settings": {
+                  "retry": {
+                    "backoff_seconds": 0,
+                    "max_attempts": 1
+                  }
+                },
+                "native_multimodal": false,
+                "no_tool_policy": "finish",
+                "prompt_bundle": {
+                  "sections": [
+                    {
+                      "id": "agent_instructions",
+                      "source": "agent.instructions",
+                      "stable": true,
+                      "text": "Be precise."
+                    }
+                  ],
+                  "stable_hash": "5c59f406718e3f1852cf267a5edd92fc51c9dae64dc192406b5b160ff739a4d2"
+                },
+                "sub_agents": {},
+                "task_id": "thread_1/context",
+                "use_workspace": true,
+                "user_prompt": ""
+              },
+              "tools": []
             }
           },
           "parent_operation_id": null,
@@ -3333,39 +3423,6 @@
       "writer_epoch": 1
     },
     {
-      "bytes_base64": "eyJhdHRlbXB0IjpudWxsLCJraW5kIjoic2Vzc2lvbl9jcmVhdGVkIiwib3BlcmF0aW9uX2lkIjpudWxsLCJwYXlsb2FkIjp7ImF0dHJpYnV0ZXMiOnsiYXBwX3NlcnZlciI6eyJhZ2VudF9rZXkiOiJkZWZhdWx0IiwiY3dkIjpudWxsLCJtZXRhZGF0YSI6e319fSwicGFyZW50X29wZXJhdGlvbl9pZCI6bnVsbCwicGFyZW50X3Nlc3Npb25faWQiOm51bGwsInByaW5jaXBhbCI6ImxvY2FsIiwid29ya3NwYWNlIjoiLiJ9LCJyZWNvcmRfaWQiOiJzZXNzaW9uL3RocmVhZF8yL2NyZWF0ZWQiLCJzY2hlbWFfdmVyc2lvbiI6MSwic2Vzc2lvbl9pZCI6InRocmVhZF8yIiwidHVybl9pZCI6bnVsbH0=",
-      "commit_id": "session/create",
-      "created_ms": 1041102,
-      "record_id": "session/thread_2/created",
-      "seq": 1,
-      "session_id": "thread_2",
-      "sha256": "c00b80ca69a2e73a67b3f5668d87ce3f00bb628750e6510a5d17ff145480b98a",
-      "type": "record",
-      "wire": {
-        "attempt": null,
-        "kind": "session_created",
-        "operation_id": null,
-        "payload": {
-          "attributes": {
-            "app_server": {
-              "agent_key": "default",
-              "cwd": null,
-              "metadata": {}
-            }
-          },
-          "parent_operation_id": null,
-          "parent_session_id": null,
-          "principal": "local",
-          "workspace": "."
-        },
-        "record_id": "session/thread_2/created",
-        "schema_version": 1,
-        "session_id": "thread_2",
-        "turn_id": null
-      },
-      "writer_epoch": 0
-    },
-    {
       "bytes_base64": "eyJhdHRlbXB0IjoxLCJraW5kIjoib3BfcGFya2VkIiwib3BlcmF0aW9uX2lkIjoidGhyZWFkXzIvdHVybi90dXJuXzEvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAiLCJwYXlsb2FkIjp7ImRlYWRsaW5lX21zIjpudWxsLCJkZWxlZ2F0aW9uIjp7ImFnZW50X25hbWUiOiJ3b3JrZXIiLCJoYW5kb2ZmX2NvdW50IjowLCJtYXhfaGFuZG9mZnMiOjEwLCJtZXRhZGF0YSI6e30sIm1vZGUiOiJjb25maWd1cmVkIn0sImhhbmRsZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiZGVsaXZlcnlfdGFyZ2V0Ijp7ImF0dGVtcHQiOjEsImdlbmVyYXRpb24iOjAsIm9wZXJhdGlvbl9pZCI6InRocmVhZF8yL3R1cm4vdHVybl8xL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wIiwic2Vzc2lvbl9pZCI6InRocmVhZF8yIiwidHVybl9pZCI6InRocmVhZF8yL3R1cm4vdHVybl8xIn0sImdlbmVyYXRpb24iOjAsImtpbmQiOiJjaGlsZCIsInNlc3Npb25faWQiOiJ0aHJlYWRfMi9jaGlsZC8zZGUwMGQ1MzQ1NjQxMzVhYjdjYzM4OTIiLCJ0dXJuX2lkIjoidGhyZWFkXzIvY2hpbGQvM2RlMDBkNTM0NTY0MTM1YWI3Y2MzODkyL3R1cm4vc3RhcnQifSwicGhhc2UiOiJhZnRlcl9kaXNwYXRjaCIsInBvbGxfYXRfbXMiOm51bGx9LCJyZWNvcmRfaWQiOiJvcC90aHJlYWRfMi90dXJuL3R1cm5fMS9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xL3BhcmtlZC9hZnRlcl9kaXNwYXRjaCIsInNjaGVtYV92ZXJzaW9uIjoxLCJzZXNzaW9uX2lkIjoidGhyZWFkXzIiLCJ0dXJuX2lkIjoidGhyZWFkXzIvdHVybi90dXJuXzEifQ==",
       "commit_id": "b9deeb2dfd7b9155f33e472a4b9f3b21ba79566b6397594023abd429cf253bfc",
       "created_ms": 1041102,
@@ -3410,6 +3467,146 @@
         "turn_id": "thread_2/turn/turn_1"
       },
       "writer_epoch": 1
+    },
+    {
+      "bytes_base64": "eyJhdHRlbXB0IjpudWxsLCJraW5kIjoic2Vzc2lvbl9jcmVhdGVkIiwib3BlcmF0aW9uX2lkIjpudWxsLCJwYXlsb2FkIjp7ImF0dHJpYnV0ZXMiOnsiYXBwX3NlcnZlciI6eyJhZ2VudF9rZXkiOiJkZWZhdWx0IiwiY3dkIjpudWxsLCJtZXRhZGF0YSI6e319LCJhcHBfc2VydmVyX2NvbnRleHQiOnsiYWdlbnRfbmFtZSI6ImFwcCIsImNhcGFiaWxpdGllcyI6e30sImNoaWxkX3Rvb2xzIjpbXSwibWVtb3J5X3NldHRpbmdzIjp7ImFydGlmYWN0X3Njb3BlIjoicnVuIiwiYXV0b2NvbXBhY3RfYnVmZmVyX3Rva2VucyI6MTMwMDAsImJhc2Vfc3lzdGVtX3Byb21wdCI6IiIsImNvbXBhY3RfdGhyZXNob2xkIjoyNTAwMDAsImluY2x1ZGVfbWVtb3J5X3dhcm5pbmciOmZhbHNlLCJrZWVwX3JlY2VudF9tZXNzYWdlcyI6MTAsImxhbmd1YWdlIjoiemgtQ04iLCJtaWNyb2NvbXBhY3Rpb25fcG9saWN5Ijp7ImtlZXBfcmVjZW50X2N5Y2xlcyI6MywibWluX3Jlc3VsdF9jaGFycyI6NTAwLCJ0YXJnZXRfcmF0aW8iOjAuNiwidHJpZ2dlcl9yYXRpbyI6MC43NX0sIm1vZGVsIjoiIiwibW9kZWxfY29udGV4dF93aW5kb3ciOjEyODAwMCwibW9kZWxfbWF4X291dHB1dF90b2tlbnMiOjE2Mzg0LCJyZXNlcnZlZF9vdXRwdXRfc291cmNlIjoiZnJhbWV3b3JrX2ZhbGxiYWNrIiwicmVzZXJ2ZWRfb3V0cHV0X3Rva2VucyI6MTYwMDAsInN1bW1hcnlfYmFja2VuZCI6bnVsbCwic3VtbWFyeV9ldmVudF9saW1pdCI6NDAsInN1bW1hcnlfbW9kZWwiOm51bGwsInRvb2xfcmVzdWx0X2V4Y2VycHRfaGVhZCI6MjAwLCJ0b29sX3Jlc3VsdF9leGNlcnB0X3RhaWwiOjIwMCwidG9vbF9yZXN1bHRfcmV0ZW50aW9ucyI6e30sIndhcm5pbmdfdGhyZXNob2xkX3BlcmNlbnRhZ2UiOjkwfSwibW9kZWxfYmluZGluZyI6eyJiYWNrZW5kIjoic2NyaXB0ZWQiLCJjb250ZXh0X2xlbmd0aCI6MTI4MDAwLCJtYXhfb3V0cHV0X3Rva2VucyI6MTYzODQsIm1vZGVsIjoibSJ9LCJ0YXNrIjp7ImFnZW50X3R5cGUiOm51bGwsImFsbG93X2ludGVycnVwdGlvbiI6dHJ1ZSwiZXhjbHVkZV90b29scyI6W10sImV4dHJhX3Rvb2xfbmFtZXMiOlsiYXBwcm92ZWQiXSwiaW5pdGlhbF9tZXNzYWdlcyI6W10sImluaXRpYWxfc2hhcmVkX3N0YXRlIjp7InRvZG9fbGlzdCI6W119LCJtYXhfY3ljbGVzIjoxMCwibWVtb3J5X2NvbXBhY3RfdGhyZXNob2xkIjoyNTAwMDAsIm1lbW9yeV90aHJlc2hvbGRfcGVyY2VudGFnZSI6OTAsIm1ldGFkYXRhIjp7Il92dl9hZ2VudF90b29sX3BvbGljeV9hcHByb3ZhbCI6ImRlZmF1bHQiLCJfdnZfYWdlbnRfdG9vbF91c2VfYmVoYXZpb3IiOiJydW5fbGxtX2FnYWluIiwibW9kZWxfY29udGV4dF93aW5kb3ciOjEyODAwMCwibW9kZWxfbWF4X291dHB1dF90b2tlbnMiOjE2Mzg0LCJzZXNzaW9uX21lbW9yeV9lbmFibGVkIjpmYWxzZSwidHJhY2VfaWQiOiJ0aHJlYWRfMy9jb250ZXh0In0sIm1pY3JvY29tcGFjdGlvbl9wb2xpY3kiOnsia2VlcF9yZWNlbnRfY3ljbGVzIjozLCJtaW5fcmVzdWx0X2NoYXJzIjo1MDAsInRhcmdldF9yYXRpbyI6MC42LCJ0cmlnZ2VyX3JhdGlvIjowLjc1fSwibW9kZWwiOiJtIiwibW9kZWxfc2V0dGluZ3MiOnsicmV0cnkiOnsiYmFja29mZl9zZWNvbmRzIjowLCJtYXhfYXR0ZW1wdHMiOjF9fSwibmF0aXZlX211bHRpbW9kYWwiOmZhbHNlLCJub190b29sX3BvbGljeSI6ImZpbmlzaCIsInByb21wdF9idW5kbGUiOnsic2VjdGlvbnMiOlt7ImlkIjoiYWdlbnRfaW5zdHJ1Y3Rpb25zIiwic291cmNlIjoiYWdlbnQuaW5zdHJ1Y3Rpb25zIiwic3RhYmxlIjp0cnVlLCJ0ZXh0IjoiQXBwcm92ZS4ifV0sInN0YWJsZV9oYXNoIjoiMjAzZDAwYzBhMWE2NjAxNzk3OGVlNTRmYjkwYWM3OWE0MzQxYzIyYjE2Y2IyMTk3NTc1NWQwNWFkMGU0ZTJiMiJ9LCJzdWJfYWdlbnRzIjp7fSwidGFza19pZCI6InRocmVhZF8zL2NvbnRleHQiLCJ1c2Vfd29ya3NwYWNlIjp0cnVlLCJ1c2VyX3Byb21wdCI6IiJ9LCJ0b29scyI6W3siZnVuY3Rpb24iOnsiZGVzY3JpcHRpb24iOiIiLCJuYW1lIjoiYXBwcm92ZWQiLCJwYXJhbWV0ZXJzIjp7ImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjpmYWxzZSwicHJvcGVydGllcyI6e30sInJlcXVpcmVkIjpbXSwidHlwZSI6Im9iamVjdCJ9LCJzdHJpY3QiOnRydWV9LCJ0eXBlIjoiZnVuY3Rpb24ifV19fSwicGFyZW50X29wZXJhdGlvbl9pZCI6bnVsbCwicGFyZW50X3Nlc3Npb25faWQiOm51bGwsInByaW5jaXBhbCI6ImxvY2FsIiwid29ya3NwYWNlIjoiLiJ9LCJyZWNvcmRfaWQiOiJzZXNzaW9uL3RocmVhZF8zL2NyZWF0ZWQiLCJzY2hlbWFfdmVyc2lvbiI6MSwic2Vzc2lvbl9pZCI6InRocmVhZF8zIiwidHVybl9pZCI6bnVsbH0=",
+      "commit_id": "session/create",
+      "created_ms": 1041102,
+      "record_id": "session/thread_3/created",
+      "seq": 1,
+      "session_id": "thread_3",
+      "sha256": "ebb0d2480a1c8162063f5a38626302ca1054e404edd5ad7d5a2535b8940350f7",
+      "type": "record",
+      "wire": {
+        "attempt": null,
+        "kind": "session_created",
+        "operation_id": null,
+        "payload": {
+          "attributes": {
+            "app_server": {
+              "agent_key": "default",
+              "cwd": null,
+              "metadata": {}
+            },
+            "app_server_context": {
+              "agent_name": "app",
+              "capabilities": {},
+              "child_tools": [],
+              "memory_settings": {
+                "artifact_scope": "run",
+                "autocompact_buffer_tokens": 13000,
+                "base_system_prompt": "",
+                "compact_threshold": 250000,
+                "include_memory_warning": false,
+                "keep_recent_messages": 10,
+                "language": "zh-CN",
+                "microcompaction_policy": {
+                  "keep_recent_cycles": 3,
+                  "min_result_chars": 500,
+                  "target_ratio": 0.6,
+                  "trigger_ratio": 0.75
+                },
+                "model": "",
+                "model_context_window": 128000,
+                "model_max_output_tokens": 16384,
+                "reserved_output_source": "framework_fallback",
+                "reserved_output_tokens": 16000,
+                "summary_backend": null,
+                "summary_event_limit": 40,
+                "summary_model": null,
+                "tool_result_excerpt_head": 200,
+                "tool_result_excerpt_tail": 200,
+                "tool_result_retentions": {},
+                "warning_threshold_percentage": 90
+              },
+              "model_binding": {
+                "backend": "scripted",
+                "context_length": 128000,
+                "max_output_tokens": 16384,
+                "model": "m"
+              },
+              "task": {
+                "agent_type": null,
+                "allow_interruption": true,
+                "exclude_tools": [],
+                "extra_tool_names": [
+                  "approved"
+                ],
+                "initial_messages": [],
+                "initial_shared_state": {
+                  "todo_list": []
+                },
+                "max_cycles": 10,
+                "memory_compact_threshold": 250000,
+                "memory_threshold_percentage": 90,
+                "metadata": {
+                  "_vv_agent_tool_policy_approval": "default",
+                  "_vv_agent_tool_use_behavior": "run_llm_again",
+                  "model_context_window": 128000,
+                  "model_max_output_tokens": 16384,
+                  "session_memory_enabled": false,
+                  "trace_id": "thread_3/context"
+                },
+                "microcompaction_policy": {
+                  "keep_recent_cycles": 3,
+                  "min_result_chars": 500,
+                  "target_ratio": 0.6,
+                  "trigger_ratio": 0.75
+                },
+                "model": "m",
+                "model_settings": {
+                  "retry": {
+                    "backoff_seconds": 0,
+                    "max_attempts": 1
+                  }
+                },
+                "native_multimodal": false,
+                "no_tool_policy": "finish",
+                "prompt_bundle": {
+                  "sections": [
+                    {
+                      "id": "agent_instructions",
+                      "source": "agent.instructions",
+                      "stable": true,
+                      "text": "Approve."
+                    }
+                  ],
+                  "stable_hash": "203d00c0a1a66017978ee54fb90ac79a4341c22b16cb21975755d05ad0e4e2b2"
+                },
+                "sub_agents": {},
+                "task_id": "thread_3/context",
+                "use_workspace": true,
+                "user_prompt": ""
+              },
+              "tools": [
+                {
+                  "function": {
+                    "description": "",
+                    "name": "approved",
+                    "parameters": {
+                      "additionalProperties": false,
+                      "properties": {},
+                      "required": [],
+                      "type": "object"
+                    },
+                    "strict": true
+                  },
+                  "type": "function"
+                }
+              ]
+            }
+          },
+          "parent_operation_id": null,
+          "parent_session_id": null,
+          "principal": "local",
+          "workspace": "."
+        },
+        "record_id": "session/thread_3/created",
+        "schema_version": 1,
+        "session_id": "thread_3",
+        "turn_id": null
+      },
+      "writer_epoch": 0
     },
     {
       "bytes_base64": "eyJhdHRlbXB0IjoxLCJraW5kIjoib3BfcGFya2VkIiwib3BlcmF0aW9uX2lkIjoidGhyZWFkXzMvdHVybi90dXJuXzEvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAiLCJwYXlsb2FkIjp7ImRlYWRsaW5lX21zIjoxMTAxMTAyLCJoYW5kbGUiOnsia2luZCI6ImFwcHJvdmFsIiwicmVxdWVzdF9kaWdlc3QiOiI3MWQxMTA1MDI5YzI1NGRiNTQ0MWIxNzhjN2MwODE3MTM5N2JiMjZkYzVkMGNiMWFmY2QyNDQzMzg4YTBmODAzIiwicmVxdWVzdF9pZCI6ImFwcHJvdmFsL3RocmVhZF8zL3R1cm4vdHVybl8xL21vZGVsL3ByaW1hcnkvMS9hdHRlbXB0LzEvdG9vbC8wLzEiLCJzY29wZSI6WyJhcHByb3ZlZCJdfSwicGhhc2UiOiJiZWZvcmVfZGlzcGF0Y2giLCJwb2xsX2F0X21zIjpudWxsfSwicmVjb3JkX2lkIjoib3AvdGhyZWFkXzMvdHVybi90dXJuXzEvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMS9wYXJrZWQvYmVmb3JlX2Rpc3BhdGNoIiwic2NoZW1hX3ZlcnNpb24iOjEsInNlc3Npb25faWQiOiJ0aHJlYWRfMyIsInR1cm5faWQiOiJ0aHJlYWRfMy90dXJuL3R1cm5fMSJ9",

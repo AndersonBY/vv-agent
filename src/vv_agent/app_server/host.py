@@ -96,8 +96,50 @@ class DefaultAppServerHost:
         return resolve_model_selection(provider, request)
 
     def list_models(self, request: ModelListRequest) -> ModelListResponse:
-        del request
-        return ModelListResponse(models=list(self._models))
+        return ModelListResponse(models=[m for m in self._models if request.provider is None or m.provider == request.provider])
+
+
+def model_summary(resolved: ResolvedModelConfig) -> ModelSummary:
+    """Only allowlisted catalog fields enter the public wire."""
+    c = resolved.capabilities
+
+    def known_bool(key):
+        value = c.get(key)
+        return value if isinstance(value, bool) else None
+
+    def known_strings(key):
+        value = c.get(key)
+        return value if isinstance(value, list) and all(isinstance(x, str) for x in value) else None
+
+    tools = known_bool("function_call_available")
+    if tools is None and resolved.function_call_available:
+        tools = True
+    vision = known_bool("native_multimodal")
+    if vision is None and resolved.native_multimodal:
+        vision = True
+    modalities = known_strings("input_modalities")
+    if modalities is not None:
+        vision = "image" in modalities
+    if modalities is None and vision is not None:
+        modalities = ["text", "image"] if vision else ["text"]
+    return ModelSummary(
+        id=resolved.model_id,
+        provider=resolved.backend,
+        display_name=resolved.selected_model,
+        context_length=resolved.context_length,
+        max_output_tokens=resolved.max_output_tokens,
+        supports_tools=tools,
+        supports_vision=vision,
+        input_modalities=modalities,
+        supports_reasoning=known_bool("reasoning_available"),
+        supported_reasoning_efforts=known_strings("supported_reasoning_efforts"),
+        default_reasoning_effort=c.get("default_reasoning_effort")
+        if isinstance(c.get("default_reasoning_effort"), str)
+        else None,
+        supports_prompt_cache=known_bool("prompt_cache_available"),
+        supports_continuation=known_bool("continuation_available"),
+        metadata={"requestedModel": resolved.requested_model},
+    )
 
 
 class AppServerApprovalProvider(ApprovalProvider):

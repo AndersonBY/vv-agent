@@ -110,7 +110,7 @@ def _approval_client(calls: list[str]) -> AppServerClient:
 def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
     client = _client()
     initialized = client.initialize(ClientInfo(name="test-client"))
-    assert initialized["protocolVersion"] == "v3"
+    assert initialized["protocolVersion"] == "v4"
 
     thread = client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))
     thread_id = str(thread["threadId"])
@@ -294,6 +294,8 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "thread/start": "start_thread",
         "thread/resume": "resume_thread",
         "thread/read": "read_thread",
+        "thread/context/read": "read_context",
+        "thread/compact/start": "compact_thread",
         "thread/events/list": "list_events",
         "thread/model/select": "select_model",
         "thread/status": "thread_status",
@@ -310,7 +312,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "schema/export": "export_schema",
     }
 
-    assert len(CLIENT_METHOD_SPECS) == 20
+    assert len(CLIENT_METHOD_SPECS) == 22
     assert set(facade_methods) == set(CLIENT_METHOD_SPECS)
     assert all(callable(getattr(AppServerClient, method)) for method in facade_methods.values())
     assert callable(AppServerClient.send_response)

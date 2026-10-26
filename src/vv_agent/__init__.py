@@ -9,6 +9,8 @@ from vv_agent.app_server import (
     MessageProcessor,
     OutgoingRouter,
     RunConfigResolutionRequest,
+    ThreadCompactStartParams,
+    ThreadContextReadParams,
     ThreadEventsListParams,
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest
@@ -305,6 +307,8 @@ __all__ = [
     "SummaryChildTool",
     "TaskTokenUsage",
     "TaskTokenUsageTotals",
+    "ThreadCompactStartParams",
+    "ThreadContextReadParams",
     "ThreadEventsListParams",
     "TokenUsage",
     "Tool",

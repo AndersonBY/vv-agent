@@ -14,8 +14,7 @@ from typing import Any, NoReturn
 from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, StdioJsonlTransport
 from vv_agent.app_server.client import run_debug_message
-from vv_agent.app_server.host import DefaultAppServerHost
-from vv_agent.app_server.protocol import ModelSummary
+from vv_agent.app_server.host import DefaultAppServerHost, model_summary
 from vv_agent.app_server.schema import generate_json_schema, generate_typescript
 from vv_agent.config import ConfigError, ResolvedModelConfig
 from vv_agent.events import DiagnosticEvent, RunEvent
@@ -206,16 +205,7 @@ def _build_app_server_host(
             max_cycles=max_cycles,
             approval_timeout_seconds=_APP_SERVER_APPROVAL_TIMEOUT_SECONDS,
         ),
-        models=[
-            ModelSummary(
-                id=resolved.model_id,
-                provider=resolved.backend,
-                display_name=resolved.selected_model,
-                metadata={"requestedModel": resolved.requested_model},
-                context_length=resolved.context_length,
-                supports_tools=resolved.function_call_available,
-            )
-        ],
+        models=[model_summary(resolved)],
     )
 
 

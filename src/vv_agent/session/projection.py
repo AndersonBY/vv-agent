@@ -48,6 +48,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
     plans, events, turns = {}, [], {}
     delegations: dict[tuple[str, int], dict] = {}
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
+    compactions: dict[str, str | None] = {}
     for stored in records:
         r, p = stored.record, stored.record.payload
         identity_digest = digest([r.session_id, r.record_id])
@@ -62,7 +63,12 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         if r.turn_id in turns:
             common["agent_name"] = turns[r.turn_id]["definition"].get("agent_name")
         event: RunEvent | None = None
+        if r.kind == "input_applied" and p["reason"] == "host compaction request" and p["disposition"] in {"queued", "applied"}:
+            compactions[p["input"]["input_id"]] = r.turn_id
         if r.kind == "turn_started":
+            for key in p["input_ids"]:
+                if key in compactions:
+                    compactions[key] = r.turn_id
             turns[r.turn_id] = p
             common["agent_name"] = p["definition"]["task"].get("metadata", {}).get("agent_name")
             if p["definition"]["task"].get("metadata", {}).get("vv_session", {}).get("input_blocked"):
@@ -72,6 +78,17 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             agent_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/agent"}
             event = AgentStartedEvent(**agent_common)
         elif r.kind == "turn_ended":
+            remaining = [key for key, tid in compactions.items() if tid == r.turn_id]
+            if remaining:
+                failure_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/compaction_failed"}
+                events.append(
+                    DiagnosticEvent(
+                        **failure_common,
+                        level="warning",
+                        code="context_compaction_failed",
+                        details={"request_ids": remaining, "error": p["reason"] or p["status"]},
+                    )
+                )
             if p["status"] == "completed":
                 completed_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/diagnostic"}
                 events.append(
@@ -90,6 +107,9 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         elif r.kind == "boundary_recorded":
             data, stage = p["data"], p["stage"]
             if stage in {"memory_started", "memory_completed"}:
+                if stage == "memory_completed":
+                    for key in data["event"].get("metadata", {}).get("requested_by", []):
+                        compactions.pop(key, None)
                 event = event_from_dict(data["event"] | {"metadata": data["event"].get("metadata", {}) | common["metadata"]})
             elif stage == "after_cycle":
                 code = (

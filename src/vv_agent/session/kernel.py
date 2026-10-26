@@ -46,7 +46,7 @@ from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
-from .summary_requests import child_summary, pending_compaction_requests, summary_pending
+from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -588,7 +588,13 @@ class _Driver:
                 continue
             if item.kind == "steer" and (tid is None or (self.pending_batch() and target_tid == tid)):
                 continue
-            if item.kind == "child_result":
+            if compaction_request(item) is not None:
+                if self.state.closed:
+                    disposition, reason = "rejected", "session closed"
+                else:
+                    disposition = "applied" if tid else "queued"
+                    reason = "host compaction request"
+            elif item.kind == "child_result":
                 target, extra, disposition, reason = self.apply_child(item)
                 if disposition == "pending":
                     continue
@@ -851,7 +857,13 @@ class _Driver:
                 content["text"] if isinstance(content, dict) and "messages" in content else str(content),
                 tid,
                 seed=self.records[0].record._payload["attributes"].get("seed") if not self.state.turns else None,
+                control=compaction_request(InboxItem(**item)) is not None,
             )
+            task.metadata.pop("_vv_agent_app_server_compaction_only", None)
+            if compaction_request(InboxItem(**item)) is not None:
+                task.metadata["_vv_agent_app_server_compaction_only"] = True
+                if self.state.turns:
+                    task.initial_messages = []
             if isinstance(content, dict) and "messages" in content:
                 task.metadata.setdefault("vv_session", {})["input_messages"] = content["messages"]
             task.task_id = tid
@@ -996,7 +1008,7 @@ class _Driver:
         exhaustion = evaluator.terminal() if evaluator else None
         if exhaustion:
             status, reason = "failed", "budget_exhausted"
-        if status == "completed" and not transferred:
+        if status == "completed" and not transferred and not self.task().metadata.get("_vv_agent_app_server_compaction_only"):
             prepared = prepare_output(self, result)
             if prepared is None:
                 return
@@ -1634,6 +1646,12 @@ class _Driver:
                 return False
         if self.pending_batch():
             return False
+        requested = [key for key in pending_compaction_requests(self) if key in self.state.applied_inputs]
+        if requested and compact_context(self, requested_by=requested):
+            return True
+        if task.metadata.get("_vv_agent_app_server_compaction_only"):
+            self.close("completed", "context_compaction")
+            return True
         models = [
             (oid, op) for oid, op in operations if op.kind == "model" and op.attempts[1].plan._payload["purpose"] == "primary"
         ]

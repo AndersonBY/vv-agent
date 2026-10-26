@@ -137,7 +137,9 @@ RETIRED_KINDS = frozenset(
 )
 REASONS = {
     "after_cycle_hook.json": "section 4 F2d-1 hooks / F2d-2 boundary wire: committed boundary decisions",
-    "app_server_observable.json": "App Server v3: durable submissions, shared control, bounded replay and execution status",
+    "app_server_observable.json": (
+        "App Server v4: durable submissions, shared control, context management, bounded replay and execution status"
+    ),
     "approval_tool_policy.json": "section 4 F2d-1 approval deadline and Q7: absolute deadline and retained owner",
     "bounded_tool_result.json": "section 4 execution authority: record receipts replace old carriers; strict recovery retained",
     "budget_events.jsonl": "section 4 F2d-2 tool budget/internal tokens: record-derived accounting",
@@ -696,7 +698,7 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
-        d.update(contract="vv-agent-public-api-v13", schema_version=13)
+        d.update(contract="vv-agent-public-api-v14", schema_version=14)
         d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "app_server_host"]
         d["surfaces"].append(
             {
@@ -794,6 +796,29 @@ class Author:
                         },
                     }
                 )
+        for method, name in (("thread/context/read", "read_context"), ("thread/compact/start", "compact_thread")):
+            surface = next(s for s in d["surfaces"] if s["id"] == "app_server_client")
+            operations = surface["protocol_operations"]
+            operations[:] = [m for m in operations if m["id"] != method]
+            operations.append(
+                {
+                    "id": method,
+                    "kind": "operation",
+                    "python": {
+                        "kind": "method",
+                        "name": name,
+                        "signature": signature(getattr(resolve(surface["python_target"]), name)),
+                    },
+                }
+            )
+        for domain in d["domains"]:
+            if domain["id"] in {"app_server", "exports"}:
+                for name in ("ThreadContextReadParams", "ThreadCompactStartParams"):
+                    target = "vv_agent." + name
+                    if not any(c["python"] == target for c in domain["capabilities"]):
+                        domain["capabilities"].append(
+                            {"id": "export." + name if domain["id"] == "exports" else "app_server." + name, "python": target}
+                        )
         for domain in d["domains"]:
             for capability in domain["capabilities"]:
                 resolve(capability["python"])
@@ -1007,7 +1032,7 @@ class Author:
         def named(method):
             return [m for m in notices if m.get("method") == method]
 
-        d["version"] = 5
+        d["version"] = 6
         d["protocolVersion"] = app["protocol_version"]
         d["restart"]["staleRunningThreadStatus"] = "running"
         d["approval"]["disconnectDecision"] = "retained_deadline_any_authenticated_connection"

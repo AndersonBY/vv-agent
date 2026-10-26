@@ -14,6 +14,8 @@ from vv_agent.app_server.protocol.jsonrpc import (
 from vv_agent.app_server.protocol.model import ModelListRequest, ModelListResponse, ModelSummary
 from vv_agent.app_server.protocol.thread import (
     ThreadArchiveParams,
+    ThreadCompactStartParams,
+    ThreadContextReadParams,
     ThreadEventsListParams,
     ThreadListParams,
     ThreadModelSelectParams,
@@ -56,6 +58,8 @@ __all__ = [
     "ModelSummary",
     "RequestId",
     "ThreadArchiveParams",
+    "ThreadCompactStartParams",
+    "ThreadContextReadParams",
     "ThreadEventsListParams",
     "ThreadItem",
     "ThreadListParams",

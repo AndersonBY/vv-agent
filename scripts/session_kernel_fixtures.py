@@ -1130,7 +1130,7 @@ class Fixtures:
             notices.clear()
             return result
 
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v3"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v4"
         request(None, "initialized")
         request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
         request(
@@ -1408,7 +1408,7 @@ class Fixtures:
         assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
         assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
         return {
-            "protocol_version": "v3",
+            "protocol_version": "v4",
             "host_interaction_values": {"request": request_value, "outcome": outcome_value},
             "transcripts": transcript,
             "schemas": exported,

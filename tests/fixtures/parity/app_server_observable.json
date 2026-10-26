@@ -1785,7 +1785,7 @@
       "turn/completed"
     ]
   },
-  "protocolVersion": "v3",
+  "protocolVersion": "v4",
   "restart": {
     "connectionIdCanReinitialize": true,
     "staleRunningThreadStatus": "running"
@@ -1805,6 +1805,8 @@
       "SchemaExportResponse",
       "ServerNotification",
       "ServerRequest",
+      "ThreadCompactStartResponse",
+      "ThreadContextReadResponse",
       "ThreadReadResponse",
       "ThreadResumeResponse",
       "ThreadStartResponse",
@@ -1825,6 +1827,8 @@
       "SchemaExportResponse.ts",
       "ServerNotification.ts",
       "ServerRequest.ts",
+      "ThreadCompactStartResponse.ts",
+      "ThreadContextReadResponse.ts",
       "ThreadReadResponse.ts",
       "ThreadResumeResponse.ts",
       "ThreadStartResponse.ts",
@@ -2178,5 +2182,5 @@
       "startedNotifications": []
     }
   },
-  "version": 5
+  "version": 6
 }

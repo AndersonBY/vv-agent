@@ -127,6 +127,15 @@ In multi-turn and tool-call requests, every assistant message keeps its full
 `reasoning_content`. Streamed reasoning deltas are collected until the
 provider stream ends, and only then is the message stored.
 
+## Catalog capabilities in App Server
+
+model/list uses resolved context_length and max_output_tokens and the catalog's
+function_call_available and native_multimodal flags. Optional input_modalities,
+reasoning_available, supported_reasoning_efforts, default_reasoning_effort,
+prompt_cache_available and continuation_available describe only known provider
+capabilities. Missing fields stay null on the wire; no support is inferred from
+model names. These fields do not select a model or change request settings.
+
 ## Cache usage accounting
 
 `vv-agent` requires `vv-llm` 0.3.107 or newer. For generic OpenAI-compatible
