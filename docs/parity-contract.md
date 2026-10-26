@@ -181,3 +181,14 @@ memory_settings resolver with execution. thread/compact/start writes the existin
 content extension and feeds summary_requests; it adds no inbox kind or store
 version. Typed client methods are read_context and compact_thread. The canonical
 A2 vectors are reproduced by scripts/app_server_a2_fixtures.py.
+
+### Completed-boundary forks
+
+Contract 30.1.0 adds thread/fork under App Server v4 without a store boundary.
+ThreadForkParams maps to AppServerClient.fork_thread. The canonical rules are in
+the contract session-kernel document; Python uses the same context_messages and
+project_view functions for source cuts and context reads. Creation uses the
+existing transaction create receipt. The app_server_fork attribute extension
+stores lineage/default model; seed retains its closed messages/shared_state shape.
+Real producer and SQL tests are in tests/test_app_server_fork.py and
+tests/session/test_app_server_fork.py. No Rust adoption is required.

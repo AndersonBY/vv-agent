@@ -142,3 +142,23 @@ class ThreadCompactStartParams:
         if self.expected_context_version is not None:
             payload["expectedContextVersion"] = self.expected_context_version
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadForkParams:
+    thread_id: str
+    fork_id: str
+    through_turn_id: str | None = None
+    before_turn_id: str | None = None
+    workspace: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"threadId": self.thread_id, "forkId": self.fork_id}
+        for name, value in (
+            ("throughTurnId", self.through_turn_id),
+            ("beforeTurnId", self.before_turn_id),
+            ("workspace", self.workspace),
+        ):
+            if value is not None:
+                payload[name] = value
+        return payload

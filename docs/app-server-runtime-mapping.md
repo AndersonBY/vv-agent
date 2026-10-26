@@ -38,3 +38,22 @@ memory_compact_completed with requested_by identities. A terminal DiagnosticEven
 reports requests that never completed, including cancellation before summary
 start. events/list supplies indexed intent and lifecycle dependencies for that
 projection. No new record, inbox, SQL or RunEvent version is needed.
+
+## Fork ownership
+
+thread/fork reads an immutable source prefix ending at turn_ended (or creation),
+projects model context with the ordinary context reader, and atomically creates
+one session. The existing seed carries messages and empty shared state.
+attributes.app_server_fork retains the request, lineage, inherited effective
+model and last compaction descriptor; app_server_context retains the cut baseline.
+That baseline clears the source task's bootstrap messages, initial shared state,
+user prompt and reserved execution metadata; only the seed supplies copied history.
+No source inbox, attempt or event log is copied. The destination inbox and turns
+start empty. Thread metadata exposes lineage and opaque workspace to the host.
+
+session/fork.py owns ID derivation, boundary selection, artifact integrity and
+creation replay. The kernel uses the inherited model as its frozen default;
+ordinary later selections take precedence. Artifact references use the existing
+workspace backend API and layout. Tests in test_app_server_fork.py and
+session/test_app_server_fork.py cover processors, cross-node races and all SQL
+stores. Host business-file cloning stays outside this mapping.

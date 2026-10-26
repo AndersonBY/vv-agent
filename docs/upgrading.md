@@ -77,6 +77,16 @@ old-version session.
 
 ## Version notes
 
+### 0.29.0
+
+Contract 30.1.0 adds thread/fork. App Server v4, public API inventory v14, record
+schema 1, inbox schema 3 and SQL layouts stay unchanged: this is not a store
+boundary. Regenerate schema/TypeScript clients to use the new method and optional
+lineage in fork context reads. Forks retain a model default in existing creation
+attributes; route them to 0.29.0 or newer. Older workers can read these maps but
+would ignore that default. The host prepares business workspaces and implements
+fork authorization and binding; see [task cloning](app-server-host-integration.md#task-cloning).
+
 ### 0.28.0
 
 Contract 30.0.0 selects App Server v4 and public API inventory v14. There is no

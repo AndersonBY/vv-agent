@@ -328,6 +328,10 @@
         {
           "id": "app_server.ThreadCompactStartParams",
           "python": "vv_agent.ThreadCompactStartParams"
+        },
+        {
+          "id": "app_server.ThreadForkParams",
+          "python": "vv_agent.ThreadForkParams"
         }
       ],
       "id": "app_server"
@@ -1183,6 +1187,10 @@
         {
           "id": "export.ThreadCompactStartParams",
           "python": "vv_agent.ThreadCompactStartParams"
+        },
+        {
+          "id": "export.ThreadForkParams",
+          "python": "vv_agent.ThreadForkParams"
         }
       ],
       "id": "exports"
@@ -3373,6 +3381,29 @@
           "python": {
             "kind": "method",
             "name": "compact_thread",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "thread/fork",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "fork_thread",
             "signature": {
               "async": false,
               "parameters": [

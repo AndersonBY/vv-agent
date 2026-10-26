@@ -644,3 +644,12 @@ scripted providers and fixed clocks. It never edits the vendored snapshot; it
 compares all 45 outputs with it byte for byte, and checks digests, record IDs
 and schemas with an independent Node RFC 8785 encoder. The corpus is limited to
 3 MB, and 512 KB per file.
+
+## App Server fork seeds
+
+Completed-boundary forks use the existing creation seed and attributes extension
+maps; see [App Server](app-server.md#forking-a-thread). app_server_fork stores
+params, lineage, effective_model and last_compaction. It is creation evidence,
+not a copied execution plan. The inherited model remains the frozen default
+across turns and selection clears. Seed shared_state is empty; host process
+objects and operational state are never copied. Store versions stay unchanged.

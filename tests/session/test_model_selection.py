@@ -129,7 +129,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     assert [e.usage.total_tokens for e in events] == [12300, 200 + b_usage["completion_tokens"]]
     # Capacity uses persisted selection even on a fresh worker, with no new resolution.
     state.active_turn_id = a_plan.turn_id
-    driver = cast(Any, SimpleNamespace(state=state, runtime=rt, sid="s"))
+    driver = cast(Any, SimpleNamespace(state=state, records=records, runtime=rt, sid="s"))
     driver.effective_model = lambda: _Driver.effective_model(driver)
     manager = manager_for(driver)
     assert (manager.model, manager.model_context_window, manager.reserved_output_tokens) == ("B", 8192, expected_reserve)

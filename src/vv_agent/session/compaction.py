@@ -50,7 +50,9 @@ def manager_for(driver: _Driver) -> MemoryManager:
     start = driver.state.turns[driver.state.active_turn_id].start
     task = start._task()
     definition = start._payload["definition"]
-    settings = memory_settings(definition, driver.state.model_selection)
+    fork = driver.records[0].record._payload["attributes"].get("app_server_fork")
+    baseline = driver.records[0].record._payload["attributes"].get("app_server_context") if fork else None
+    settings = memory_settings(baseline or definition, driver.state.model_selection)
     settings["artifact_scope"] = f"session/{driver.sid}/{task.task_id}"
     return MemoryManager(
         **settings,

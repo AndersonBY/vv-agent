@@ -75,6 +75,133 @@
     "code": -32024,
     "message": "submission_conflict"
   },
+  "fork": {
+    "conflict": {
+      "code": -32024,
+      "message": "submission_conflict"
+    },
+    "context": {
+      "contextVersion": "821e210012913a3097deca97ce6362b83c143a32dbb19e1d9363086ef3ad2cc6",
+      "counts": {
+        "modelVisibleHistoryMessages": 1,
+        "modelVisibleMessages": 3,
+        "pendingInputs": 0,
+        "rawHistoryMessages": 2,
+        "rawRecordCount": 1
+      },
+      "estimates": {
+        "estimated": true,
+        "estimator": "local_cjk_character_estimate_v1",
+        "parts": {
+          "history": 9,
+          "instructions": 10,
+          "pendingInput": 0,
+          "summary": 123,
+          "tools": 0
+        },
+        "total": 142
+      },
+      "lastCompaction": {
+        "createdAt": 1000000,
+        "replacedMessageCount": 3,
+        "seq": 23,
+        "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
+        "turnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d"
+      },
+      "limits": {
+        "compactionThreshold": 99000,
+        "contextWindow": 128000,
+        "maxOutputTokens": 16384,
+        "outputReserve": 16000,
+        "outputReserveSource": "framework_fallback",
+        "runtimeContextWindow": 128000
+      },
+      "lineage": {
+        "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
+        "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordSeq": 27,
+        "sourceThreadId": "a2"
+      },
+      "projectionStage": "durable_pre_hooks",
+      "threadId": "fork/b665685aed0b890cbc62d33fb663b307901f574e7277ca52a402c9062dc2ed1a"
+    },
+    "params": {
+      "forkId": "branch",
+      "threadId": "a2",
+      "workspace": {
+        "snapshot": "prepared"
+      }
+    },
+    "receipt": {
+      "accepted": true,
+      "lineage": {
+        "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
+        "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordSeq": 27,
+        "sourceThreadId": "a2"
+      },
+      "replayed": false,
+      "threadId": "fork/b665685aed0b890cbc62d33fb663b307901f574e7277ca52a402c9062dc2ed1a"
+    },
+    "replay": {
+      "accepted": true,
+      "lineage": {
+        "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
+        "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordSeq": 27,
+        "sourceThreadId": "a2"
+      },
+      "replayed": true,
+      "threadId": "fork/b665685aed0b890cbc62d33fb663b307901f574e7277ca52a402c9062dc2ed1a"
+    },
+    "seed": {
+      "messages": [
+        {
+          "content": "Be precise.",
+          "metadata": {
+            "_vv_agent_tool_policy_approval": "default",
+            "_vv_agent_tool_use_behavior": "run_llm_again",
+            "memory_keep_recent_messages": 1,
+            "model_context_window": 128000,
+            "model_max_output_tokens": 16384,
+            "session_id": "a2",
+            "session_memory_enabled": false,
+            "thread_id": "a2",
+            "trace_id": "a2/turn/prompt",
+            "turn_id": "a2/turn/prompt",
+            "vv_session": {
+              "input_messages": [
+                {
+                  "content": "go",
+                  "role": "user"
+                }
+              ]
+            }
+          },
+          "role": "system"
+        },
+        {
+          "content": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
+          "metadata": {
+            "_vv_agent_compaction": {
+              "artifacts": [],
+              "cursors": []
+            }
+          },
+          "name": "memory_summary",
+          "role": "user"
+        },
+        {
+          "content": "done",
+          "role": "assistant"
+        }
+      ],
+      "shared_state": {}
+    }
+  },
   "lifecycle": [
     {
       "method": "contextCompaction/started",

@@ -194,7 +194,12 @@ class _KernelThreadStore:
             archived,
             project_thread_status(state, pending=bool(pending)).value,
             state.active_turn_id or (f"{thread_id}/turn/{pending[-1].input_id}" if pending else None),
-            attributes["metadata"],
+            attributes["metadata"]
+            | (
+                {"lineage": records[0].record._payload["attributes"]["app_server_fork"]["lineage"]}
+                if "app_server_fork" in records[0].record._payload["attributes"]
+                else {}
+            ),
         )
 
     def read_thread(self, thread_id):
@@ -413,20 +418,21 @@ class _KernelRunAdapter(RunAdapter):
             self._ensure_observer()
 
     def _retry_lease(self, sid, retry):
-        with self._notification_lock:
-            if self._lease_retries.get(sid) != retry:
-                return
-            del self._lease_retries[sid]
-        _, target, _, _, _ = retry
-        try:
-            new_head, new_epoch, remaining = self.kernel.store.lease_status(target)
-            if remaining > 0:
-                with self._notification_lock:
-                    self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, new_head, new_epoch, None)
-                return
-            self.recover(self._subscriber(sid), sid, lease_retry=False)
-        except Exception as exc:
-            self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
+        with self._state_manager.turn_lock(sid):
+            with self._notification_lock:
+                if self._lease_retries.get(sid) != retry:
+                    return
+                del self._lease_retries[sid]
+            _, target, _, _, _ = retry
+            try:
+                new_head, new_epoch, remaining = self.kernel.store.lease_status(target)
+                if remaining > 0:
+                    with self._notification_lock:
+                        self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, new_head, new_epoch, None)
+                    return
+                self.recover(self._subscriber(sid), sid, lease_retry=False)
+            except Exception as exc:
+                self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
 
     def _subscriber(self, sid):
         return next((cid for cid in self._state_manager.subscribers(sid) if self._router.is_registered(cid)), None)
@@ -809,6 +815,11 @@ class _KernelRunAdapter(RunAdapter):
             for wait in waits
         ]
 
+    def fork_thread(self, params):
+        from .fork import fork_thread
+
+        return fork_thread(self.kernel, self._host, params)
+
     def read_context(self, thread_id):
         return context_view(self.kernel.store, thread_id)
 
@@ -976,6 +987,8 @@ class _KernelRunAdapter(RunAdapter):
                         sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": "failed", "error": str(error)}
                     )
                 return
+            with self._notification_lock:
+                self._lease_retries.pop(sid, None)
             self._notify_subscribers(sid, "thread/status/changed", self.public_thread_status(sid))
             self._publish_turns(sid)
             state, _, _ = self.kernel.store.read_state(sid)

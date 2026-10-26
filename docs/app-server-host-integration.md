@@ -161,3 +161,34 @@ default catalog accepts reasoning_available, supported_reasoning_efforts,
 default_reasoning_effort, prompt_cache_available, continuation_available and
 input_modalities alongside the existing tool and multimodal fields. Keep provider
 secrets outside these fields and outside the wire metadata.
+
+## Task cloning
+
+Prepare the destination workspace, snapshot or worktree in the host. Save the
+source thread, forkId, cut selector and opaque workspace object in the task clone
+record, then call thread/fork. Bind metadata.workspace in resolve_agent and
+build_run_config to the workspace you prepared. Neither callback should infer
+files from the fork thread ID. The framework does not interpret workspace fields. When workspace is omitted,
+the source binding metadata is retained.
+Store the returned threadId and lineage on the new task; retry with the same
+params after a lost reply. Use thread/model/select if the clone needs a different
+model. Start its first turn with expectedTurnId=null.
+
+Authorize thread/fork against source ownership, creation of the derived
+`fork/` + SHA-256(RFC8785([threadId,forkId])) identity, and the requested workspace.
+The derived ID is not an authorization token. Keep host binding metadata free of
+keys and credentials. The default local host permits all connections.
+
+Artifact storage is separate from business files. LocalWorkspaceBackend maps
+reserved artifact paths into a private root keyed by workspace; copying a business
+directory alone does not copy that root. S3 and memory backends also expose the
+same immutable write interface. Fork reuses readable references, or copies
+missing artifact bytes through source and destination bindings at the original
+relative paths, checking size and SHA-256. Existing corrupt bytes cause -32602.
+No artifact_scope is rewritten: that value names future artifact writes only.
+Keep shared artifact references alive for surviving forks. Failed creation can
+leave reusable immutable artifacts, but cannot leave a partly created session.
+
+Keep forked sessions on 0.29.0 or newer. Older workers can parse the extension
+maps but do not apply the inherited model default. This release has no store
+schema boundary and supplies no migration.

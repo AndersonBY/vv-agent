@@ -186,3 +186,11 @@ model on each cycle. That was rejected. The callback's answer would not be in
 the log, App Server and other hosts could not see it, and two workers could get
 different answers for the same cycle. An inbox input is logged once, applied at
 a defined point, and replays the same way everywhere.
+
+## Fork defaults
+
+thread/fork freezes the source's effective model, settings, route and binding at
+the selected ended-turn cut. It does not copy a pending selection. The inherited
+choice is the new session's default, so a later null selection restores it.
+Selections on either session never alter the other. See
+[thread forks](app-server.md#forking-a-thread).

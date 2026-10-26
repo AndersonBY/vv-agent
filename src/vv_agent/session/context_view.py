@@ -39,6 +39,21 @@ def context_view(store, session_id: str) -> dict[str, Any]:
             break
     else:
         raise ContextSnapshotBusy("context_snapshot_busy")
+    return project_view(session_id, records, inbox)
+
+
+def context_messages(records, state, definition):
+    messages = project_context(records, state)
+    attributes = records[0].record._payload["attributes"]
+    if not state.turns and definition and "app_server_fork" not in attributes:
+        from vv_agent.types import AgentTask
+
+        task = AgentTask.from_dict(definition["task"])
+        messages = [Message("system", task.prompt_bundle.flatten()), *[m for m in messages if m.role != "system"]]
+    return messages
+
+
+def project_view(session_id, records, inbox=()):
     state = fold(
         (r.record for r in records),
         consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
@@ -46,7 +61,6 @@ def context_view(store, session_id: str) -> dict[str, Any]:
     attributes = records[0].record._payload["attributes"]
     if "app_server" not in attributes:
         raise KeyError(session_id)
-    messages = project_context(records, state)
     pending = [
         InboxItem(**r._payload["input"])
         for key, r in state.applied_inputs.items()
@@ -60,20 +74,19 @@ def context_view(store, session_id: str) -> dict[str, Any]:
     selection = state.model_selection
     if selection is not None:
         effective = selection._payload["input"]["payload"]["selection"] | {"binding": selection._payload["model_binding"]}
+    elif attributes.get("app_server_fork"):
+        effective = attributes["app_server_fork"]["effective_model"]
     elif definition:
         task = definition["task"]
         effective = {"model": task["model"], "model_settings": task.get("model_settings"), "binding": definition["model_binding"]}
     else:
         effective = None
     tools = definition["tools"] if definition else None
-    settings = memory_settings(definition, selection) if definition else None
+    baseline = attributes.get("app_server_context") if "app_server_fork" in attributes else None
+    settings = memory_settings(baseline or definition, selection) if definition else None
     manager = MemoryManager(**settings) if settings else None
     binding = effective["binding"] if effective else {}
-    if start is None and definition:
-        from vv_agent.types import AgentTask
-
-        task = AgentTask.from_dict(definition["task"])
-        messages = [Message("system", task.prompt_bundle.flatten()), *[m for m in messages if m.role != "system"]]
+    messages = context_messages(records, state, definition)
     summary = [m for m in messages if m.name == "memory_summary"]
     instructions = [m for m in messages if m.role == "system" and m.name != "memory_summary"]
     history = [m for m in messages if m.role != "system" and m.name != "memory_summary"]
@@ -105,7 +118,7 @@ def context_view(store, session_id: str) -> dict[str, Any]:
     compact = next(
         (r for r in reversed(records) if r.record.kind == "context_compacted" and r.record._payload["mode"] != "micro"), None
     )
-    last = None
+    last = attributes.get("app_server_fork", {}).get("last_compaction")
     if compact:
         payload = compact.record._payload
         last = {
@@ -118,6 +131,7 @@ def context_view(store, session_id: str) -> dict[str, Any]:
     raw = project_context(records, state, compacted=False)
     return {
         "threadId": session_id,
+        **({"lineage": attributes["app_server_fork"]["lineage"]} if "app_server_fork" in attributes else {}),
         "contextVersion": digest(
             {
                 "messages": [m.to_openai_message() for m in messages],
