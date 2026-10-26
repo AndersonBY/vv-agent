@@ -228,9 +228,19 @@ class VvLlmModelProvider:
         if model.type == "resolved" and model.resolved_config is not None:
             return model.resolved_config
         backend = model.backend_id or self.default_backend
+        settings = load_llm_settings_from_file(self.settings_file)
+        if backend:
+            config = settings["backends"].get(backend)
+            models = config.get("models") if isinstance(config, dict) else None
+            if not isinstance(models, dict) or model.model_name in models:
+                return resolve_model_endpoint(settings, backend=backend, model=model.model_name)
+        matches = _model_id_matches(settings, model.model_name, backend)
+        if len(matches) > 1:
+            raise ModelError("Model ID must identify exactly one configured model")
+        if matches:
+            return replace(matches[0], requested_model=model.model_name)
         if not backend:
             raise ModelError(f"model provider has no default backend for named model `{model.model_name}`")
-        settings = load_llm_settings_from_file(self.settings_file)
         return resolve_model_endpoint(settings, backend=backend, model=model.model_name)
 
     def client(self, resolved: ResolvedModelConfig) -> LLMClient:
@@ -268,15 +278,9 @@ def resolve_model_selection(provider: ModelProvider, request: dict[str, Any]) ->
     if request.get("route", {}):
         raise ValueError("The default model resolver requires an empty route")
     if isinstance(provider, VvLlmModelProvider):
+        # Selections accept only IDs; a settings key can shadow another entry's ID.
         settings = load_llm_settings_from_file(provider.settings_file)
-        matches = []
-        for backend, config in settings["backends"].items():
-            if provider.default_backend is not None and backend != provider.default_backend:
-                continue
-            for key in config.get("models", {}):
-                resolved = resolve_model_endpoint(settings, backend=backend, model=key)
-                if resolved.model_id == request["model"]:
-                    matches.append(resolved)
+        matches = _model_id_matches(settings, request["model"], provider.default_backend)
         if len(matches) != 1:
             raise ModelError("Model ID must identify exactly one configured model")
         resolved = matches[0]
@@ -285,3 +289,15 @@ def resolve_model_selection(provider: ModelProvider, request: dict[str, Any]) ->
     if resolved.model_id != request["model"]:
         raise ValueError("Resolver changed the requested model")
     return provider.client(resolved), resolved
+
+
+def _model_id_matches(settings: dict[str, Any], model_id: str, backend: str | None) -> list[ResolvedModelConfig]:
+    matches = []
+    for backend_id, config in settings["backends"].items():
+        if backend is not None and backend_id != backend:
+            continue
+        for key in config.get("models", {}):
+            resolved = resolve_model_endpoint(settings, backend=backend_id, model=key)
+            if resolved.model_id == model_id:
+                matches.append(resolved)
+    return matches

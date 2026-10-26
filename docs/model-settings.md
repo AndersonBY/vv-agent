@@ -56,6 +56,16 @@ separate models. If only `kimi-k3` is configured, a request for `kimi-k2.5`
 raises `ConfigError` instead of quietly using `kimi-k3`.
 `tests/test_config.py` covers this.
 
+`VvLlmModelProvider.resolve()` first uses an exact settings key within the
+explicit or default backend. If that key is absent, it accepts an exact
+resolved `model_id`, including the first endpoint's override, only when one
+configured model matches in that backend. Without a default backend, only a
+unique model ID across backends can be resolved by a named reference; settings
+keys still require an explicit backend. This lets provider wrappers delegate
+the session kernel's model-ID requests while preserving their own capability
+overrides. Ambiguous IDs are rejected. `tests/test_model_provider.py` covers
+both direct resolution and wrapped-provider session execution.
+
 ### Changing the model in a session
 
 A session can switch models through a `model_selection` inbox input. The
