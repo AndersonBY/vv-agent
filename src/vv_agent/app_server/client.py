@@ -14,6 +14,7 @@ from vv_agent.app_server.protocol import (
     ThreadCompactStartParams,
     ThreadContextReadParams,
     ThreadEventsListParams,
+    ThreadForkParams,
     ThreadListParams,
     ThreadModelSelectParams,
     ThreadReadParams,
@@ -74,6 +75,9 @@ class AppServerClient:
 
     def start_thread(self, params: ThreadStartParams) -> dict[str, Any]:
         return self._send_request("thread/start", params.to_dict())
+
+    def fork_thread(self, params: ThreadForkParams) -> dict[str, Any]:
+        return self._send_request("thread/fork", params.to_dict())
 
     def resume_thread(self, params: ThreadResumeParams) -> dict[str, Any]:
         return self._send_request("thread/resume", params.to_dict())

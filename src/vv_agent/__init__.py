@@ -12,6 +12,7 @@ from vv_agent.app_server import (
     ThreadCompactStartParams,
     ThreadContextReadParams,
     ThreadEventsListParams,
+    ThreadForkParams,
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest
 from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskHandle, BackgroundAgentTaskSnapshot
@@ -310,6 +311,7 @@ __all__ = [
     "ThreadCompactStartParams",
     "ThreadContextReadParams",
     "ThreadEventsListParams",
+    "ThreadForkParams",
     "TokenUsage",
     "Tool",
     "ToolArtifactRef",

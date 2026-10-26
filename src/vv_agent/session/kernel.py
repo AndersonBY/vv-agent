@@ -297,6 +297,9 @@ class _Driver:
         if selected is not None:
             selection = selected._payload["input"]["payload"]["selection"]
             return selection | {"binding": selected._payload["model_binding"]}
+        fork = self.records[0].record._payload["attributes"].get("app_server_fork")
+        if fork is not None:
+            return copy_json(fork["effective_model"])
         assert self.state.active_turn_id is not None
         task = self.state.turns[self.state.active_turn_id].start._task()
         return {

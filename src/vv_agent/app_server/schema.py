@@ -36,6 +36,7 @@ JSON_SCHEMA_NAMES = (
     "ServerRequest",
     "ThreadCompactStartResponse",
     "ThreadContextReadResponse",
+    "ThreadForkResponse",
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
@@ -453,6 +454,9 @@ def _definitions() -> dict[str, dict[str, Any]]:
     for name in ("TurnResumeResponse", "TurnCompletedParams"):
         definitions[name]["properties"].update(result)
 
+    definitions.update(_fork_definitions())
+    definitions["ThreadContextReadResponse"]["properties"]["lineage"] = {"$ref": "#/$defs/ForkLineage"}
+
     return definitions
 
 
@@ -592,6 +596,42 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
     }
 
 
+def _fork_definitions() -> dict[str, dict[str, Any]]:
+    text = {"type": "string", "minLength": 1, "maxLength": 512}
+    digest = {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64}
+    fields = {
+        "sourceThreadId": text,
+        "cutTurnId": nullable(text),
+        "sourceRecordSeq": {"type": "integer", "minimum": 1},
+        "sourceRecordDigest": digest,
+        "contextDigest": digest,
+    }
+    params = _object(
+        {
+            "threadId": text,
+            "forkId": {"type": "string", "pattern": CLIENT_ID_PATTERN, "minLength": 1, "maxLength": 128},
+            "throughTurnId": text,
+            "beforeTurnId": text,
+            "workspace": JSON_OBJECT,
+        },
+        required=["threadId", "forkId"],
+    )
+    params["not"] = {"required": ["throughTurnId", "beforeTurnId"]}
+    return {
+        "ThreadForkParams": params,
+        "ForkLineage": _object(fields, required=list(fields)),
+        "ThreadForkResponse": _object(
+            {
+                "threadId": text,
+                "accepted": {"const": True},
+                "replayed": {"type": "boolean"},
+                "lineage": {"$ref": "#/$defs/ForkLineage"},
+            },
+            required=["threadId", "accepted", "replayed", "lineage"],
+        ),
+    }
+
+
 def _context_definitions() -> dict[str, dict[str, Any]]:
     integer = {"type": "integer", "minimum": 0}
     count = nullable(integer)
@@ -684,6 +724,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "initialized": (None, False, False),
     "model/list": ("ModelListParams", True, False),
     "thread/start": ("ThreadStartParams", True, True),
+    "thread/fork": ("ThreadForkParams", True, True),
     "thread/resume": ("ThreadResumeParams", True, True),
     "thread/read": ("ThreadReadParams", True, True),
     "thread/context/read": ("ThreadContextReadParams", True, True),
@@ -821,6 +862,7 @@ def _schema_bundle() -> dict[str, Any]:
         "InitializeParams": definitions["InitializeParams"],
         "InitializeResponse": definitions["InitializeResponse"],
         "SchemaExportResponse": definitions["SchemaExportResponse"],
+        "ThreadForkResponse": definitions["ThreadForkResponse"],
         "ThreadReadResponse": definitions["ThreadSnapshotResponse"],
         "ThreadContextReadResponse": definitions["ThreadContextReadResponse"],
         "ThreadCompactStartResponse": definitions["ThreadCompactStartResponse"],
@@ -935,6 +977,11 @@ def _typescript_protocol_source() -> str:
         "export interface InitializeParams { clientInfo: ClientInfo; capabilities?: ClientCapabilities; }\n"
         "export interface ModelListParams { agentKey?: string; provider?: string; }\n"
         "export interface ThreadStartParams { inputId: string; agentKey?: string; cwd?: string; metadata?: JsonObject; }\n"
+        "export interface ForkLineage { sourceThreadId: string; cutTurnId: string | null; "
+        "sourceRecordSeq: number; sourceRecordDigest: string; contextDigest: string; }\n"
+        "export interface ThreadForkParams { threadId: string; forkId: string; "
+        "throughTurnId?: string; beforeTurnId?: string; workspace?: JsonObject; }\n"
+        "export interface ThreadForkResponse { threadId: string; accepted: true; replayed: boolean; lineage: ForkLineage; }\n"
         "export interface ThreadIdParams { threadId: string; }\n"
         "export interface ThreadResumeParams { threadId: string; subscribe?: boolean; }\n"
         "export interface ThreadModelSelectResponse { threadId: string; inputId: string; accepted: true; }\n"
@@ -952,7 +999,7 @@ def _typescript_protocol_source() -> str:
         "string; inputSeq: number; accepted: true; replayed: boolean; }\n"
         "export interface ContextCompactionParams { threadId: string; turnId: string; requestId: string; "
         "eventId: string; changed: boolean; error: string | null; }\n"
-        "export interface ThreadContextReadResponse { threadId: string; contextVersion: string; "
+        "export interface ThreadContextReadResponse { threadId: string; lineage?: ForkLineage; contextVersion: string; "
         "projectionStage: 'durable_pre_hooks';\n"
         "  estimates: { estimated: true; estimator: 'local_cjk_character_estimate_v1'; parts: { "
         "instructions: number | null; tools: number | null; history: number | null; summary: number | null; "
@@ -1057,6 +1104,7 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/start"; params: ThreadStartParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/model/select"; params: ThreadModelSelectParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/fork"; params: ThreadForkParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/context/read"; params: ThreadContextReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/compact/start"; params: ThreadCompactStartParams }\n'
@@ -1093,7 +1141,8 @@ def _typescript_protocol_source() -> str:
         '  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;\n'
         "};\n"
         "export type ClientResult =\n"
-        "  | ThreadContextReadResponse | ThreadCompactStartResponse | InitializeResponse | ModelListResponse "
+        "  | ThreadForkResponse | ThreadContextReadResponse | ThreadCompactStartResponse | "
+        "InitializeResponse | ModelListResponse "
         "| ThreadStartResponse | ThreadReadResponse\n"
         "  | ThreadModelSelectResponse | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
         "ThreadUnsubscribeResponse | ThreadStatusResponse\n"

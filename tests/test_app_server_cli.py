@@ -28,6 +28,7 @@ _JSON_SCHEMA_NAMES = {
     "ServerRequest",
     "ThreadReadResponse",
     "ThreadContextReadResponse",
+    "ThreadForkResponse",
     "ThreadCompactStartResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",

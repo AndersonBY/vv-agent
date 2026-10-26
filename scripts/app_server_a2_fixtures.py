@@ -126,7 +126,21 @@ def produce() -> dict:
             for method, params in map_run_event(event, thread_id="a2", turn_id=event.run_id).additional_notifications
             if method.startswith("contextCompaction/")
         ]
+        fork_params = {"threadId": "a2", "forkId": "branch", "workspace": {"snapshot": "prepared"}}
+        fork = request("fork", "thread/fork", fork_params)["result"]
+        fork_replay = request("fork-replay", "thread/fork", fork_params)["result"]
+        fork_conflict = request("fork-conflict", "thread/fork", fork_params | {"workspace": {}})["error"]
+        fork_context = request("fork-context", "thread/context/read", {"threadId": fork["threadId"]})["result"]
+        fork_seed = fixtures.kernel.store.read(fork["threadId"]).records[0].record._payload["attributes"]["seed"]
         return {
+            "fork": {
+                "params": fork_params,
+                "receipt": fork,
+                "replay": fork_replay,
+                "conflict": fork_conflict,
+                "context": fork_context,
+                "seed": fork_seed,
+            },
             "lifecycle": lifecycle,
             "schema_version": 1,
             "protocol_version": "v4",

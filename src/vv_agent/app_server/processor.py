@@ -39,6 +39,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "initialized",
     "model/list",
     "thread/start",
+    "thread/fork",
     "thread/resume",
     "thread/read",
     "thread/context/read",
@@ -167,6 +168,9 @@ class MessageProcessor:
             return
         if request.method == "thread/start":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_start(connection_id, request))
+            return
+        if request.method == "thread/fork":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_fork(connection_id, request))
             return
         if request.method == "thread/model/select":
             self._serialize_or_run(connection_id, request, lambda: self._handle_model_select(connection_id, request))
@@ -439,6 +443,25 @@ class MessageProcessor:
             self._router.send_notification(
                 connection_id, "thread/started", {k: v for k, v in payload.items() if k not in {"accepted", "replayed"}}
             )
+
+    def _handle_thread_fork(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        from vv_agent.session.fork import validate_params
+
+        try:
+            validate_params(params)
+            result = self._run_adapter.fork_thread(params)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        except SubmissionConflict:
+            raise
+        except ValueError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        self._router.send_response(connection_id, request.id, result)
 
     def _handle_model_select(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)

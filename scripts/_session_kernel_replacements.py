@@ -796,7 +796,11 @@ class Author:
                         },
                     }
                 )
-        for method, name in (("thread/context/read", "read_context"), ("thread/compact/start", "compact_thread")):
+        for method, name in (
+            ("thread/context/read", "read_context"),
+            ("thread/compact/start", "compact_thread"),
+            ("thread/fork", "fork_thread"),
+        ):
             surface = next(s for s in d["surfaces"] if s["id"] == "app_server_client")
             operations = surface["protocol_operations"]
             operations[:] = [m for m in operations if m["id"] != method]
@@ -813,7 +817,7 @@ class Author:
             )
         for domain in d["domains"]:
             if domain["id"] in {"app_server", "exports"}:
-                for name in ("ThreadContextReadParams", "ThreadCompactStartParams"):
+                for name in ("ThreadContextReadParams", "ThreadCompactStartParams", "ThreadForkParams"):
                     target = "vv_agent." + name
                     if not any(c["python"] == target for c in domain["capabilities"]):
                         domain["capabilities"].append(
@@ -1892,7 +1896,7 @@ class Author:
                 state = fold(
                     prefix, consumed_inputs=[InboxItem(**r._payload["input"]) for r in prefix if r.kind == "input_applied"]
                 )
-                admitted = manager_for(SimpleNamespace(state=state, sid=sid, runtime=rt))
+                admitted = manager_for(SimpleNamespace(state=state, records=records, sid=sid, runtime=rt))
                 if context_only:
                     assert admitted.model_context_window == case["expected_model_context_window"]
                     case["expected_model_context_window"] = admitted.model_context_window

@@ -88,6 +88,53 @@ leaving a connection never closes a durable session. Closed sessions reject
 execution; archived sessions return `-32021`. `thread/list` and `thread/archive`
 retain their normal lifecycle roles.
 
+## Forking a thread
+
+`thread/fork` starts an independent session from an ended-turn boundary. Keep a
+stable forkId in your business record before submitting:
+
+```jsonl
+{"jsonrpc":"2.0","id":12,"method":"thread/fork","params":{"threadId":"thread_1","forkId":"edit_1","beforeTurnId":"thread_1/turn/prompt_2","workspace":{"snapshotId":"prepared-by-host"}}}
+```
+
+Use throughTurnId to include an ended turn, beforeTurnId to exclude that turn,
+or omit both to include the last ended turn. A running suffix is excluded.
+Before the first turn, or when none has ended, the fork has only the creation
+context. Unknown and unfinished cut turns return -32602. The two cut selectors
+cannot be combined. Failed or cancelled turns with turn_ended are valid cuts.
+The cut needs a retained turn definition or creation baseline; an older directly
+created session without either returns -32602 rather than inventing past settings.
+No model or instruction overrides are accepted. The effective model, settings
+and route at the cut become the fork's frozen default; select another model
+with thread/model/select afterwards. Clearing that selection restores the
+inherited default.
+
+The result has threadId, accepted, replayed and lineage. The ID is `fork/` plus
+SHA-256 of RFC8785 `[sourceThreadId,forkId]`. Retrying the same request on any node
+returns the original result, even after the source advances. Changed parameters
+with the same identity return -32024 submission_conflict. Omitted workspace and
+workspace={} are different requests.
+
+Lineage contains sourceThreadId, nullable cutTurnId, sourceRecordSeq,
+sourceRecordDigest and contextDigest. The first digest identifies the exact cut
+record bytes; the second hashes RFC8785 of the copied Message dictionaries.
+thread/read and thread/list put lineage in thread.metadata.lineage;
+thread/context/read returns lineage directly. The fork starts with no turns or
+items of its own. Its seed contains the projected context, including the active
+accepted summary. Its inherited lastCompaction refers to the source record
+until the fork accepts a newer summary. No pending input, compaction intent,
+control, operation, approval or parked interaction is copied.
+
+workspace is an opaque JSON object, retained as thread.metadata.workspace and
+passed unchanged in both host binding callbacks' metadata. The host prepares
+business files or a snapshot first. vv-agent never interprets workspace fields,
+copies business files, snapshots a directory or creates a worktree. It reuses
+compaction artifact references; when the host binds a different artifact backend,
+it copies missing immutable artifacts using the existing exclusive write API.
+It verifies length and SHA-256 and rejects inaccessible or corrupt evidence
+before creating the session. Artifact paths and storage layout stay unchanged.
+See [host integration](app-server-host-integration.md#task-cloning).
+
 ## Bounded replay
 
 Use `thread/events/list` for a long thread. Supply threadId and a limit from 1
