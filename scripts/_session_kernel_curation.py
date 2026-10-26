@@ -330,6 +330,31 @@ def projection_sources(rows, events, spans, through):
     return retained
 
 
+def app_server_source(app):
+    # Keep the outer JSON compact too; embedded schemas already retain their own types.
+    return json.dumps(app, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def curate_app_server(app):
+    app["transcripts"] = select("app_server_protocol.json", app["transcripts"])
+    # Whitespace is not a schema contract. Keep every exported bundle and all types.
+    app["schemas"]["jsonSchema"] = {
+        name: json.dumps(json.loads(source), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        for name, source in app["schemas"]["jsonSchema"].items()
+    }
+
+    typescript = app["schemas"]["typescript"]
+    source = next(iter(typescript.values()))
+    assert all(text == source for text in typescript.values())
+    from hashlib import sha256
+
+    app["schemas"]["typescript_source"] = source
+    app["schemas"]["typescript"] = {
+        name: {"source_ref": "typescript_source", "sha256": sha256(text.encode()).hexdigest()}
+        for name, text in typescript.items()
+    }
+
+
 def curate(output, streams, semantics, independent, facts):
     """Validate the full producer run first, then retain only covered representatives."""
     from collections import Counter
@@ -437,23 +462,7 @@ def curate(output, streams, semantics, independent, facts):
     for name in EVENT_FILES | {"runner_trace.jsonl"}:
         values[name] = select(name, values[name])
     app = values["app_server_protocol.json"]
-    app["transcripts"] = select("app_server_protocol.json", app["transcripts"])
-    # Whitespace is not a schema contract. Keep every exported bundle and all types.
-    app["schemas"]["jsonSchema"] = {
-        name: json.dumps(json.loads(source), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        for name, source in app["schemas"]["jsonSchema"].items()
-    }
-
-    typescript = app["schemas"]["typescript"]
-    source = next(iter(typescript.values()))
-    assert all(text == source for text in typescript.values())
-    from hashlib import sha256
-
-    app["schemas"]["typescript_source"] = source
-    app["schemas"]["typescript"] = {
-        name: {"source_ref": "typescript_source", "sha256": sha256(text.encode()).hexdigest()}
-        for name, text in typescript.items()
-    }
+    curate_app_server(app)
     inventory = values["session_codec_vectors.json"]["coverage"]
     from session_kernel_fixtures import coverage
 
@@ -468,6 +477,8 @@ def curate(output, streams, semantics, independent, facts):
         path = output / name
         if path.suffix == ".jsonl":
             path.write_bytes(b"".join(raw + b"\n" for raw in independent(value)))
+        elif name == "app_server_protocol.json":
+            path.write_text(app_server_source(value))
         elif name == "session_projection.json":
             # One source row per line keeps real wire objects readable without repeated indentation.
             lines = [

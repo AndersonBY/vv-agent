@@ -41,6 +41,8 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/start",
     "thread/resume",
     "thread/read",
+    "thread/context/read",
+    "thread/compact/start",
     "thread/events/list",
     "thread/model/select",
     "thread/status",
@@ -70,6 +72,9 @@ SERVER_NOTIFICATION_METHODS: tuple[str, ...] = (
     "approval/resolved",
     "error/warning",
     "turn/completed",
+    "contextCompaction/started",
+    "contextCompaction/completed",
+    "contextCompaction/failed",
 )
 
 SERVER_REQUEST_METHODS: tuple[str, ...] = ("approval/request",)
@@ -166,6 +171,12 @@ class MessageProcessor:
         if request.method == "thread/model/select":
             self._serialize_or_run(connection_id, request, lambda: self._handle_model_select(connection_id, request))
             return
+        if request.method == "thread/context/read":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_context_read(connection_id, request))
+            return
+        if request.method == "thread/compact/start":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_compact_start(connection_id, request))
+            return
         if request.method == "thread/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
             return
@@ -259,7 +270,15 @@ class MessageProcessor:
         return RequestScope.thread(thread_id or "missing-thread")
 
     def _request_access(self, method: str) -> RequestAccess:
-        if method in {"model/list", "schema/export", "thread/list", "thread/read", "thread/status", "thread/events/list"}:
+        if method in {
+            "model/list",
+            "schema/export",
+            "thread/list",
+            "thread/read",
+            "thread/status",
+            "thread/events/list",
+            "thread/context/read",
+        }:
             return "shared_read"
         return "exclusive"
 
@@ -329,7 +348,7 @@ class MessageProcessor:
         state.ready_for_notifications = True
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
-            protocol_version="v3",
+            protocol_version="v4",
             capabilities=SERVER_CAPABILITIES,
         )
         self._router.send_response(connection_id, request.id, response.to_dict())
@@ -360,6 +379,8 @@ class MessageProcessor:
     def _handle_model_list(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request, allow_missing=True)
         if params is None:
+            return
+        if not self._closed_params(connection_id, request, params, {"agentKey", "provider"}):
             return
         agent_key = self._optional_string_param(connection_id, request, params, "agentKey")
         if agent_key is _INVALID_PARAM:
@@ -394,7 +415,22 @@ class MessageProcessor:
         ):
             return
         try:
-            payload = self._store.create_thread_receipt(input_id=input_id, agent_key=agent_key, cwd=cwd, metadata=metadata)
+            context = None
+            try:
+                creation = self._run_adapter.kernel.store.read(input_id).records[0].record
+                context = creation._payload["attributes"].get("app_server_context")
+            except (KeyError, Conflict):
+                from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
+
+                agent = self._host.resolve_agent(AgentResolutionRequest(input_id, agent_key, cwd, metadata))
+                config = self._host.build_run_config(RunConfigResolutionRequest(input_id, agent_key, cwd, metadata))
+                if config.model_provider is not None:
+                    runtime = self._run_adapter.kernel.runtime(agent, config)
+                    task = runtime.compile("", input_id + "/context", control=True)
+                    context = runtime._definition(task)
+            payload = self._store.create_thread_receipt(
+                input_id=input_id, agent_key=agent_key, cwd=cwd, metadata=metadata, context=context
+            )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         self._run_adapter.subscribe(input_id, connection_id)
@@ -419,6 +455,66 @@ class MessageProcessor:
         except SubmissionConflict:
             raise
         except ValueError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        self._router.send_response(connection_id, request.id, result)
+
+    def _handle_context_read(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        thread_id = self._required_string_param(connection_id, request, params, "threadId")
+        if not thread_id or not self._closed_params(connection_id, request, params, {"threadId"}):
+            return
+        from vv_agent.session.context_view import ContextSnapshotBusy
+
+        try:
+            result = self._run_adapter.read_context(thread_id)
+        except ContextSnapshotBusy:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
+            return
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, result)
+
+    def _handle_compact_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+        import re
+
+        from vv_agent.session.app_server import ContextVersionMismatch
+
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        thread_id = self._required_string_param(connection_id, request, params, "threadId")
+        action_id = self._required_identity(connection_id, request, params, "actionId")
+        if (
+            not thread_id
+            or not action_id
+            or not self._closed_params(connection_id, request, params, {"threadId", "actionId", "expectedContextVersion"})
+        ):
+            return
+        expected = params.get("expectedContextVersion")
+        if "expectedContextVersion" in params and (
+            not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+        ):
+            self._router.send_error(
+                connection_id, request.id, AppServerError.invalid_params("expectedContextVersion must be a SHA-256 digest")
+            )
+            return
+        try:
+            result = self._run_adapter.compact_thread(
+                thread_id=thread_id, action_id=action_id, expected_context_version=expected, connection_id=connection_id
+            )
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        except ContextVersionMismatch:
+            self._router.send_error(
+                connection_id, request.id, AppServerError(AppServerErrorCode.CONTEXT_VERSION_MISMATCH, "context_version_mismatch")
+            )
+            return
+        except TurnResumeError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
         self._router.send_response(connection_id, request.id, result)

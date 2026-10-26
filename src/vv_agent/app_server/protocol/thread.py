@@ -121,3 +121,24 @@ class ThreadEventsListParams:
         if self.through_cursor is not None:
             result["throughCursor"] = self.through_cursor
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadContextReadParams:
+    thread_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"threadId": self.thread_id}
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCompactStartParams:
+    thread_id: str
+    action_id: str
+    expected_context_version: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {"threadId": self.thread_id, "actionId": self.action_id}
+        if self.expected_context_version is not None:
+            payload["expectedContextVersion"] = self.expected_context_version
+        return payload

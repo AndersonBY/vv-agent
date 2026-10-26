@@ -49,10 +49,14 @@ This guide is for a desktop app, worker, IDE or service that runs the
 5. Use `thread/model/select` when the user changes model settings. Give each
    user command a stable `inputId`, so a retried request is a replay rather
    than a second change.
-6. Page durable history with `thread/events/list`. Persist its nextCursor and
+6. Read thread/context/read to show the durable context budget. Keep its
+   contextVersion when asking thread/compact/start to reject a stale view. Give
+   compaction its own stable actionId and follow contextCompaction notifications.
+   A replay returns the original durable request identity.
+7. Page durable history with `thread/events/list`. Persist its nextCursor and
    retain throughCursor across pages. Reconcile volatile deltas with final items
    by callId or toolCallId; deduplicate durable events by event_id.
-7. Route `approval/request` to the host UI or policy service and return one
+8. Route `approval/request` to the host UI or policy service and return one
    canonical decision.
 
 ## Reliability
@@ -131,3 +135,29 @@ archive filtering. It includes rejected controls so callers check disposition.
 - Denied and timed-out approvals never run the protected tool.
 - A slow or disconnected client does not leave an active turn or an approval
   request stuck in the host UI.
+
+## Context reads and control intent
+
+Context reads use immutable log reads and a stable inbox watermark. Custom stores
+accept peek_inbox(..., ready_only=False) to include every accepted pending input,
+including inputs whose available_ms is in the future. Execution keeps the default
+ready_only=True. This prevents the context version from depending on wall time. They do not
+use read_state's PostgreSQL row lock. A busy cut can require a retry. They report
+the durable view before future callbacks, rather than running callbacks to guess
+what they will add. Thread creation retains a compiled baseline without running
+input guardrails or context providers. Compaction-only turns also skip prompt
+and final-output guardrails, since they submit no user prompt or final answer. Model
+selection still uses thread/model/select.
+
+Manual compaction stores metadata.request_compaction in the existing user-content
+JSON extension, with app_server_compaction holding its closed wire params. The
+kernel treats that reserved content as control intent and never as a user reply.
+The App Server's ordinary turn input cannot create that envelope. A custom host
+must authorize compact/start just as it authorizes turn/action, then wake only
+after commit. A cancelled turn does not revive to finish compaction.
+
+Custom model listings must supply explicit nulls for unknown capabilities. The
+default catalog accepts reasoning_available, supported_reasoning_efforts,
+default_reasoning_effort, prompt_cache_available, continuation_available and
+input_modalities alongside the existing tool and multimodal fields. Keep provider
+secrets outside these fields and outside the wire metadata.

@@ -39,7 +39,7 @@ place to start if you are new.
 
 ## Releases
 
-Release notes live in [releases/](releases/): [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
+Release notes live in [releases/](releases/): [0.28.0](releases/0.28.0.md), [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
 [0.23.1](releases/0.23.1.md), [0.23.0](releases/0.23.0.md),
 [0.22.0](releases/0.22.0.md). Store and API changes that hosts must act on are
 collected in [upgrading.md](upgrading.md#version-notes).

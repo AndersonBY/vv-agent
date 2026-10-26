@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,7 +10,10 @@ from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    DiagnosticEvent,
     HostInteractionRequestedEvent,
+    MemoryCompactCompleted,
+    MemoryCompactStarted,
     ModelCallCompletedEvent,
     ModelCallFailedEvent,
     ModelCallStartedEvent,
@@ -39,6 +43,48 @@ def item_id_for_event(event: RunEvent) -> str:
 
 
 def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProjection:
+    if isinstance(event, (MemoryCompactStarted, MemoryCompactCompleted)):
+        requests = [key for key in event.metadata.get("requested_by", []) if re.fullmatch(r"compaction/[0-9a-f]{64}", key)]
+        state = (
+            "started"
+            if isinstance(event, MemoryCompactStarted)
+            else "failed"
+            if event.metadata.get("compaction_error")
+            else "completed"
+        )
+        return ItemProjection(
+            additional_notifications=tuple(
+                (
+                    "contextCompaction/" + state,
+                    {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "requestId": key,
+                        "eventId": event.event_id + "/" + key,
+                        "changed": event.changed if isinstance(event, MemoryCompactCompleted) else False,
+                        "error": event.metadata.get("compaction_error"),
+                    },
+                )
+                for key in requests
+            )
+        )
+    if isinstance(event, DiagnosticEvent) and event.code == "context_compaction_failed":
+        return ItemProjection(
+            additional_notifications=tuple(
+                (
+                    "contextCompaction/failed",
+                    {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "requestId": key,
+                        "eventId": event.event_id + "/" + key,
+                        "changed": False,
+                        "error": event.details["error"],
+                    },
+                )
+                for key in event.details["request_ids"]
+            )
+        )
     if isinstance(event, (HostInteractionRequestedEvent, RunStateChangedEvent)):
         return ItemProjection()
     if isinstance(event, RunStartedEvent):

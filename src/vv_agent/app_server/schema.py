@@ -34,6 +34,8 @@ JSON_SCHEMA_NAMES = (
     "SchemaExportResponse",
     "ServerNotification",
     "ServerRequest",
+    "ThreadCompactStartResponse",
+    "ThreadContextReadResponse",
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
@@ -367,6 +369,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
         ),
     }
     definitions.update(_result_definitions())
+    definitions.update(_context_definitions())
     from vv_agent.session.app_server import ThreadStatus
 
     status = {"type": "string", "enum": [value.value for value in ThreadStatus]}
@@ -378,7 +381,6 @@ def _definitions() -> dict[str, dict[str, Any]]:
         "ThreadStartedParams",
     ):
         definitions[name]["properties"]["status"] = status
-    definitions["InitializeResponse"]["properties"]["protocolVersion"] = {"const": "v3"}
     definitions["ThreadStartResponse"]["properties"].update(accepted={"const": True}, replayed={"type": "boolean"})
     definitions["ThreadStartResponse"]["required"].extend(["accepted", "replayed"])
     definitions["TurnInterruptResponse"] = deepcopy(definitions["TurnActionResponse"])
@@ -455,22 +457,32 @@ def _definitions() -> dict[str, dict[str, Any]]:
 
 
 def _result_definitions() -> dict[str, dict[str, Any]]:
+    capabilities = {
+        "contextLength": nullable({"type": "integer", "minimum": 1}),
+        "maxOutputTokens": nullable({"type": "integer", "minimum": 0}),
+        **{
+            name: {"type": ["boolean", "null"]}
+            for name in ("supportsTools", "supportsVision", "supportsReasoning", "supportsPromptCache", "supportsContinuation")
+        },
+        "inputModalities": nullable(_array({"type": "string"})),
+        "supportedReasoningEfforts": nullable(_array({"type": "string"})),
+        "defaultReasoningEffort": NULLABLE_STRING,
+    }
     model_summary = _object(
         {
             "id": {"type": "string"},
             "provider": {"type": "string"},
             "displayName": {"type": "string"},
-            "contextLength": {"type": "integer", "minimum": 0},
-            "supportsTools": {"type": "boolean"},
             "metadata": JSON_OBJECT,
+            **capabilities,
         },
-        required=["id", "supportsTools"],
+        required=["id", *capabilities],
     )
     return {
         "InitializeResponse": _object(
             {
                 "userAgent": {"type": "string"},
-                "protocolVersion": {"const": "v1"},
+                "protocolVersion": {"const": "v4"},
                 "capabilities": {"$ref": "#/$defs/ServerCapabilities"},
             },
             required=["userAgent", "protocolVersion", "capabilities"],
@@ -580,6 +592,93 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
     }
 
 
+def _context_definitions() -> dict[str, dict[str, Any]]:
+    integer = {"type": "integer", "minimum": 0}
+    count = nullable(integer)
+    text = {"type": "string"}
+    digest = {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64}
+
+    def closed(fields):
+        return _object(fields, required=list(fields))
+
+    notice = closed(
+        {
+            "threadId": text,
+            "turnId": text,
+            "requestId": text,
+            "eventId": text,
+            "changed": {"type": "boolean"},
+            "error": NULLABLE_STRING,
+        }
+    )
+    return {
+        "ThreadContextReadParams": closed({"threadId": text}),
+        "ThreadCompactStartParams": _object(
+            {
+                "threadId": text,
+                "actionId": {"type": "string", "pattern": CLIENT_ID_PATTERN, "minLength": 1, "maxLength": 128},
+                "expectedContextVersion": digest,
+            },
+            required=["threadId", "actionId"],
+        ),
+        "ThreadCompactStartResponse": closed(
+            {
+                "threadId": text,
+                "actionId": text,
+                "requestId": text,
+                "inputSeq": {"type": "integer", "minimum": 1},
+                "accepted": {"const": True},
+                "replayed": {"type": "boolean"},
+            }
+        ),
+        "ContextCompactionParams": notice,
+        "ThreadContextReadResponse": closed(
+            {
+                "threadId": text,
+                "contextVersion": digest,
+                "projectionStage": {"const": "durable_pre_hooks"},
+                "estimates": closed(
+                    {
+                        "estimated": {"const": True},
+                        "estimator": {"const": "local_cjk_character_estimate_v1"},
+                        "parts": closed(
+                            {name: count for name in ("instructions", "tools", "history", "summary", "pendingInput")}
+                        ),
+                        "total": count,
+                    }
+                ),
+                "limits": closed(
+                    {
+                        "contextWindow": count,
+                        "maxOutputTokens": count,
+                        "runtimeContextWindow": count,
+                        "outputReserve": count,
+                        "outputReserveSource": NULLABLE_STRING,
+                        "compactionThreshold": count,
+                    }
+                ),
+                "lastCompaction": nullable(
+                    closed(
+                        {"seq": integer, "turnId": text, "createdAt": integer, "replacedMessageCount": integer, "summary": text}
+                    )
+                ),
+                "counts": closed(
+                    {
+                        name: integer
+                        for name in (
+                            "rawRecordCount",
+                            "rawHistoryMessages",
+                            "modelVisibleMessages",
+                            "modelVisibleHistoryMessages",
+                            "pendingInputs",
+                        )
+                    }
+                ),
+            }
+        ),
+    }
+
+
 CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "initialize": ("InitializeParams", True, True),
     "initialized": (None, False, False),
@@ -587,6 +686,8 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/start": ("ThreadStartParams", True, True),
     "thread/resume": ("ThreadResumeParams", True, True),
     "thread/read": ("ThreadReadParams", True, True),
+    "thread/context/read": ("ThreadContextReadParams", True, True),
+    "thread/compact/start": ("ThreadCompactStartParams", True, True),
     "thread/events/list": ("ThreadEventsListParams", True, True),
     "thread/model/select": ("ThreadModelSelectParams", True, True),
     "thread/status": ("ThreadStatusParams", True, True),
@@ -616,6 +717,7 @@ SERVER_NOTIFICATION_SPECS: dict[str, str] = {
     "approval/resolved": "ApprovalResolveParams",
     "error/warning": "WarningParams",
     "turn/completed": "TurnCompletedParams",
+    **{f"contextCompaction/{stage}": "ContextCompactionParams" for stage in ("started", "completed", "failed")},
 }
 
 SERVER_REQUEST_SPECS: dict[str, str] = {"approval/request": "ApprovalRequestParams"}
@@ -720,6 +822,8 @@ def _schema_bundle() -> dict[str, Any]:
         "InitializeResponse": definitions["InitializeResponse"],
         "SchemaExportResponse": definitions["SchemaExportResponse"],
         "ThreadReadResponse": definitions["ThreadSnapshotResponse"],
+        "ThreadContextReadResponse": definitions["ThreadContextReadResponse"],
+        "ThreadCompactStartResponse": definitions["ThreadCompactStartResponse"],
         "ThreadResumeResponse": definitions["ThreadSnapshotResponse"],
         "ThreadStartResponse": definitions["ThreadStartResponse"],
         "TurnResumeParams": definitions["TurnResumeParams"],
@@ -842,6 +946,24 @@ def _typescript_protocol_source() -> str:
         "export interface ThreadEventsListResponse { events: { cursor: EventCursor; event: JsonObject "
         "}[]; nextCursor: EventCursor; throughCursor: EventCursor; more: boolean; }\n"
         "export interface ThreadReadParams { threadId: string; }\n"
+        "export interface ThreadContextReadParams { threadId: string; }\n"
+        "export interface ThreadCompactStartParams { threadId: string; actionId: string; expectedContextVersion?: string; }\n"
+        "export interface ThreadCompactStartResponse { threadId: string; actionId: string; requestId: "
+        "string; inputSeq: number; accepted: true; replayed: boolean; }\n"
+        "export interface ContextCompactionParams { threadId: string; turnId: string; requestId: string; "
+        "eventId: string; changed: boolean; error: string | null; }\n"
+        "export interface ThreadContextReadResponse { threadId: string; contextVersion: string; "
+        "projectionStage: 'durable_pre_hooks';\n"
+        "  estimates: { estimated: true; estimator: 'local_cjk_character_estimate_v1'; parts: { "
+        "instructions: number | null; tools: number | null; history: number | null; summary: number | null; "
+        "pendingInput: number | null; }; total: number | null; };\n"
+        "  limits: { contextWindow: number | null; maxOutputTokens: number | null; runtimeContextWindow: "
+        "number | null; outputReserve: number | null; outputReserveSource: string | null; "
+        "compactionThreshold: number | null; };\n"
+        "  lastCompaction: { seq: number; turnId: string; createdAt: number; replacedMessageCount: number; "
+        "summary: string; } | null;\n"
+        "  counts: { rawRecordCount: number; rawHistoryMessages: number; modelVisibleMessages: number; "
+        "modelVisibleHistoryMessages: number; pendingInputs: number; }; }\n"
         "export interface ThreadListParams {\n"
         "  includeArchived?: boolean; archived?: boolean; offset?: number; limit?: number;\n"
         "}\n"
@@ -875,11 +997,14 @@ def _typescript_protocol_source() -> str:
         "}\n"
         "export interface ToolCallDeltaParams extends AppItem { delta: JsonValue; }\n"
         "export interface WarningParams { message: string; code?: string; }\n"
-        'export interface InitializeResponse { userAgent: string; protocolVersion: "v3"; '
+        'export interface InitializeResponse { userAgent: string; protocolVersion: "v4"; '
         "capabilities: ServerCapabilities; }\n"
         "export interface ModelSummary {\n"
-        "  id: string; provider?: string; displayName?: string; contextLength?: number;\n"
-        "  supportsTools: boolean; metadata?: JsonObject;\n"
+        "  id: string; provider?: string; displayName?: string; contextLength: number | null;\n"
+        "  supportsTools: boolean | null; maxOutputTokens: number | null; supportsVision: boolean | null;\n"
+        "  inputModalities: string[] | null; supportsReasoning: boolean | null; supportedReasoningEfforts: string[] | null;\n"
+        "  defaultReasoningEffort: string | null; supportsPromptCache: boolean | null; supportsContinuation: "
+        "boolean | null; metadata?: JsonObject;\n"
         "}\n"
         "export interface ModelListResponse { models: ModelSummary[]; }\n"
         "export interface ThreadStartResponse { threadId: string; agentKey: string; cwd: string | "
@@ -933,6 +1058,8 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/model/select"; params: ThreadModelSelectParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/context/read"; params: ThreadContextReadParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/compact/start"; params: ThreadCompactStartParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/events/list"; params: ThreadEventsListParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; '
@@ -958,13 +1085,16 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; method: "item/toolCall/delta"; params: ToolCallDeltaParams }\n'
         '  | { jsonrpc: "2.0"; method: "approval/requested"; params: ApprovalRequestParams }\n'
         '  | { jsonrpc: "2.0"; method: "approval/resolved"; params: ApprovalResolveParams }\n'
+        '  | { jsonrpc: "2.0"; method: "contextCompaction/started" | "contextCompaction/completed" | '
+        '"contextCompaction/failed"; params: ContextCompactionParams }\n'
         '  | { jsonrpc: "2.0"; method: "error/warning"; params: WarningParams };\n'
         "\n"
         "export type ServerRequest = {\n"
         '  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;\n'
         "};\n"
         "export type ClientResult =\n"
-        "  | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse\n"
+        "  | ThreadContextReadResponse | ThreadCompactStartResponse | InitializeResponse | ModelListResponse "
+        "| ThreadStartResponse | ThreadReadResponse\n"
         "  | ThreadModelSelectResponse | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
         "ThreadUnsubscribeResponse | ThreadStatusResponse\n"
         "  | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | "

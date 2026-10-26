@@ -311,16 +311,45 @@ class SQLStore:
             for row in rows:
                 stored = self._stored(session_id, row)
                 found[stored.seq] = stored
+        for r in records:
+            if r.record.kind != "turn_ended":
+                continue
+            # Read only this turn's indexed intent and lifecycle dependencies.
+            rows = self._rows(
+                "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest FROM sk_record r "
+                "LEFT JOIN sk_inbox i ON i.session_id=r.session_id AND i.consumed_seq=r.seq "
+                "WHERE r.session_id=%s AND r.turn_id=%s AND r.seq<=%s AND "
+                "(r.kind='boundary_recorded' OR (r.kind='input_applied' AND i.input_id LIKE 'compaction/%%')) ORDER BY r.seq",
+                (session_id, r.record.turn_id, through),
+            )
+            for row in rows:
+                stored = self._stored(session_id, row)
+                found[stored.seq] = stored
+            start = next(
+                row.record
+                for row in found.values()
+                if row.record.kind == "turn_started" and row.record.turn_id == r.record.turn_id
+            )
+            for key in start._payload["input_ids"]:
+                if key.startswith("compaction/"):
+                    item = self.read_input(session_id, key)
+                    if item is not None and item.consumed_seq is not None:
+                        row = self.read(
+                            session_id, after_seq=item.consumed_seq - 1, through_seq=item.consumed_seq, limit=1
+                        ).records[0]
+                        found[row.seq] = row
         return tuple(found[k] for k in sorted(found))
 
-    def peek_inbox(self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256) -> tuple[StoredInput, ...]:
+    def peek_inbox(
+        self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256, ready_only: bool = True
+    ) -> tuple[StoredInput, ...]:
         _positive(limit, "limit")
         if through_input_seq is not None:
             _natural(through_input_seq, "through_input_seq")
+        readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
-            f"SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox WHERE session_id=%s "
-            f"AND consumed_seq IS NULL AND available_ms<={self.clock_sql} "
-            "AND (%s OR input_seq<=%s) ORDER BY input_seq LIMIT %s",
+            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox WHERE session_id=%s "
+            "AND consumed_seq IS NULL " + readiness + "AND (%s OR input_seq<=%s) ORDER BY input_seq LIMIT %s",
             (session_id, through_input_seq is None, through_input_seq or 0, limit),
         )
         result = []

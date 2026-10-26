@@ -11,6 +11,8 @@ from vv_agent.app_server.protocol import (
     InitializeParams,
     ModelListRequest,
     ThreadArchiveParams,
+    ThreadCompactStartParams,
+    ThreadContextReadParams,
     ThreadEventsListParams,
     ThreadListParams,
     ThreadModelSelectParams,
@@ -81,6 +83,12 @@ class AppServerClient:
 
     def read_thread(self, params: ThreadReadParams) -> dict[str, Any]:
         return self._send_request("thread/read", params.to_dict())
+
+    def read_context(self, params: ThreadContextReadParams) -> dict[str, Any]:
+        return self._send_request("thread/context/read", params.to_dict())
+
+    def compact_thread(self, params: ThreadCompactStartParams) -> dict[str, Any]:
+        return self._send_request("thread/compact/start", params.to_dict())
 
     def list_events(self, params: ThreadEventsListParams) -> dict[str, Any]:
         return self._send_request("thread/events/list", params.to_dict())

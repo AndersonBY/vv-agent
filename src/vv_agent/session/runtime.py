@@ -29,7 +29,7 @@ from vv_agent.budget import (
 )
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.guardrails import apply_input_guardrails
+from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory import MemoryManager
@@ -348,7 +348,7 @@ class Runtime:
             return client.complete_with_stream(request, stream_callback)
         return client.complete(request)
 
-    def compile(self, content: str, tid: str, *, seed: dict[str, Any] | None = None) -> AgentTask:
+    def compile(self, content: str, tid: str, *, seed: dict[str, Any] | None = None, control: bool = False) -> AgentTask:
 
         if "vv_session" in self.agent.metadata or "vv_session" in self.config.metadata:
             raise ValueError("vv_session is reserved for kernel metadata")
@@ -368,7 +368,11 @@ class Runtime:
             elif not enabled and name in self._enabled_dynamic_tools:
                 self.registry.unregister(name)
                 self._enabled_dynamic_tools.remove(name)
-        guardrail = apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
+        guardrail = (
+            GuardrailResult.allow()
+            if control
+            else apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
+        )
         if guardrail.outcome == "rewrite":
             content = str(guardrail.value)
         if guardrail.outcome in {"block", "require_approval"}:
@@ -387,6 +391,7 @@ class Runtime:
             run_config=replace(
                 self.config,
                 tool_policy=policy,
+                context_providers=[] if control else self.config.context_providers,
                 **(
                     {
                         "initial_messages": [Message.from_dict(copy_json(m)) for m in seed["messages"]],

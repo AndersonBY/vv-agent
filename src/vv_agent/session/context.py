@@ -17,27 +17,31 @@ if TYPE_CHECKING:
     from .reducer import ExecutionState
 
 
-def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) -> list[Message]:
+def project_context(records: tuple[StoredRecord, ...], state: ExecutionState, *, compacted: bool = True) -> list[Message]:
     seed = records[0].record._payload["attributes"].get("seed", {}) if records else {}
     messages: list[Message] = (
         filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in seed["messages"]])
         if seed.get("messages")
         else []
     )
+    seen_turn = False
     for stored in records:
         r = stored.record
         if r.kind not in {"context_compacted", "boundary_recorded", "turn_started", "input_applied", "op_completed"}:
             continue
         p = r._payload
         if r.kind == "boundary_recorded":
-            if p["stage"] == "before_memory":
+            if p["stage"] == "before_memory" and compacted:
                 messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in p["data"]["messages"]])
             elif p["stage"] == "after_cycle" and not p["data"]["error"]:
                 messages.extend(Message("user", text) for text in p["data"]["steering_messages"])
-        elif r.kind == "context_compacted":
+        elif r.kind == "context_compacted" and compacted:
             messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in p["replacement"]])
         elif r.kind == "turn_started":
             task = r._task()
+            if task.metadata.get("_vv_agent_app_server_compaction_only") and seen_turn:
+                continue
+            seen_turn = True
             history = filter_empty_assistant_messages(deepcopy(task.initial_messages)) if task.initial_messages else messages
             messages = [
                 Message("system", task.prompt_bundle.flatten(), metadata=copy_json(task.metadata)),
@@ -45,7 +49,9 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
             ]
             initial_input = task.metadata.get("vv_session", {}).get("input_messages")
             messages.extend(
-                filter_empty_assistant_messages([Message.from_dict(m) for m in initial_input])
+                []
+                if task.metadata.get("_vv_agent_app_server_compaction_only")
+                else filter_empty_assistant_messages([Message.from_dict(m) for m in initial_input])
                 if initial_input
                 else [Message("user", task.user_prompt)]
             )

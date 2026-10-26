@@ -77,6 +77,17 @@ old-version session.
 
 ## Version notes
 
+### 0.28.0
+
+Contract 30.0.0 selects App Server v4 and public API inventory v14. There is no
+store boundary: record schema 1, inbox schema 3, SQL layouts and RunEvent v6 stay
+unchanged. Regenerate schema and TypeScript clients. model/list now requires the
+capability fields and uses null for unknown values. Use thread/context/read and
+thread/compact/start for context UI; model selection remains thread/model/select.
+Creation attributes may contain app_server_context, a compiled projection baseline.
+Do not route sessions with pending compaction intents to an older runtime, which
+would interpret the new content extension as ordinary input.
+
 ### 0.27.0
 
 This release adopts contract 29.1.0 and public API inventory v13. Record schema

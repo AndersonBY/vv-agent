@@ -1,0 +1,172 @@
+{
+  "after": {
+    "contextVersion": "9c1385607dec9d0dc8391c2b788e334d2f86077f5d893b168c4c84e46d7794c4",
+    "counts": {
+      "modelVisibleHistoryMessages": 1,
+      "modelVisibleMessages": 3,
+      "pendingInputs": 0,
+      "rawHistoryMessages": 4,
+      "rawRecordCount": 27
+    },
+    "estimates": {
+      "estimated": true,
+      "estimator": "local_cjk_character_estimate_v1",
+      "parts": {
+        "history": 9,
+        "instructions": 10,
+        "pendingInput": 0,
+        "summary": 123,
+        "tools": 0
+      },
+      "total": 142
+    },
+    "lastCompaction": {
+      "createdAt": 1000000,
+      "replacedMessageCount": 3,
+      "seq": 23,
+      "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
+      "turnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d"
+    },
+    "limits": {
+      "compactionThreshold": 99000,
+      "contextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "outputReserve": 16000,
+      "outputReserveSource": "framework_fallback",
+      "runtimeContextWindow": 128000
+    },
+    "projectionStage": "durable_pre_hooks",
+    "threadId": "a2"
+  },
+  "before": {
+    "contextVersion": "447322826b3ccdd9cca79ab185619c24d2f680bcdf28d4b730f128fb314f28f9",
+    "counts": {
+      "modelVisibleHistoryMessages": 4,
+      "modelVisibleMessages": 5,
+      "pendingInputs": 0,
+      "rawHistoryMessages": 4,
+      "rawRecordCount": 11
+    },
+    "estimates": {
+      "estimated": true,
+      "estimator": "local_cjk_character_estimate_v1",
+      "parts": {
+        "history": 2535,
+        "instructions": 10,
+        "pendingInput": 0,
+        "summary": 0,
+        "tools": 0
+      },
+      "total": 2545
+    },
+    "lastCompaction": null,
+    "limits": {
+      "compactionThreshold": 99000,
+      "contextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "outputReserve": 16000,
+      "outputReserveSource": "framework_fallback",
+      "runtimeContextWindow": 128000
+    },
+    "projectionStage": "durable_pre_hooks",
+    "threadId": "a2"
+  },
+  "conflict": {
+    "code": -32024,
+    "message": "submission_conflict"
+  },
+  "lifecycle": [
+    {
+      "method": "contextCompaction/started",
+      "params": {
+        "changed": false,
+        "error": null,
+        "eventId": "sk/memory/f4673ef4fe283987b2a1ccfda10f85ae6b2563033eb6e9666113168ff450292e/started/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "requestId": "compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "threadId": "a2",
+        "turnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d"
+      }
+    },
+    {
+      "method": "contextCompaction/completed",
+      "params": {
+        "changed": true,
+        "error": null,
+        "eventId": "sk/memory/f4673ef4fe283987b2a1ccfda10f85ae6b2563033eb6e9666113168ff450292e/completed/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "requestId": "compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+        "threadId": "a2",
+        "turnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d"
+      }
+    }
+  ],
+  "modelCalls": [
+    "primary",
+    "compaction"
+  ],
+  "models": [
+    {
+      "contextLength": 100000,
+      "defaultReasoningEffort": "high",
+      "displayName": "known",
+      "id": "known-id",
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "maxOutputTokens": 9000,
+      "metadata": {
+        "requestedModel": "known"
+      },
+      "provider": "test",
+      "supportedReasoningEfforts": [
+        "low",
+        "high"
+      ],
+      "supportsContinuation": true,
+      "supportsPromptCache": false,
+      "supportsReasoning": true,
+      "supportsTools": true,
+      "supportsVision": true
+    },
+    {
+      "contextLength": null,
+      "defaultReasoningEffort": null,
+      "displayName": "unknown",
+      "id": "unknown-id",
+      "inputModalities": null,
+      "maxOutputTokens": null,
+      "metadata": {
+        "requestedModel": "unknown"
+      },
+      "provider": "test",
+      "supportedReasoningEfforts": null,
+      "supportsContinuation": null,
+      "supportsPromptCache": null,
+      "supportsReasoning": null,
+      "supportsTools": null,
+      "supportsVision": null
+    }
+  ],
+  "protocol_version": "v4",
+  "receipt": {
+    "accepted": true,
+    "actionId": "compact",
+    "inputSeq": 2,
+    "replayed": false,
+    "requestId": "compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+    "threadId": "a2"
+  },
+  "replay": {
+    "accepted": true,
+    "actionId": "compact",
+    "inputSeq": 2,
+    "replayed": true,
+    "requestId": "compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
+    "threadId": "a2"
+  },
+  "schema_version": 1,
+  "stale": {
+    "code": -32028,
+    "message": "context_version_mismatch"
+  }
+}

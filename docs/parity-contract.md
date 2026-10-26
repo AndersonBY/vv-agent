@@ -172,3 +172,12 @@ uses `Runtime.resolve_model` to obtain current primary clients and
 `VvLlmClient.ordered_targets` to freeze each operation's routing. Historical
 endpoint fields remain readable evidence. Record schema 1 and inbox schema 3
 are unchanged. See [model selection](session-model-selection.md#resolver-contract).
+
+## A2 context mapping
+
+Contract 30.0.0 uses App Server v4 and public API inventory v14. Python maps
+thread/context/read to session.context_view and shares session.compaction's
+memory_settings resolver with execution. thread/compact/start writes the existing
+content extension and feeds summary_requests; it adds no inbox kind or store
+version. Typed client methods are read_context and compact_thread. The canonical
+A2 vectors are reproduced by scripts/app_server_a2_fixtures.py.

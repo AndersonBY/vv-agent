@@ -111,8 +111,8 @@ def test_schema_bundle_file_sets_and_sources_match_shared_fixture(tmp_path) -> N
 
     json_bundle = json_schema_bundle()
     typescript_bundle = typescript_schema_bundle()
-    assert len(json_bundle) == 19
-    assert len(typescript_bundle) == 18
+    assert len(json_bundle) == 21
+    assert len(typescript_bundle) == 20
     assert [f"{name}.json" for name in json_bundle] == expected_json_files
     assert list(typescript_bundle) == expected_typescript_files
 
@@ -176,7 +176,7 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
         "typescript": typescript_schema_bundle(),
     }
     definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
-    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v3"}
+    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v4"}
     assert definitions["AppThread"]["properties"]["status"]["enum"] == [
         "idle",
         "running",
@@ -198,8 +198,8 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
     assert "CheckpointSummary" not in definitions
     assert json.loads(result["jsonSchema"]["ClientRequest"])["title"] == "ClientRequest"
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
-    assert len(result["jsonSchema"]) == 19
-    assert len(result["typescript"]) == 18
+    assert len(result["jsonSchema"]) == 21
+    assert len(result["typescript"]) == 20
     assert '"deferred"' not in result["typescript"]["ThreadResumeResponse.ts"]
 
     processor.process_message(

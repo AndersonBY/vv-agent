@@ -173,7 +173,7 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
     object.__setattr__(event, "version", "v6")
     if requested_by:
-        metadata = metadata | {"requested_by": requested_by}
+        metadata = metadata | {"requested_by": requested_by, "source_digest": digest([m.to_dict() for m in source])}
     payload = event.to_dict() | {"metadata": metadata}
     driver.commit([driver.boundary_record("memory_started", key, {"event": payload})], guarded=True)
     return True
@@ -223,6 +223,14 @@ def finish_compact(
     metadata = call_after_memory_providers(driver.runtime.config.memory_providers, event)
     if "requested_by" in start.get("metadata", {}):
         metadata = metadata | {"requested_by": start["metadata"]["requested_by"]}
+        metadata["compaction_error"] = None
+        if not changed and any(
+            op.kind == "model"
+            and op.attempts[1].plan._payload["purpose"] == "compaction"
+            and op.attempts[1].plan._payload["request"]["metadata"].get("source_digest") == start["metadata"].get("source_digest")
+            for op in driver.state.operations.values()
+        ):
+            metadata["compaction_error"] = "summary_unavailable"
     records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
     if changed and mode in {"summary", "emergency"} and driver.task().metadata.get("session_memory_enabled"):
         memory = restore_memory(driver)
