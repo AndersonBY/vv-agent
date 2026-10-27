@@ -3,7 +3,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread
 from time import monotonic
 
 import pytest
@@ -207,7 +207,16 @@ def test_drive_backoff_database_failure_is_chained_to_original(store, database, 
     if failure == "drive":
         monkeypatch.setattr(_Driver, "step", fail)
     elif failure == "renew":
-        monkeypatch.setattr(store, "renew", fail)
+        # Exercise the main-thread TTL handoff, after factory renewal has started.
+        renew = store.renew
+        caller = current_thread()
+
+        def fail_handoff(*args, **kwargs):
+            if current_thread() is caller:
+                fail()
+            return renew(*args, **kwargs)
+
+        monkeypatch.setattr(store, "renew", fail_handoff)
     with pytest.raises(type(error)) as caught:
         drive(store, "s", runtime=factory)
     assert caught.value is error

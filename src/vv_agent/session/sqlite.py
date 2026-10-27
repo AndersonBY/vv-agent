@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from threading import RLock
 
 from .sql import SQLStore
@@ -71,6 +71,9 @@ class SQLiteStore(SQLStore):
     """A serialized connection per instance; BEGIN IMMEDIATE fences local writers."""
 
     clock_sql = "session_now_ms()"
+
+    def heartbeat_store(self):
+        return nullcontext(self) if self.path == ":memory:" else SQLiteStore.standalone(self.path)
 
     def __init__(self, path: str):
         self.path = path

@@ -551,51 +551,55 @@ class _KernelRunAdapter(RunAdapter):
     def submit_input(self, *, connection_id, thread_id, input_id, expected_turn_id, kind, input, metadata=None):
         content = _content(self, input, metadata or {}, kind, expected_turn_id)
         try:
-            with self.kernel.store.atomic() as tx:
-                tx.lock_session(thread_id)
-                state, _, _ = self.kernel.store.read_state(thread_id)
-                stored = self.kernel.store.read_input(thread_id, input_id)
-                if stored:
-                    retained = stored.item
-                    if retained.kind != ("user" if kind == "start" else kind):
-                        raise SubmissionConflict("submission_conflict")
-                    original = retained.payload["content"]
-                    if not isinstance(original, dict) or canonical_json_bytes(original.get("app_server")) != canonical_json_bytes(
-                        content["app_server"]
-                    ):
-                        raise SubmissionConflict("submission_conflict")
-                    item = retained
-                    content = original
-                else:
-                    if state.closed or state.archived:
-                        raise TurnMismatch("Thread is closed or archived")
-                    latest = next(reversed(state.turns), None)
-                    if expected_turn_id != (state.active_turn_id if kind == "steer" else latest):
-                        raise TurnMismatch("turn_mismatch")
-                    if kind == "start" and (
-                        state.active_turn_id
-                        or any(
-                            r._payload["disposition"] == "queued"
-                            and key not in state.admitted_inputs
-                            and r._payload["input"]["kind"] in {"user", "follow_up"}
-                            for key, r in state.applied_inputs.items()
+            while True:
+                state, records, _ = self.kernel.store.read_state(thread_id)
+                with self.kernel.store.atomic() as tx:
+                    tx.lock_session(thread_id)
+                    if self.kernel.store.lease_status(thread_id)[0] != records[-1].seq:
+                        continue
+                    stored = self.kernel.store.read_input(thread_id, input_id)
+                    if stored:
+                        retained = stored.item
+                        if retained.kind != ("user" if kind == "start" else kind):
+                            raise SubmissionConflict("submission_conflict")
+                        original = retained.payload["content"]
+                        if not isinstance(original, dict) or canonical_json_bytes(
+                            original.get("app_server")
+                        ) != canonical_json_bytes(content["app_server"]):
+                            raise SubmissionConflict("submission_conflict")
+                        item = retained
+                        content = original
+                    else:
+                        if state.closed or state.archived:
+                            raise TurnMismatch("Thread is closed or archived")
+                        latest = next(reversed(state.turns), None)
+                        if expected_turn_id != (state.active_turn_id if kind == "steer" else latest):
+                            raise TurnMismatch("turn_mismatch")
+                        if kind == "start" and (
+                            state.active_turn_id
+                            or any(
+                                r._payload["disposition"] == "queued"
+                                and key not in state.admitted_inputs
+                                and r._payload["input"]["kind"] in {"user", "follow_up"}
+                                for key, r in state.applied_inputs.items()
+                            )
+                            or any(
+                                x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None
+                                for x in self.kernel.store.peek_inbox(thread_id)
+                            )
+                        ):
+                            raise TurnMismatch("Thread already has an active turn")
+                        if kind != "start" and expected_turn_id is None:
+                            raise TurnMismatch("turn_mismatch")
+                        item = InboxItem(
+                            input_id,
+                            "user" if kind == "start" else kind,
+                            {"content": content},
+                            expected_turn_id if kind == "steer" else None,
+                            state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
                         )
-                        or any(
-                            x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None
-                            for x in self.kernel.store.peek_inbox(thread_id)
-                        )
-                    ):
-                        raise TurnMismatch("Thread already has an active turn")
-                    if kind != "start" and expected_turn_id is None:
-                        raise TurnMismatch("turn_mismatch")
-                    item = InboxItem(
-                        input_id,
-                        "user" if kind == "start" else kind,
-                        {"content": content},
-                        expected_turn_id if kind == "steer" else None,
-                        state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
-                    )
-                receipt = self.kernel.push(thread_id, item)
+                    receipt = self.kernel.push(thread_id, item)
+                    break
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         tid = expected_turn_id if kind == "steer" else f"{thread_id}/turn/{input_id}"
@@ -841,22 +845,29 @@ class _KernelRunAdapter(RunAdapter):
             },
         )
         try:
-            with self.kernel.store.atomic() as tx:
-                tx.lock_session(thread_id)
-                previous = self.kernel.store.read_input(thread_id, request_id)
-                if previous is not None:
-                    if previous.item.encode() != item.encode():
-                        raise SubmissionConflict("submission_conflict")
-                else:
-                    state, _, _ = self.kernel.store.read_state(thread_id)
-                    if state.closed or state.archived:
-                        raise TurnResumeError("Thread is closed or archived")
-                    if (
-                        expected_context_version is not None
-                        and self.read_context(thread_id)["contextVersion"] != expected_context_version
-                    ):
-                        raise ContextVersionMismatch("context_version_mismatch")
-                receipt = tx.push(thread_id, item)
+            while True:
+                state, records, watermark = self.kernel.store.read_state(thread_id)
+                context_version = self.read_context(thread_id)["contextVersion"] if expected_context_version is not None else None
+                head = records[-1].seq
+                position = self.kernel.store.read(thread_id, after_seq=head, through_seq=head, limit=1)
+                if (position.head_seq, position.inbox_seq) != (head, watermark):
+                    continue
+                with self.kernel.store.atomic() as tx:
+                    tx.lock_session(thread_id)
+                    position = self.kernel.store.read(thread_id, after_seq=head, through_seq=head, limit=1)
+                    if (position.head_seq, position.inbox_seq) != (head, watermark):
+                        continue
+                    previous = self.kernel.store.read_input(thread_id, request_id)
+                    if previous is not None:
+                        if previous.item.encode() != item.encode():
+                            raise SubmissionConflict("submission_conflict")
+                    else:
+                        if state.closed or state.archived:
+                            raise TurnResumeError("Thread is closed or archived")
+                        if expected_context_version is not None and context_version != expected_context_version:
+                            raise ContextVersionMismatch("context_version_mismatch")
+                    receipt = tx.push(thread_id, item)
+                    break
         except Conflict as exc:
             if str(exc) == "session or cursor not found":
                 raise KeyError(thread_id) from exc

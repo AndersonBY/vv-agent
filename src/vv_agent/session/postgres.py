@@ -82,12 +82,14 @@ class PostgresStore(SQLStore):
     """A serialized connection; atomic() nests as a savepoint in host transactions."""
 
     lock_clause = " FOR UPDATE"
-    read_lock_clause = " FOR SHARE"
     clock_sql = CLOCK
 
     def __init__(self, connection: Connection[Any]):
         self.connection = connection
         self._connection_lock = RLock()
+
+    def heartbeat_store(self):
+        return PostgresStore.standalone(_connection_conninfo(self.connection))
 
     @classmethod
     @contextmanager
