@@ -77,6 +77,30 @@ old-version session.
 
 ## Version notes
 
+### 0.30.0
+
+Contract 31.0.0 requires renewal throughout runtime factory preparation and
+captured-prefix state reads that do not hold the session row while loading,
+folding or copying history. The factory starting TTL remains 15 seconds and
+renews every 250 ms; preparation may exceed that interval. The returned runtime's
+TTL applies before execution. Renewal failure discards the factory result.
+Deferral and release use the current lease and every renewal thread is joined.
+
+Hosts can drop a factory-lease workaround such as `RuntimeFactoryStore` and pass
+their store and factory directly to `drive`. A custom store must implement
+`heartbeat_store()` to open an independent renewal connection to the same
+session database. Built-in SQL stores implement it; PostgreSQL subclasses that
+use host-managed connections should override it with their host's connection
+factory. In-memory SQLite shares its serialized connection. Bound connection
+and callback I/O so shutdown can join renewal workers.
+
+Record schema 1, inbox schema 3, SQL layouts, SQLite user_version 3, App Server v4
+and the public API inventory v14 are unchanged. This is not a store boundary;
+existing 0.27.x sessions remain readable. Hosts pinned to 0.27.x must also review
+0.28.0 and 0.29.0 for App Server client changes and fork/compaction routing.
+Do not surround history reads with a host-owned session write lock or a SQLite
+write transaction: that outer lock remains the host's responsibility.
+
 ### 0.29.0
 
 Contract 30.1.0 adds thread/fork. App Server v4, public API inventory v14, record

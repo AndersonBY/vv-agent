@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -22,7 +21,6 @@ from vv_agent.types import AgentTask, Message
 from .children import child_handles
 from .context import project_context
 from .kernel import drive
-from .postgres import PostgresStore, _connection_conninfo
 from .records import InboxItem, SessionSpec
 from .result import project_result
 from .runtime import Runtime
@@ -115,11 +113,7 @@ class SessionDriver:
         return runtime
 
     def _heartbeat_store(self):
-        if isinstance(self.store, SQLiteStore) and self.store.path != ":memory:":
-            return SQLiteStore.standalone(self.store.path)
-        if isinstance(self.store, PostgresStore):
-            return PostgresStore.standalone(_connection_conninfo(self.store.connection))
-        return nullcontext(self.store)
+        return self.store.heartbeat_store()
 
     def start(
         self,

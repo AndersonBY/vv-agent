@@ -67,7 +67,6 @@ class SQLStore:
     """One connection per thread. atomic() nests as a savepoint in host transactions."""
 
     lock_clause = ""
-    read_lock_clause = ""
     clock_sql = ""
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
@@ -187,8 +186,9 @@ class SQLStore:
             raise Conflict("log sequence gap")
         consumed = []
         for body, checksum in self._rows(
-            "SELECT body,digest FROM sk_inbox WHERE session_id=%s AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
-            (session_id, through, head),
+            "SELECT body,digest FROM sk_inbox WHERE session_id=%s AND input_seq<=%s "
+            "AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
+            (session_id, row[1], through, head),
         ):
             if sha256(body).hexdigest() != checksum:
                 raise Conflict("stored input digest mismatch")
@@ -202,14 +202,13 @@ class SQLStore:
     def read_state(self, session_id: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
         # Preserve the public read boundary used by host snapshot/reconnect hooks.
         self.read(session_id, limit=1)
-        with self._transaction():
-            row = self._one(
-                "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms "
-                f"FROM sk_session WHERE session_id=%s{self.read_lock_clause}",
-                (session_id,),
-            )
-            prefix = self._prefix(session_id, row)
-            return prefix.reducer.snapshot(), prefix.records, row[1]
+        # One statement captures a committed head; immutable prefix reads need no row lock.
+        row = self._head(session_id)
+        prefix = self._prefix(session_id, row)
+        return prefix.reducer.snapshot(), prefix.records, row[1]
+
+    def _head(self, session_id: str) -> tuple[Any, ...]:
+        return self._one("SELECT head_seq,inbox_seq,lease_epoch FROM sk_session WHERE session_id=%s", (session_id,))
 
     def _schedule(self, session_id: str, state: ExecutionState, *, preserve_due: bool = False) -> None:
         self._rows(
@@ -219,12 +218,17 @@ class SQLStore:
         )
 
     def rebuild_schedule(self, session_id: str) -> ExecutionState:
-        with self._transaction():
-            row = self._lock(session_id)
+        while True:
+            captured = self._head(session_id)
             self._fold_cache = None
-            reducer = self._prefix(session_id, row).reducer
-            self._schedule(session_id, reducer.state)
-            return reducer.snapshot()
+            reducer = self._prefix(session_id, captured).reducer
+            snapshot = reducer.snapshot()
+            with self._transaction():
+                row = self._lock(session_id)
+                if row[:3] != captured:
+                    continue
+                self._schedule(session_id, reducer.state)
+                return snapshot
 
     def read(self, session_id: str, *, after_seq: int = 0, through_seq: int | None = None, limit: int = 1024) -> ReadPage:
         _positive(limit, "limit")
@@ -333,7 +337,7 @@ class SQLStore:
             for key in start._payload["input_ids"]:
                 if key.startswith("compaction/"):
                     item = self.read_input(session_id, key)
-                    if item is not None and item.consumed_seq is not None:
+                    if item is not None and item.consumed_seq is not None and item.consumed_seq <= through:
                         row = self.read(
                             session_id, after_seq=item.consumed_seq - 1, through_seq=item.consumed_seq, limit=1
                         ).records[0]
@@ -415,15 +419,18 @@ class SQLStore:
     def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
         """Defer a stale idle schedule without changing execution facts or future due work."""
         _positive(poll_ms, "poll_ms")
+        sid = lease.session_id
+        captured = self._head(sid)
+        state = self._prefix(sid, captured).reducer.state
         with self._transaction():
-            sid = lease.session_id
             row = self._lock(sid)
             now = self._now()
             self._check_lease(sid, lease, row, now)
             scheduled = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (sid,))[0]
             if scheduled is None or scheduled > now:
                 return False
-            state = self._prefix(sid, row).reducer.state
+            if row[:3] != captured:
+                raise SequenceConflict("head or inbox watermark changed")
             due = [now + poll_ms, *(t for t in state.due_ms if t > now)]
             available = self._one(
                 "SELECT min(available_ms) FROM sk_inbox WHERE session_id=%s AND consumed_seq IS NULL AND available_ms>%s",
@@ -656,6 +663,16 @@ class SQLSessionTx:
             {"record_ids": [r.record_id for r in records], "consume_input_ids": list(consume_input_ids)}
         )
         s = self.store
+        captured = s._head(session_id)
+        prefix = None
+        reducer = None
+        # Commit replay needs no history or live lease. Prepare new immutable history
+        # before the write lock; locked admission below rechecks both CAS and epoch.
+        if expected_seq == captured[0] and not s._rows(
+            "SELECT 1 FROM sk_commit WHERE session_id=%s AND commit_id=%s", (session_id, commit_id)
+        ):
+            prefix = s._prefix(session_id, captured)
+            reducer = prefix.reducer.fork()
         with s._transaction():
             row = s._lock(session_id)
             old = s._rows(
@@ -675,7 +692,8 @@ class SQLSessionTx:
             s._check_lease(session_id, lease, row, s._now())
             if expected_seq != row[0] or (expected_inbox_seq is not None and expected_inbox_seq != row[1]):
                 raise SequenceConflict("head or inbox watermark changed")
-            prefix = s._prefix(session_id, row)
+            if prefix is None or reducer is None or row[2] != captured[2]:
+                raise SequenceConflict("head or epoch changed during append preparation")
             sequences: list[tuple[str, int]] = []
             new: list[tuple[int, Record, int]] = []
             head = row[0]
@@ -705,7 +723,6 @@ class SQLSessionTx:
                 if incoming[1] is not None or incoming[2] > now or incoming[0] != canonical_json_bytes(applied._payload["input"]):
                     raise Conflict("input already consumed, unavailable, or different bytes")
                 consumed.append(InboxItem.parse(incoming[0]))
-            reducer = prefix.reducer.fork()
             state = reducer.extend((r for _, r, _ in new), consumed_inputs=consumed, bodies=(encoded[p] for p, _, _ in new))
             now = s._now()
             s._check_lease(session_id, lease, row, now)  # Validation may outlive the lease.

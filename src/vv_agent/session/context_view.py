@@ -22,7 +22,7 @@ class ContextSnapshotBusy(RuntimeError):
 
 
 def context_view(store, session_id: str) -> dict[str, Any]:
-    # Use immutable reads, not read_state (which takes a PostgreSQL row lock).
+    # Capture records and pending inbox together without locking the session row.
     for _ in range(8):
         try:
             first = store.read(session_id)

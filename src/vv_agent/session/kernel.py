@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -53,24 +53,66 @@ def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[Sto
     return store.read_state(sid)
 
 
-class _Scope:
-    def __init__(self, lease: Lease, runtime: Runtime):
-        self.lease, self.runtime = lease, runtime
-        self.token = CancellationToken()
+FACTORY_LEASE_TTL_MS = 15000
+FACTORY_HEARTBEAT_SECONDS = 0.25
+
+
+class _LeaseHeartbeat:
+    def __init__(
+        self,
+        lease: Lease,
+        heartbeat_store: Callable[[], AbstractContextManager[SessionStore]],
+        ttl_ms: int,
+        heartbeat_seconds: float,
+    ):
+        self.lease = lease
+        self.heartbeat_store = heartbeat_store
+        self.ttl_ms, self.heartbeat_seconds = ttl_ms, heartbeat_seconds
         self.stop = threading.Event()
+        self.ready = threading.Event()
         self.lock = threading.Lock()
         self.lost = False
         self.heartbeat_error: Exception | None = None
-        self.turn_id: str | None = None
-        self.generation: int | None = None
         self.thread = threading.Thread(target=self._heartbeat, daemon=True, name="session-heartbeat")
 
     def poll(self, store: SessionStore):
         with self.lock:
             if self.lost:
                 raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
-            poll = store.renew(self.lease, ttl_ms=self.runtime.ttl_ms)
+            poll = store.renew(self.lease, ttl_ms=self.ttl_ms)
             self.lease = poll.lease
+        return poll
+
+    def _heartbeat(self) -> None:
+        try:
+            with self.heartbeat_store() as store:
+                while not self.stop.is_set():
+                    self.poll(store)
+                    self.ready.set()
+                    if self.stop.wait(self.heartbeat_seconds):
+                        break
+        except Exception as exc:
+            with self.lock:
+                self.heartbeat_error = exc
+                self.lost = True
+        finally:
+            self.ready.set()
+
+    def close(self) -> None:
+        self.stop.set()
+        self.thread.join()
+
+
+class _Scope(_LeaseHeartbeat):
+    def __init__(self, lease: Lease, runtime: Runtime):
+        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds)
+        self.runtime = runtime
+        self.token = CancellationToken()
+        self.turn_id: str | None = None
+        self.generation: int | None = None
+
+    def poll(self, store: SessionStore):
+        poll = super().poll(store)
         for item in poll.controls:
             if (
                 item.target_turn_id in {None, self.turn_id}
@@ -81,14 +123,8 @@ class _Scope:
         return poll
 
     def _heartbeat(self) -> None:
-        try:
-            with self.runtime.heartbeat_store() as store:
-                while not self.stop.wait(self.runtime.heartbeat_seconds):
-                    self.poll(store)
-        except Exception as exc:
-            with self.lock:
-                self.heartbeat_error = exc
-                self.lost = True
+        super()._heartbeat()
+        if self.lost:
             self.token.cancel("lease_lost")
 
 
@@ -1762,7 +1798,7 @@ def drive(
     if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
         raise ValueError("failure_backoff_ms must be a positive integer")
     scheduled = not isinstance(runtime, Runtime)
-    ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else 15000
+    ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else FACTORY_LEASE_TTL_MS
     lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     delay = 0.05
     while lease is None and _wait_for_lease:
@@ -1772,8 +1808,21 @@ def drive(
     if lease is None:
         return False
     if not isinstance(runtime, Runtime):
+        # Resolve store setup on the driving thread (host connections can be thread-bound).
         try:
-            runtime = runtime(session_id)
+            heartbeat = store.heartbeat_store()
+            build = _LeaseHeartbeat(lease, lambda: heartbeat, ttl_ms, FACTORY_HEARTBEAT_SECONDS)
+            build.thread.start()
+            try:
+                build.ready.wait()
+                if build.lost:
+                    raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
+                runtime = runtime(session_id)
+            finally:
+                build.close()
+                lease = build.lease
+            if build.lost:
+                raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
             lease = store.renew(lease, ttl_ms=runtime.ttl_ms).lease
         except RuntimeNotReady as exc:
             try:
@@ -1785,6 +1834,10 @@ def drive(
             try:
                 _defer_after_error(store, lease, failure_backoff_ms, exc)
             finally:
+                store.release(lease)
+            raise
+        except BaseException:
+            with suppress(Exception):
                 store.release(lease)
             raise
     scope = _Scope(lease, runtime)
@@ -1811,8 +1864,7 @@ def drive(
                 _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
         raise
     finally:
-        scope.stop.set()
-        scope.thread.join(timeout=2)
+        scope.close()
         with suppress(Exception):
             store.release(scope.lease)
         with suppress(Exception):

@@ -702,38 +702,40 @@ def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None):
         ),
     )
     assert isinstance(server.kernel.store, SQLiteStore)
-    server.kernel.store.connection.create_function("session_now_ms", 0, lambda: 1041102)
-    try:
-        server.processor.process_message(
-            "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "producer"}}}
-        )
-        _response(transport, 0)
-        server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
-        server.processor.process_message(
-            "conn_1", {"params": {"inputId": f"thread_{thread_number}"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"}
-        )
-        thread = _response(transport, 1)["result"]["threadId"]
-        transport.receive_outbound(timeout=1)
-        server.processor.process_message(
-            "conn_1",
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "turn/start",
-                "params": {
-                    "inputId": "turn_1",
-                    "expectedTurnId": None,
-                    "threadId": thread,
-                    "input": [{"type": "text", "text": "go"}],
+    # File-backed heartbeat connections must observe the same controlled clock.
+    with pytest.MonkeyPatch.context() as frozen_clock:
+        frozen_clock.setattr(SQLiteStore, "clock_sql", "1041102")
+        try:
+            server.processor.process_message(
+                "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "producer"}}}
+            )
+            _response(transport, 0)
+            server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
+            server.processor.process_message(
+                "conn_1", {"params": {"inputId": f"thread_{thread_number}"}, "jsonrpc": "2.0", "id": 1, "method": "thread/start"}
+            )
+            thread = _response(transport, 1)["result"]["threadId"]
+            transport.receive_outbound(timeout=1)
+            server.processor.process_message(
+                "conn_1",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "turn/start",
+                    "params": {
+                        "inputId": "turn_1",
+                        "expectedTurnId": None,
+                        "threadId": thread,
+                        "input": [{"type": "text", "text": "go"}],
+                    },
                 },
-            },
-        )
-        _response(transport, 2)
-        messages = _completed(transport)
-        server.run_adapter.join()
-        yield server, messages
-    finally:
-        for handle in server.kernel.handles:
-            handle.cancel("test teardown")
-        server.run_adapter.join()
-        server.kernel.close()
+            )
+            _response(transport, 2)
+            messages = _completed(transport)
+            server.run_adapter.join()
+            yield server, messages
+        finally:
+            for handle in server.kernel.handles:
+                handle.cancel("test teardown")
+            server.run_adapter.join()
+            server.kernel.close()

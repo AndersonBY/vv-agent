@@ -11,9 +11,9 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 [cloud host integration](host-integration.md). This page is the reference for
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
-The package implements contract 27.0.0, pinned in `contract.lock.json`. Current
-versions: public API v12, inbox schema 3, record schema 1, RunEvent v6,
-model-call v2, task-token-usage v3, strict Message, App Server protocol v3 and
+The package implements contract 31.0.0, pinned in `contract.lock.json`. Current
+versions: public API v14, inbox schema 3, record schema 1, RunEvent v6,
+model-call v2, task-token-usage v3, strict Message, App Server protocol v4 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
 ## Terms
@@ -171,6 +171,15 @@ digest, schema and reducer transition; a warm refresh folds only the new tail.
 Appends still run both lease checks and CAS. Rollback, conflict or a changed
 head digest drops the cache. The cache changes cost, never results.
 
+`read_state` captures head sequence, inbox watermark and epoch with one statement, then loads and folds records up to
+that head without a session row lock. Consumed inputs are bounded by both the
+captured head and inbox watermark. Snapshot copying also runs without the lock.
+Schedule rebuilds prepare history first and recheck the captured position under
+the write lock before updating. PostgreSQL appends prepare the retained prefix
+and fork its reducer before locking the session; new-record validation, CAS and
+fencing remain atomic. SQLite write transactions remain serialized; prepare
+large reads before entering a host-owned write transaction.
+
 `rebuild_schedule(session_id)` locks the session and recomputes `phase`,
 `next_drive_ms`, `active_turn_id` and `terminal_seq` from the log. Zero means
 due now; absolute deadlines come from records. PostgreSQL reads time with
@@ -216,6 +225,18 @@ LLM client, tool and provider bindings, and a `heartbeat_store` factory: a
 separate connection for files and PostgreSQL, the same locked instance for
 memory sessions. Defaults are a 15-second lease (`ttl_ms=15000`) and 250 ms
 heartbeats; the heartbeat must be at most one second and under half the TTL.
+
+For a callable runtime, `drive` uses the explicit
+`FACTORY_LEASE_TTL_MS = 15000` and `FACTORY_HEARTBEAT_SECONDS = 0.25` preparation
+policy. Before calling the factory, it opens `store.heartbeat_store()` and
+completes an initial renewal. Renewal continues during the factory; this TTL is
+not a build timeout. Every factory exit stops and joins that worker, and passes
+the latest Lease to deferral, release or the runtime TTL handoff. A renewal error
+or fenced epoch discards the factory result before any driver work. The runtime
+heartbeat takes over with the runtime's own TTL and connection factory. Factories
+prepare bindings only; they must not dispatch execution effects. Hosts must
+bound SQL and callback I/O because joining cannot cancel arbitrary host code.
+
 External calls run on daemon threads, so the driver can close a cancellation
 without waiting for a handler that ignores it. A thread counts as stopped only
 if its handler confirms cooperative cancellation.

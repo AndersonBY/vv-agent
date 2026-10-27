@@ -138,6 +138,10 @@ class SessionTx(Protocol):
 
 
 class SessionStore(Protocol):
+    def heartbeat_store(self) -> AbstractContextManager[SessionStore]:
+        """Open a runtime-independent renewal connection; memory stores may share their lock."""
+        ...
+
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None: ...
 
     def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]: ...

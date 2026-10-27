@@ -14,6 +14,11 @@
     "dispatch_never_drives_inline": true,
     "projection_failure_isolated": true,
     "factory_not_ready_preserves_turn": true,
-    "batch_delivery_atomic": true
+    "batch_delivery_atomic": true,
+    "factory_lease_renewed_until_handoff": true,
+    "factory_renewal_failure_prevents_execution": true,
+    "factory_cleanup_uses_current_lease": true,
+    "prefix_reads_do_not_block_renewal": true,
+    "prefix_reads_use_captured_head_and_inbox": true
   }
 }

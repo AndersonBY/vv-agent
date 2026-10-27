@@ -82,6 +82,15 @@ resumed turn runs on the definition it retained when it started. If the rebuilt
 binding no longer matches, the session stops explicitly instead of continuing
 on different settings.
 
+Built-in stores expose `heartbeat_store()` independently of a Runtime. A custom
+store (including a PostgreSQL subclass with host connection management) must
+supply a context manager opening the same session database on the heartbeat
+thread. The method itself runs on the driving thread, so thread-bound connection
+metadata can be captured safely. Hosts can remove `RuntimeFactoryStore` or an
+equivalent lease-swapping wrapper. Avoid holding an outer session write lock or
+SQLite write transaction around history reads; no inner read can release a
+caller's lock.
+
 When you build the `Runtime`:
 
 - Give each driving thread its own store connection. Set `heartbeat_store` to a
@@ -118,9 +127,13 @@ takes part in scheduled backoff.
 
 1. `drive` tries to take the lease. If another worker holds it, `drive` returns
    at once without waking anyone.
-2. It calls the factory under a 15-second preparation lease, then renews the
-   lease to the runtime's `ttl_ms`. Keep preparation shorter than 15 seconds
-   and give host I/O its own timeouts.
+2. It opens `store.heartbeat_store()` and starts renewal before calling the
+   factory. The explicit starting TTL is 15 seconds (`FACTORY_LEASE_TTL_MS`),
+   renewed every 250 ms (`FACTORY_HEARTBEAT_SECONDS`); preparation can exceed the
+   starting TTL. Every exit joins this heartbeat and uses its latest Lease.
+   Before execution, it renews to the returned runtime's `ttl_ms` and starts
+   that runtime's heartbeat. A failed renewal or fenced epoch prevents use of
+   the factory result. Give host callbacks and SQL their own I/O timeouts.
 3. It applies inputs and runs operations until nothing is runnable.
    Duplicate, reordered or concurrent deliveries never redispatch committed
    work.
