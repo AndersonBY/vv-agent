@@ -7,6 +7,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from test_app_server_distributed import node, request, submission
@@ -353,6 +354,19 @@ def test_first_subscriber_during_active_turn_receives_started(tmp_path, monkeypa
 )
 def test_foreground_child_lease_unavailable_propagates_and_recovers(tmp_path, monkeypatch, holder_kind, hold_seconds):
     from vv_agent.run_handle import RunHandle
+    from vv_agent.session.kernel import _Scope
+
+    # All SQLite connections share controlled database time, including heartbeats.
+    now_ms = [time.time_ns() // 1_000_000]
+    monkeypatch.setattr("vv_agent.session.sqlite.time", SimpleNamespace(time_ns=lambda: now_ms[0] * 1_000_000))
+    scopes = {}
+    poll = _Scope.poll
+
+    def remember_scope(self, store):
+        scopes[self.lease.session_id] = self
+        return poll(self, store)
+
+    monkeypatch.setattr(_Scope, "poll", remember_scope)
 
     entered, release = Event(), Event()
     child = Agent("child", "Answer.")
@@ -407,8 +421,31 @@ def test_foreground_child_lease_unavailable_propagates_and_recovers(tmp_path, mo
         assert first._lease_unavailable_session == held[0].session_id != "thread"
         assert lifecycle(messages) == [("turn/started", tid)]
         initial_acquires = len(acquisitions)
-        time.sleep(hold_seconds)
+
+        def retry_lease():
+            with server.run_adapter._state_manager.turn_lock("thread"):
+                with server.run_adapter._notification_lock:
+                    retry = server.run_adapter._lease_retries["thread"]
+                server.run_adapter._retry_lease("thread", retry)
+
+        if holder_kind != "abandoned":
+            scope = scopes[held[0].session_id]
+            epoch = scope.lease.epoch
+            for _ in range(round(hold_seconds / 0.05)):
+                with scope.lock:
+                    previous_expiry = scope.lease.expires_at_ms
+                    now_ms[0] += 50
+                renewed = scope.poll(server.kernel.store).lease
+                assert renewed.expires_at_ms > previous_expiry and renewed.epoch == epoch
+                # Exercise the expiry callback after renewal, without waiting for the observer's timer.
+                retry_lease()
+                assert len(acquisitions) == initial_acquires
+            assert not scope.lost and not held[0].done()
         assert len(acquisitions) == initial_acquires
+        if holder_kind == "abandoned":
+            now_ms[0] = held[0].expires_at_ms
+            assert server.kernel.store.lease_status(held[0].session_id)[2] == 0
+            retry_lease()
         if holder_kind == "wake_only":
             # Delivery must drive the parent even when its expiry retry is lost.
             with server.run_adapter._notification_lock:
@@ -419,6 +456,7 @@ def test_foreground_child_lease_unavailable_propagates_and_recovers(tmp_path, mo
         assert server.store.read_thread("thread").turns[0].result["finalOutput"] == "parent done"
         assert lifecycle(messages) == [("turn/started", tid), ("turn/completed", tid)]
         assert len(calls) == 3
+        assert len(acquisitions) > initial_acquires
         assert not any(m.get("params", {}).get("code") == "lease_retry_exhausted" for m in messages)
 
 
