@@ -24,6 +24,7 @@ from vv_agent.types import (
 
 from .context import project_context
 from .projection import project_records
+from .records import copy_json
 from .reducer import ExecutionState
 from .runtime import Runtime, model_usage
 from .store import SessionStore, StoredRecord
@@ -41,24 +42,29 @@ def project_result(
     turn = state.turns[turn_id]
     task = turn.start._task()
     terminal = next((r.record for r in reversed(records) if r.record.kind == "turn_ended" and r.record.turn_id == turn_id), None)
-    through = next((i + 1 for i, r in enumerate(records) if r.record == terminal), len(records))
+    through = next((i + 1 for i, r in enumerate(records) if r.record is terminal), len(records))
     records = records[:through]
     messages = project_context(records, state)
     cycles, calls, ledger = [], [], []
     plan_seqs = {r.record.record_id: r.seq for r in records}
     compaction_seqs = [r.seq for r in records if r.record.kind == "context_compacted" and r.record.turn_id == turn_id]
     previous_primary_seq = plan_seqs[turn.start.record_id]
+    tools_by_model = {}
+    for child in state.operations.values():
+        dependencies = child.attempts[1].plan._payload["dependencies"]
+        if child.kind != "model" and len(dependencies) == 1:
+            tools_by_model.setdefault(dependencies[0], []).append(child)
     shared = deepcopy(task.initial_shared_state)
     for stored in records:
         r = stored.record
         if r.turn_id != turn_id:
             continue
         if r.kind == "boundary_recorded" and "shared_state" in r._payload["data"]:
-            shared = r.payload["data"]["shared_state"]
+            shared = copy_json(r._payload["data"]["shared_state"])
         if r.kind != "op_completed":
             continue
-        if r.payload["context"] == "normal" and r.payload["shared_state"] is not None:
-            shared = deepcopy(r.payload["shared_state"])
+        if r._payload["context"] == "normal" and r._payload["shared_state"] is not None:
+            shared = copy_json(r._payload["shared_state"])
     for oid, op in state.operations.items():
         if op.turn_id != turn_id or op.kind != "model":
             continue
@@ -119,13 +125,12 @@ def project_result(
                 continue
             response = attempt.result.payload["result"]
             tool_results = []
-            for child in state.operations.values():
-                if child.kind != "model" and child.attempts[1].plan._payload["dependencies"] == [oid]:
-                    child_attempt = child.attempts[child.selected_attempt or max(child.attempts)]
-                    if child_attempt.result:
-                        tool_results.append(ToolExecutionResult.from_dict(child_attempt.result.payload["result"]))
-                    elif child_attempt.wait and "interaction_result" in child_attempt.wait:
-                        tool_results.append(ToolExecutionResult.from_dict(deepcopy(child_attempt.wait["interaction_result"])))
+            for child in tools_by_model.get(oid, ()):
+                child_attempt = child.attempts[child.selected_attempt or max(child.attempts)]
+                if child_attempt.result:
+                    tool_results.append(ToolExecutionResult.from_dict(child_attempt.result.payload["result"]))
+                elif child_attempt.wait and "interaction_result" in child_attempt.wait:
+                    tool_results.append(ToolExecutionResult.from_dict(deepcopy(child_attempt.wait["interaction_result"])))
             cycles.append(
                 CycleRecord(
                     cycle,

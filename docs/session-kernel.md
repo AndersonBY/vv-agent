@@ -168,6 +168,16 @@ Each SQL store caches up to two validated log prefixes, so projecting a child
 result does not evict the executing parent. A cache entry is bound to session,
 head sequence, lease epoch and head digest. A cold read checks every stored
 digest, schema and reducer transition; a warm refresh folds only the new tail.
+Context projection starts at the most recent complete message replacement and
+keeps the task that supplies its tool and continuation rules. Earlier boundary
+source digests are still checked as the log is folded. Growing full-conversation
+snapshots still require work proportional to their total size. Cold SQL reads
+fetch at most 256 records at once. Equal model-request and before-memory messages share private parsed JSON,
+validated Message values and canonical fragments within a fold. Every record,
+request and boundary source digest is still checked. Only the reducer's digest
+checks borrow cached Message objects; public payloads and projected messages
+remain detached copies. Forks copy the cache indexes, so a provisional tail does
+not change the retained prefix.
 Appends still run both lease checks and CAS. Rollback, conflict or a changed
 head digest drops the cache. The cache changes cost, never results.
 

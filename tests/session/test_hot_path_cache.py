@@ -89,14 +89,14 @@ def test_retained_json_is_not_parsed_again_and_nested_outputs_are_detached(sourc
     rec = SessionSpec("s", "p", "w", attributes=attributes).record()
     body = rec.encode()
     if source == "cold":
-        loads = records.json.loads
+        loads = records.jiter.from_json
         calls = []
 
         def parse(*args, **kwargs):
             calls.append(1)
             return loads(*args, **kwargs)
 
-        monkeypatch.setattr(records.json, "loads", parse)
+        monkeypatch.setattr(records.jiter, "from_json", parse)
         rec = records.Record.parse(body)
         assert len(calls) == 1
 
@@ -104,6 +104,7 @@ def test_retained_json_is_not_parsed_again_and_nested_outputs_are_detached(sourc
         raise AssertionError("retained JSON must not be reparsed")
 
     monkeypatch.setattr(records.json, "loads", unexpected)
+    monkeypatch.setattr(records.jiter, "from_json", unexpected)
     attributes["nested"][0]["values"].clear()
     rec.payload["attributes"]["nested"][0]["values"].append(3)
     rec.to_dict()["payload"]["attributes"]["nested"].clear()

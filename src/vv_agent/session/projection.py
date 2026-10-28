@@ -1,6 +1,7 @@
 """Pure durable-record -> existing RunEvent projection. Never executes or acknowledges."""
 
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Any
 
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetExhaustion, BudgetUsageSnapshot
@@ -50,7 +51,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
     compactions: dict[str, str | None] = {}
     for stored in records:
-        r, p = stored.record, stored.record.payload
+        r, p = stored.record, stored.record._payload
         identity_digest = digest([r.session_id, r.record_id])
         common: dict[str, Any] = {
             "run_id": r.turn_id or r.session_id,
@@ -422,4 +423,4 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             events.append(event)
     for projected in events:
         object.__setattr__(projected, "version", "v6")
-    return events
+    return deepcopy(events)

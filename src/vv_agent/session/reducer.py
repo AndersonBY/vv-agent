@@ -19,7 +19,7 @@ from vv_agent.types import Message
 
 from .children import child_handles
 from .context import message_ids, project_context
-from .records import InboxItem, Record, copy_json, digest
+from .records import InboxItem, Record, _MessageCache, copy_json, digest
 from .store import StoredRecord
 
 
@@ -516,7 +516,7 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
     require(tid == state.active_turn_id and tid in state.turns, "compaction outside active turn")
     assert tid is not None
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
-    source = project_context(tuple(history), state)
+    source = project_context(history, state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
     replacement = [Message.from_dict(m) for m in p["replacement"]]
     ids = message_ids(source)
@@ -600,6 +600,7 @@ class Fold:
         self.seen: dict[str, bytes] = {}
         self.consumed: dict[str, InboxItem] = {}
         self.history: list[StoredRecord] = []
+        self._messages = _MessageCache()
         self._shared_operations: set[str] = set()
         self._shared_turns: set[str] = set()
 
@@ -619,6 +620,7 @@ class Fold:
         result.state.boundaries = self.state.boundaries.copy()
         result.seen, result.consumed = self.seen.copy(), self.consumed.copy()
         result.history = self.history.copy()
+        result._messages = self._messages.copy()
         return result
 
     def _own_operation(self, oid: str | None) -> None:
@@ -673,13 +675,14 @@ class Fold:
             if record.record_id in seen:
                 require(seen[record.record_id] == body, "record identity conflict")
                 continue
+            record._share_messages(self._messages)
             seen[record.record_id] = body
             seq += 1
-            history.append(StoredRecord(record, seq, "", 0, 0))
             p, kind, tid = record._payload, record.kind, record.turn_id
             if kind == "session_created":
                 require(seq == 1, "session already created")
                 state.session_id = record.session_id
+                history.append(StoredRecord(record, seq, "", 0, 0))
                 continue
             require(state.session_id == record.session_id, "missing creation or wrong session")
             if kind == "turn_started":
@@ -811,15 +814,15 @@ class Fold:
                 key = (tid, p["stage"], p["boundary_id"])
                 require(key not in state.boundaries, "boundary recorded twice")
                 if p["source_digest"] is not None:
-                    source = project_context(tuple(history[:-1]), state)
-                    require(digest([m.to_dict() for m in source]) == p["source_digest"], "boundary source mismatch")
+                    source = project_context(history, state, _message_cache=self._messages)
+                    require(self._messages.source_digest(source) == p["source_digest"], "boundary source mismatch")
                 oid = p["source_operation_id"]
                 if oid is not None:
                     require(oid in state.operations and state.operations[oid].turn_id == tid, "boundary operation mismatch")
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
                     for message in p["data"]["messages"]:
-                        Message.from_dict(message)
+                        self._messages.parse(message)
                 elif p["stage"] == "session_memory_saved" and oid is not None:
                     require(
                         state.operations[oid].kind == "model"
@@ -879,7 +882,8 @@ class Fold:
                         require((tid, "memory_started", p["boundary_id"]) in state.boundaries, "memory completion without start")
                 state.boundaries[key] = record
             elif kind == "context_compacted":
-                _compacted(state, record, history[:-1])
+                _compacted(state, record, history)
+            history.append(StoredRecord(record, seq, "", 0, 0))
         require(set(consumed) == set(state.applied_inputs), "consumed input without input_applied")
         _schedule(state)
         return state

@@ -11,7 +11,7 @@ from typing import Any
 
 from vv_agent.canonical_json import canonical_json_bytes
 
-from .records import InboxItem, Record, SessionSpec
+from .records import InboxItem, Record, SessionSpec, _MessageCache
 from .reducer import ExecutionState, Fold, fold
 from .store import (
     CommitReceipt,
@@ -143,7 +143,7 @@ class SQLStore:
         ):
             raise LeaseLost("lease expired or fenced")
 
-    def _stored(self, session_id: str, row: tuple[Any, ...]) -> StoredRecord:
+    def _stored(self, session_id: str, row: tuple[Any, ...], messages: _MessageCache | None = None) -> StoredRecord:
         body, seq, commit, epoch, created, checksum = row
         if sha256(body).hexdigest() != checksum:
             raise Conflict("stored record digest mismatch")
@@ -153,7 +153,8 @@ class SQLStore:
             if cached.reducer.seen[prior.record_id] == body:
                 # The same session/sequence and exact validated bytes can share the immutable record.
                 return StoredRecord(prior, seq, commit, epoch, created)
-        return StoredRecord(Record.parse(body), seq, commit, epoch, created)
+        record = Record.parse(body) if messages is None else Record._parse(body, messages)
+        return StoredRecord(record, seq, commit, epoch, created)
 
     def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
         head, epoch = row[0], row[2]
@@ -173,17 +174,31 @@ class SQLStore:
                 # The immutable prefix survives a lease change; execution authority does not.
                 cached = _Prefix(session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
+        if head == 0:
+            raise Conflict("log sequence gap")
         if cached is not None and through == head:
             self._retain_prefix(cached)
             return cached
-        rows = self._rows(
-            "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-            "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq",
-            (session_id, through, head),
-        )
-        records = tuple(self._stored(session_id, r) for r in rows)
-        if tuple(r.seq for r in records) != tuple(range(through + 1, head + 1)):
-            raise Conflict("log sequence gap")
+        records, bodies = [], []
+        reducer = cached.reducer.fork() if cached else Fold()
+        head_digest = cached.head_digest if cached else ""
+        cursor = through
+        while cursor < head:
+            rows = self._rows(
+                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
+                "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
+                (session_id, cursor, head, 256),
+            )
+            if not rows:
+                raise Conflict("log sequence gap")
+            for row_data in rows:
+                if row_data[1] != cursor + 1:
+                    raise Conflict("log sequence gap")
+                stored = self._stored(session_id, row_data, reducer._messages)
+                stored.record._share_messages(reducer._messages)
+                records.append(stored)
+                bodies.append(row_data[0])
+                cursor, head_digest = stored.seq, row_data[5]
         consumed = []
         for body, checksum in self._rows(
             "SELECT body,digest FROM sk_inbox WHERE session_id=%s AND input_seq<=%s "
@@ -193,9 +208,8 @@ class SQLStore:
             if sha256(body).hexdigest() != checksum:
                 raise Conflict("stored input digest mismatch")
             consumed.append(InboxItem.parse(body))
-        reducer = cached.reducer.fork() if cached else Fold()
-        reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=(r[0] for r in rows))
-        prefix = _Prefix(session_id, epoch, rows[-1][5], reducer, (cached.records if cached else ()) + records)
+        reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=bodies)
+        prefix = _Prefix(session_id, epoch, head_digest, reducer, (cached.records if cached else ()) + tuple(records))
         self._retain_prefix(prefix)
         return prefix
 
