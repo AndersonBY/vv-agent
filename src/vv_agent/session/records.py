@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
+import jiter
+import orjson
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
@@ -17,7 +19,7 @@ from vv_agent.canonical_json import canonical_json_bytes, utf16_sort_key
 from vv_agent.model_settings import ModelSettings
 
 if TYPE_CHECKING:
-    from vv_agent.types import AgentTask
+    from vv_agent.types import AgentTask, Message
 
 
 class RecordError(ValueError):
@@ -37,6 +39,88 @@ def copy_json(value: Any) -> Any:
 
 def digest(value: Any) -> str:
     return sha256(_json_bytes(value)).hexdigest()
+
+
+class _MessageCache:
+    """Private immutable message values, validated forms and their canonical bytes."""
+
+    def __init__(self) -> None:
+        self.wires: dict[bytes, dict[str, Any]] = {}
+        self._known: set[int] = set()
+        self._decoded: dict[int, tuple[dict[str, Any], Message]] = {}
+        self._bodies: dict[int, bytes | None] = {}
+        self._wire_bodies: dict[int, bytes] = {}
+
+    def copy(self) -> _MessageCache:
+        result = _MessageCache()
+        result.wires = self.wires.copy()
+        result._known = self._known.copy()
+        result._decoded = self._decoded.copy()
+        result._bodies = self._bodies.copy()
+        result._wire_bodies = self._wire_bodies.copy()
+        return result
+
+    def share(self, value: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+        if id(value) in self._known:
+            return value
+        # This is an equality key, never persisted or used as a protocol digest.
+        options = orjson.OPT_STRICT_INTEGER if strict else 0
+        sorted_key = None
+        try:
+            key = orjson.dumps(value, option=options)
+        except orjson.JSONEncodeError:
+            if strict:
+                canonical_json_bytes(value)
+                raise
+            key = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            sorted_key = key
+        retained = self.wires.get(key)
+        if retained is None:
+            sorted_key = sorted_key if sorted_key is not None else orjson.dumps(value, option=options | orjson.OPT_SORT_KEYS)
+            retained = self.wires.setdefault(sorted_key, value)
+            self.wires[key] = retained
+        self._known.add(id(retained))
+        return retained
+
+    def wire_array(self, values: list[Any]) -> bytes:
+        parts = []
+        for index, value in enumerate(values):
+            if isinstance(value, dict):
+                value = values[index] = self.share(value, strict=True)
+                body = self._wire_bodies.get(id(value))
+                if body is None:
+                    body = canonical_json_bytes(value)
+                    self._wire_bodies[id(value)] = body
+            else:
+                body = canonical_json_bytes(value)
+            parts.append(body)
+        return b"[" + b",".join(parts) + b"]"
+
+    def parse(self, value: dict[str, Any]) -> Message:
+        from vv_agent.types import Message
+
+        cached = self._decoded.get(id(value))
+        if cached is None:
+            message = Message.from_dict(copy_json(value))
+            self._decoded[id(value)] = (value, message)
+            self._bodies[id(message)] = None
+            return message
+        return cached[1]
+
+    def source_digest(self, messages: list[Message]) -> str:
+        checksum = sha256(b"[")
+        for index, message in enumerate(messages):
+            if index:
+                checksum.update(b",")
+            identity = id(message)
+            body = self._bodies.get(identity)
+            if body is None:
+                body = canonical_json_bytes(message.to_dict())
+                if identity in self._bodies:
+                    self._bodies[identity] = body
+            checksum.update(body)
+        checksum.update(b"]")
+        return checksum.hexdigest()
 
 
 def closed(**fields: Any) -> dict[str, Any]:
@@ -475,7 +559,7 @@ def validate(value: Any, schema: dict[str, Any], *, canonical: bool = True) -> N
         raise RecordError(str(exc)) from exc
 
 
-def _load(body: bytes) -> dict[str, Any]:
+def _load(body: bytes, *, strict: bool = False) -> dict[str, Any]:
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in items:
@@ -485,7 +569,13 @@ def _load(body: bytes) -> dict[str, Any]:
         return result
 
     try:
-        value = json.loads(body, object_pairs_hook=pairs)
+        try:
+            value = jiter.from_json(body, catch_duplicate_keys=True, cache_mode="all", allow_inf_nan=not strict)
+        except (ValueError, TypeError):
+            if strict:
+                raise
+            # Preserve the existing accepted inputs and error messages on invalid JSON.
+            value = json.loads(body, object_pairs_hook=pairs)
     except (ValueError, UnicodeError) as exc:
         raise RecordError(str(exc)) from exc
     if not isinstance(value, dict):
@@ -493,8 +583,8 @@ def _load(body: bytes) -> dict[str, Any]:
     return value
 
 
-def _check_digest(payload: dict[str, Any], field: str) -> bytes:
-    encoded = _json_bytes(payload[field])
+def _check_digest(payload: dict[str, Any], field: str, encoded: bytes | None = None) -> bytes:
+    encoded = _json_bytes(payload[field]) if encoded is None else encoded
     if payload[f"{field}_digest"] != sha256(encoded).hexdigest():
         raise RecordError(f"{field} digest mismatch")
     return encoded
@@ -644,6 +734,7 @@ class Record:
     _value: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
     _task_value: AgentTask | None = field(default=None, init=False, repr=False, compare=False)
     _tools_body: bytes | None = field(default=None, init=False, repr=False, compare=False)
+    _message_cache_id: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def _task(self) -> AgentTask:
         from vv_agent.types import AgentTask
@@ -713,7 +804,24 @@ class Record:
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
         object.__setattr__(self, "_body", body)
 
-    def _validate(self, value: dict[str, Any]) -> dict[str, bytes]:
+    def _share_messages(self, messages: _MessageCache) -> None:
+        # Retained JSON is private and read-only; public payloads still detach it.
+        # This marker only avoids repeated interning, never validation or digest checks.
+        if self._message_cache_id == id(messages):
+            return
+        p = self._payload
+        snapshots = []
+        if self.kind == "op_planned" and p["op_kind"] == "model":
+            snapshots = p["request"].get("messages", [])
+        elif self.kind == "boundary_recorded" and p["stage"] == "before_memory":
+            snapshots = p["data"]["messages"]
+        if isinstance(snapshots, list):
+            for index, message in enumerate(snapshots):
+                if isinstance(message, dict):
+                    snapshots[index] = messages.share(message)
+        object.__setattr__(self, "_message_cache_id", id(messages))
+
+    def _validate(self, value: dict[str, Any], messages: _MessageCache | None = None) -> dict[str, bytes]:
         validate(value, RECORD_SCHEMA, canonical=False)
         validate(self.payload, PAYLOADS[self.kind], canonical=False)
         op = self.kind.startswith("op_")
@@ -764,12 +872,23 @@ class Record:
             ("input_applied", "input"),
         ):
             if self.kind == kind:
-                encoded_fields[digest_field] = _check_digest(self.payload, digest_field)
+                encoded = None
+                if self.kind == "op_planned" and self.payload["op_kind"] == "model" and messages is not None:
+                    request = self.payload["request"]
+                    if isinstance(request.get("messages"), list):
+                        encoded = _object_bytes(request, {"messages": messages.wire_array(request["messages"])})
+                encoded_fields[digest_field] = _check_digest(self.payload, digest_field, encoded)
         if self.kind == "input_applied":
             incoming = self.payload["input"]
             InboxItem(**incoming)._validate(incoming)
         if self.kind == "boundary_recorded":
             validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
+            if self.payload["stage"] == "before_memory" and messages is not None:
+                data = self.payload["data"]
+                try:
+                    encoded_fields["data"] = _object_bytes(data, {"messages": messages.wire_array(data["messages"])})
+                except (ValueError, TypeError) as exc:
+                    raise RecordError(str(exc)) from exc
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
         return encoded_fields
@@ -794,15 +913,30 @@ class Record:
 
     @classmethod
     def parse(cls, body: bytes) -> Record:
-        value = _load(body)
+        return cls._parse(body)
+
+    @classmethod
+    def _parse(cls, body: bytes, messages: _MessageCache | None = None) -> Record:
+        # Fragment reuse requires strict JSON; legacy/error paths retain the full encoder.
+        try:
+            value = _load(body, strict=messages is not None)
+        except (ValueError, TypeError):
+            if messages is None:
+                raise
+            value, messages = _load(body), None
         try:
             record = cls(**value)
         except TypeError as exc:
             raise RecordError(str(exc)) from exc
-        encoded_fields = record._validate(value)
+        encoded_fields = record._validate(value, messages)
         try:
             canonical = _record_bytes(value, encoded_fields)
-            record._retain(canonical, value if canonical == body else None)
+            if canonical == body:
+                record._retain(body if type(body) is bytes else canonical, value)
+                if messages is not None:
+                    object.__setattr__(record, "_message_cache_id", id(messages))
+            else:
+                record._retain(canonical)
         except (ValueError, TypeError) as exc:
             raise RecordError(str(exc)) from exc
         return record

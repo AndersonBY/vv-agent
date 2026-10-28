@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
@@ -10,29 +11,44 @@ from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.runtime.tool_results import build_image_notification
 from vv_agent.types import Message, ToolExecutionResult
 
-from .records import copy_json, digest
+from .records import _MessageCache, copy_json, digest
 from .store import StoredRecord
 
 if TYPE_CHECKING:
     from .reducer import ExecutionState
 
 
-def project_context(records: tuple[StoredRecord, ...], state: ExecutionState, *, compacted: bool = True) -> list[Message]:
-    seed = records[0].record._payload["attributes"].get("seed", {}) if records else {}
+def project_context(
+    records: Sequence[StoredRecord], state: ExecutionState, *, compacted: bool = True, _message_cache: _MessageCache | None = None
+) -> list[Message]:
+    def decode(value):
+        return _message_cache.parse(value) if _message_cache is not None else Message.from_dict(copy_json(value))
+
+    start = 0
+    task = None
+    if compacted:
+        for index in range(len(records) - 1, -1, -1):
+            r = records[index].record
+            if r.kind == "context_compacted" or (r.kind == "boundary_recorded" and r._payload["stage"] == "before_memory"):
+                start = index
+                assert r.turn_id is not None
+                task = state.turns[r.turn_id].start._task()
+                break
+    seed = records[0].record._payload["attributes"].get("seed", {}) if records and not start else {}
     messages: list[Message] = (
         filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in seed["messages"]])
         if seed.get("messages")
         else []
     )
-    seen_turn = False
-    for stored in records:
-        r = stored.record
+    seen_turn = bool(start)
+    for index in range(start, len(records)):
+        r = records[index].record
         if r.kind not in {"context_compacted", "boundary_recorded", "turn_started", "input_applied", "op_completed"}:
             continue
         p = r._payload
         if r.kind == "boundary_recorded":
             if p["stage"] == "before_memory" and compacted:
-                messages = filter_empty_assistant_messages([Message.from_dict(copy_json(m)) for m in p["data"]["messages"]])
+                messages = filter_empty_assistant_messages([decode(m) for m in p["data"]["messages"]])
             elif p["stage"] == "after_cycle" and not p["data"]["error"]:
                 messages.extend(Message("user", text) for text in p["data"]["steering_messages"])
         elif r.kind == "context_compacted" and compacted:
@@ -78,6 +94,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState, *,
         ):
             messages.append(Message("user", str(p["input"]["payload"]["content"]["text"])))
         elif r.kind == "op_completed" and r.operation_id:
+            assert task is not None
             assert r.attempt is not None and r.turn_id is not None
             op = state.operations[r.operation_id]
             if op.kind != "model" and p["context"] == "correction":

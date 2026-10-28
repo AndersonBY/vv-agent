@@ -77,6 +77,24 @@ old-version session.
 
 ## Version notes
 
+### 0.30.1
+
+Cold history loading avoids replaying message snapshots that a later complete
+snapshot replaces. Boundary source digests, record validation, sequence checks
+and lease fencing remain in place. PostgreSQL reads use binary results to avoid
+hex-encoding record bodies. Canonical record bytes share their storage buffer and repeated messages share
+private parsed values;
+result and event projections copy only the data they return. Validated messages
+and canonical fragments are reused while every record, request and source digest
+is still checked. The package adds explicit jiter and orjson dependencies; orjson
+is only used for private equality keys, never for persisted or protocol bytes.
+
+Contract 31.0.0, record schema 1, inbox schema 3 and SQL layouts are unchanged.
+This is not a store boundary. Sessions written by 0.24 through 0.30 keep the same
+stored bytes and fold to the same state. No migration or host API change is
+needed. Full message snapshots still accumulate in the log, so cold load cost
+still grows with the total stored data.
+
 ### 0.30.0
 
 Contract 31.0.0 requires renewal throughout runtime factory preparation and

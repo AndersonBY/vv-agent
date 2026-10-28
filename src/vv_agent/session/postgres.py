@@ -103,7 +103,7 @@ class PostgresStore(SQLStore):
         from psycopg.rows import tuple_row
 
         with self._connection_lock, self.connection.cursor(row_factory=tuple_row) as cursor:
-            cursor.execute(cast(LiteralString, query), params)
+            cursor.execute(cast(LiteralString, query), params, binary=query.lstrip().startswith("SELECT"))
             return cursor.fetchall() if cursor.description is not None else []
 
     @contextmanager

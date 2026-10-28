@@ -1,0 +1,636 @@
+{
+  "1": {
+    "session_id": "s",
+    "operations": [
+      [
+        "t/model/1",
+        {
+          "turn_id": "t",
+          "kind": "model",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/1/1/planned",
+                  "digest": "1858c915d25b680164e4346167464b2b9cdd7491cd627708798193ab1383a693"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/1/1/started",
+                  "digest": "a314f8b123abccf164643771ae2e5cdec789e8d0e36a17128333e23d30ed6961"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/1/1/result",
+                  "digest": "5ee020c5ef61867164c135040d55468fcdc7e847e084c7a86bf890860d12834c"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/1/attempt/1/tool/0",
+        {
+          "turn_id": "t",
+          "kind": "tool",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/planned",
+                  "digest": "ae409472800cc3bdb14fa94c1075456dd8aef2597ad27fbd1e3cf8bfaa266df2"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/started",
+                  "digest": "aa93e23a014e3314f9bb71fcc9ab207b2f8df3f794e0898f2b6803bc316b9dc3"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/result",
+                  "digest": "af18828b5ebca132027d5e78e4b5b7e081291f4431f5ef7cb5808ba2e16d51c6"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ]
+    ],
+    "turns": [
+      [
+        "t",
+        {
+          "start": {
+            "record_id": "turn/t/started",
+            "digest": "60c1908e76856f9ff619ce9861f9e0bee255b24010c9cc4660210c74185ffa22"
+          },
+          "ended": false,
+          "cancelled": false,
+          "suspended": false,
+          "wait": null
+        }
+      ]
+    ],
+    "active_turn_id": "t",
+    "closed": false,
+    "archived": false,
+    "cancel_requested": false,
+    "suspend_requested": false,
+    "phase": "active",
+    "due_ms": [
+      0
+    ],
+    "next_drive_ms": 0,
+    "terminal_seq": 0,
+    "applied_inputs": [],
+    "admitted_inputs": [],
+    "child_completions": null,
+    "usage_observations": [],
+    "usage_values": [],
+    "compactions": [],
+    "boundaries": [
+      [
+        [
+          "t",
+          "before_memory",
+          "1"
+        ],
+        {
+          "record_id": "turn/t/boundary/before_memory/1",
+          "digest": "dfd954a698c789dff40bc995f93fcbd020cfa04466641c4fed1c9163bcb577f8"
+        }
+      ]
+    ],
+    "preferred_endpoint_id": null,
+    "model_selection": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "Be precise.",
+        "metadata": {
+          "_vv_agent_tool_policy_approval": "default",
+          "_vv_agent_tool_use_behavior": "run_llm_again",
+          "session_memory_enabled": false,
+          "trace_id": "t"
+        }
+      },
+      {
+        "role": "user",
+        "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "1:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "tool_call_id": "call-1"
+      }
+    ]
+  },
+  "4": {
+    "session_id": "s",
+    "operations": [
+      [
+        "t/model/1",
+        {
+          "turn_id": "t",
+          "kind": "model",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/1/1/planned",
+                  "digest": "1858c915d25b680164e4346167464b2b9cdd7491cd627708798193ab1383a693"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/1/1/started",
+                  "digest": "a314f8b123abccf164643771ae2e5cdec789e8d0e36a17128333e23d30ed6961"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/1/1/result",
+                  "digest": "5ee020c5ef61867164c135040d55468fcdc7e847e084c7a86bf890860d12834c"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/1/attempt/1/tool/0",
+        {
+          "turn_id": "t",
+          "kind": "tool",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/planned",
+                  "digest": "ae409472800cc3bdb14fa94c1075456dd8aef2597ad27fbd1e3cf8bfaa266df2"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/started",
+                  "digest": "aa93e23a014e3314f9bb71fcc9ab207b2f8df3f794e0898f2b6803bc316b9dc3"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/1/attempt/1/tool/0/1/result",
+                  "digest": "af18828b5ebca132027d5e78e4b5b7e081291f4431f5ef7cb5808ba2e16d51c6"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/2",
+        {
+          "turn_id": "t",
+          "kind": "model",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/2/1/planned",
+                  "digest": "3c07389543747b70fc7cb0052cb495c0faa3ca46b1bb9cd58233b41a0f3fd875"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/2/1/started",
+                  "digest": "4edf7f422e9f4602781226b54df9872800ded9a6a5f5041d545dba236cf7e0f4"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/2/1/result",
+                  "digest": "3508f7c3fed05ece3beee08df2e50e6be7f1211510b5ed43679b866a8ab47d95"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/2/attempt/1/tool/0",
+        {
+          "turn_id": "t",
+          "kind": "tool",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/2/attempt/1/tool/0/1/planned",
+                  "digest": "383e574383d76dc32ed4b3e125edea2e6c69e531aa2e7af7a77e942d8c25a69a"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/2/attempt/1/tool/0/1/started",
+                  "digest": "4e0afa0799e4b70f40ed7bb3f198b6e4489c75ed496bfec842b843705053877c"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/2/attempt/1/tool/0/1/result",
+                  "digest": "c6d75046a1622753da884dfae046ee1e6d4de8cc6a65f5d773e343b2711d7b0e"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/3",
+        {
+          "turn_id": "t",
+          "kind": "model",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/3/1/planned",
+                  "digest": "45271d9b6719c6212e97f49bdc9eb2534350216cfa8ccc8e2a5b48a0f16dd401"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/3/1/started",
+                  "digest": "b90af557843f17c157b2d44ec50f049da8314bd734ad4f857eb6ddfc009d8c80"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/3/1/result",
+                  "digest": "94c444279a7e0b9a42b79d35608630094f35a8a1653d325a7ebb21061eb50022"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/3/attempt/1/tool/0",
+        {
+          "turn_id": "t",
+          "kind": "tool",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/3/attempt/1/tool/0/1/planned",
+                  "digest": "7c3aa733fa9d967dffe165dd5eef5bddfcccbd700b9421ce4aaa232fc8f96464"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/3/attempt/1/tool/0/1/started",
+                  "digest": "2e2826b1d51fb995c96a88e3e368ebc45d05bf92fdab8bb8ffab96d5de3b66c7"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/3/attempt/1/tool/0/1/result",
+                  "digest": "26d330c4bf690815dc93b56995fb6de61b47466a6f6ae94e236931902b3ff8c1"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/4",
+        {
+          "turn_id": "t",
+          "kind": "model",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/4/1/planned",
+                  "digest": "4a7443ec43e53eadd1850c3863578c7a04da5b6570864d91a9e3648fbe715a1f"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/4/1/started",
+                  "digest": "d92bb5a6afc9f2b4a219d6c5fc0e51d5d6881ec3eb64ad40c5f0460fb065fe7b"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/4/1/result",
+                  "digest": "638c6462902e23f477329e20ac709c5414ed2501939b83817b0cf07220e5415e"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ],
+      [
+        "t/model/4/attempt/1/tool/0",
+        {
+          "turn_id": "t",
+          "kind": "tool",
+          "attempts": [
+            [
+              1,
+              {
+                "plan": {
+                  "record_id": "op/t/model/4/attempt/1/tool/0/1/planned",
+                  "digest": "f8a70ca7b449af9c6768b29110c1d5a6d698ea1de0302c97cdc713a599c3a9ff"
+                },
+                "state": "completed",
+                "dispatch": {
+                  "record_id": "op/t/model/4/attempt/1/tool/0/1/started",
+                  "digest": "71d296248f5ee8428fb20b158c6e84808b788935fc1679dbea9d8dd8ffff4777"
+                },
+                "wait": null,
+                "child_handle": null,
+                "unknown": null,
+                "result": {
+                  "record_id": "op/t/model/4/attempt/1/tool/0/1/result",
+                  "digest": "6f1e0e863abc1ce8df4ae48ec02edea29c6b79de0199c5e4a63ad45e5fcc1b24"
+                },
+                "context": "normal",
+                "unknown_consumed": false,
+                "approval": null,
+                "superseded": false,
+                "prepared": null,
+                "approval_answer": null
+              }
+            ]
+          ],
+          "selected_attempt": 1
+        }
+      ]
+    ],
+    "turns": [
+      [
+        "t",
+        {
+          "start": {
+            "record_id": "turn/t/started",
+            "digest": "60c1908e76856f9ff619ce9861f9e0bee255b24010c9cc4660210c74185ffa22"
+          },
+          "ended": false,
+          "cancelled": false,
+          "suspended": false,
+          "wait": null
+        }
+      ]
+    ],
+    "active_turn_id": "t",
+    "closed": false,
+    "archived": false,
+    "cancel_requested": false,
+    "suspend_requested": false,
+    "phase": "active",
+    "due_ms": [
+      0
+    ],
+    "next_drive_ms": 0,
+    "terminal_seq": 0,
+    "applied_inputs": [],
+    "admitted_inputs": [],
+    "child_completions": null,
+    "usage_observations": [],
+    "usage_values": [],
+    "compactions": [],
+    "boundaries": [
+      [
+        [
+          "t",
+          "before_memory",
+          "1"
+        ],
+        {
+          "record_id": "turn/t/boundary/before_memory/1",
+          "digest": "dfd954a698c789dff40bc995f93fcbd020cfa04466641c4fed1c9163bcb577f8"
+        }
+      ],
+      [
+        [
+          "t",
+          "before_memory",
+          "2"
+        ],
+        {
+          "record_id": "turn/t/boundary/before_memory/2",
+          "digest": "616dd1c0fd8a7f58ea1c923f224142008d7264175b20872b0ebf4309b10cf978"
+        }
+      ],
+      [
+        [
+          "t",
+          "before_memory",
+          "3"
+        ],
+        {
+          "record_id": "turn/t/boundary/before_memory/3",
+          "digest": "a2c751f3224152022b74e838b36590c20aa789b3da531e8961495b90950dd928"
+        }
+      ],
+      [
+        [
+          "t",
+          "before_memory",
+          "4"
+        ],
+        {
+          "record_id": "turn/t/boundary/before_memory/4",
+          "digest": "b3c2cd9fd147c98b6efee159214c72cf5fb8f01de68f0dc81d1506518d637771"
+        }
+      ]
+    ],
+    "preferred_endpoint_id": null,
+    "model_selection": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "Be precise.",
+        "metadata": {
+          "_vv_agent_tool_policy_approval": "default",
+          "_vv_agent_tool_use_behavior": "run_llm_again",
+          "session_memory_enabled": false,
+          "trace_id": "t"
+        }
+      },
+      {
+        "role": "user",
+        "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "1:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "tool_call_id": "call-1"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call-2",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "2:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "tool_call_id": "call-2"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call-3",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "3:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "tool_call_id": "call-3"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call-4",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "4:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "tool_call_id": "call-4"
+      }
+    ]
+  }
+}
