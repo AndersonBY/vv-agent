@@ -50,7 +50,9 @@ def _tiktoken_versions() -> tuple[str, str]:
 def _local_tokenizer_family(model: str) -> str | None:
     if model.startswith("deepseek"):
         return "deepseek"
-    if model.startswith(("abab", "MiniMax", "moonshot", "kimi", "gemini", "claude", "qwen", "stepfun", "glm")):
+    if model.startswith("qwen"):
+        return "qwen"
+    if model.startswith(("abab", "MiniMax", "moonshot", "kimi", "gemini", "claude", "stepfun", "glm")):
         return None
     # vv-llm routes every remaining name to o200k, except this exact spelling.
     return "cl100k_base" if model == "gpt-3.5-turbo" else "o200k_base"
@@ -59,7 +61,7 @@ def _local_tokenizer_family(model: str) -> str | None:
 def incremental_token_counting_status(model: str) -> tuple[bool, str]:
     """Return eligibility and a reason; individual unsafe text boundaries still fall back."""
     family = _local_tokenizer_family(model)
-    if family is None:
+    if family is None or family == "qwen":
         return False, "model family uses whole-conversation counting"
     package = "deepseek-tokenizer" if family == "deepseek" else "tiktoken"
     try:
@@ -71,36 +73,15 @@ def incremental_token_counting_status(model: str) -> tuple[bool, str]:
         return False, f"unverified versions: vv-llm={versions[0]}, {package}={versions[1]}"
     from vv_llm.chat_clients import utils
 
-    if utils.settings.token_server is not None:
-        return False, "global token server is configured"
     if utils.get_message_token_counts.__module__ != utils.__name__ or utils.get_token_counts.__module__ != utils.__name__:
         return False, "token counting functions have been replaced"
     return True, f"verified {family} newline boundaries"
 
 
-def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int | None:
-    """Reuse exact newline-terminated counts; unsupported boundaries use vv-llm."""
-    enabled, reason = incremental_token_counting_status(model)
-    family = _local_tokenizer_family(model)
-    if not enabled:
-        if reason.startswith("unverified versions:"):
-            with _TOKEN_CACHE_LOCK:
-                first = family not in _VERSION_FALLBACK_LOGGED
-                if family is not None:
-                    _VERSION_FALLBACK_LOGGED.add(family)
-            if first:
-                logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
-        return None
+def _message_token_parts(messages: list[dict[str, Any]], *, native_multimodal: bool) -> tuple[list[str], int]:
     from vv_llm.chat_clients import utils
     from vv_llm.types.enums import BackendType
 
-    if family == "deepseek":
-        from deepseek_tokenizer import deepseek_tokenizer
-
-        encode = deepseek_tokenizer.encode
-    else:
-        encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
-        encode = encoding.encode
     formatted = utils.format_messages(cast(Any, messages), backend=BackendType.OpenAI, native_multimodal=native_multimodal)
     texts = []
     images = 0
@@ -114,6 +95,32 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
                     texts.append(item["text"])
                 elif isinstance(item, dict) and item["type"].startswith("image"):
                     images += 1
+    return texts, images
+
+
+def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int | None:
+    """Reuse exact newline-terminated counts; unsupported boundaries use a whole count."""
+    enabled, reason = incremental_token_counting_status(model)
+    family = _local_tokenizer_family(model)
+    if not enabled:
+        if reason.startswith("unverified versions:"):
+            with _TOKEN_CACHE_LOCK:
+                first = family not in _VERSION_FALLBACK_LOGGED
+                if family is not None:
+                    _VERSION_FALLBACK_LOGGED.add(family)
+            if first:
+                logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
+        return None
+    from vv_llm.chat_clients import utils
+
+    if family == "deepseek":
+        from deepseek_tokenizer import deepseek_tokenizer
+
+        encode = deepseek_tokenizer.encode
+    else:
+        encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
+        encode = encoding.encode
+    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal)
     if any(not isinstance(text, str) or not text for text in texts):
         return None
     # DeepSeek stops at the first newline run; tiktoken can span whitespace after it.
@@ -128,7 +135,10 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
         plain, terminated = _cached_token_data(
             text,
             identity,
-            lambda text=text: (utils.get_token_counts(text, model), utils.get_token_counts(text + "\n", model)),
+            lambda text=text: (
+                utils.get_token_counts(text, model, use_token_server_first=False),
+                utils.get_token_counts(text + "\n", model, use_token_server_first=False),
+            ),
         )
         # The verified pre-tokenizers cannot cross these guarded newline cuts.
         total += plain if index == len(texts) - 1 else terminated
@@ -136,7 +146,23 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
         total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
     if tools:
         tool_text = str(tools)
-        total += _cached_token_data(tool_text, (*identity, "tools"), lambda: (utils.get_token_counts(tool_text, model), 0))[0]
+        total += _cached_token_data(
+            tool_text, (*identity, "tools"), lambda: (utils.get_token_counts(tool_text, model, use_token_server_first=False), 0)
+        )[0]
+    return total
+
+
+def _count_whole_local_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int:
+    """Match vv-llm's whole count without consulting its process-global token server."""
+    from vv_llm.chat_clients import utils
+
+    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal)
+    combined_text = "\n".join(texts)
+    total = utils.get_token_counts(combined_text, model, use_token_server_first=False) if combined_text else 0
+    if images:
+        total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
+    if tools:
+        total += utils.get_token_counts(str(tools), model, use_token_server_first=False)
     return total
 
 
@@ -174,7 +200,7 @@ def count_messages_tokens(
         return 0
 
     try:
-        from vv_llm.chat_clients.utils import get_message_token_counts
+        from vv_llm.chat_clients import utils
 
         kwargs: dict[str, Any] = {
             "messages": messages,
@@ -186,7 +212,16 @@ def count_messages_tokens(
 
         count = _count_incremental_messages(messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal)
         if count is None:
-            count = get_message_token_counts(**kwargs)
+            # Preserve an explicitly replaced message counter instead of bypassing it.
+            if (
+                _local_tokenizer_family(kwargs["model"]) is not None
+                and utils.get_message_token_counts.__module__ == utils.__name__
+            ):
+                count = _count_whole_local_messages(
+                    messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal
+                )
+            else:
+                count = utils.get_message_token_counts(**kwargs)
         if isinstance(count, int) and count >= 0:
             return count
     except Exception:

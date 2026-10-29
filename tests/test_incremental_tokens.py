@@ -7,14 +7,40 @@ import weakref
 from collections import defaultdict
 from functools import wraps
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import httpx2
 import pytest
 import regex
 from deepseek_tokenizer import deepseek_tokenizer
-from support.token_counting import legacy_count
+from support.token_counting import legacy_count as _legacy_count
 from vv_llm.chat_clients import utils
+from vv_llm.settings import Server
 
 from vv_agent.memory import token_utils
+
+
+def legacy_count(messages, **kwargs):
+    """The local reference is vv-llm's original whole count with no token server."""
+    with patch.object(utils.settings, "token_server", None):
+        return _legacy_count(messages, **kwargs)
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["no-server", "global-server"])
+def token_server_settings(request, monkeypatch):
+    from vv_llm.settings import settings
+
+    assert utils.settings is settings
+    server = Server(host="token-server.invalid", port=8188, url="https://token-server.invalid") if request.param else None
+    monkeypatch.setattr(settings, "token_server", server)
+
+    def unexpected_http(request):
+        pytest.fail(f"Local counting attempted HTTP: {request.method} {request.url}")
+
+    with httpx2.Client(transport=httpx2.MockTransport(unexpected_http)) as client:
+        monkeypatch.setattr(utils.httpx2, "post", client.post)
+        yield
+    assert settings.token_server is server
 
 
 @pytest.fixture(autouse=True)
@@ -53,7 +79,10 @@ def empty_token_cache():
 def test_totals_match_original_across_every_vv_llm_family(monkeypatch, model, native_multimodal):
     # Exercise the installed implementations with endpointless settings, never credentials or I/O.
     backend = SimpleNamespace(models=defaultdict(lambda: SimpleNamespace(endpoints=[], id=model)))
-    monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=None, get_backend=lambda _: backend))
+    monkeypatch.setattr(type(utils.settings), "get_backend", lambda self, _: backend)
+    if model.startswith(("MiniMax", "abab", "moonshot", "kimi", "gemini", "claude", "stepfun", "glm")):
+        # This suite compares local algorithms; remote server behavior has its own test.
+        monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=None, get_backend=lambda _: backend))
     messages = [
         {"role": "system", "content": "Rules and 中文。"},
         {"role": "user", "content": "hello!\n"},
@@ -172,33 +201,33 @@ def test_tokenizer_identity_and_model_change_invalidate_cached_counts(monkeypatc
     assert token_utils.count_messages_tokens(messages, model="deepseek-v3") == original + 1
 
 
-def test_token_server_and_unreviewed_versions_keep_the_whole_exact_path(monkeypatch):
+@pytest.mark.parametrize("model", ["deepseek-flash", "gpt-3.5-turbo", "gpt-4o", "qwen-plus"])
+def test_replaced_functions_and_unreviewed_versions_keep_the_whole_local_path(monkeypatch, model):
     seen = []
 
-    def count(text, model):
+    def count(text, model, *, use_token_server_first=True):
+        assert not use_token_server_first
         seen.append(text)
         return len(text) // 3
 
     monkeypatch.setattr(utils, "get_token_counts", count)
     messages = [{"role": "user", "content": "hello"}, {"role": "user", "content": "world"}]
-    monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=object()))
-    assert token_utils.count_messages_tokens(messages, model="deepseek-v4-pro") == len("hello\nworld") // 3
+    if model != "qwen-plus":
+        assert token_utils.incremental_token_counting_status(model) == (False, "token counting functions have been replaced")
+    assert token_utils.count_messages_tokens(messages, model=model) == len("hello\nworld") // 3
     assert seen == ["hello\nworld"]
     seen.clear()
     monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("future", "0.3.0"))
-    assert token_utils.count_messages_tokens(messages, model="deepseek-v4-pro") == len("hello\nworld") // 3
+    monkeypatch.setattr(token_utils, "_tiktoken_versions", lambda: ("future", "0.14.0"))
+    assert token_utils.count_messages_tokens(messages, model=model) == len("hello\nworld") // 3
     assert seen == ["hello\nworld"]
 
 
 def test_public_status_and_version_fallback_warning_once_per_family(monkeypatch, caplog):
     from vv_agent.memory import incremental_token_counting_status
 
-    monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=None))
     assert incremental_token_counting_status("deepseek-flash")[0] is True
     assert incremental_token_counting_status("qwen-plus") == (False, "model family uses whole-conversation counting")
-    monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=object()))
-    assert incremental_token_counting_status("deepseek-flash") == (False, "global token server is configured")
-    monkeypatch.setattr(utils, "settings", SimpleNamespace(token_server=None))
     monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("0.8.5", "0.3.0"))
     monkeypatch.setattr(token_utils, "_VERSION_FALLBACK_LOGGED", set())
     enabled, reason = incremental_token_counting_status("deepseek-flash")
@@ -263,18 +292,22 @@ def test_tiktoken_boundary_proof_matches_pre_tokens_and_token_ids(model):
 def test_tiktoken_unsafe_boundaries_use_the_original_whole_call(monkeypatch, model, boundary):
     messages = [{"role": "user", "content": s} for s in ("hello!\n", boundary, "world")]
     expected = legacy_count(messages, model=model)
-    count = utils.get_message_token_counts
+    count = utils.get_token_counts
     calls = []
 
     @wraps(count)
-    def counted(**kwargs):
-        calls.append(kwargs["messages"])
-        return count(**kwargs)
+    def counted(text, *args, **kwargs):
+        calls.append(text)
+        assert kwargs["use_token_server_first"] is False
+        return count(text, *args, **kwargs)
 
-    monkeypatch.setattr(utils, "get_message_token_counts", counted)
+    monkeypatch.setattr(utils, "get_token_counts", counted)
     assert token_utils.count_messages_tokens(messages, model=model) == expected
     unsafe = not boundary or boundary[0].isspace() or (model == "gpt-4o" and boundary[0] == "/")
-    assert calls == ([messages] if unsafe else [])
+    if unsafe:
+        assert calls == ["\n".join(m["content"] for m in messages)]
+    else:
+        assert len(calls) == 6
 
 
 def test_tiktoken_unverified_versions_warn_once_for_each_encoder(monkeypatch, caplog):
@@ -323,10 +356,10 @@ def test_deepseek_boundary_proof_matches_token_ids_and_pre_tokens():
         "claude-sonnet-4",
         "stepfun",
         "glm-4-plus",
-        "deepseek-flash",
     ],
 )
-def test_configured_remote_counters_keep_whole_inputs_and_request_counts(monkeypatch, model):
+@pytest.mark.parametrize("global_server", [False, True])
+def test_configured_remote_counters_keep_whole_inputs_and_request_counts(monkeypatch, model, global_server):
     calls = []
     backend = SimpleNamespace(models=defaultdict(lambda: SimpleNamespace(endpoints=["local"], id=model)))
     endpoint = SimpleNamespace(
@@ -339,7 +372,7 @@ def test_configured_remote_counters_keep_whole_inputs_and_request_counts(monkeyp
         endpoint_type="anthropic",
     )
     settings = SimpleNamespace(
-        token_server=SimpleNamespace(url="https://example.invalid") if model.startswith("deepseek") else None,
+        token_server=SimpleNamespace(url="https://example.invalid") if global_server else None,
         get_backend=lambda _: backend,
         get_endpoint=lambda _: endpoint,
     )
@@ -365,7 +398,7 @@ def test_configured_remote_counters_keep_whole_inputs_and_request_counts(monkeyp
     monkeypatch.setattr(utils, "Anthropic", lambda **_: SimpleNamespace(messages=SimpleNamespace(count_tokens=claude_count)))
     messages = [{"role": "user", "content": "hello"}, {"role": "user", "content": "world"}]
     tools = [{"type": "function", "function": {"name": "read"}}]
-    expected = legacy_count(messages, model=model, tools=tools)
+    expected = utils.get_message_token_counts(messages, model=model, tools=tools)
     original_calls = calls[:]
     calls.clear()
     assert token_utils.count_messages_tokens(messages, model=model, tools=tools) == expected == 246

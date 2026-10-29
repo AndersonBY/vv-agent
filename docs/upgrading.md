@@ -77,6 +77,26 @@ old-version session.
 
 ## Version notes
 
+### 0.30.3
+
+Compaction counts DeepSeek, local tiktoken models and Qwen on the worker itself,
+even when another part of the host configures vv-llm's global token server.
+The count matches vv-llm's whole-conversation count with no token server
+configured. Tools and multimodal messages keep the same formatting and counts.
+Qwen still counts the whole conversation. Unsafe text boundaries and unverified
+dependency versions also use a whole count, on the worker.
+
+`incremental_token_counting_status(model)` no longer treats a global token
+server as a reason to disable DeepSeek or tiktoken caching. The exact version
+pairs listed below and the check for replaced counting functions still apply.
+An explicitly replaced message-counting function remains in control.
+Claude, Gemini, Moonshot, Kimi, MiniMax, Stepfun and GLM keep their existing
+server, provider and fallback behavior.
+
+Hosts do not need to remove their global token server settings. Contract
+31.0.0, record schema 1, inbox schema 3 and SQL layouts stay unchanged.
+This release has no store boundary or migration.
+
 ### 0.30.2
 
 Local DeepSeek and tiktoken counting reuse exact counts for unchanged text instead of
@@ -87,7 +107,7 @@ vv-llm 0.8.3 + tiktoken 0.14.0 and vv-llm 0.8.4 + tiktoken 0.14.0.
 Each requires independent newline boundaries. Empty text parts and parts
 beginning with CR/LF use the original whole-conversation path. tiktoken also
 rejects any leading whitespace, and o200k rejects leading `/`.
-Other dependency versions, token servers, Qwen and families that can count
+In 0.30.2, other dependency versions, token servers, Qwen and families that can count
 remotely keep the original whole-conversation path. The local JSON
 estimate also reuses character counts and rounds only the final total.
 
@@ -103,8 +123,9 @@ assert enabled, reason
 
 This reports whether the installed dependencies and configuration allow the
 incremental path. An individual conversation with unsafe text boundaries still
-uses the original exact count. A configured global token server also disables
-the local path. An unverified version produces one WARNING per model family
+uses the original exact count. In 0.30.2 a configured global token server also
+disables the local path; 0.30.3 removes that restriction.
+An unverified version produces one WARNING per model family
 per process when counting falls back.
 
 After upgrading vv-llm or a tokenizer, rerun
