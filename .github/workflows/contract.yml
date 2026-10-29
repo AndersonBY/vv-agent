@@ -11,21 +11,28 @@ permissions:
 jobs:
   install-matrix:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports: [5432:5432]
-        options: >-
-          --health-cmd pg_isready --health-interval 5s
-          --health-timeout 5s --health-retries 10
     env:
       UV_NO_SOURCES: "1"
       VV_AGENT_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
+      # Install PostgreSQL from the PGDG apt repository instead of pulling a container image:
+      # anonymous registry pulls from shared runner IPs keep hitting rate limits.
+      - name: Start PostgreSQL 18
+        run: |
+          set -euo pipefail
+          # Drop the runner image's preinstalled clusters so 18/main takes port 5432.
+          if command -v pg_lsclusters >/dev/null; then
+            pg_lsclusters -h | while read -r ver name _; do sudo pg_dropcluster --stop "$ver" "$name"; done
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-18
+          sudo pg_ctlcluster 18 main start || true
+          pg_lsclusters
+          sudo -u postgres psql -p 5432 -qc "ALTER USER postgres PASSWORD 'postgres'"
+          pg_isready -h localhost -p 5432
+          psql "$VV_AGENT_TEST_POSTGRES_DSN" -tAc 'SHOW server_version' | grep -q '^18\.'
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
