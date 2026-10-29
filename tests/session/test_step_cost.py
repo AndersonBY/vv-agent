@@ -6,6 +6,7 @@ from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 
+import httpx2
 import pytest
 from support.token_counting import legacy_count
 
@@ -37,11 +38,16 @@ def test_released_histories_load_to_the_0301_state_without_byte_changes(history)
 
 @pytest.mark.parametrize("mode", ["summary", "micro", "memory"])
 @pytest.mark.parametrize("counting_model", ["deepseek-v4-pro", "gpt-4o", "gpt-3.5-turbo"])
+@pytest.mark.parametrize("global_server", [False, True])
 def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
-    store, database, tmp_path, monkeypatch, mode, counting_model
+    store, database, tmp_path, monkeypatch, mode, counting_model, global_server
 ):
+    from vv_llm.chat_clients import utils
+    from vv_llm.settings import Server
+
     from vv_agent.memory import manager as memory_manager
 
+    monkeypatch.setattr(utils.settings, "token_server", None)
     # Freeze observations, not the decisions being compared; both stores use the same clock.
     monkeypatch.setattr(PostgresStore, "clock_sql", "100000")
     monkeypatch.setattr(SQLiteStore, "clock_sql", "100000")
@@ -134,7 +140,16 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     for file in tmp_path.rglob("session_memory.json"):
         file.unlink()
     token_utils._TOKEN_CACHE.clear()
-    bodies, commits = execute(store, database)
+    server = Server(host="token-server.invalid", port=8188, url="https://token-server.invalid") if global_server else None
+    monkeypatch.setattr(utils.settings, "token_server", server)
+
+    def unexpected_http(request):
+        pytest.fail(f"Compaction attempted HTTP: {request.method} {request.url}")
+
+    with httpx2.Client(transport=httpx2.MockTransport(unexpected_http)) as client:
+        monkeypatch.setattr(utils.httpx2, "post", client.post)
+        bodies, commits = execute(store, database)
+    assert utils.settings.token_server is server
     assert decisions == expected_decisions
     assert bodies == expected_bodies
     assert commits == expected_commits
