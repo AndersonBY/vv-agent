@@ -555,27 +555,12 @@ definition. The kernel never calls the legacy summary callback or the Session
 Memory extraction loop. It reuses `MemoryManager.plan_summary`,
 `accept_summary(plan, text, notify=False)` and `compaction_evidence`.
 
-Token counting uses a process cache capped at 4096 entries. Keys contain text
-digests, model and tokenizer identities; values are integers, never message
-bodies. DeepSeek, local tiktoken models and Qwen count on the worker, ignoring
-vv-llm's global token server. Their counts match vv-llm with no token server
-configured, including tools and multimodal formatting. Families that can count
-through a provider keep vv-llm's existing server and fallback behavior.
-With the dependency pairs listed in [upgrading](upgrading.md#0302),
-unchanged DeepSeek, cl100k and o200k text reuses
-both its plain and newline-terminated counts. A newline terminates a DeepSeek
-pre-token; its added tokens contain no whitespace. If the next text part starts
-with CR/LF, or is empty, that newline run can cross the cut, so the whole request
-uses the original algorithm. For tiktoken the next part must start with
-non-whitespace; o200k additionally excludes `/` because its punctuation suffix
-can consume slashes across newlines. Qwen and unverified dependency versions
-count the whole conversation locally. Replaced counting functions disable
-incremental caching; an explicitly replaced message counter remains in control.
-The local JSON
-fallback caches CJK and other character counts and rounds once after including
-the list's brackets and separators.
-`tests/test_incremental_tokens.py` and `tests/session/test_step_cost.py` pin the
-counts, work bounds and record equality.
+Compaction estimates context size on the worker. It uses the local methods
+described in [token counting](token-counting.md), independent of provider
+endpoints and vv-llm's global token server. These estimates determine future
+compaction checks. Saved compaction receipts still determine replay.
+`tests/test_incremental_tokens.py` and `tests/session/test_step_cost.py`
+pin the local counts, work bounds, decisions and record equality.
 
 Before a primary request the driver makes at most one archive-backed prune pass
 and commits mode `micro` only after MemoryManager confirms the archive. A

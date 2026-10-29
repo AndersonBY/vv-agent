@@ -19,6 +19,12 @@ _TOKEN_CACHE_LOCK = Lock()
 _VERSION_FALLBACK_LOGGED: set[str] = set()
 _VERIFIED_DEEPSEEK_VERSIONS = frozenset({("0.8.3", "0.3.0"), ("0.8.4", "0.3.0")})
 _VERIFIED_TIKTOKEN_VERSIONS = frozenset({("0.8.3", "0.14.0"), ("0.8.4", "0.14.0")})
+# vv-llm 0.8.4 get_token_counts: use its no-endpoint fallback, never its provider branch.
+_PROVIDER_LOCAL_FALLBACKS = (
+    (("abab", "MiniMax"), "int(len(text) / 1.33)"),
+    (("moonshot", "kimi", "gemini", "stepfun", "glm"), "cl100k_base"),
+    (("claude",), "o200k_base"),
+)
 
 
 def _cached_token_data(text: str, identity: tuple[Any, ...], calculate: Callable[[], tuple[int, int]]) -> tuple[int, int]:
@@ -47,35 +53,48 @@ def _tiktoken_versions() -> tuple[str, str]:
     return version("vv-llm"), version("tiktoken")
 
 
-def _local_tokenizer_family(model: str) -> str | None:
+def _local_tokenizer_family(model: str) -> str:
+    for prefixes, fallback in _PROVIDER_LOCAL_FALLBACKS:
+        if model.startswith(prefixes):
+            return fallback
     if model.startswith("deepseek"):
         return "deepseek"
     if model.startswith("qwen"):
         return "qwen"
-    if model.startswith(("abab", "MiniMax", "moonshot", "kimi", "gemini", "claude", "stepfun", "glm")):
-        return None
     # vv-llm routes every remaining name to o200k, except this exact spelling.
     return "cl100k_base" if model == "gpt-3.5-turbo" else "o200k_base"
 
 
 def incremental_token_counting_status(model: str) -> tuple[bool, str]:
-    """Return eligibility and a reason; individual unsafe text boundaries still fall back."""
+    """Return incremental eligibility and local method; unsafe boundaries still use a whole count."""
     family = _local_tokenizer_family(model)
-    if family is None or family == "qwen":
-        return False, "model family uses whole-conversation counting"
+    if family in ("int(len(text) / 1.33)", "qwen"):
+        return False, f"local {family}; whole-conversation counting"
     package = "deepseek-tokenizer" if family == "deepseek" else "tiktoken"
     try:
         versions = _deepseek_versions() if family == "deepseek" else _tiktoken_versions()
     except PackageNotFoundError:
-        return False, "token counting dependency is not installed"
+        return False, f"local {family}; token counting dependency is not installed"
     verified = _VERIFIED_DEEPSEEK_VERSIONS if family == "deepseek" else _VERIFIED_TIKTOKEN_VERSIONS
     if versions not in verified:
-        return False, f"unverified versions: vv-llm={versions[0]}, {package}={versions[1]}"
+        return False, f"unverified versions: vv-llm={versions[0]}, {package}={versions[1]}; whole-conversation local {family}"
     from vv_llm.chat_clients import utils
 
     if utils.get_message_token_counts.__module__ != utils.__name__ or utils.get_token_counts.__module__ != utils.__name__:
-        return False, "token counting functions have been replaced"
+        return False, f"local {family}; token counting functions have been replaced"
     return True, f"verified {family} newline boundaries"
+
+
+def _count_local_text(text: str, model: str) -> int:
+    from vv_llm.chat_clients import utils
+
+    for prefixes, fallback in _PROVIDER_LOCAL_FALLBACKS:
+        if model.startswith(prefixes):
+            if fallback == "int(len(text) / 1.33)":
+                return int(len(text) / 1.33)
+            encoding = utils.get_gpt_35_encoding() if fallback == "cl100k_base" else utils.get_gpt_4o_encoding()
+            return len(encoding.encode(text))
+    return utils.get_token_counts(text, model, use_token_server_first=False)
 
 
 def _message_token_parts(messages: list[dict[str, Any]], *, native_multimodal: bool) -> tuple[list[str], int]:
@@ -106,8 +125,7 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
         if reason.startswith("unverified versions:"):
             with _TOKEN_CACHE_LOCK:
                 first = family not in _VERSION_FALLBACK_LOGGED
-                if family is not None:
-                    _VERSION_FALLBACK_LOGGED.add(family)
+                _VERSION_FALLBACK_LOGGED.add(family)
             if first:
                 logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
         return None
@@ -136,8 +154,8 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
             text,
             identity,
             lambda text=text: (
-                utils.get_token_counts(text, model, use_token_server_first=False),
-                utils.get_token_counts(text + "\n", model, use_token_server_first=False),
+                _count_local_text(text, model),
+                _count_local_text(text + "\n", model),
             ),
         )
         # The verified pre-tokenizers cannot cross these guarded newline cuts.
@@ -146,23 +164,21 @@ def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, t
         total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
     if tools:
         tool_text = str(tools)
-        total += _cached_token_data(
-            tool_text, (*identity, "tools"), lambda: (utils.get_token_counts(tool_text, model, use_token_server_first=False), 0)
-        )[0]
+        total += _cached_token_data(tool_text, (*identity, "tools"), lambda: (_count_local_text(tool_text, model), 0))[0]
     return total
 
 
 def _count_whole_local_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int:
-    """Match vv-llm's whole count without consulting its process-global token server."""
+    """Use local text methods with vv-llm's message formatting and image estimate."""
     from vv_llm.chat_clients import utils
 
     texts, images = _message_token_parts(messages, native_multimodal=native_multimodal)
     combined_text = "\n".join(texts)
-    total = utils.get_token_counts(combined_text, model, use_token_server_first=False) if combined_text else 0
+    total = _count_local_text(combined_text, model) if combined_text else 0
     if images:
         total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
     if tools:
-        total += utils.get_token_counts(str(tools), model, use_token_server_first=False)
+        total += _count_local_text(str(tools), model)
     return total
 
 
@@ -195,7 +211,7 @@ def count_messages_tokens(
     tools: Any = None,
     native_multimodal: bool = True,
 ) -> int:
-    """Count tokens for OpenAI-compatible messages."""
+    """Estimate compaction context size locally, independent of provider endpoints."""
     if not messages:
         return 0
 
@@ -213,10 +229,7 @@ def count_messages_tokens(
         count = _count_incremental_messages(messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal)
         if count is None:
             # Preserve an explicitly replaced message counter instead of bypassing it.
-            if (
-                _local_tokenizer_family(kwargs["model"]) is not None
-                and utils.get_message_token_counts.__module__ == utils.__name__
-            ):
+            if utils.get_message_token_counts.__module__ == utils.__name__:
                 count = _count_whole_local_messages(
                     messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal
                 )

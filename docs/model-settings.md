@@ -123,6 +123,25 @@ configured threshold is never silently lowered. If an explicit context is
 smaller than the reserve plus the buffer, the remaining prompt capacity can be
 zero.
 
+The automatic compaction threshold is the smaller of the configured
+`memory_compact_threshold` (default `250000`) and
+`max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)`.
+A nonpositive configured threshold uses only the model-derived limit.
+The default buffer is `13000`. Compaction starts when the local count
+exceeds the threshold; a count equal to the threshold can still proceed.
+
+For the `1048576` context in the settings example, the default `16000`
+output reserve leaves a `250000` compaction threshold and `782576` tokens
+between that threshold and the prompt capacity. A `128000` context instead
+lowers the threshold to `99000`, leaving only the `13000` buffer. If context
+size was derived because no real limit was known, that computed margin does
+not prove the provider has that capacity.
+
+These counts are local estimates. Different tokenizers, message overhead,
+tools and a large new tool result can consume the margin. Hosts that need
+more room can lower `memory_compact_threshold` or increase task metadata
+`autocompact_buffer_tokens`. See [token counting](token-counting.md).
+
 In multi-turn and tool-call requests, every assistant message keeps its full
 `reasoning_content`. Streamed reasoning deltas are collected until the
 provider stream ends, and only then is the message stored.
@@ -138,7 +157,7 @@ model names. These fields do not select a model or change request settings.
 
 ## Cache usage accounting
 
-`vv-agent` requires `vv-llm` 0.3.107 or newer. For generic OpenAI-compatible
+`vv-agent` requires `vv-llm` 0.8.3 or newer. For generic OpenAI-compatible
 providers, an omitted cache reading stays unknown, and an explicit
 `cached_tokens: 0` is an observed zero. Moonshot is the one exception. When a
 cold completion omits both top-level `cached_tokens` and

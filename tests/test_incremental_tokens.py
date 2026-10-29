@@ -13,6 +13,7 @@ import httpx2
 import pytest
 import regex
 from deepseek_tokenizer import deepseek_tokenizer
+from support.token_counting import PROVIDER_MODELS, provider_counting_settings
 from support.token_counting import legacy_count as _legacy_count
 from vv_llm.chat_clients import utils
 from vv_llm.settings import Server
@@ -38,7 +39,12 @@ def token_server_settings(request, monkeypatch):
         pytest.fail(f"Local counting attempted HTTP: {request.method} {request.url}")
 
     with httpx2.Client(transport=httpx2.MockTransport(unexpected_http)) as client:
-        monkeypatch.setattr(utils.httpx2, "post", client.post)
+
+        def post(*args, proxy=None, **kwargs):
+            assert proxy is None
+            return client.post(*args, **kwargs)
+
+        monkeypatch.setattr(utils.httpx2, "post", post)
         yield
     assert settings.token_server is server
 
@@ -213,7 +219,8 @@ def test_replaced_functions_and_unreviewed_versions_keep_the_whole_local_path(mo
     monkeypatch.setattr(utils, "get_token_counts", count)
     messages = [{"role": "user", "content": "hello"}, {"role": "user", "content": "world"}]
     if model != "qwen-plus":
-        assert token_utils.incremental_token_counting_status(model) == (False, "token counting functions have been replaced")
+        enabled, reason = token_utils.incremental_token_counting_status(model)
+        assert not enabled and "token counting functions have been replaced" in reason
     assert token_utils.count_messages_tokens(messages, model=model) == len("hello\nworld") // 3
     assert seen == ["hello\nworld"]
     seen.clear()
@@ -227,7 +234,7 @@ def test_public_status_and_version_fallback_warning_once_per_family(monkeypatch,
     from vv_agent.memory import incremental_token_counting_status
 
     assert incremental_token_counting_status("deepseek-flash")[0] is True
-    assert incremental_token_counting_status("qwen-plus") == (False, "model family uses whole-conversation counting")
+    assert incremental_token_counting_status("qwen-plus") == (False, "local qwen; whole-conversation counting")
     monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("0.8.5", "0.3.0"))
     monkeypatch.setattr(token_utils, "_VERSION_FALLBACK_LOGGED", set())
     enabled, reason = incremental_token_counting_status("deepseek-flash")
@@ -345,68 +352,120 @@ def test_deepseek_boundary_proof_matches_token_ids_and_pre_tokens():
             ]
 
 
+@pytest.mark.parametrize("model", PROVIDER_MODELS)
+@pytest.mark.parametrize("unverified", [False, True])
+@pytest.mark.parametrize("native_multimodal", [False, True])
+def test_provider_families_use_the_no_endpoint_count_without_http(monkeypatch, model, unverified, native_multimodal):
+    backend, setting, endpoint = provider_counting_settings(model)
+    monkeypatch.setattr(type(utils.settings), "get_backend", lambda self, _: backend)
+    monkeypatch.setattr(type(utils.settings), "get_endpoint", lambda self, _: endpoint)
+    messages = [
+        {"role": "user", "content": "Mixed 中文 facts. " * 400},
+        {
+            "role": "assistant",
+            "content": "Read.",
+            "tool_calls": [{"id": "a", "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "结果"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "https://image.invalid/a.png"}},
+            ],
+        },
+    ]
+    tools = [{"type": "function", "function": {"name": "read"}}]
+    with patch.object(utils.settings, "token_server", None):
+        expected = utils.get_message_token_counts(messages, model=model, tools=tools, native_multimodal=native_multimodal)
+    if unverified:
+        monkeypatch.setattr(token_utils, "_tiktoken_versions", lambda: ("future", "0.14.0"))
+    setting.endpoints = ["fake-enabled"]
+
+    def unexpected_http(request):
+        pytest.fail(f"Provider counting attempted HTTP: {request.method} {request.url}")
+
+    def unexpected_client(*args, **kwargs):
+        pytest.fail("Compaction initialized a provider SDK")
+
+    # Covers raw HTTP and SDK-created clients; BaseException failures cannot hide in estimates/retries.
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", lambda self, request: unexpected_http(request))
+    for name in ("Anthropic", "AnthropicVertex", "get_token_with_cache"):
+        monkeypatch.setattr(utils, name, unexpected_client)
+    with httpx2.Client(transport=httpx2.MockTransport(unexpected_http)) as client:
+
+        def post(*args, proxy=None, **kwargs):
+            assert proxy is None
+            return client.post(*args, **kwargs)
+
+        monkeypatch.setattr(utils.httpx2, "post", post)
+        for _ in range(2):
+            assert (
+                token_utils.count_messages_tokens(messages, model=model, tools=tools, native_multimodal=native_multimodal)
+                == expected
+            )
+    assert setting.endpoints == ["fake-enabled"] and endpoint.enabled
+
+
+@pytest.mark.parametrize("model", PROVIDER_MODELS)
+def test_provider_local_method_status_and_incremental_work(monkeypatch, model):
+    family = token_utils._local_tokenizer_family(model)
+    enabled, reason = token_utils.incremental_token_counting_status(model)
+    assert family in reason
+    assert enabled is (not model.startswith(("MiniMax", "abab")))
+    if not enabled:
+        assert reason == "local int(len(text) / 1.33); whole-conversation counting"
+        return
+    encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
+    encoded = []
+    original = type(encoding).encode
+
+    def counted(self, text, *args, **kwargs):
+        encoded.append(len(text))
+        return original(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(type(encoding), "encode", counted)
+    messages = [{"role": "user", "content": "Mixed 中文 facts. " * 4000}]
+    token_utils.count_messages_tokens(messages, model=model)
+    for content in ("new 信息", "another result"):
+        encoded.clear()
+        messages.append({"role": "user", "content": content})
+        token_utils.count_messages_tokens(messages, model=model)
+        assert sum(encoded) == 2 * len(content) + 1
+
+
+def test_minimax_rounds_the_whole_text_and_tools_separately():
+    messages = [{"role": "user", "content": "ab"}, {"role": "user", "content": "cd"}]
+    assert token_utils.count_messages_tokens(messages, model="MiniMax-M2.5", tools=["x"]) == (
+        int(len("ab\ncd") / 1.33) + int(len(str(["x"])) / 1.33)
+    )
+
+
 @pytest.mark.parametrize(
-    "model",
+    ("model", "method"),
     [
-        "MiniMax-M2",
-        "abab",
-        "moonshot-v1",
-        "kimi-k3",
-        "gemini-3-pro",
-        "claude-sonnet-4",
-        "stepfun",
-        "glm-4-plus",
+        ("abab", "int(len(text) / 1.33)"),
+        ("MiniMax-M2.5", "int(len(text) / 1.33)"),
+        ("moonshot-v1", "cl100k_base"),
+        ("kimi-k3", "cl100k_base"),
+        ("gemini-3-pro", "cl100k_base"),
+        ("claude-sonnet-4", "o200k_base"),
+        ("stepfun", "cl100k_base"),
+        ("glm-4-flash", "cl100k_base"),
     ],
 )
-@pytest.mark.parametrize("global_server", [False, True])
-def test_configured_remote_counters_keep_whole_inputs_and_request_counts(monkeypatch, model, global_server):
-    calls = []
-    backend = SimpleNamespace(models=defaultdict(lambda: SimpleNamespace(endpoints=["local"], id=model)))
-    endpoint = SimpleNamespace(
-        api_base="https://example.invalid",
-        api_key="unused",
-        proxy=None,
-        enabled=True,
-        is_bedrock=False,
-        is_vertex=False,
-        endpoint_type="anthropic",
-    )
-    settings = SimpleNamespace(
-        token_server=SimpleNamespace(url="https://example.invalid") if global_server else None,
-        get_backend=lambda _: backend,
-        get_endpoint=lambda _: endpoint,
-    )
-    monkeypatch.setattr(utils, "settings", settings)
-
-    def post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return SimpleNamespace(
-            json=lambda: {
-                "total_tokens": 123,
-                "segments_num": 123,
-                "data": {"total_tokens": 123},
-                "totalTokens": 123,
-                "usage": {"prompt_tokens": 123},
-            }
-        )
-
-    def claude_count(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(input_tokens=123)
-
-    monkeypatch.setattr(utils.httpx2, "post", post)
-    monkeypatch.setattr(utils, "Anthropic", lambda **_: SimpleNamespace(messages=SimpleNamespace(count_tokens=claude_count)))
-    messages = [{"role": "user", "content": "hello"}, {"role": "user", "content": "world"}]
-    tools = [{"type": "function", "function": {"name": "read"}}]
-    expected = utils.get_message_token_counts(messages, model=model, tools=tools)
-    original_calls = calls[:]
-    calls.clear()
-    assert token_utils.count_messages_tokens(messages, model=model, tools=tools) == expected == 246
-    assert calls == original_calls and len(calls) == 2
-    calls.clear()
-    token_utils.count_messages_tokens(messages, model=model)
-    token_utils.count_messages_tokens(messages, model=model)
-    assert len(calls) == 2
+def test_mapping_matches_installed_vv_llm_no_endpoint_branches(monkeypatch, model, method):
+    backend, _, _ = provider_counting_settings(model)
+    monkeypatch.setattr(type(utils.settings), "get_backend", lambda self, _: backend)
+    assert token_utils._local_tokenizer_family(model) == method
+    for text in ("", "a", "Mixed 中文 facts.\n", " \r\n/leading", "😀e\u0301"):
+        if method == "int(len(text) / 1.33)":
+            expected = int(len(text) / 1.33)
+        else:
+            encoding = utils.get_gpt_35_encoding() if method == "cl100k_base" else utils.get_gpt_4o_encoding()
+            expected = len(encoding.encode(text))
+        assert utils.get_token_counts(text, model, use_token_server_first=False) == expected
+        assert token_utils._count_local_text(text, model) == expected
 
 
 def test_fallback_rounds_once_and_scans_only_new_serialized_messages(monkeypatch):

@@ -11,6 +11,7 @@ place to start if you are new.
 | --- | --- |
 | [architecture.md](architecture.md) | Understand the runtime layout, module boundaries and invariants. |
 | [model-settings.md](model-settings.md) | Configure `LLM_SETTINGS`, key files, model defaults and exact model resolution. |
+| [token-counting.md](token-counting.md) | Understand local compaction estimates, incremental counting and their limits. |
 | [runtime-control.md](runtime-control.md) | Wait for and resume replies, approvals, background work, cancellation and events. |
 | [run-budgets.md](run-budgets.md) | Limit tokens, tool calls, wall time or host cost for a run. |
 | [output-validation.md](output-validation.md) | Validate a typed final output and allow one tools-free repair. |
@@ -39,7 +40,7 @@ place to start if you are new.
 
 ## Releases
 
-Release notes live in [releases/](releases/): [0.30.3](releases/0.30.3.md), [0.30.2](releases/0.30.2.md), [0.30.1](releases/0.30.1.md), [0.30.0](releases/0.30.0.md), [0.29.0](releases/0.29.0.md), [0.28.0](releases/0.28.0.md), [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
+Release notes live in [releases/](releases/): [0.30.4](releases/0.30.4.md), [0.30.3](releases/0.30.3.md), [0.30.2](releases/0.30.2.md), [0.30.1](releases/0.30.1.md), [0.30.0](releases/0.30.0.md), [0.29.0](releases/0.29.0.md), [0.28.0](releases/0.28.0.md), [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
 [0.23.1](releases/0.23.1.md), [0.23.0](releases/0.23.0.md),
 [0.22.0](releases/0.22.0.md). Store and API changes that hosts must act on are
 collected in [upgrading.md](upgrading.md#version-notes).

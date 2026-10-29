@@ -77,6 +77,33 @@ old-version session.
 
 ## Version notes
 
+### 0.30.4
+
+Compaction now uses local estimates for Moonshot, Kimi, Gemini, Claude,
+MiniMax, Stepfun and GLM, even when those models have enabled endpoints.
+Each family uses vv-llm's no-endpoint fallback. These checks no longer upload
+the conversation to a provider, wait for its retries, or accept its failure
+constant as a context size. DeepSeek, other tiktoken models and Qwen keep
+their 0.30.3 behavior.
+
+The new counts can differ from provider counts, so a session may compact
+earlier or later after upgrading. Review the host's context window, output
+reserve and compaction threshold before upgrading. The existing buffer
+leaves some room, but is not an error bound for a different tokenizer.
+No safety multiplier is applied. See [token counting](token-counting.md) for
+the methods and [capacity metadata](model-settings.md#capacity-metadata)
+for the threshold calculation.
+
+`incremental_token_counting_status(model)` keeps its `(bool, str)` result.
+The text now names the local method, including whole-conversation methods.
+The verified dependency pairs below still gate incremental counting.
+Explicitly replaced message counters remain in control. Direct vv-llm
+calls and `count_tokens` keep their previous behavior.
+
+Contract 31.0.0, record schema 1, inbox schema 3 and SQL layouts stay unchanged.
+This release has no store boundary or migration. Saved compaction receipts
+remain authoritative; future checks use the new estimates.
+
 ### 0.30.3
 
 Compaction counts DeepSeek, local tiktoken models and Qwen on the worker itself,
