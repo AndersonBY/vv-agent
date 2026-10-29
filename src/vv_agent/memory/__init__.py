@@ -19,6 +19,7 @@ from .provider import (
     MemorySearchResult,
 )
 from .session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryEntry, SessionMemoryState
+from .token_utils import incremental_token_counting_status
 
 __all__ = [
     "COMPACT_MARKER_CLOSING",
@@ -38,6 +39,7 @@ __all__ = [
     "SessionMemoryConfig",
     "SessionMemoryEntry",
     "SessionMemoryState",
+    "incremental_token_counting_status",
     "plan_microcompact",
     "sanitize_for_resume",
     "token_utils",

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
-import httpx
+import httpx2
 import pytest
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.completion_usage import PromptTokensDetails
@@ -92,7 +92,7 @@ def _complete(
 def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
     def failing_call(kwargs: dict[str, Any]) -> Any:
         del kwargs
-        raise APIConnectionError(request=httpx.Request("POST", "https://first.example/v1/chat/completions"))
+        raise APIConnectionError(request=httpx2.Request("POST", "https://first.example/v1/chat/completions"))
 
     _FakeChatClient.behavior_by_endpoint = {
         "first": failing_call,
@@ -189,8 +189,8 @@ def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
         del kwargs
         attempts += 1
         if attempts == 1:
-            request = httpx.Request("POST", "https://first.example/v1/chat/completions")
-            response = httpx.Response(429, request=request)
+            request = httpx2.Request("POST", "https://first.example/v1/chat/completions")
+            response = httpx2.Response(429, request=request)
             raise APIStatusError("rate limited", response=response, body={"error": "rate limited"})
         return SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
 
@@ -215,8 +215,8 @@ def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
 def test_llm_auth_status_fails_over_without_same_endpoint_retry(monkeypatch) -> None:
     def unauthorized_call(kwargs: dict[str, Any]) -> Any:
         del kwargs
-        request = httpx.Request("POST", "https://first.example/v1/chat/completions")
-        response = httpx.Response(401, request=request)
+        request = httpx2.Request("POST", "https://first.example/v1/chat/completions")
+        response = httpx2.Response(401, request=request)
         raise APIStatusError("unauthorized", response=response, body={"error": "unauthorized"})
 
     _FakeChatClient.behavior_by_endpoint = {
@@ -248,8 +248,8 @@ def test_llm_aborts_non_retryable_errors_without_failover(monkeypatch, failure: 
     def failing_call(kwargs: dict[str, Any]) -> Any:
         del kwargs
         if failure == "bad_request":
-            request = httpx.Request("POST", "https://first.example/v1/chat/completions")
-            response = httpx.Response(400, request=request)
+            request = httpx2.Request("POST", "https://first.example/v1/chat/completions")
+            response = httpx2.Response(400, request=request)
             raise APIStatusError("invalid request", response=response, body={"error": "invalid request"})
         raise RuntimeError("programming error")
 

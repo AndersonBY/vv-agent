@@ -15,7 +15,7 @@ import orjson
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
-from vv_agent.canonical_json import canonical_json_bytes, utf16_sort_key
+from vv_agent.canonical_json import _stdlib_compatible, canonical_json_bytes, utf16_sort_key
 from vv_agent.model_settings import ModelSettings
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ class _MessageCache:
         result._wire_bodies = self._wire_bodies.copy()
         return result
 
-    def share(self, value: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    def share(self, value: dict[str, Any], *, strict: bool = False, detach: bool = False) -> dict[str, Any]:
         if id(value) in self._known:
             return value
         # This is an equality key, never persisted or used as a protocol digest.
@@ -77,10 +77,20 @@ class _MessageCache:
         retained = self.wires.get(key)
         if retained is None:
             sorted_key = sorted_key if sorted_key is not None else orjson.dumps(value, option=options | orjson.OPT_SORT_KEYS)
-            retained = self.wires.setdefault(sorted_key, value)
+            retained = self.wires.get(sorted_key)
+            if retained is None:
+                retained = copy_json(value) if detach else value
+                self.wires[sorted_key] = retained
             self.wires[key] = retained
         self._known.add(id(retained))
         return retained
+
+    def retain_array(self, values: list[dict[str, Any]]) -> _RetainedMessages | list[dict[str, Any]]:
+        # orjson can map NaN to null and serialize non-JSON objects; do not intern those.
+        if not _stdlib_compatible(values):
+            return values
+        private = [self.share(value, strict=True, detach=True) for value in values]
+        return _RetainedMessages(private, self.wire_array(private))
 
     def wire_array(self, values: list[Any]) -> bytes:
         parts = []
@@ -608,9 +618,20 @@ class _RetainedTools:
         return self.source._payload["definition"]["tools"]
 
 
+@dataclass(frozen=True)
+class _RetainedMessages:
+    """Producer-only canonical fragments from detached, private message values."""
+
+    value: list[dict[str, Any]]
+    body: bytes
+
+    def encode(self) -> bytes:
+        return self.body
+
+
 def _json_bytes(value: Any) -> bytes:
     if isinstance(value, dict):
-        retained = {key: item.encode() for key, item in value.items() if isinstance(item, _RetainedTools)}
+        retained = {key: item.encode() for key, item in value.items() if isinstance(item, _RetainedTools | _RetainedMessages)}
         if retained:
             return _object_bytes(value, retained)
     return canonical_json_bytes(value)
@@ -799,6 +820,8 @@ class Record:
                 value["payload"][container_field]["tools"] = retained.value
                 if container_field == "definition":
                     object.__setattr__(self, "_tools_body", retained.encode())
+            if isinstance(container, dict) and isinstance(container.get("messages"), _RetainedMessages):
+                value["payload"][container_field]["messages"] = container["messages"].value
         object.__setattr__(self, "_value", value)
         object.__setattr__(self, "payload", {})
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
