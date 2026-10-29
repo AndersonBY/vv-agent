@@ -266,7 +266,7 @@ def compact_context(driver: _Driver, *, requested_by: list[str] | None = None) -
     oid = f"{driver.state.active_turn_id}/model/compaction/{source_digest}/{mode}/{plan.keep_recent}"
     if oid in driver.state.operations:
         return finish_compact(driver, manager, source, mode="none", changed=False)
-    task = driver.task()
+    task = driver._task()
     _, resolved = driver.runtime.model_route("compaction")
     request = {
         "model": resolved.model_id,

@@ -77,6 +77,56 @@ old-version session.
 
 ## Version notes
 
+### 0.30.2
+
+Local DeepSeek and tiktoken counting reuse exact counts for unchanged text instead of
+tokenizing the whole conversation at each step. This applies to the explicitly
+verified pairs vv-llm 0.8.4 + deepseek-tokenizer 0.3.0 and
+vv-llm 0.8.3 + deepseek-tokenizer 0.3.0. The cl100k and o200k paths allow
+vv-llm 0.8.3 + tiktoken 0.14.0 and vv-llm 0.8.4 + tiktoken 0.14.0.
+Each requires independent newline boundaries. Empty text parts and parts
+beginning with CR/LF use the original whole-conversation path. tiktoken also
+rejects any leading whitespace, and o200k rejects leading `/`.
+Other dependency versions, token servers, Qwen and families that can count
+remotely keep the original whole-conversation path. The local JSON
+estimate also reuses character counts and rounds only the final total.
+
+Hosts can check their environment during startup or in their own tests:
+
+```python
+from vv_agent.memory import incremental_token_counting_status
+
+enabled, reason = incremental_token_counting_status("deepseek-flash")
+assert enabled, reason
+# The same check works for "gpt-4o" and "gpt-3.5-turbo".
+```
+
+This reports whether the installed dependencies and configuration allow the
+incremental path. An individual conversation with unsafe text boundaries still
+uses the original exact count. A configured global token server also disables
+the local path. An unverified version produces one WARNING per model family
+per process when counting falls back.
+
+After upgrading vv-llm or a tokenizer, rerun
+`uv run pytest tests/test_incremental_tokens.py tests/session/test_step_cost.py`
+with real PostgreSQL, review the formatter, model routing and tokenizer
+boundaries, then add the exact version pair to the verified set. Versions are
+listed individually; a newer version is not assumed safe. The gates are
+`_VERIFIED_DEEPSEEK_VERSIONS` and `_VERIFIED_TIKTOKEN_VERSIONS` in
+`memory/token_utils.py`. The repository lock
+uses vv-llm 0.8.4, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
+qwen-tokenizer 0.3.0.
+
+Model request encoding reuses private canonical message fragments. Internal
+policy reads avoid detached task copies; host callbacks still receive copies.
+Routing is still resolved before dispatch, since a host can remove an endpoint
+after a plan commits.
+
+Contract 31.0.0, record schema 1, inbox schema 3, SQL layouts and stored bytes
+are unchanged. There is no store boundary or migration. Existing sessions from
+0.24 through 0.30.1 load to the same state. Both full message snapshots remain
+in the log.
+
 ### 0.30.1
 
 Cold history loading avoids replaying message snapshots that a later complete

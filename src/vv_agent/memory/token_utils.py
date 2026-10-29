@@ -2,10 +2,142 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
+from collections.abc import Callable
 from functools import lru_cache
-from typing import Any
+from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
+from threading import Lock
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
+
+# Only digests, tokenizer identities and integers survive a call, never message bodies.
+_TOKEN_CACHE_LIMIT = 4096
+_TOKEN_CACHE: OrderedDict[tuple[Any, ...], tuple[int, int]] = OrderedDict()
+_TOKEN_CACHE_LOCK = Lock()
+_VERSION_FALLBACK_LOGGED: set[str] = set()
+_VERIFIED_DEEPSEEK_VERSIONS = frozenset({("0.8.3", "0.3.0"), ("0.8.4", "0.3.0")})
+_VERIFIED_TIKTOKEN_VERSIONS = frozenset({("0.8.3", "0.14.0"), ("0.8.4", "0.14.0")})
+
+
+def _cached_token_data(text: str, identity: tuple[Any, ...], calculate: Callable[[], tuple[int, int]]) -> tuple[int, int]:
+    key = (*identity, len(text), sha256(text.encode("utf-8", errors="surrogatepass")).digest())
+    with _TOKEN_CACHE_LOCK:
+        cached = _TOKEN_CACHE.get(key)
+        if cached is not None:
+            _TOKEN_CACHE.move_to_end(key)
+            return cached
+    result = calculate()
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE[key] = result
+        _TOKEN_CACHE.move_to_end(key)
+        while len(_TOKEN_CACHE) > _TOKEN_CACHE_LIMIT:
+            _TOKEN_CACHE.popitem(last=False)
+    return result
+
+
+@lru_cache(maxsize=1)
+def _deepseek_versions() -> tuple[str, str]:
+    return version("vv-llm"), version("deepseek-tokenizer")
+
+
+@lru_cache(maxsize=1)
+def _tiktoken_versions() -> tuple[str, str]:
+    return version("vv-llm"), version("tiktoken")
+
+
+def _local_tokenizer_family(model: str) -> str | None:
+    if model.startswith("deepseek"):
+        return "deepseek"
+    if model.startswith(("abab", "MiniMax", "moonshot", "kimi", "gemini", "claude", "qwen", "stepfun", "glm")):
+        return None
+    # vv-llm routes every remaining name to o200k, except this exact spelling.
+    return "cl100k_base" if model == "gpt-3.5-turbo" else "o200k_base"
+
+
+def incremental_token_counting_status(model: str) -> tuple[bool, str]:
+    """Return eligibility and a reason; individual unsafe text boundaries still fall back."""
+    family = _local_tokenizer_family(model)
+    if family is None:
+        return False, "model family uses whole-conversation counting"
+    package = "deepseek-tokenizer" if family == "deepseek" else "tiktoken"
+    try:
+        versions = _deepseek_versions() if family == "deepseek" else _tiktoken_versions()
+    except PackageNotFoundError:
+        return False, "token counting dependency is not installed"
+    verified = _VERIFIED_DEEPSEEK_VERSIONS if family == "deepseek" else _VERIFIED_TIKTOKEN_VERSIONS
+    if versions not in verified:
+        return False, f"unverified versions: vv-llm={versions[0]}, {package}={versions[1]}"
+    from vv_llm.chat_clients import utils
+
+    if utils.settings.token_server is not None:
+        return False, "global token server is configured"
+    if utils.get_message_token_counts.__module__ != utils.__name__ or utils.get_token_counts.__module__ != utils.__name__:
+        return False, "token counting functions have been replaced"
+    return True, f"verified {family} newline boundaries"
+
+
+def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int | None:
+    """Reuse exact newline-terminated counts; unsupported boundaries use vv-llm."""
+    enabled, reason = incremental_token_counting_status(model)
+    family = _local_tokenizer_family(model)
+    if not enabled:
+        if reason.startswith("unverified versions:"):
+            with _TOKEN_CACHE_LOCK:
+                first = family not in _VERSION_FALLBACK_LOGGED
+                if family is not None:
+                    _VERSION_FALLBACK_LOGGED.add(family)
+            if first:
+                logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
+        return None
+    from vv_llm.chat_clients import utils
+    from vv_llm.types.enums import BackendType
+
+    if family == "deepseek":
+        from deepseek_tokenizer import deepseek_tokenizer
+
+        encode = deepseek_tokenizer.encode
+    else:
+        encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
+        encode = encoding.encode
+    formatted = utils.format_messages(cast(Any, messages), backend=BackendType.OpenAI, native_multimodal=native_multimodal)
+    texts = []
+    images = 0
+    for message in formatted:
+        content = message["content"]
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item["type"] == "text":
+                    texts.append(item["text"])
+                elif isinstance(item, dict) and item["type"].startswith("image"):
+                    images += 1
+    if any(not isinstance(text, str) or not text for text in texts):
+        return None
+    # DeepSeek stops at the first newline run; tiktoken can span whitespace after it.
+    if family == "deepseek" and any(text[0] in "\r\n" for text in texts):
+        return None
+    # o200k's punctuation suffix can consume slashes after the separator as well.
+    if family != "deepseek" and any(text[0].isspace() or (family == "o200k_base" and text[0] == "/") for text in texts):
+        return None
+    identity = (family, model, utils.get_token_counts, encode, utils.get_message_token_counts)
+    total = 0
+    for index, text in enumerate(texts):
+        plain, terminated = _cached_token_data(
+            text,
+            identity,
+            lambda text=text: (utils.get_token_counts(text, model), utils.get_token_counts(text + "\n", model)),
+        )
+        # The verified pre-tokenizers cannot cross these guarded newline cuts.
+        total += plain if index == len(texts) - 1 else terminated
+    if images:
+        total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
+    if tools:
+        tool_text = str(tools)
+        total += _cached_token_data(tool_text, (*identity, "tools"), lambda: (utils.get_token_counts(tool_text, model), 0))[0]
+    return total
 
 
 def count_tokens(text: str | dict[str, Any], model: str = "") -> int:
@@ -52,14 +184,22 @@ def count_messages_tokens(
         if tools is not None:
             kwargs["tools"] = tools
 
-        count = get_message_token_counts(**kwargs)
+        count = _count_incremental_messages(messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal)
+        if count is None:
+            count = get_message_token_counts(**kwargs)
         if isinstance(count, int) and count >= 0:
             return count
     except Exception:
         logger.debug("vv-llm message token counting unavailable; using local estimate", exc_info=True)
 
-    raw = json.dumps(messages, ensure_ascii=False, default=str)
-    return _estimate_tokens(raw)
+    # json.dumps(list) inserts two brackets and ", " between individual dumps.
+    cjk_chars, ascii_chars = 0, 2 * len(messages)
+    for message in messages:
+        raw = json.dumps(message, ensure_ascii=False, default=str)
+        cjk, ascii_ = _cached_token_data(raw, ("json-estimate",), lambda raw=raw: _estimate_characters(raw))
+        cjk_chars += cjk
+        ascii_chars += ascii_
+    return max(1, int(cjk_chars * 1.5 + ascii_chars * 0.25))
 
 
 def compute_compaction_threshold(
@@ -131,11 +271,15 @@ def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
 
+    cjk_chars, ascii_chars = _estimate_characters(text)
+    return max(1, int(cjk_chars * 1.5 + ascii_chars * 0.25))
+
+
+def _estimate_characters(text: str) -> tuple[int, int]:
     cjk_chars = sum(
         1 for char in text if "\u4e00" <= char <= "\u9fff" or "\u3000" <= char <= "\u303f" or "\uff00" <= char <= "\uffef"
     )
-    ascii_chars = len(text) - cjk_chars
-    return max(1, int(cjk_chars * 1.5 + ascii_chars * 0.25))
+    return cjk_chars, len(text) - cjk_chars
 
 
 def _coerce_positive_int(value: Any) -> int | None:

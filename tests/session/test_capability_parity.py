@@ -690,7 +690,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
 ):
     from types import SimpleNamespace
 
-    import httpx
+    import httpx2
     from vv_llm.types import APIConnectionError
 
     import vv_agent.llm.vv_llm_client as client_module
@@ -712,7 +712,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
         calls.append(chat_client.endpoint_id)
         if fail_remaining:
             fail_remaining -= 1
-            raise APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+            raise APIConnectionError(request=httpx2.Request("POST", "https://example.invalid"))
         return LLMResponse("done", raw={"usage": USAGE})
 
     monkeypatch.setattr(client_module, "create_chat_client", transport)

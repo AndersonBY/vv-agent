@@ -181,6 +181,11 @@ not change the retained prefix.
 Appends still run both lease checks and CAS. Rollback, conflict or a changed
 head digest drops the cache. The cache changes cost, never results.
 
+Model request producers also reuse these private canonical message fragments.
+The request digest still hashes the complete canonical bytes; public payloads
+and callbacks still detach mutable values. This does not remove either full
+message snapshot.
+
 `read_state` captures head sequence, inbox watermark and epoch with one statement, then loads and folds records up to
 that head without a session row lock. Consumed inputs are bounded by both the
 captured head and inbox watermark. Snapshot copying also runs without the lock.
@@ -549,6 +554,23 @@ The host supplies `Runtime.memory_manager`; its settings are frozen in the turn
 definition. The kernel never calls the legacy summary callback or the Session
 Memory extraction loop. It reuses `MemoryManager.plan_summary`,
 `accept_summary(plan, text, notify=False)` and `compaction_evidence`.
+
+Token counting uses a process cache capped at 4096 entries. Keys contain text
+digests, model and tokenizer identities; values are integers, never message
+bodies. With the dependency pairs listed in [upgrading](upgrading.md#0302),
+unchanged DeepSeek, cl100k and o200k text reuses
+both its plain and newline-terminated counts. A newline terminates a DeepSeek
+pre-token; its added tokens contain no whitespace. If the next text part starts
+with CR/LF, or is empty, that newline run can cross the cut, so the whole request
+uses the original algorithm. For tiktoken the next part must start with
+non-whitespace; o200k additionally excludes `/` because its punctuation suffix
+can consume slashes across newlines. Qwen, remotely counted families, unverified dependency versions and
+token servers also use the original algorithm. This preserves tools,
+multimodal formatting, thresholds and memory decisions exactly. The local JSON
+fallback caches CJK and other character counts and rounds once after including
+the list's brackets and separators.
+`tests/test_incremental_tokens.py` and `tests/session/test_step_cost.py` pin the
+counts, work bounds and record equality.
 
 Before a primary request the driver makes at most one archive-backed prune pass
 and commits mode `micro` only after MemoryManager confirms the archive. A

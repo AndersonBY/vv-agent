@@ -328,6 +328,10 @@ class _Driver:
         assert self.state.active_turn_id is not None
         return self.state.turns[self.state.active_turn_id].start.task()
 
+    def _task(self) -> AgentTask:
+        assert self.state.active_turn_id is not None
+        return self.state.turns[self.state.active_turn_id].start._task()
+
     def effective_model(self) -> dict[str, Any]:
         selected = self.state.model_selection
         if selected is not None:
@@ -380,6 +384,8 @@ class _Driver:
                 and all(a is b for a, b in zip(tools, frozen, strict=True))
             ):
                 request = request | {"tools": _RetainedTools(source)}
+        if kind == "model" and isinstance(request.get("messages"), list):
+            request = request | {"messages": self.fold._messages.retain_array(request["messages"])}
         binding = "model" if kind == "model" else request["name"] if request["name"] in self.runtime.providers else "function"
         return make_record(
             "op_planned",
@@ -1047,7 +1053,7 @@ class _Driver:
         exhaustion = evaluator.terminal() if evaluator else None
         if exhaustion:
             status, reason = "failed", "budget_exhausted"
-        if status == "completed" and not transferred and not self.task().metadata.get("_vv_agent_app_server_compaction_only"):
+        if status == "completed" and not transferred and not self._task().metadata.get("_vv_agent_app_server_compaction_only"):
             prepared = prepare_output(self, result)
             if prepared is None:
                 return
@@ -1482,7 +1488,7 @@ class _Driver:
     def finalize_tool(self, plan: Record, context, outcome: Definitive) -> Definitive:
         call = ToolCall.from_dict(plan.payload["request"])
         result = self.runtime.hooks.apply_after_tool_call(
-            task=self.task(),
+            task=self.task() if self.runtime.hooks.has_hooks() else self._task(),
             cycle_index=context.cycle_index,
             call=call,
             context=replace(context, tool_call_id=call.id, tool_name=call.name, arguments=dict(call.arguments)),
@@ -1490,7 +1496,7 @@ class _Driver:
         )
         if not result.tool_call_id.strip():
             result.tool_call_id = call.id
-        stop = apply_tool_use_behavior(task=self.task(), call=call, result=result)
+        stop = apply_tool_use_behavior(task=self._task(), call=call, result=result)
         if stop is not None:
             result.metadata["completion_reason"] = stop.value
         return replace(outcome, result=result.to_dict(), shared_state=self.runtime.durable_state(context.shared_state))

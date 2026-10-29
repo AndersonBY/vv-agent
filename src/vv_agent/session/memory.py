@@ -232,7 +232,7 @@ def finish_compact(
         ):
             metadata["compaction_error"] = "summary_unavailable"
     records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
-    if changed and mode in {"summary", "emergency"} and driver.task().metadata.get("session_memory_enabled"):
+    if changed and mode in {"summary", "emergency"} and driver._task().metadata.get("session_memory_enabled"):
         memory = restore_memory(driver)
         memory.on_compaction(current_tokens=event.summary_tokens)
         records.append(driver.boundary_record("session_memory_saved", f"compact/{key}", {"state": memory.state.to_dict()}))
