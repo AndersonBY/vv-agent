@@ -26,7 +26,7 @@ Every line is one JSON object. Requests and notifications carry
 {"jsonrpc":"2.0","method":"initialized"}
 ```
 
-The response reports `protocolVersion: "v4"`. Schema exports describe the
+The response reports `protocolVersion: "v5"`. Schema exports describe the
 current closed wire shapes. Regenerate client bindings when upgrading.
 Malformed JSON returns `-32700`; an invalid message returns `-32600`.
 
@@ -76,7 +76,10 @@ repeat side effects. Replies keep their retained interaction target.
 ```
 
 Interrupt submits durable cancel, including when that API node has no handle.
-Its result is the turn/action receipt. Resume checks durable execution state,
+Its result is the turn/action receipt. Accepted means cancellation was requested.
+A valid provider completion confirms the original operation's terminal outcome.
+When the provider cannot confirm it, the turn can end cancelled with a nonzero
+`unconfirmedCount`; the external work remains unresolved. Resume checks durable execution state,
 reuses an available local handle and respects the session lease. It never needs
 the original connection. A terminal turn returns its retained result.
 

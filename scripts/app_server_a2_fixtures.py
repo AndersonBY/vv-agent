@@ -79,7 +79,7 @@ def produce() -> dict:
         stack.callback(fixtures.kernel.close)
         stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
         stack.enter_context(patch("vv_agent.prompt.builder.datetime", FixedDatetime))
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v4"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         with fixtures.kernel.store.atomic() as tx:
             tx.create(
                 SessionSpec(
@@ -143,7 +143,7 @@ def produce() -> dict:
             },
             "lifecycle": lifecycle,
             "schema_version": 1,
-            "protocol_version": "v4",
+            "protocol_version": "v5",
             "before": before,
             "after": after,
             "receipt": receipt,

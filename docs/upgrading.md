@@ -77,6 +77,26 @@ old-version session.
 
 ## Version notes
 
+### Unreleased: contract 32.0.0
+
+Regenerate App Server bindings for v5 and public API inventory v15. Hosts can
+register business job providers through `RunConfig.tool_providers`; direct
+`Runtime.providers` integrations use the same result validation. Rebuild all
+named bindings after restart, including during revoked-authority cleanup.
+Only an explicit `function` binding selects the synchronous handler.
+
+Provider completions must use the original tool call ID and a definitive
+status. Include the original acceptance evidence after a job was parked.
+Invalid results keep the job unresolved and report `provider_result_invalid`;
+a missing binding reports `missing_host_binding`. Cancel receipts acknowledge
+a request, while unconfirmed jobs remain visible after the turn ends.
+
+Record schema 1, inbox schema 3, SQLite user_version 3 and RunEvent v6 remain
+unchanged. There is no store boundary. Existing stored bytes still load, but
+hosts must rebuild the required providers before driving them. This is a draft
+upgrade entry; result/resource and structured-interaction changes follow in
+the same contract release.
+
 ### 0.30.5
 
 PostgreSQL heartbeats now continue while child admission and `before_commit`

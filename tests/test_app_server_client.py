@@ -110,7 +110,7 @@ def _approval_client(calls: list[str]) -> AppServerClient:
 def test_client_covers_thread_model_schema_and_close_lifecycle() -> None:
     client = _client()
     initialized = client.initialize(ClientInfo(name="test-client"))
-    assert initialized["protocolVersion"] == "v4"
+    assert initialized["protocolVersion"] == "v5"
 
     thread = client.start_thread(ThreadStartParams(input_id="thread_1", agent_key="default"))
     thread_id = str(thread["threadId"])

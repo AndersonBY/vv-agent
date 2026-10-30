@@ -64,6 +64,19 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         if r.turn_id in turns:
             common["agent_name"] = turns[r.turn_id]["definition"].get("agent_name")
         event: RunEvent | None = None
+        if r.kind in {"op_unknown", "input_applied"} and p.get("reason") == "provider_result_invalid":
+            invalid_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/provider_result_invalid"}
+            events.append(
+                DiagnosticEvent(
+                    **invalid_common,
+                    level="warning",
+                    code="provider_result_invalid",
+                    details={
+                        "operation_id": r.operation_id or p.get("target_operation_id"),
+                        "attempt": r.attempt or p.get("input", {}).get("payload", {}).get("attempt"),
+                    },
+                )
+            )
         if r.kind == "input_applied" and p["reason"] == "host compaction request" and p["disposition"] in {"queued", "applied"}:
             compactions[p["input"]["input_id"]] = r.turn_id
         if r.kind == "turn_started":

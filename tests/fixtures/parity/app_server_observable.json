@@ -1785,7 +1785,7 @@
       "turn/completed"
     ]
   },
-  "protocolVersion": "v4",
+  "protocolVersion": "v5",
   "restart": {
     "connectionIdCanReinitialize": true,
     "staleRunningThreadStatus": "running"

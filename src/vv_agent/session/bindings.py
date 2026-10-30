@@ -6,7 +6,7 @@ from vv_agent.canonical_json import canonical_json_bytes
 
 
 class MissingHostBinding(ValueError):
-    pass
+    code = "missing_host_binding"
 
 
 def bind_shared_state(state: dict[str, Any], bindings: dict[str, Any], required: list[str]) -> dict[str, Any]:

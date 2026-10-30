@@ -352,7 +352,7 @@ class MessageProcessor:
         state.ready_for_notifications = True
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
-            protocol_version="v4",
+            protocol_version="v5",
             capabilities=SERVER_CAPABILITIES,
         )
         self._router.send_response(connection_id, request.id, response.to_dict())

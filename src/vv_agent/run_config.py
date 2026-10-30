@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from vv_agent.config import ResolvedModelConfig
     from vv_agent.memory.provider import MemoryProvider
     from vv_agent.model import ModelProvider, ModelRef
+    from vv_agent.session.providers import Provider
 
 RunEventObserver = Callable[[RunEvent], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
@@ -190,8 +191,24 @@ class RunConfig:
     no_tool_policy: NoToolPolicy | None = None
     budget_limits: RunBudgetLimits | None = None
     host_cost_meter: HostCostMeter | None = None
+    tool_providers: dict[str, Provider] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.tool_providers, dict):
+            raise TypeError("RunConfig.tool_providers must be a dict of exact tool names to providers")
+        for name, provider in self.tool_providers.items():
+            if not isinstance(name, str) or not name or any(c.isspace() for c in name):
+                raise ValueError("RunConfig.tool_providers requires exact nonempty tool names without whitespace")
+            if name in {"model", "function", "ask_user", "create_sub_task"}:
+                raise ValueError(f"RunConfig.tool_providers conflicts with reserved binding: {name}")
+            missing = [
+                method
+                for method in ("submit", "query", "cancel", "authenticate")
+                if not callable(getattr(provider, method, None))
+            ]
+            if missing:
+                raise TypeError(f"RunConfig.tool_providers[{name!r}] is missing required methods: {', '.join(missing)}")
+        self.tool_providers = dict(self.tool_providers)
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_bounded_int(self.max_handoffs, "max_handoffs", minimum=0)
         _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
@@ -267,6 +284,7 @@ def effective_run_config(
         config,
         model=model,
         model_provider=config.model_provider or defaults.model_provider,
+        tool_providers={**defaults.tool_providers, **config.tool_providers},
         model_settings=model_settings,
         workspace=prefer_run("workspace"),
         workspace_backend=prefer_run("workspace_backend"),

@@ -176,7 +176,7 @@ def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> N
         "typescript": typescript_schema_bundle(),
     }
     definitions = json.loads(result["jsonSchema"]["ClientRequest"])["$defs"]
-    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v4"}
+    assert definitions["InitializeResponse"]["properties"]["protocolVersion"] == {"const": "v5"}
     assert definitions["AppThread"]["properties"]["status"]["enum"] == [
         "idle",
         "running",

@@ -473,6 +473,7 @@ def test_provider_compaction_intent_and_callback_replay(store, database, deliver
                         "usage": {},
                     },
                     plan.turn_id,
+                    generation=0,
                 ),
             )
         drive(store, "s", runtime=rt)

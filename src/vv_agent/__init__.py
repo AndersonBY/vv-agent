@@ -124,7 +124,7 @@ from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.providers import Accepted, Definitive, Unknown
+from vv_agent.session.providers import Accepted, Definitive, Provider, Unknown
 from vv_agent.session.records import InboxItem, Record, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict, LeaseLost, SessionStore, SessionTx
@@ -274,6 +274,7 @@ __all__ = [
     "PostgresStore",
     "PromptBundle",
     "PromptSection",
+    "Provider",
     "ReasoningDeltaEvent",
     "Record",
     "ResolvedModelConfig",

@@ -103,6 +103,7 @@ class SessionDriver:
             resolved,
             llm,
             self._heartbeat_store,
+            providers=dict(config.tool_providers),
             frozen_task=task,
             memory_manager=memory,
             model_resolver=self.model_resolver,

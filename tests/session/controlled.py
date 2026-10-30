@@ -114,7 +114,10 @@ class ControlledProvider:
                 usage=result.get("raw", {}).get("usage", {}),
                 evidence=[h["evidence"]],
             )
-        return InboxItem(input_id, kind, payload, target_turn_id=target_turn_id or "s/turn/initial")
+        tid = target_turn_id or "s/turn/initial"
+        with open_store(self.database) as store:
+            generation = store.read_state("s")[0].turns[tid].start.payload["generation"]
+        return InboxItem(input_id, kind, payload, target_turn_id=tid, generation=generation)
 
     def retain_model_result(self, plan: Record, result: dict[str, Any]):
         key = f"model/{plan.operation_id}/{plan.attempt}"

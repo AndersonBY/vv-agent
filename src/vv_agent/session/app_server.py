@@ -721,7 +721,8 @@ class _KernelRunAdapter(RunAdapter):
                         state.active_turn_id
                         or queued
                         or any(
-                            x.item.kind in kinds and x.item.target_turn_id is None
+                            (x.item.kind in kinds and x.item.target_turn_id is None)
+                            or x.item.kind in {"provider_result", "provider_evidence"}
                             for x in self.kernel.store.peek_inbox(thread_id)
                         )
                     ):
@@ -987,13 +988,20 @@ class _KernelRunAdapter(RunAdapter):
                     self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
                 return
             if error is not None:
+                from .bindings import MissingHostBinding
+                from .providers import ProviderResultInvalid
                 from .store import LeaseRetryExhausted
 
-                code = error.code if isinstance(error, LeaseRetryExhausted) else "event_stream"
+                retained_wait = isinstance(error, (MissingHostBinding, ProviderResultInvalid))
+                code = (
+                    error.code
+                    if isinstance(error, (LeaseRetryExhausted, MissingHostBinding, ProviderResultInvalid))
+                    else "event_stream"
+                )
                 self._notify_subscribers(sid, "error/warning", {"message": str(error), "code": code})
                 self._publish_turns(sid)
                 state, _, _ = self.kernel.store.read_state(sid)
-                if tid not in state.turns or not state.turns[tid].ended:
+                if not retained_wait and (tid not in state.turns or not state.turns[tid].ended):
                     self._notify_subscribers(
                         sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": "failed", "error": str(error)}
                     )

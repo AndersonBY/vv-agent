@@ -13,6 +13,7 @@ providers.
 | Approval | The parked operation keeps the request binding and deadline; any authorized connection may answer |
 | Context read | Immutable log/inbox projection and the shared memory-policy resolver |
 | Manual compaction | Existing content extension, summary model operations and memory boundaries; an idle request admits a compaction-only turn |
+| Business tool provider | `build_run_config().tool_providers` copied by `SessionDriver.runtime`; children inherit the bindings |
 | Model selection | A session-scoped `model_selection` inbox input |
 | Live delta | A volatile `RunEvent` observation routed to subscribed transports |
 | Read and resume | Retained records and bounded (seq, event offset, recordDigest) cursors; resume drives the retained turn |

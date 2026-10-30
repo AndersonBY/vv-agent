@@ -1130,7 +1130,7 @@ class Fixtures:
             notices.clear()
             return result
 
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v4"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         request(None, "initialized")
         request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
         request(
@@ -1408,7 +1408,7 @@ class Fixtures:
         assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
         assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
         return {
-            "protocol_version": "v4",
+            "protocol_version": "v5",
             "host_interaction_values": {"request": request_value, "outcome": outcome_value},
             "transcripts": transcript,
             "schemas": exported,
@@ -1988,8 +1988,9 @@ def generate(output: Path):
                 replacement_report["replaced"] = {
                     name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE
                 }
-                replacements.write_report(replacement_report, Path("/tmp/c1c1b-fixture-diff.md"))
-                with Path("/tmp/c1c1b-fixture-diff.md").open("a") as report:
+                report_path = output.with_name(f"{output.name}-diff.md")
+                replacements.write_report(replacement_report, report_path)
+                with report_path.open("a") as report:
                     report.write("\n## Coverage counts (full producer = curated)\n\n")
                     report.write("| File | Full | Curated |\n| --- | ---: | ---: |\n")
                     for name, keys in curated_coverage.items():

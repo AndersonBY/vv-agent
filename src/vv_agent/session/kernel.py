@@ -27,6 +27,7 @@ from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 from .approval import resolve_approval
+from .bindings import MissingHostBinding
 from .children import (
     ChildSession,
     InvalidChildBatch,
@@ -43,7 +44,15 @@ from .lifecycle import after_cycle
 from .memory import save_projection
 from .output import prepare_output, serializable_output
 from .postgres import PostgresStore
-from .providers import Accepted, Definitive, Outcome, Unknown
+from .providers import (
+    Accepted,
+    Definitive,
+    Outcome,
+    ProviderResultInvalid,
+    Unknown,
+    validate_provider_handle,
+    validate_provider_result,
+)
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
@@ -671,6 +680,7 @@ class _Driver:
         )
         retry = (
             retry
+            and reason != "provider_result_invalid"
             and self.scope.token.reason not in {"cancel", "abort", "close", "lease_lost"}
             and not self.state.cancel_requested
         )
@@ -695,7 +705,18 @@ class _Driver:
         )
 
     def provider(self, plan: Record):
-        return self.runtime.providers.get(plan._payload["provider_binding"], self.runtime.functions)
+        binding = plan._payload["provider_binding"]
+        if binding == "function":
+            return self.runtime.functions
+        if binding not in self.runtime.providers:
+            raise MissingHostBinding(f"Missing provider host binding: {binding}")
+        return self.runtime.providers[binding]
+
+    def check_provider_result(self, plan: Record, outcome: Definitive) -> None:
+        assert plan.operation_id is not None and plan.attempt is not None
+        attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
+        handle = attempt.wait["handle"] if attempt.wait and attempt.wait["handle"]["kind"] == "provider" else None
+        validate_provider_result(plan, outcome, handle)
 
     def parked(self, plan: Record, handle: dict[str, Any], *, after: bool) -> Record:
         timeout = self.runtime.config.approval_timeout_seconds if handle["kind"] == "approval" else None
@@ -784,6 +805,8 @@ class _Driver:
                     attempt is None
                     or op is None
                     or op.turn_id != target_tid
+                    or not attempt.started
+                    or item.generation != self.state.turns[op.turn_id].start._payload["generation"]
                     or item.payload["request_digest"] != attempt.execution_plan._payload["request_digest"]
                     or not self.provider(attempt.execution_plan).authenticate(item, attempt.execution_plan)
                 ):
@@ -807,12 +830,20 @@ class _Driver:
                         )
                         reason = "retained result" if disposition == "noop" else "result conflict"
                     else:
-                        extra = self.completed(
-                            attempt.execution_plan,
-                            Definitive(item.payload["result"], tuple(item.payload["evidence"]), usage=item.payload["usage"]),
-                        )
+                        outcome = Definitive(item.payload["result"], tuple(item.payload["evidence"]), usage=item.payload["usage"])
+                        try:
+                            self.check_provider_result(attempt.execution_plan, outcome)
+                        except ProviderResultInvalid:
+                            disposition, reason = "rejected", "provider_result_invalid"
+                        else:
+                            extra = self.completed(attempt.execution_plan, outcome)
                 elif attempt.state == "started":
-                    extra = [self.parked(attempt.execution_plan, item.payload["handle"], after=True)]
+                    try:
+                        validate_provider_handle(attempt.execution_plan, item.payload["handle"])
+                    except ProviderResultInvalid:
+                        disposition, reason = "rejected", "provider_result_invalid"
+                    else:
+                        extra = [self.parked(attempt.execution_plan, item.payload["handle"], after=True)]
                 elif attempt.wait and attempt.wait["handle"] == item.payload["handle"]:
                     disposition = "noop"
                 else:
@@ -1221,11 +1252,15 @@ class _Driver:
                         continue
                     if a.wait and a.wait["handle"]["kind"] == "provider":
                         handle = copy_json(a.wait["handle"])
-                        outcome = _invoke(
-                            self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).cancel(handle), 1
-                        )
+                        provider = self.provider(a.execution_plan)
+                        outcome = _invoke(self.scope, lambda handle=handle, provider=provider: provider.cancel(handle), 1)
                         if isinstance(outcome, Definitive):
-                            records.extend(self.completed(a.execution_plan, outcome))
+                            try:
+                                self.check_provider_result(a.execution_plan, outcome)
+                            except ProviderResultInvalid:
+                                records.append(self.unknown(a.execution_plan, "provider_result_invalid"))
+                            else:
+                                records.extend(self.completed(a.execution_plan, outcome))
                             continue
                     records.append(self.unknown(a.execution_plan, reason or "turn stopped"))
 
@@ -1407,6 +1442,7 @@ class _Driver:
             self.commit(budget_records, guarded=True)
             self.close("failed", "budget_exhausted")
             return
+        provider = self.provider(plan) if kind != "model" else None
         poll = self.scope.poll(self.store)
         if poll.inbox_seq != self.watermark or self.scope.token.cancelled:
             raise SequenceConflict("input arrived before dispatch")
@@ -1597,13 +1633,27 @@ class _Driver:
 
         outcome = _invoke(
             self.scope,
-            model if kind == "model" else lambda: self.provider(plan).submit(plan, context=context),
+            model if provider is None else lambda: provider.submit(plan, context=context),
             self.runtime.model_timeout if kind == "model" else self.runtime.tool_timeout,
         )
         self.runtime.hook("after_external_call", plan)
+        if provider is not None and plan._payload["provider_binding"] != "function":
+            try:
+                if isinstance(outcome, Definitive):
+                    self.check_provider_result(plan, outcome)
+                elif isinstance(outcome, Accepted):
+                    validate_provider_handle(plan, outcome.handle)
+            except ProviderResultInvalid:
+                outcome = Unknown("provider_result_invalid")
         if isinstance(outcome, Definitive):
             if kind != "model":
                 outcome = self.finalize_tool(plan, context, outcome)
+                if plan._payload["provider_binding"] != "function":
+                    try:
+                        self.check_provider_result(plan, outcome)
+                    except ProviderResultInvalid:
+                        self.commit([self.unknown(plan, "provider_result_invalid")])
+                        return
             outcome = replace(outcome, shared_state=self.runtime.durable_state(context.shared_state))
             self.commit(self.completed(plan, outcome))
         elif isinstance(outcome, Accepted):
@@ -1814,10 +1864,14 @@ class _Driver:
                             return False
                     self.polled.add(key)
                     handle = copy_json(a.wait["handle"])
-                    outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).query(handle), 1)
+                    provider = self.provider(a.execution_plan)
+                    outcome = _invoke(self.scope, lambda handle=handle, provider=provider: provider.query(handle), 1)
                     if isinstance(outcome, Definitive):
+                        self.check_provider_result(a.execution_plan, outcome)
                         self.commit(self.completed(a.execution_plan, outcome), guarded=True)
                         return True
+                    if isinstance(outcome, Accepted) and outcome.handle != handle:
+                        raise ProviderResultInvalid()
                 return False
         if self.pending_batch():
             return False

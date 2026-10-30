@@ -11,9 +11,9 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 [cloud host integration](host-integration.md). This page is the reference for
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
-The package implements contract 31.0.0, pinned in `contract.lock.json`. Current
-versions: public API v14, inbox schema 3, record schema 1, RunEvent v6,
-model-call v2, task-token-usage v3, strict Message, App Server protocol v4 and
+The kernel follows contract 32.0.0, pinned in `contract.lock.json`. Current
+versions: public API v15, inbox schema 3, record schema 1, RunEvent v6,
+model-call v2, task-token-usage v3, strict Message, App Server protocol v5 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
 ## Terms
@@ -377,6 +377,36 @@ A provider implements `submit(plan, context)`, `query(handle)`, `cancel(handle)`
 and `authenticate(input, plan)`, returning `Definitive`, `Accepted` or
 `Unknown`. The adapter owns evidence authenticity and real idempotency; a job ID
 or a model-produced value is not enough.
+
+Register exact tool names through `RunConfig.tool_providers`. Effective configs
+merge defaults and explicit mappings, then the driver copies them into
+`Runtime.providers`. Children inherit those bindings when created and rebuilt.
+Registration does not supply a tool schema and cannot replace the model,
+interaction or delegation adapters. Only a stored `function` binding uses
+`FunctionProvider`; a missing named binding raises `MissingHostBinding` before
+any replacement dispatch and keeps the original wait.
+
+Before completion, named provider returns must parse as a strict
+`ToolExecutionResult`, match the prepared call ID, and have SUCCESS or ERROR
+status. An ambiguous timeout, connection loss or cancellation error needs
+`metadata.definitive_outcome=true`. Dispatched completions need nonempty evidence;
+parked completions also include the original handle's acceptance evidence.
+Callbacks authenticate result and usage with the original operation, attempt,
+request digest, provider, turn and generation.
+
+Invalid query results raise `ProviderResultInvalid` with code
+`provider_result_invalid`; the App Server reports a warning and retains the wait.
+Invalid callbacks have a rejected input receipt with that reason. An invalid
+submit without a valid retained handle records Unknown with dispatch evidence
+and disables automatic retry. Invalid cancellation results also retain the
+original acceptance as an unconfirmed operation. A cancellation receipt means
+requested; only a valid terminal result confirms the operation's outcome.
+
+An external service may accept before the kernel commits its handle. Declare
+`ToolMetadata.idempotency="supported"` only when the provider actually dedupes
+and recovers by `context.idempotency_key`, including across attempts. Otherwise
+that crash window stays Unknown until trusted evidence arrives. Committing a
+handle does not create an unconditional exactly-once guarantee.
 
 Each handle is queried at most once per drive, and a failed query leaves the
 operation parked. `SessionStore.next_drive_delay_ms` reads `next_drive_ms` under

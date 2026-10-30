@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v14",
+  "contract": "vv-agent-public-api-v15",
   "domains": [
     {
       "capabilities": [
@@ -754,6 +754,10 @@
           "behavior": "current runtime bindings; custom callbacks return one child or a nonempty uniform-background sequence",
           "id": "session.Runtime",
           "python": "vv_agent.session.runtime.Runtime"
+        },
+        {
+          "id": "session.Provider",
+          "python": "vv_agent.Provider"
         }
       ],
       "id": "session"
@@ -1191,12 +1195,28 @@
         {
           "id": "export.ThreadForkParams",
           "python": "vv_agent.ThreadForkParams"
+        },
+        {
+          "id": "exports.Provider",
+          "python": "vv_agent.Provider"
+        },
+        {
+          "id": "exports.Accepted",
+          "python": "vv_agent.Accepted"
+        },
+        {
+          "id": "exports.Definitive",
+          "python": "vv_agent.Definitive"
+        },
+        {
+          "id": "exports.Unknown",
+          "python": "vv_agent.Unknown"
         }
       ],
       "id": "exports"
     }
   ],
-  "schema_version": 14,
+  "schema_version": 15,
   "surfaces": [
     {
       "id": "agent",
@@ -2067,6 +2087,15 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "host_cost_meter"
+          }
+        },
+        {
+          "id": "tool_providers",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "tool_providers"
           }
         }
       ],
@@ -6001,6 +6030,15 @@
           }
         },
         {
+          "id": "providers",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "providers"
+          }
+        },
+        {
           "id": "model_resolver",
           "kind": "field",
           "python": {
@@ -6044,6 +6082,115 @@
       "behavior": "pure requires_summary predicate; logged full-history summary before atomic admit(plan, summary) callback",
       "id": "session_SummaryChildTool",
       "python_target": "vv_agent.SummaryChildTool"
+    },
+    {
+      "behavior": "submit only after admission; query retained acceptance; validate definitive identity and evidence; authenticate callbacks including usage",
+      "id": "session_Provider",
+      "members": [
+        {
+          "id": "submit",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "submit",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "plan",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "context",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "query",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "query",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "handle",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "cancel",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "cancel",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "handle",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "authenticate",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "authenticate",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "item",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "plan",
+                  "required": true
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "python_target": "vv_agent.Provider"
     },
     {
       "id": "app_server_host",
@@ -6098,6 +6245,29 @@
                 {
                   "kind": "positional_or_keyword",
                   "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "build_run_config",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "build_run_config",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "request",
                   "required": true
                 }
               ]

@@ -486,7 +486,7 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
         "InitializeResponse": _object(
             {
                 "userAgent": {"type": "string"},
-                "protocolVersion": {"const": "v4"},
+                "protocolVersion": {"const": "v5"},
                 "capabilities": {"$ref": "#/$defs/ServerCapabilities"},
             },
             required=["userAgent", "protocolVersion", "capabilities"],
@@ -1044,7 +1044,7 @@ def _typescript_protocol_source() -> str:
         "}\n"
         "export interface ToolCallDeltaParams extends AppItem { delta: JsonValue; }\n"
         "export interface WarningParams { message: string; code?: string; }\n"
-        'export interface InitializeResponse { userAgent: string; protocolVersion: "v4"; '
+        'export interface InitializeResponse { userAgent: string; protocolVersion: "v5"; '
         "capabilities: ServerCapabilities; }\n"
         "export interface ModelSummary {\n"
         "  id: string; provider?: string; displayName?: string; contextLength: number | null;\n"

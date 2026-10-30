@@ -48,6 +48,16 @@ sees, runtime behavior, persisted data, or a wire format:
    with the contract and Python revisions. Rust adoption and Rust gates are not
    required.
 
+## Local unreleased work
+
+For unreleased contract work, build the canonical worktree into a deterministic
+ZIP under `/tmp`. Run `scripts/contract_snapshot.py sync` with that local file
+and the absolute `/tmp/...` path as `--artifact-url`. The revision is the worktree's base commit;
+the artifact and manifest digests pin the uncommitted fixture bytes. This is a
+local development lock, not an immutable release pin. Replace it with the
+reviewed release revision and URL before publishing a package. Keep adoption
+pending until the required central gates pass.
+
 ## Snapshot commands
 
 Check the lock and the vendored snapshot:
@@ -100,7 +110,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |
 | --- | --- | --- |
-| Public API v12 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
+| Public API v15 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
 | Strict wire formats | `events.py`, `types.py`, `message_codec.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
 | Prompt and run definition | `runtime/compiler.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
 | Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
@@ -111,7 +121,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | Model selection | `session/kernel.py`, `session/runtime.py`, `session/app_server.py` | `tests/session/test_model_selection.py`, `test_app_server_model_selection.py` |
 | Provider usage | `session/kernel.py`, `session/providers.py` | `tests/session/test_provider_usage.py`, `tests/session/test_recovery_matrix.py` |
 | Session supervision and dispatch | `session/supervisor.py`, `session/children.py`, `session/kernel.py` | `tests/session/test_batch_children.py`, `test_supervisor.py`, `test_dispatch.py` |
-| App Server v3 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
+| App Server v5 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
 | Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
 
 The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the
@@ -128,7 +138,7 @@ preservation of a UTF-8 BOM and CRLF line endings.
   [upgrading.md](upgrading.md#session-data-and-upgrades) for what this means for
   stored data.
 - Results carry `session_id` and `turn_id`.
-- The App Server speaks protocol v3 and reports thread state with one
+- The App Server speaks protocol v5 and reports thread state with one
   `ThreadStatus` enum.
 - The session log is the source of truth for execution. Events, results, the
   App Server and tracing are projections built from it. JSONL event stores only

@@ -138,7 +138,7 @@ RETIRED_KINDS = frozenset(
 REASONS = {
     "after_cycle_hook.json": "section 4 F2d-1 hooks / F2d-2 boundary wire: committed boundary decisions",
     "app_server_observable.json": (
-        "App Server v4: durable submissions, shared control, context management, bounded replay and execution status"
+        "App Server v5: durable submissions, shared control, context management, bounded replay and execution status"
     ),
     "approval_tool_policy.json": "section 4 F2d-1 approval deadline and Q7: absolute deadline and retained owner",
     "bounded_tool_result.json": "section 4 execution authority: record receipts replace old carriers; strict recovery retained",
@@ -698,7 +698,52 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
-        d.update(contract="vv-agent-public-api-v14", schema_version=14)
+        d.update(contract="vv-agent-public-api-v15", schema_version=15)
+        d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "session_Provider"]
+        d["surfaces"].append(
+            {
+                "id": "session_Provider",
+                "python_target": "vv_agent.Provider",
+                "behavior": (
+                    "submit only after admission; query retained acceptance; validate definitive identity and evidence; "
+                    "authenticate callbacks including usage"
+                ),
+                "members": [
+                    {
+                        "id": name,
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": name,
+                            "signature": signature(getattr(resolve("vv_agent.Provider"), name)),
+                        },
+                    }
+                    for name in ("submit", "query", "cancel", "authenticate")
+                ],
+            }
+        )
+        for domain in d["domains"]:
+            names = (
+                ("Provider", "Accepted", "Definitive", "Unknown")
+                if domain["id"] == "exports"
+                else ("Provider",)
+                if domain["id"] == "session"
+                else ()
+            )
+            for name in names:
+                target = "vv_agent." + name
+                if not any(c["python"] == target for c in domain["capabilities"]):
+                    domain["capabilities"].append({"id": domain["id"] + "." + name, "python": target})
+        for surface_id, name in (("run_config", "tool_providers"), ("session_Runtime", "providers")):
+            surface = next(s for s in d["surfaces"] if s["id"] == surface_id)
+            surface["members"] = [m for m in surface["members"] if m["id"] != name]
+            surface["members"].append(
+                {
+                    "id": name,
+                    "kind": "field",
+                    "python": {"kind": "field", "name": name, "declaration": "dataclass_field"},
+                }
+            )
         d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "app_server_host"]
         d["surfaces"].append(
             {
@@ -721,6 +766,15 @@ class Author:
                             "kind": "method",
                             "name": "authorize",
                             "signature": signature(resolve("vv_agent.AppServerHost").authorize),
+                        },
+                    },
+                    {
+                        "id": "build_run_config",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "build_run_config",
+                            "signature": signature(resolve("vv_agent.AppServerHost").build_run_config),
                         },
                     },
                 ],
