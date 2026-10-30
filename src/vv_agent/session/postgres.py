@@ -8,6 +8,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
 from .sql import SQLSessionTx, SQLStore
+from .store import Lease
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -81,7 +82,9 @@ def _connection_conninfo(connection: Connection[Any]) -> str:
 class PostgresStore(SQLStore):
     """A serialized connection; atomic() nests as a savepoint in host transactions."""
 
-    lock_clause = " FOR UPDATE"
+    # Session keys never change. This still serializes writers while allowing
+    # child inserts to retain their parent foreign-key KEY SHARE locks.
+    lock_clause = " FOR NO KEY UPDATE"
     clock_sql = CLOCK
 
     def __init__(self, connection: Connection[Any]):
@@ -89,7 +92,34 @@ class PostgresStore(SQLStore):
         self._connection_lock = RLock()
 
     def heartbeat_store(self):
-        return PostgresStore.standalone(_connection_conninfo(self.connection))
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        conninfo = _connection_conninfo(self.connection)
+        options = conninfo_to_dict(conninfo).get("options", "")
+        return PostgresStore.standalone(
+            make_conninfo(
+                conninfo,
+                connect_timeout=3,
+                options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
+            )
+        )
+
+    @contextmanager
+    def _bound_append(self, lease: Lease) -> Iterator[None]:
+        # Rollback restores settings on failure; success must restore them explicitly.
+        with self._transaction():
+            previous = self._one("SELECT current_setting('lock_timeout'),current_setting('statement_timeout')")
+            self._rows(
+                f"WITH remaining AS (SELECT GREATEST(1,%s-({self.clock_sql})) AS ms) "
+                "SELECT set_config('lock_timeout',ms::text || 'ms',true), "
+                "set_config('statement_timeout',ms::text || 'ms',true) FROM remaining",
+                (lease.expires_at_ms,),
+            )
+            yield
+            self._rows(
+                "SELECT set_config('lock_timeout',%s,true),set_config('statement_timeout',%s,true)",
+                previous,
+            )
 
     @classmethod
     @contextmanager

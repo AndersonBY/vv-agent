@@ -77,6 +77,31 @@ old-version session.
 
 ## Version notes
 
+### 0.30.5
+
+PostgreSQL heartbeats now continue while child admission and `before_commit`
+callbacks run. Append finishes encoding and history preparation before taking
+the latest Lease. It keeps every owner, epoch, expiry, head and inbox check.
+Slow callbacks no longer cause a lease loss just by blocking a Python lock.
+
+PostgreSQL heartbeat timeouts and operational errors retry while the last
+published Lease has enough time left for another attempt. An expired or fenced
+Lease still stops the drive. This also applies during runtime factory setup.
+The final append uses the remaining Lease time as its SQL timeout and restores
+the host's previous settings before returning from a nested transaction.
+Each `close()` waits at most 6 seconds; failure to stop raises `LeaseLost` and
+prevents release or runtime handoff. Hosts with custom connection contexts must
+bound connection setup and exit too. See
+[transaction callbacks](host-integration.md#transaction-callbacks) for exact
+limits, callback rules and transaction-duration logging.
+
+Recovery still rolls back failed admission and allows another drive to redo it.
+A durable rule that stops an interrupted admission from being repeated is not
+included. A real worker crash or database lease loss can still cause that redo.
+
+Contract 31.0.0, record schema 1, inbox schema 3 and SQL layouts stay unchanged.
+This release has no store boundary or migration.
+
 ### 0.30.4
 
 Compaction now uses local estimates for Moonshot, Kimi, Gemini, Claude,

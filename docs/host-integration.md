@@ -132,7 +132,7 @@ takes part in scheduled backoff.
    renewed every 250 ms (`FACTORY_HEARTBEAT_SECONDS`); preparation can exceed the
    starting TTL. Every exit joins this heartbeat and uses its latest Lease.
    Before execution, it renews to the returned runtime's `ttl_ms` and starts
-   that runtime's heartbeat. A failed renewal or fenced epoch prevents use of
+   that runtime's heartbeat. A lost lease or fenced epoch prevents use of
    the factory result. Give host callbacks and SQL their own I/O timeouts.
 3. It applies inputs and runs operations until nothing is runnable.
    Duplicate, reordered or concurrent deliveries never redispatch committed
@@ -356,6 +356,63 @@ commit together.
   with `metadata.children`.
 - A single child keeps the single-result shape. Children configured through
   the SDK use the same admission and delivery path.
+
+#### Transaction callbacks
+
+`prepare`, child `admit` and `before_commit` run in the kernel's database
+transaction. Keep them to short checks and database writes. A slow callback
+holds business row locks and keeps the transaction open.
+
+Copy files, download or upload data before entering this transaction, or in a
+job after commit. Preparation before the transaction needs a stable request
+identity and a receipt the host can check. Inside the transaction, recheck
+permissions, the request and that receipt, then commit the children and parent
+records together. Wake children after commit.
+
+Host business rows must use the same database transaction. A callback must not
+commit an independent business transaction or start a child execution loop.
+Database rollback does not undo object storage requests or changes to Python
+objects.
+
+Heartbeat renewal continues during these callbacks. A PostgreSQL heartbeat
+allows 250 ms for a lock wait and 1 second for a statement, including on
+connections opened by a host's custom factory. A renewal timeout or operational
+error retries on the heartbeat interval while the last published Lease has
+more time left than both two heartbeat intervals and 1 second. Otherwise the
+heartbeat reports `LeaseLost`. A store's `LeaseLost` or a changed owner or epoch
+stops renewal immediately. Append refuses an expired Lease even between retries.
+Custom connection contexts must also bound connection setup and exit; each
+`close()` waits at most 6 seconds and refuses handoff if the thread is still
+running.
+
+The final append bounds each SQL lock wait and statement by the remaining
+Lease time, with a 1 ms minimum. It restores the host's previous timeout settings
+before returning, including when the append rolls back inside an outer
+transaction. The final expiry check still rejects writes that outlive the Lease.
+
+Heartbeat renewal is neither a callback
+timeout nor permission to run indefinitely. Give network and database operations
+bounded timeouts. Once a callback locks the parent session row for writing, it must do no
+file or network I/O: another connection cannot renew a row that this transaction
+has locked for writing. Do not wrap a whole `drive` in an outer host transaction;
+leaving a savepoint does not release the outer transaction's locks.
+
+If the database lease expires or another owner takes over, the final append
+raises `LeaseLost` and the transaction rolls back. Do not catch that error and
+commit the business results. Admission that rolled back remains eligible for
+another drive; external preparation needs its own deduplication and recovery.
+SQLite serializes writers, so it cannot renew from another connection during a
+long write transaction.
+
+The `vv_agent.session.kernel` logger reports the duration of `prepare`,
+`before_commit` and append after the kernel leaves `store.atomic()`, including
+failed callbacks. Durations at least half the configured lease TTL produce a
+WARNING; shorter phases produce DEBUG. Fields include `session_id`, `turn_id`,
+`operation_id`, `request_digest`, `epoch`, `phase`, `callback_ms`, `append_ms`,
+`kernel_atomic_ms`, `outcome` and `exception_type`. Arguments, contents and
+exception messages are omitted. `kernel_atomic_ms` measures this kernel block,
+not an enclosing host transaction. A callback that never returns cannot produce
+a completed duration.
 
 ### A compact tool and fresh child summaries
 
