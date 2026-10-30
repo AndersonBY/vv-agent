@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -41,10 +42,13 @@ from .delegation import admitted_result, assemble, result_for_children
 from .lifecycle import after_cycle
 from .memory import save_projection
 from .output import prepare_output, serializable_output
+from .postgres import PostgresStore
 from .providers import Accepted, Definitive, Outcome, Unknown
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
+from .sql import SQLSessionTx, SQLStore
+from .sqlite import SQLiteStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
 
@@ -55,6 +59,12 @@ def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[Sto
 
 FACTORY_LEASE_TTL_MS = 15000
 FACTORY_HEARTBEAT_SECONDS = 0.25
+HEARTBEAT_CLOSE_SECONDS = 6.0
+logger = logging.getLogger(__name__)
+
+
+class _HeartbeatStopped(LeaseLost):
+    pass
 
 
 class _LeaseHeartbeat:
@@ -64,6 +74,8 @@ class _LeaseHeartbeat:
         heartbeat_store: Callable[[], AbstractContextManager[SessionStore]],
         ttl_ms: int,
         heartbeat_seconds: float,
+        *,
+        now_ms: int | None = None,
     ):
         self.lease = lease
         self.heartbeat_store = heartbeat_store
@@ -71,26 +83,84 @@ class _LeaseHeartbeat:
         self.stop = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
+        self.poll_lock = threading.Lock()
+        self.commit_lock = threading.Lock()
         self.lost = False
         self.heartbeat_error: Exception | None = None
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        self.expires_deadline = time.monotonic() + (lease.expires_at_ms - now_ms) / 1000
         self.thread = threading.Thread(target=self._heartbeat, daemon=True, name="session-heartbeat")
 
     def poll(self, store: SessionStore):
-        with self.lock:
-            if self.lost:
-                raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
-            poll = store.renew(self.lease, ttl_ms=self.ttl_ms)
-            self.lease = poll.lease
+        # SQLite must acquire its writer lock before the latch; an admission
+        # transaction may already hold that lock while preparing an append.
+        with (
+            self.poll_lock,
+            store._transaction() if isinstance(store, SQLiteStore) else nullcontext(),
+            self.committing() as lease,
+        ):
+            started = time.monotonic()
+            poll = store.renew(lease, ttl_ms=self.ttl_ms)
+            if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch) != (
+                lease.session_id,
+                lease.owner,
+                lease.epoch,
+            ):
+                with self.lock:
+                    self.lost = True
+                raise LeaseLost("heartbeat changed lease identity")
+            with self.lock:
+                if not self.stop.is_set() and not self.lost:
+                    self.lease = poll.lease
+                    self.expires_deadline = started + (poll.lease.expires_at_ms - poll.db_now_ms) / 1000
+                    self.heartbeat_error = None
         return poll
+
+    @contextmanager
+    def committing(self) -> Iterator[Lease]:
+        with self.commit_lock:
+            with self.lock:
+                if self.lost:
+                    raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+                if self.stop.is_set():
+                    raise _HeartbeatStopped("heartbeat stopped")
+                if time.monotonic() >= self.expires_deadline:
+                    self.lost = True
+                    raise LeaseLost("heartbeat lease expired")
+                lease = self.lease
+            yield lease
 
     def _heartbeat(self) -> None:
         try:
             with self.heartbeat_store() as store:
+                transient_errors: tuple[type[Exception], ...] = (TimeoutError,)
+                if isinstance(store, PostgresStore):
+                    from psycopg import OperationalError
+
+                    transient_errors = (TimeoutError, OperationalError)
+                    # Host factories may bypass PostgresStore.heartbeat_store().
+                    store._rows("SELECT set_config('lock_timeout','250ms',false),set_config('statement_timeout','1000ms',false)")
                 while not self.stop.is_set():
-                    self.poll(store)
-                    self.ready.set()
+                    with self.lock:
+                        if self.heartbeat_error is not None and self.expires_deadline - time.monotonic() <= max(
+                            2 * self.heartbeat_seconds, 1.0
+                        ):
+                            raise self.heartbeat_error
+                    try:
+                        self.poll(store)
+                    except Exception as exc:
+                        if not isinstance(exc, transient_errors):
+                            raise
+                        with self.lock:
+                            self.heartbeat_error = exc
+                            if self.expires_deadline - time.monotonic() <= max(2 * self.heartbeat_seconds, 1.0):
+                                raise
+                    else:
+                        self.ready.set()
                     if self.stop.wait(self.heartbeat_seconds):
                         break
+        except _HeartbeatStopped:
+            pass
         except Exception as exc:
             with self.lock:
                 self.heartbeat_error = exc
@@ -99,13 +169,18 @@ class _LeaseHeartbeat:
             self.ready.set()
 
     def close(self) -> None:
-        self.stop.set()
-        self.thread.join()
+        with self.lock:
+            self.stop.set()
+        self.thread.join(timeout=HEARTBEAT_CLOSE_SECONDS)
+        if self.thread.is_alive():
+            with self.lock:
+                self.lost = True
+            raise LeaseLost("heartbeat did not stop; lease cannot be released or handed off")
 
 
 class _Scope(_LeaseHeartbeat):
-    def __init__(self, lease: Lease, runtime: Runtime):
-        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds)
+    def __init__(self, lease: Lease, runtime: Runtime, *, now_ms: int | None = None):
+        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds, now_ms=now_ms)
         self.runtime = runtime
         self.token = CancellationToken()
         self.turn_id: str | None = None
@@ -243,21 +318,72 @@ class _Driver:
                 ),
                 *records,
             ]
-        with self.scope.lock:
-            if self.scope.lost:
-                raise LeaseLost("heartbeat lost ownership") from self.scope.heartbeat_error
-            with self.store.atomic() as tx:
+        timings: list[tuple[str, float, str, str | None]] = []
+        atomic_start = time.monotonic_ns()
+        atomic_error = None
+
+        @contextmanager
+        def phase(name: str):
+            begin = time.monotonic_ns()
+            error = None
+            try:
+                yield
+            except BaseException as exc:
+                error = type(exc).__name__
+                raise
+            finally:
+                timings.append((name, (time.monotonic_ns() - begin) / 1_000_000, "error" if error else "ok", error))
+
+        try:
+            with ExitStack() as latch, self.store.atomic() as tx:
                 if prepare is not None:
-                    records.extend(prepare(tx))
-                self.runtime.hook("before_commit", records[-1] if records else None)
-                receipt = tx.append(
-                    self.sid,
-                    lease=self.scope.lease,
-                    expected_seq=self.records[-1].seq,
-                    commit_id=digest({"record_ids": [r.record_id for r in records], "consumed": list(consumed)}),
-                    records=tuple(records),
-                    consume_input_ids=consumed,
-                    expected_inbox_seq=self.watermark if guarded else None,
+                    with phase("prepare"):
+                        records.extend(prepare(tx))
+                with phase("before_commit"):
+                    self.runtime.hook("before_commit", records[-1] if records else None)
+                # SQL append calls this only after encoding and immutable history
+                # preparation. Keep the latch through the outer atomic exit.
+                if isinstance(tx, SQLSessionTx):
+                    tx._lease_guard = lambda: latch.enter_context(self.scope.committing())
+                with phase("append"):
+                    receipt = tx.append(
+                        self.sid,
+                        lease=self.scope.lease if isinstance(tx, SQLSessionTx) else latch.enter_context(self.scope.committing()),
+                        expected_seq=self.records[-1].seq,
+                        commit_id=digest({"record_ids": [r.record_id for r in records], "consumed": list(consumed)}),
+                        records=tuple(records),
+                        consume_input_ids=consumed,
+                        expected_inbox_seq=self.watermark if guarded else None,
+                    )
+        except BaseException as exc:
+            atomic_error = type(exc).__name__
+            raise
+        finally:
+            atomic_ms = (time.monotonic_ns() - atomic_start) / 1_000_000
+            source = next((r for r in reversed(records) if r.operation_id), None)
+            request_digest = source._payload.get("request_digest") if source else None
+            if source and source.operation_id in self.state.operations:
+                operation = self.state.operations[source.operation_id]
+                attempt = operation.attempts.get(source.attempt or 1)
+                if attempt is not None:
+                    request_digest = attempt.execution_plan._payload["request_digest"]
+            for name, duration, outcome, error in timings:
+                logger.log(
+                    logging.WARNING if duration >= self.runtime.ttl_ms / 2 else logging.DEBUG,
+                    "session transaction phase",
+                    extra={
+                        "session_id": self.sid,
+                        "turn_id": tid,
+                        "operation_id": source.operation_id if source else None,
+                        "request_digest": request_digest,
+                        "epoch": self.scope.lease.epoch,
+                        "phase": name,
+                        "callback_ms": duration if name != "append" else 0,
+                        "append_ms": duration if name == "append" else 0,
+                        "kernel_atomic_ms": atomic_ms,
+                        "outcome": "error" if atomic_error else outcome,
+                        "exception_type": error or atomic_error,
+                    },
                 )
         self.runtime.hook("after_commit", records[-1] if records else None)
         if receipt.replayed:
@@ -1680,8 +1806,12 @@ class _Driver:
             if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "provider":
                 key = (oid, a.plan.attempt or 1)
                 if key not in self.polled:
-                    if self.store.next_drive_delay_ms(self.sid, lease=self.scope.lease) != 0:
-                        return False
+                    with (
+                        self.store._transaction() if isinstance(self.store, SQLiteStore) else nullcontext(),
+                        self.scope.committing() as lease,
+                    ):
+                        if self.store.next_drive_delay_ms(self.sid, lease=lease) != 0:
+                            return False
                     self.polled.add(key)
                     handle = copy_json(a.wait["handle"])
                     outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).query(handle), 1)
@@ -1814,13 +1944,21 @@ def drive(
     if lease is None:
         return False
     if not isinstance(runtime, Runtime):
+        build = None
         # Resolve store setup on the driving thread (host connections can be thread-bound).
         try:
             heartbeat = store.heartbeat_store()
-            build = _LeaseHeartbeat(lease, lambda: heartbeat, ttl_ms, FACTORY_HEARTBEAT_SECONDS)
+            build = _LeaseHeartbeat(
+                lease,
+                lambda: heartbeat,
+                ttl_ms,
+                FACTORY_HEARTBEAT_SECONDS,
+                now_ms=store._now() if isinstance(store, SQLStore) else None,
+            )
             build.thread.start()
             try:
-                build.ready.wait()
+                if not build.ready.wait(ttl_ms / 1000):
+                    raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
                 if build.lost:
                     raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
                 runtime = runtime(session_id)
@@ -1837,26 +1975,34 @@ def drive(
                 store.release(lease)
             return True
         except Exception as exc:
+            if build is not None and build.thread.is_alive():
+                raise
             try:
                 _defer_after_error(store, lease, failure_backoff_ms, exc)
             finally:
                 store.release(lease)
             raise
         except BaseException:
-            with suppress(Exception):
-                store.release(lease)
+            if build is None or not build.thread.is_alive():
+                with suppress(Exception):
+                    store.release(lease)
             raise
-    scope = _Scope(lease, runtime)
+    scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None)
     scope.thread.start()
     try:
         driver = _Driver(store, session_id, runtime, scope)
         while not scope.lost:
             try:
                 if not driver.step():
-                    with scope.lock:
-                        if scope.lost:
-                            raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
-                        store.defer_idle_drive(scope.lease, poll_ms=runtime.poll_ms)
+                    with ExitStack() as latch:
+                        if isinstance(store, SQLStore):
+                            store._defer_idle_drive(
+                                scope.lease,
+                                poll_ms=runtime.poll_ms,
+                                lease_guard=lambda: latch.enter_context(scope.committing()),
+                            )
+                        else:
+                            store.defer_idle_drive(latch.enter_context(scope.committing()), poll_ms=runtime.poll_ms)
                     break
                 if _one_turn and driver.records[-1].record.kind == "turn_ended":
                     break
@@ -1865,9 +2011,9 @@ def drive(
         if scope.lost:
             raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
     except Exception as exc:
+        scope.close()
         if scheduled:
-            with scope.lock:
-                _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
+            _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
         raise
     finally:
         scope.close()

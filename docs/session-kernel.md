@@ -252,6 +252,26 @@ heartbeat takes over with the runtime's own TTL and connection factory. Factorie
 prepare bindings only; they must not dispatch execution effects. Hosts must
 bound SQL and callback I/O because joining cannot cancel arbitrary host code.
 
+The built-in PostgreSQL heartbeat connection limits connection establishment to
+3 seconds, row-lock waits to 250 ms and each statement to 1 second. `close()`
+waits at most 6 seconds for the heartbeat thread. If it is still running, the
+drive raises `LeaseLost` and cannot release the lease or hand it to a runtime.
+Custom connection contexts must also bound their open, renewal and exit work;
+Python cannot forcibly stop an arbitrary blocked thread.
+The final PostgreSQL append also limits lock waits to 250 ms and statements to
+1 second, each capped by the remaining Lease lifetime. These transaction-local
+limits begin after encoding and history preparation.
+
+State locking covers only short reads and updates. A separate latch serializes
+renewal and its publication with the final append. Encoding and history reads
+finish before append takes that latch and reads the current Lease, then locks
+the parent row. The latch stays held through the transaction exit. Owner,
+epoch, both lease expiry checks, head and inbox checks remain in force.
+PostgreSQL uses `FOR NO KEY UPDATE` because session keys never change; it
+serializes writers while allowing child foreign-key checks to retain their
+parent references. For callback requirements and transaction timing logs, see
+[transaction callbacks](host-integration.md#transaction-callbacks).
+
 External calls run on daemon threads, so the driver can close a cancellation
 without waiting for a handler that ignores it. A thread counts as stopped only
 if its handler confirms cooperative cancellation.

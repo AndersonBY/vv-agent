@@ -30,6 +30,7 @@ class SummaryChildTool:
 
     The predicate must be pure. Change handler_version when its behavior changes.
     The admission callback receives None when the predicate returns False.
+    Keep admission short and transactional; see docs/host-integration.md#transaction-callbacks.
     """
 
     requires_summary: Callable[[Record], bool]

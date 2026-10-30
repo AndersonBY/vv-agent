@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -106,6 +106,12 @@ class SQLStore:
 
     def _now(self) -> int:
         return self._one(f"SELECT {self.clock_sql}")[0]
+
+    @contextmanager
+    def _bound_append(self, lease: Lease) -> Iterator[None]:
+        """Keep final-write limits inside the append transaction."""
+        with self._transaction():
+            yield
 
     def list_sessions(self, *, limit: int = 100, after: str | None = None) -> tuple[str, ...]:
         """Read-only catalog, including idle sessions absent from list_runnable."""
@@ -432,11 +438,16 @@ class SQLStore:
 
     def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
         """Defer a stale idle schedule without changing execution facts or future due work."""
+        return self._defer_idle_drive(lease, poll_ms=poll_ms)
+
+    def _defer_idle_drive(self, lease: Lease, *, poll_ms: int, lease_guard: Callable[[], Lease] | None = None) -> bool:
         _positive(poll_ms, "poll_ms")
         sid = lease.session_id
         captured = self._head(sid)
         state = self._prefix(sid, captured).reducer.state
         with self._transaction():
+            if lease_guard is not None:
+                lease = lease_guard()
             row = self._lock(sid)
             now = self._now()
             self._check_lease(sid, lease, row, now)
@@ -531,6 +542,7 @@ class SQLSessionTx:
         self.store = store
         self.transaction_id = store._transaction_id()
         self.batches: dict[tuple[str, str], ConsumerBatch] = {}
+        self._lease_guard: Callable[[], Lease] | None = None
 
     def _active(self) -> None:
         if self.store._transaction_id() != self.transaction_id:
@@ -687,7 +699,9 @@ class SQLSessionTx:
         ):
             prefix = s._prefix(session_id, captured)
             reducer = prefix.reducer.fork()
-        with s._transaction():
+        if self._lease_guard is not None:
+            lease = self._lease_guard()
+        with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
             row = s._lock(session_id)
             old = s._rows(
                 "SELECT body,record_sequences,head_seq FROM sk_commit WHERE session_id=%s AND commit_id=%s",
@@ -776,6 +790,7 @@ class SQLSessionTx:
             self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
             checksum = new[-1][1].digest if new else prefix.head_digest
             s._retain_prefix(_Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added))
+            s._check_lease(session_id, lease, row, s._now())
             return receipt
 
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None:
