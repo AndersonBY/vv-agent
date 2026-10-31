@@ -77,7 +77,7 @@ old-version session.
 
 ## Version notes
 
-### Unreleased: contract 32.0.0
+### 0.31.0
 
 Regenerate App Server bindings for v5 and public API inventory v15. Hosts can
 register business job providers through `RunConfig.tool_providers`; direct
@@ -106,10 +106,9 @@ See [tool result reads](app-server-tool-results.md).
 Reprojected events change bytes under their existing stable event IDs.
 Hosts that store immutable event projections must plan their product projection
 version boundary before upgrading; a kernel store schema bump is not required.
-This remains an unreleased draft for the single 32.0.0 / 0.31.0 release.
 
 User questions now carry a retained typed form in status and snapshot `state`.
-Replace respond.message with respond.target and respond.answer. Free text remains
+Replace `respond.message` with `respond.target` and `respond.answer`. Free text remains
 legal for every form, including choices with custom selections disabled; the
 model-facing ask_user result is now JSON labeled free_text or selection. Update
 product projections and answer parsers accordingly. Existing direct host text

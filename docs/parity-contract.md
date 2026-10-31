@@ -48,16 +48,6 @@ sees, runtime behavior, persisted data, or a wire format:
    with the contract and Python revisions. Rust adoption and Rust gates are not
    required.
 
-## Local unreleased work
-
-For unreleased contract work, build the canonical worktree into a deterministic
-ZIP under `/tmp`. Run `scripts/contract_snapshot.py sync` with that local file
-and the absolute `/tmp/...` path as `--artifact-url`. The revision is the worktree's base commit;
-the artifact and manifest digests pin the uncommitted fixture bytes. This is a
-local development lock, not an immutable release pin. Replace it with the
-reviewed release revision and URL before publishing a package. Keep adoption
-pending until the required central gates pass.
-
 ## Snapshot commands
 
 Check the lock and the vendored snapshot:
