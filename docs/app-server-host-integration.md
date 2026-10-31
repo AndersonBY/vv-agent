@@ -241,3 +241,8 @@ leave reusable immutable artifacts, but cannot leave a partly created session.
 Keep forked sessions on 0.29.0 or newer. Older workers can parse the extension
 maps but do not apply the inherited model default. This release has no store
 schema boundary and supplies no migration.
+
+
+For question UIs, preserve the full retained target and send typed answers as
+shown in [user interactions](app-server-interactions.md). Free-text input remains
+available for choice questions. Do not turn a child's wait into its final result.

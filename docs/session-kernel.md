@@ -433,8 +433,9 @@ Ready receipts and controls apply before repair.
   window forces a recompute.
 
 A reply to `ask_user` is a `user` input with the active `target_turn_id` and
-content `{operation_id, interaction_id, text}`. It produces one tool result in
-the same turn, not an extra user message. A no-tool `wait_user` result appends
+content `{interaction_id, text}` with the target turn and generation. An optional
+operation_id must match. It produces one explicitly labeled free-text tool result
+in the same turn, not an extra user message. A no-tool `wait_user` result appends
 `turn_parked` with no due time and no tool operation; its reply carries
 `interaction_id` and `text` and appends the user message in the same turn. A
 tool returning WAIT_USER parks with `turn_parked`, and the reply resumes it
@@ -754,3 +755,11 @@ params, lineage, effective_model and last_compaction. It is creation evidence,
 not a copied execution plan. The inherited model remains the frozen default
 across turns and selection clears. Seed shared_state is empty; host process
 objects and operational state are never copied. Store versions stay unchanged.
+
+
+User forms and typed answers use the retained wait, not a newly executed tool.
+Both direct inbox application and App Server admission validate the same identity
+and answer rules. See [user interactions](app-server-interactions.md).
+`HeartbeatStopped`, exported from `vv_agent`, reports intentional renewal-worker
+shutdown. Catch it before `LeaseLost` when a host must distinguish normal stop
+from ownership failure. It does not permit another execution or commit.

@@ -179,9 +179,9 @@ class DiscoveryFilteredWorkspaceBackend:
         retain = getattr(self._backend, "retain_output", None)
         return retain(path, expected=expected) if callable(retain) else None
 
-    def open_retained(self, ref):
+    def open_retained(self, ref, *, offset=0, length=None):
         from typing import cast
 
         from vv_agent.workspace.resources import OutputRetentionBackend
 
-        return cast(OutputRetentionBackend, self._backend).open_retained(ref)
+        return cast(OutputRetentionBackend, self._backend).open_retained(ref, offset=offset, length=length)

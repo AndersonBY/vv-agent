@@ -203,3 +203,10 @@ existing transaction create receipt. The app_server_fork attribute extension
 stores lineage/default model; seed retains its closed messages/shared_state shape.
 Real producer and SQL tests are in tests/test_app_server_fork.py and
 tests/session/test_app_server_fork.py. No Rust adoption is required.
+
+
+Public interaction mappings are `AppServerUserInteraction`,
+`InteractionAnswerSpec`, `InteractionReplyTarget`, and `InteractionAnswer`.
+`HeartbeatStopped` is the public intentional heartbeat-stop signal. The current
+App Server v5 snapshot adds `state`, and respond uses target plus answer.
+These mappings preserve record 1, inbox 3, SQLite 3 and RunEvent v6.

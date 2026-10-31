@@ -288,17 +288,10 @@ def _definitions() -> dict[str, dict[str, Any]]:
                         _object(
                             {
                                 "kind": {"const": "respond"},
-                                "message": {
-                                    "type": "object",
-                                    "properties": {
-                                        "role": {"const": "user"},
-                                        "content": {"type": "string", "minLength": 1, "maxLength": 65536},
-                                    },
-                                    "required": ["role", "content"],
-                                    "additionalProperties": False,
-                                },
+                                "target": {"$ref": "#/$defs/InteractionReplyTarget"},
+                                "answer": {"$ref": "#/$defs/InteractionAnswer"},
                             },
-                            required=["kind", "message"],
+                            required=["kind", "target", "answer"],
                         ),
                         *[
                             _object({"kind": {"const": kind}}, required=["kind"])
@@ -390,16 +383,77 @@ def _definitions() -> dict[str, dict[str, Any]]:
     definitions["ThreadStartResponse"]["properties"].update(accepted={"const": True}, replayed={"type": "boolean"})
     definitions["ThreadStartResponse"]["required"].extend(["accepted", "replayed"])
     definitions["TurnInterruptResponse"] = deepcopy(definitions["TurnActionResponse"])
-    definitions["Interaction"] = _object(
+    target = {
+        **{name: {"type": "string", "minLength": 1, "maxLength": 4096} for name in ("sessionId", "turnId", "interactionId")},
+        "generation": {"type": "integer", "minimum": 0, "maximum": 2**53 - 1},
+        "operationId": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096},
+        "attempt": {"type": ["integer", "null"], "minimum": 1, "maximum": 2**53 - 1},
+        "requestDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    }
+    definitions["InteractionReplyTarget"] = _object(target, required=list(target))
+    definitions["InteractionReplyTarget"]["oneOf"] = [
+        {"properties": {"operationId": {"type": "null"}, "attempt": {"type": "null"}}},
+        {"properties": {"operationId": {"type": "string"}, "attempt": {"type": "integer"}}},
+    ]
+    definitions["InteractionAnswerSpec"] = _object(
         {
-            "sessionId": {"type": "string"},
-            "turnId": {"type": "string"},
-            "interactionId": {"type": "string"},
-            "requestId": {"type": "string"},
-            "prompt": {"type": "string"},
+            "kind": {"enum": ["text", "single", "multi"]},
+            "options": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "maxItems": 64,
+                "uniqueItems": True,
+            },
+            "allowCustomOptions": {"type": "boolean"},
         },
-        required=["sessionId", "turnId"],
+        required=["kind", "options", "allowCustomOptions"],
     )
+    definitions["InteractionAnswer"] = {
+        "oneOf": [
+            _object(
+                {"kind": {"const": "text"}, "text": {"type": "string", "minLength": 1, "maxLength": 65536}},
+                required=["kind", "text"],
+            ),
+            *[
+                _object(
+                    {
+                        "kind": {"const": kind},
+                        **{
+                            name: {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                                "maxItems": 64,
+                                "uniqueItems": True,
+                            }
+                            for name in ("selected", "custom")
+                        },
+                    },
+                    required=["kind", "selected", "custom"],
+                )
+                for kind in ("single", "multi")
+            ],
+        ]
+    }
+    definitions["AppServerUserInteraction"] = _object(
+        {
+            "kind": {"const": "user"},
+            **target,
+            "prompt": {"type": "string", "maxLength": 16384},
+            "answerSpec": {"$ref": "#/$defs/InteractionAnswerSpec"},
+        },
+        required=["kind", *target, "prompt", "answerSpec"],
+    )
+    definitions["Interaction"] = {
+        "oneOf": [
+            _object(
+                {"kind": {"const": "approval"}, **{k: {"type": "string"} for k in ("sessionId", "turnId", "requestId")}},
+                required=["kind", "sessionId", "turnId", "requestId"],
+            ),
+            {"$ref": "#/$defs/AppServerUserInteraction"},
+        ]
+    }
+    definitions["ThreadSnapshotResponse"]["properties"]["state"] = {"$ref": "#/$defs/ThreadStatusResponse"}
+    definitions["ThreadSnapshotResponse"]["required"].append("state")
     definitions["CacheUsage"] = _object(
         {
             "status": {"type": "string", "enum": ["provider_reported", "accounting_missing", "unsupported"]},
@@ -1159,8 +1213,10 @@ def _typescript_protocol_source() -> str:
         "export interface ModelListResponse { models: ModelSummary[]; }\n"
         "export interface ThreadStartResponse { threadId: string; agentKey: string; cwd: string | "
         "null; status: ThreadStatus; accepted: true; replayed: boolean; }\n"
-        "export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
-        "export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
+        "export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; "
+        "state: ThreadStatusResponse; }\n"
+        "export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; "
+        "state: ThreadStatusResponse; }\n"
         "export interface ThreadListResponse { threads: AppThread[]; }\n"
         "export interface ThreadArchiveResponse { threadId: string; archived: boolean; }\n"
         "export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; }\n"
@@ -1178,7 +1234,7 @@ def _typescript_protocol_source() -> str:
         "export interface TurnQueueResponse extends TurnStartResponse {}\n"
         "export interface TurnInterruptResponse extends TurnActionResponse {}\n"
         "export type TurnAction =\n"
-        '  | { kind: "respond"; message: { role: "user"; content: string } }\n'
+        '  | { kind: "respond"; target: InteractionReplyTarget; answer: InteractionAnswer }\n'
         '  | { kind: "suspend" } | { kind: "resume" } | { kind: "cancel" } | { kind: "abort" };\n'
         "export interface TurnActionParams { threadId: string; turnId: string; actionId: string; action: TurnAction; }\n"
         "export interface TurnActionResponse {\n"
@@ -1261,8 +1317,16 @@ def _typescript_protocol_source() -> str:
         "export type JsonRpcMessage = ClientRequest | ServerNotification | ServerRequest | "
         "JsonRpcSuccess | JsonRpcError;\n"
         "\n"
-        "export interface Interaction { sessionId: string; turnId: string; interactionId?: string; "
-        "requestId?: string; prompt?: string; }\n"
+        "export interface InteractionReplyTarget { sessionId: string; turnId: string; generation: number; "
+        "interactionId: string; operationId: string | null; attempt: number | null; requestDigest: string; }\n"
+        'export interface InteractionAnswerSpec { kind: "text" | "single" | "multi"; options: string[]; '
+        "allowCustomOptions: boolean; }\n"
+        'export type InteractionAnswer = { kind: "text"; text: string } | { kind: "single" | "multi"; '
+        "selected: string[]; custom: string[] };\n"
+        'export interface AppServerUserInteraction extends InteractionReplyTarget { kind: "user"; prompt: '
+        "string; answerSpec: InteractionAnswerSpec; }\n"
+        'export type Interaction = { kind: "approval"; sessionId: string; turnId: string; requestId: string '
+        "} | AppServerUserInteraction;\n"
         "\n"
         "export interface CacheUsage {\n"
         '  status: "provider_reported" | "accounting_missing" | "unsupported";\n'

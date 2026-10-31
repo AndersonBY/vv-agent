@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from threading import RLock
 from typing import Protocol
 
 from vv_agent.workspace.base import _exclusive_workspace_path_segments
@@ -58,7 +60,7 @@ class OutputRetentionBackend(Protocol):
     @property
     def retained_workspace_id(self) -> str: ...
     def retain_output(self, path: str, *, expected: ToolResultResourceExpectation) -> ToolResultResourceRef | None: ...
-    def open_retained(self, ref: ToolResultResourceRef) -> Iterable[bytes]: ...
+    def open_retained(self, ref: ToolResultResourceRef, *, offset: int = 0, length: int | None = None) -> Iterable[bytes]: ...
 
 
 def private_resource_path(path: str) -> str:
@@ -121,3 +123,45 @@ def copy_retained_output(backend, path: str, *, expected: ToolResultResourceExpe
         expected.media_type,
         expected.name,
     )
+
+
+_VERIFIED: OrderedDict[ToolResultResourceRef, object] = OrderedDict()
+_VERIFY_LOCK = RLock()
+
+
+def verify_retained(ref, version, chunks):
+    """Verify a digest once per immutable reference; every range must attest its version.
+
+    The bounded process cache survives host configuration rebuilds. Eviction or process
+    restart requires one fresh digest pass. Version changes never refresh a live entry.
+    """
+    with _VERIFY_LOCK:
+        if ref in _VERIFIED:
+            if _VERIFIED[ref] != version:
+                raise ValueError("stale_reference")
+            _VERIFIED.move_to_end(ref)
+            return
+        size, digest = 0, hashlib.sha256()
+        for chunk in chunks():
+            size += len(chunk)
+            digest.update(chunk)
+            if size > ref.size_bytes:
+                raise ValueError("stale_reference")
+        if size != ref.size_bytes or digest.hexdigest() != ref.sha256:
+            raise ValueError("stale_reference")
+        _VERIFIED[ref] = version
+        # Bound both entry count and memory held by immutable memory-backend versions.
+        while len(_VERIFIED) > 1024 or (
+            len(_VERIFIED) > 1
+            and sum(len(v[1]) for v in _VERIFIED.values() if isinstance(v, tuple) and len(v) == 2 and isinstance(v[1], bytes))
+            > 268_435_456
+        ):
+            _VERIFIED.popitem(last=False)
+
+
+def retained_range(ref, offset, length):
+    if type(offset) is not int or not 0 <= offset <= ref.size_bytes:
+        raise ValueError("invalid_range")
+    if length is not None and (type(length) is not int or length < 0):
+        raise ValueError("invalid_range")
+    return min(ref.size_bytes - offset, length) if length is not None else ref.size_bytes - offset

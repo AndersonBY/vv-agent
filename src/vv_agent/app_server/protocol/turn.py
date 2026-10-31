@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
+
 from .identity import client_id
 
 
@@ -12,15 +14,6 @@ def _text(value: Any, field_name: str, *, max_bytes: int = 512) -> str:
     if len(value.encode("utf-8")) > max_bytes:
         raise ValueError(f"{field_name} exceeds the UTF-8 byte limit")
     return value
-
-
-def _message(value: Any) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != {"role", "content"}:
-        raise ValueError("turn/action message must contain exactly role and content")
-    if value.get("role") != "user":
-        raise ValueError("turn/action message role must be user")
-    content = _text(value.get("content"), "message.content", max_bytes=65536)
-    return {"role": "user", "content": content}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,9 +31,13 @@ class TurnActionParams:
             raise ValueError("action must be an object")
         kind = self.action.get("kind")
         if kind == "respond":
-            if set(self.action) != {"kind", "message"}:
+            if set(self.action) != {"kind", "target", "answer"}:
                 raise ValueError("respond action fields are invalid")
-            action = {"kind": kind, "message": _message(self.action["message"])}
+            action = {
+                "kind": kind,
+                "target": InteractionReplyTarget.from_dict(self.action["target"]).to_dict(),
+                "answer": InteractionAnswer.from_dict(self.action["answer"]).to_dict(),
+            }
         elif kind in {"suspend", "resume", "cancel", "abort"}:
             if set(self.action) != {"kind"}:
                 raise ValueError(f"{kind} action fields are invalid")

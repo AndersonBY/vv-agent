@@ -276,6 +276,9 @@ class AgentSession:
         self._closed = state.closed
         if state.turns:
             result = project_result(self.driver.store, sid, next(reversed(state.turns)), runtime=self._runtime())
+            waits = self.driver.waits(sid)
+            if waits:
+                result.metadata["session_waits"] = [{"session_id": owner, **wait} for owner, _, wait in waits]
             self._latest_run = AgentSessionRun.from_run_result(result)
 
     def _close_subscriptions(self) -> bool:
@@ -681,7 +684,23 @@ class AgentSession:
             raise ValueError("prompt cannot be empty")
         state, _, _ = self.driver.store.read_state(self.session_id)
         if state.active_turn_id:
-            self.driver.answer(self.session_id, self._runtime(), text, uuid4().hex)
+            from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
+
+            latest = self.latest_run
+            waits = sorted(
+                (w for w in latest.metadata.get("session_waits", []) if "interaction" in w) if latest else (),
+                key=lambda w: (w["interaction"]["sessionId"], w.get("operation_id", "")),
+            )
+            if not waits:
+                raise ValueError("no pending user interaction")
+            form = waits[0]["interaction"]
+            target = InteractionReplyTarget.from_dict(
+                {
+                    k: form[k]
+                    for k in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")
+                }
+            )
+            self.driver.answer(self.session_id, self._runtime(), target, InteractionAnswer("text", text=text), uuid4().hex)
         run = self._run_once(text)
         while auto_follow_up and run.status == AgentStatus.COMPLETED and self._pending("follow_up"):
             run = self._run_once("")

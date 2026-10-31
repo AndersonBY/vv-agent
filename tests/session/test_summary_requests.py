@@ -143,7 +143,7 @@ def test_terminal_batch_does_not_request_summary(store, database, terminal):
             tx.push(
                 "s",
                 InboxItem(
-                    "reply", "user", {"content": {"interaction_id": parked.payload["interaction_id"], "text": "continue"}}, tid
+                    "reply", "user", {"content": {"interaction_id": parked.payload["interaction_id"], "text": "continue"}}, tid, 0
                 ),
             )
         drive(store, "s", runtime=configured(database, [LLMResponse(SUMMARY), LLMResponse("done")]))

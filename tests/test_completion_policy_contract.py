@@ -5,12 +5,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support.interactions import displayed_target
 
 from vv_agent import (
     Agent,
     CompletionReason,
     FunctionTool,
     GuardrailResult,
+    InteractionAnswer,
     NoToolPolicy,
     RunConfig,
     Runner,
@@ -210,7 +212,13 @@ def test_output_guardrail_runs_only_after_same_turn_wait_is_resolved(tmp_path: P
     assert waiting.status.value == "wait_user" and calls == []
     assert waiting.final_output == case["candidate_output"]
     assert not any(e.type in {"run_completed", "run_failed"} for e in waiting.events)
-    handle.kernel.answer(handle.session_id, handle.runtime, "answer", "answer")
+    handle.kernel.answer(
+        handle.session_id,
+        handle.runtime,
+        displayed_target(handle.kernel, handle.session_id),
+        InteractionAnswer("text", text="answer"),
+        "answer",
+    )
     resumed = handle.resume()
     assert resumed.status.value == "completed"
     assert resumed.final_output == case["guardrail_rewrite_output"]

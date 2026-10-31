@@ -5,8 +5,9 @@ from typing import Any, cast
 
 import pytest
 from support import FixedModelProvider
+from support.interactions import target_of, text_action
 
-from vv_agent import Agent, RunConfig
+from vv_agent import Agent, InteractionAnswer, RunConfig
 from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -496,7 +497,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     )
     wait = cast(dict[str, Any], interrupted["params"])["pendingInteraction"]
     assert wait["prompt"] == "child needs answer" and wait["sessionId"] != "thread_1"
-    assert set(wait) == {"sessionId", "turnId", "prompt", "interactionId"}
+    assert wait["kind"] == "user" and wait["answerSpec"]["kind"] == "text"
     parent = surface.store.read_state("thread_1")[0]
     child = surface.store.read_state(wait["sessionId"])[0]
     assert parent.phase == child.phase == "parked"
@@ -512,7 +513,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
                 "threadId": "thread_1",
                 "turnId": parent_tid,
                 "actionId": "reply-child",
-                "action": {"kind": "respond", "message": {"role": "user", "content": "approved child answer"}},
+                "action": text_action(wait, "approved child answer"),
             },
         },
     )
@@ -525,12 +526,24 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     child_state = surface.store.read_state(wait["sessionId"])[0]
     assert child_state.applied_inputs[input_id]._payload["input"]["payload"]["content"]["text"] == "approved child answer"
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
-    receipt = surface.answer("thread_1", cast(Any, server.store).runtimes["thread_1"], "approved child answer", input_id)
+    receipt = surface.answer(
+        "thread_1",
+        cast(Any, server.store).runtimes["thread_1"],
+        target_of(wait),
+        InteractionAnswer("text", text="approved child answer"),
+        input_id,
+    )
     assert receipt.replayed
     from vv_agent.session.store import Conflict
 
     with pytest.raises(Conflict):
-        surface.answer("thread_1", cast(Any, server.store).runtimes["thread_1"], "different answer", input_id)
+        surface.answer(
+            "thread_1",
+            cast(Any, server.store).runtimes["thread_1"],
+            target_of(wait),
+            InteractionAnswer("text", text="different answer"),
+            input_id,
+        )
     retained_head = surface.store.read_state("thread_1")[1][-1].seq
     retained_handles = len(surface.handles)
     adapter = cast(Any, server.run_adapter)
@@ -539,7 +552,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         thread_id="thread_1",
         turn_id=parent_tid,
         action_id="reply-child",
-        action={"kind": "respond", "message": {"role": "user", "content": "approved child answer"}},
+        action=text_action(wait, "approved child answer"),
     )
     assert replay["accepted"]
 

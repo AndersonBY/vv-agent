@@ -49,13 +49,63 @@
     },
     "bash_shell": {
       "yield_time_ms_default": 1000,
-      "yield_time_ms_range": [0, 10000],
-      "timeout_seconds_range": [1, 86400],
+      "yield_time_ms_range": [
+        0,
+        10000
+      ],
+      "timeout_seconds_range": [
+        1,
+        86400
+      ],
       "omitted_timeout_seconds": "no_deadline",
       "deadline_origin": "process_start_monotonic",
       "running_receipt": "SUCCESS",
-      "owner": ["task_id", "workspace_identity"],
+      "owner": [
+        "task_id",
+        "workspace_identity"
+      ],
       "shell_prepare_error_code": "invalid_shell_config"
+    },
+    "user_interactions": {
+      "limits": {
+        "prompt_bytes": 16384,
+        "options": 64,
+        "option_bytes": 1024,
+        "form_bytes": 65536,
+        "answer_bytes": 65536
+      },
+      "free_text": "accepted_for_every_form_including_custom_disabled",
+      "reply_shapes": {
+        "text": {
+          "reply_mode": "free_text",
+          "text": "user reply"
+        },
+        "single": {
+          "reply_mode": "selection",
+          "selection_type": "single",
+          "selected": [
+            "A"
+          ],
+          "custom": []
+        },
+        "multi": {
+          "reply_mode": "selection",
+          "selection_type": "multi",
+          "selected": [
+            "A",
+            "B"
+          ],
+          "custom": []
+        }
+      },
+      "oversize_error": "interaction_form_too_large",
+      "selection_validation": [
+        "exact_options",
+        "no_duplicates",
+        "custom_only_when_allowed",
+        "nonempty",
+        "bounded_counts_and_utf8_bytes"
+      ]
     }
   },
   "prompt": {

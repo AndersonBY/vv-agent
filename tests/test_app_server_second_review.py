@@ -10,10 +10,11 @@ from threading import Event
 from types import SimpleNamespace
 
 import pytest
+from support.interactions import displayed_target
 from test_app_server_distributed import node, request, submission
 from test_app_server_review_regressions import record_output
 
-from vv_agent import Agent, ScriptedModelProvider
+from vv_agent import Agent, InteractionAnswer, ScriptedModelProvider
 from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import Runtime
 from vv_agent.types import LLMResponse, ToolCall
@@ -75,7 +76,13 @@ def test_resumed_turn_after_restart_retries_dead_lease_without_external_wake(tmp
         a.processor.disconnect_connection("A")
         b = node(stack, tmp_path / "store", "B", models)
         _, agent, config = b.run_adapter._binding("thread")
-        b.kernel.answer("thread", b.kernel.runtime(agent, config), "answer", "reply")
+        b.kernel.answer(
+            "thread",
+            b.kernel.runtime(agent, config),
+            displayed_target(b.kernel, "thread"),
+            InteractionAnswer("text", text="answer"),
+            "reply",
+        )
         b.kernel.store.acquire("thread", owner="dead-before-restart", ttl_ms=200)
         assert request(b, 3, "turn/resume", {"threadId": "thread", "turnId": tid})["result"]["status"] == "running"
         eventually(lambda: bool(b.kernel.store.read_state("thread")[0].turns[tid].ended))

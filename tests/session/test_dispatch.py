@@ -271,6 +271,7 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
             "user",
             {"content": {"operation_id": park.operation_id, "interaction_id": handle["interaction_id"], "text": "blue"}},
             park.turn_id,
+            0,
         )
     transport.push("s", answer)
     assert transport.wakes == [*before, "s"] and transport.queue == ["s"]

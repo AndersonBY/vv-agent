@@ -484,17 +484,19 @@ def curate(output, streams, semantics, independent, facts):
             path.write_bytes(b"".join(raw + b"\n" for raw in independent(value)))
         elif name == "app_server_protocol.json":
             path.write_text(app_server_source(value))
-        elif name == "public_api.json":
+        elif name == "app_server_observable.json" or name == "public_api.json":
             path.write_text(public_api_source(value))
         elif name == "session_projection.json":
             # One source row per line keeps real wire objects readable without repeated indentation.
-            lines = [
-                "{",
-                '  "sessions": '
-                + json.dumps(value["sessions"], ensure_ascii=True, sort_keys=True, indent=0).replace("\n", "\n  ")
-                + ",",
-                '  "source_records": {',
-            ]
+            sessions = value["sessions"]
+            lines = ["{", '  "sessions": [']
+            lines.extend(
+                "    "
+                + json.dumps(item, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                + ("," if index + 1 < len(sessions) else "")
+                for index, item in enumerate(sessions)
+            )
+            lines.extend(["  ],", '  "source_records": {'])
             sources = sorted(value["source_records"].items())
             for index, (sid, rows) in enumerate(sources):
                 lines.append("    " + json.dumps(sid) + ": [")

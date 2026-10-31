@@ -7,9 +7,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support.interactions import displayed_target
 from support.kernel_runtime import start_runner
 
-from vv_agent import Agent, AgentStatus, RunConfig, Runner, ScriptedModelProvider, SubAgentConfig, function_tool
+from vv_agent import (
+    Agent,
+    AgentStatus,
+    InteractionAnswer,
+    RunConfig,
+    Runner,
+    ScriptedModelProvider,
+    SubAgentConfig,
+    function_tool,
+)
 from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.kernel import drive
 from vv_agent.session.store import Conflict
@@ -117,8 +127,10 @@ def test_wait_user_reply_stays_on_child_and_parent_adopts_only_authenticated_ter
         child = _child(driver, parent)
         original_tid = child["turn_id"]
         monkeypatch.setattr(parent, "_schedule_background", lambda: None)
-        manager = parent.runtime.child_tasks(driver.store, "parent")
-        assert manager.message(child["session_id"], "answer", "choice") == "message_queued"
+        receipt = driver.answer(
+            "parent", parent.runtime, displayed_target(driver, "parent"), InteractionAnswer("text", text="choice"), "answer"
+        )
+        assert receipt.input_id == "answer" and not receipt.replayed
         assert driver.store.peek_inbox(child["session_id"])[0].item.target_turn_id == original_tid
         assert not driver.store.peek_inbox("parent")
         resumed = Runner.resume(parent.session_id, parent.run_id)

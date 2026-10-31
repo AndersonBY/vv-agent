@@ -332,6 +332,22 @@
 {
 "id": "app_server.ThreadForkParams",
 "python": "vv_agent.ThreadForkParams"
+},
+{
+"id": "app_server.AppServerUserInteraction",
+"python": "vv_agent.AppServerUserInteraction"
+},
+{
+"id": "app_server.InteractionAnswerSpec",
+"python": "vv_agent.InteractionAnswerSpec"
+},
+{
+"id": "app_server.InteractionReplyTarget",
+"python": "vv_agent.InteractionReplyTarget"
+},
+{
+"id": "app_server.InteractionAnswer",
+"python": "vv_agent.InteractionAnswer"
 }
 ],
 "id": "app_server"
@@ -758,6 +774,10 @@
 {
 "id": "session.Provider",
 "python": "vv_agent.Provider"
+},
+{
+"id": "session.HeartbeatStopped",
+"python": "vv_agent.HeartbeatStopped"
 }
 ],
 "id": "session"
@@ -1243,6 +1263,26 @@
 {
 "id": "exports.OutputRetentionBackend",
 "python": "vv_agent.OutputRetentionBackend"
+},
+{
+"id": "exports.AppServerUserInteraction",
+"python": "vv_agent.AppServerUserInteraction"
+},
+{
+"id": "exports.InteractionAnswerSpec",
+"python": "vv_agent.InteractionAnswerSpec"
+},
+{
+"id": "exports.InteractionReplyTarget",
+"python": "vv_agent.InteractionReplyTarget"
+},
+{
+"id": "exports.InteractionAnswer",
+"python": "vv_agent.InteractionAnswer"
+},
+{
+"id": "exports.HeartbeatStopped",
+"python": "vv_agent.HeartbeatStopped"
 }
 ],
 "id": "exports"
@@ -6139,6 +6179,11 @@
 "python_target": "vv_agent.SummaryChildTool"
 },
 {
+"behavior": "normal heartbeat stop, distinct from lease loss",
+"id": "session_HeartbeatStopped",
+"python_target": "vv_agent.HeartbeatStopped"
+},
+{
 "behavior": "submit only after admission; query retained acceptance; validate definitive identity and evidence; authenticate callbacks including usage",
 "id": "session_Provider",
 "members": [
@@ -6354,6 +6399,255 @@
 }
 ],
 "python_target": "vv_agent.AppServerHost"
+},
+{
+"id": "interaction_AppServerUserInteraction",
+"members": [
+{
+"id": "target",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "target"
+}
+},
+{
+"id": "prompt",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "prompt"
+}
+},
+{
+"id": "answer_spec",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "answer_spec"
+}
+},
+{
+"id": "to_dict",
+"kind": "operation",
+"python": {
+"kind": "method",
+"name": "to_dict",
+"signature": {
+"async": false,
+"parameters": [
+{
+"kind": "positional_or_keyword",
+"name": "self",
+"required": true
+}
+]
+}
+}
+}
+],
+"python_target": "vv_agent.AppServerUserInteraction"
+},
+{
+"id": "interaction_InteractionAnswerSpec",
+"members": [
+{
+"id": "kind",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "kind"
+}
+},
+{
+"id": "options",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "options"
+}
+},
+{
+"id": "allow_custom_options",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "allow_custom_options"
+}
+},
+{
+"id": "to_dict",
+"kind": "operation",
+"python": {
+"kind": "method",
+"name": "to_dict",
+"signature": {
+"async": false,
+"parameters": [
+{
+"kind": "positional_or_keyword",
+"name": "self",
+"required": true
+}
+]
+}
+}
+}
+],
+"python_target": "vv_agent.InteractionAnswerSpec"
+},
+{
+"id": "interaction_InteractionReplyTarget",
+"members": [
+{
+"id": "session_id",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "session_id"
+}
+},
+{
+"id": "turn_id",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "turn_id"
+}
+},
+{
+"id": "generation",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "generation"
+}
+},
+{
+"id": "interaction_id",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "interaction_id"
+}
+},
+{
+"id": "operation_id",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "operation_id"
+}
+},
+{
+"id": "attempt",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "attempt"
+}
+},
+{
+"id": "request_digest",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "request_digest"
+}
+},
+{
+"id": "to_dict",
+"kind": "operation",
+"python": {
+"kind": "method",
+"name": "to_dict",
+"signature": {
+"async": false,
+"parameters": [
+{
+"kind": "positional_or_keyword",
+"name": "self",
+"required": true
+}
+]
+}
+}
+}
+],
+"python_target": "vv_agent.InteractionReplyTarget"
+},
+{
+"id": "interaction_InteractionAnswer",
+"members": [
+{
+"id": "kind",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "kind"
+}
+},
+{
+"id": "text",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "text"
+}
+},
+{
+"id": "selected",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "selected"
+}
+},
+{
+"id": "custom",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "custom"
+}
+},
+{
+"id": "to_dict",
+"kind": "operation",
+"python": {
+"kind": "method",
+"name": "to_dict",
+"signature": {
+"async": false,
+"parameters": [
+{
+"kind": "positional_or_keyword",
+"name": "self",
+"required": true
+}
+]
+}
+}
+}
+],
+"python_target": "vv_agent.InteractionAnswer"
 },
 {
 "id": "tool_result_ToolResultRef",
@@ -6996,6 +7290,16 @@
 "kind": "positional_or_keyword",
 "name": "ref",
 "required": true
+},
+{
+"kind": "keyword_only",
+"name": "offset",
+"required": false
+},
+{
+"kind": "keyword_only",
+"name": "length",
+"required": false
 }
 ]
 }

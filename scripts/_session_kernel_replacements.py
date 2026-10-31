@@ -877,6 +877,12 @@ class Author:
                         domain["capabilities"].append(
                             {"id": "export." + name if domain["id"] == "exports" else "app_server." + name, "python": target}
                         )
+        interaction_types = (
+            "AppServerUserInteraction",
+            "InteractionAnswerSpec",
+            "InteractionReplyTarget",
+            "InteractionAnswer",
+        )
         result_types = (
             "ToolResultRef",
             "ToolResultSummary",
@@ -887,13 +893,17 @@ class Author:
             "ToolResultResourceRef",
         )
         exports = next(domain for domain in d["domains"] if domain["id"] == "exports")
-        for name in (*result_types, "OutputRetentionBackend"):
+        for name in (*interaction_types, *result_types, "OutputRetentionBackend"):
             target = "vv_agent." + name
             if not any(c["python"] == target for c in exports["capabilities"]):
                 exports["capabilities"].append({"id": "exports." + name, "python": target})
-        identifiers = {"tool_result_" + name for name in result_types} | {"workspace_output_retention"}
+        identifiers = (
+            {"tool_result_" + name for name in result_types}
+            | {"interaction_" + name for name in interaction_types}
+            | {"workspace_output_retention"}
+        )
         d["surfaces"] = [surface for surface in d["surfaces"] if surface["id"] not in identifiers]
-        for name in result_types:
+        for name in (*interaction_types, *result_types):
             target = "vv_agent." + name
             value = resolve(target)
             members = [
@@ -912,7 +922,8 @@ class Author:
                         "python": {"kind": "method", "name": "to_dict", "signature": signature(value.to_dict)},
                     }
                 )
-            d["surfaces"].append({"id": "tool_result_" + name, "python_target": target, "members": members})
+            prefix = "interaction_" if name in interaction_types else "tool_result_"
+            d["surfaces"].append({"id": prefix + name, "python_target": target, "members": members})
         retention = resolve("vv_agent.OutputRetentionBackend")
         d["surfaces"].append(
             {

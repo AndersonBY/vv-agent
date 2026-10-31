@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from threading import Event
 
 import pytest
+from support.interactions import displayed_target
 from test_app_server_distributed import node, request, submission
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
@@ -320,7 +321,11 @@ def test_start_or_attach_and_compare_clear_with_barriers(tmp_path, monkeypatch):
                 thread_id="thread",
                 turn_id=tid,
                 action_id="reply",
-                action={"kind": "respond", "message": {"role": "user", "content": "go"}},
+                action={
+                    "kind": "respond",
+                    "target": displayed_target(server.kernel, "thread").to_dict(),
+                    "answer": {"kind": "text", "text": "go"},
+                },
                 connection_id="A",
             )
             assert pushed.wait(5)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -44,11 +45,21 @@ class _FakePaginator:
         return [{"Contents": contents}]
 
 
+class _FakeObjects(dict):
+    def __init__(self):
+        super().__init__()
+        self.etags = {}
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.etags[key] = hashlib.sha256(value).hexdigest()
+
+
 class _FakeS3Client:
     def __init__(self) -> None:
         self.exceptions = _FakeS3Exceptions()
         self.meta = SimpleNamespace(endpoint_url="https://s3.invalid")
-        self.objects: dict[str, bytes] = {}
+        self.objects = _FakeObjects()
         self.put_requests: list[dict[str, Any]] = []
 
     def get_paginator(self, _name: str) -> _FakePaginator:
@@ -58,7 +69,14 @@ class _FakeS3Client:
         key = str(kwargs["Key"])
         if key not in self.objects:
             raise _FakeNoSuchKey(key)
-        return {"Body": BytesIO(self.objects[key])}
+        data = self.objects[key]
+        etag = self.objects.etags[key]
+        if kwargs.get("IfMatch", etag) != etag:
+            raise _FakeClientError(key, response={"ResponseMetadata": {"HTTPStatusCode": 412}})
+        if "Range" in kwargs:
+            start, end = map(int, kwargs["Range"].removeprefix("bytes=").split("-"))
+            data = data[start : end + 1]
+        return {"Body": BytesIO(data)}
 
     def put_object(self, **kwargs: Any) -> None:
         key = str(kwargs["Key"])
@@ -79,8 +97,9 @@ class _FakeS3Client:
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
         key = str(kwargs["Key"])
         if key not in self.objects:
-            raise _FakeClientError(key)
+            raise _FakeClientError(key, response={"ResponseMetadata": {"HTTPStatusCode": 404}})
         return {
+            "ETag": self.objects.etags[key],
             "ContentLength": len(self.objects[key]),
             "LastModified": datetime.now(tz=UTC),
         }

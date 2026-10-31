@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from vv_agent import Agent, RunConfig, handoff, input_guardrail
+from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConfig, handoff, input_guardrail
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import RunBudgetLimits, UnavailableMetricPolicy
@@ -494,7 +494,13 @@ class Fixtures:
             )
             self.run(name)
             wait = self.kernel.waits(name, self.runtimes[name])[0][2]
-            self.kernel.answer(name, self.runtimes[name], "blue", "reply")
+            self.kernel.answer(
+                name,
+                self.runtimes[name],
+                AppServerUserInteraction.from_dict(wait["interaction"]).target,
+                InteractionAnswer("text", text="blue"),
+                "reply",
+            )
             self.run(name)
             assert self.result(name).final_output == "answered"
             self.semantics.append({"case": name, "interaction_id": wait["interaction_id"], "same_turn": True})
@@ -1260,7 +1266,11 @@ class Fixtures:
             "threadId": sid,
             "turnId": tid,
             "actionId": "reply-child",
-            "action": {"kind": "respond", "message": {"role": "user", "content": "answer"}},
+            "action": {
+                "kind": "respond",
+                "target": AppServerUserInteraction.from_dict(status["pendingInteraction"]).target.to_dict(),
+                "answer": {"kind": "text", "text": "answer"},
+            },
         }
         request(25, "turn/action", action)
         server.run_adapter.join()

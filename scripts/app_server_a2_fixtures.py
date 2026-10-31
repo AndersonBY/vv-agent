@@ -6,6 +6,7 @@ import argparse
 import json
 from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from scripts.session_kernel_fixtures import FixedDatetime, Fixtures, facts, independent_bytes, write_json
@@ -159,6 +160,8 @@ def exports(output):
     from scripts._session_kernel_replacements import Author
 
     with (
+        TemporaryDirectory(prefix="a2-fixtures-") as workspace,
+        patch("vv_agent.memory.session_memory.SessionMemory.storage_path", return_value=Path(workspace) / "session_memory.json"),
         patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000),
         patch("vv_agent.prompt.builder.datetime", FixedDatetime),
     ):

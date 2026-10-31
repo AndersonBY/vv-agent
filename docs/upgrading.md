@@ -106,8 +106,24 @@ See [tool result reads](app-server-tool-results.md).
 Reprojected events change bytes under their existing stable event IDs.
 Hosts that store immutable event projections must plan their product projection
 version boundary before upgrading; a kernel store schema bump is not required.
-This remains an unreleased draft; structured interaction follows in the same
-contract release.
+This remains an unreleased draft for the single 32.0.0 / 0.31.0 release.
+
+User questions now carry a retained typed form in status and snapshot `state`.
+Replace respond.message with respond.target and respond.answer. Free text remains
+legal for every form, including choices with custom selections disabled; the
+model-facing ask_user result is now JSON labeled free_text or selection. Update
+product projections and answer parsers accordingly. Existing direct host text
+inbox replies remain legal with explicit interaction, turn and generation.
+Child-task messages now queue steering instead of inferring a user-wait target.
+See [user interactions](app-server-interactions.md) for the exact shapes.
+
+Update output-retention backends for offset/length reads and per-page immutable
+version checks. A digest must not be rescanned for every page. Replace private
+`vv_agent.session.kernel._HeartbeatStopped` imports with public
+`vv_agent.HeartbeatStopped`. Stored records, inbox envelopes and SQL versions
+remain unchanged. Older applied text replies and retained questions still load;
+only new replies use the labeled result. Reprojected events and snapshots gain
+metadata.interaction and state, so hosts own any materialized projection update.
 
 ### 0.30.5
 

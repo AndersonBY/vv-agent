@@ -4525,10 +4525,10 @@
       }
     },
     {
-      "bytes_base64": "eyJhdmFpbGFibGVfbXMiOjAsImdlbmVyYXRpb24iOjAsImlucHV0X2lkIjoicmVwbHkiLCJraW5kIjoidXNlciIsInBheWxvYWQiOnsiY29udGVudCI6eyJpbnRlcmFjdGlvbl9pZCI6ImludGVyYWN0aW9uL3R1cm5fd2FpdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMSIsInRleHQiOiJibHVlIn19LCJzY2hlbWFfdmVyc2lvbiI6MywidGFyZ2V0X3R1cm5faWQiOiJ0dXJuX3dhaXQvdHVybi9pbml0aWFsIn0=",
+      "bytes_base64": "eyJhdmFpbGFibGVfbXMiOjAsImdlbmVyYXRpb24iOjAsImlucHV0X2lkIjoicmVwbHkiLCJraW5kIjoidXNlciIsInBheWxvYWQiOnsiY29udGVudCI6eyJpbnRlcmFjdGlvbl9pZCI6ImludGVyYWN0aW9uL3R1cm5fd2FpdC90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xL2F0dGVtcHQvMS90b29sLzAvMSIsIm1ldGFkYXRhIjp7ImludGVyYWN0aW9uX3Jlc3BvbnNlIjp7ImFuc3dlciI6eyJraW5kIjoidGV4dCIsInRleHQiOiJibHVlIn0sInRhcmdldCI6eyJhdHRlbXB0IjpudWxsLCJnZW5lcmF0aW9uIjowLCJpbnRlcmFjdGlvbklkIjoiaW50ZXJhY3Rpb24vdHVybl93YWl0L3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEvYXR0ZW1wdC8xL3Rvb2wvMC8xIiwib3BlcmF0aW9uSWQiOm51bGwsInJlcXVlc3REaWdlc3QiOiI5NDVhYTIzMWEyMzRlMTg2NDNiM2Y5ZjljMGZjZDJmZTM0YTNlYzhmNjJlMzc3MWE5ZDFmOGYyNGZiMzVjNmMzIiwic2Vzc2lvbklkIjoidHVybl93YWl0IiwidHVybklkIjoidHVybl93YWl0L3R1cm4vaW5pdGlhbCJ9fX0sIm9wZXJhdGlvbl9pZCI6bnVsbCwidGV4dCI6ImJsdWUifX0sInNjaGVtYV92ZXJzaW9uIjozLCJ0YXJnZXRfdHVybl9pZCI6InR1cm5fd2FpdC90dXJuL2luaXRpYWwifQ==",
       "record_id": null,
       "session_id": "turn_wait",
-      "sha256": "70834daa030c4f5846ae61e9e487a83fcf522991c8f775d44daa8ef9cb3d0f70",
+      "sha256": "49dadf508cf477221308b1c9529a07f86a10a6ee230d5548c2d31e90eccd4a7d",
       "type": "inbox",
       "wire": {
         "available_ms": 0,
@@ -4538,6 +4538,24 @@
         "payload": {
           "content": {
             "interaction_id": "interaction/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1",
+            "metadata": {
+              "interaction_response": {
+                "answer": {
+                  "kind": "text",
+                  "text": "blue"
+                },
+                "target": {
+                  "attempt": null,
+                  "generation": 0,
+                  "interactionId": "interaction/turn_wait/turn/initial/model/primary/1/attempt/1/tool/0/1",
+                  "operationId": null,
+                  "requestDigest": "945aa231a234e18643b3f9f9c0fcd2fe34a3ec8f62e3771a9d1f8f24fb35c6c3",
+                  "sessionId": "turn_wait",
+                  "turnId": "turn_wait/turn/initial"
+                }
+              }
+            },
+            "operation_id": null,
             "text": "blue"
           }
         },

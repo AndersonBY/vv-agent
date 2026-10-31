@@ -23,6 +23,7 @@ from vv_agent.output_validation import OutputRepairRequest
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
 from vv_agent.runtime.tool_results import apply_tool_use_behavior, build_skipped_result
+from vv_agent.tools.handlers.common import builtin_error
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
@@ -72,8 +73,8 @@ HEARTBEAT_CLOSE_SECONDS = 6.0
 logger = logging.getLogger(__name__)
 
 
-class _HeartbeatStopped(LeaseLost):
-    pass
+class HeartbeatStopped(LeaseLost):
+    """Normal stop of a lease-renewal worker; grants no execution ownership."""
 
 
 class _LeaseHeartbeat:
@@ -132,7 +133,7 @@ class _LeaseHeartbeat:
                 if self.lost:
                     raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
                 if self.stop.is_set():
-                    raise _HeartbeatStopped("heartbeat stopped")
+                    raise HeartbeatStopped("heartbeat stopped")
                 if time.monotonic() >= self.expires_deadline:
                     self.lost = True
                     raise LeaseLost("heartbeat lease expired")
@@ -168,7 +169,7 @@ class _LeaseHeartbeat:
                         self.ready.set()
                     if self.stop.wait(self.heartbeat_seconds):
                         break
-        except _HeartbeatStopped:
+        except HeartbeatStopped:
             pass
         except Exception as exc:
             with self.lock:
@@ -910,65 +911,53 @@ class _Driver:
                     ),
                     None,
                 )
-                turn_wait = self.state.turns[tid].wait if tid else None
-                if previous is not None:
-                    equal = previous._payload["input"]["payload"] == item.payload
-                    disposition, reason = ("noop", "retained user reply") if equal else ("rejected", "user reply conflict")
-                elif turn_wait is not None and item.kind == "user":
-                    wait = turn_wait._payload["interaction_id"]
-                    if (
-                        target_tid != tid
-                        or not isinstance(content, dict)
-                        or content.get("interaction_id") != wait
-                        or "text" not in content
-                    ):
-                        disposition, reason = "rejected", "reply must identify the parked turn"
-                else:
-                    wait = None
-                waits = [(oid, n, h) for (oid, n), h in self.state.waits.items() if h["handle"]["kind"] == "user"]
-                if previous is not None or (turn_wait is not None and item.kind == "user"):
-                    pass
-                elif item.kind == "user" and tid and waits:
-                    content = item.payload["content"]
-                    match = next(
-                        (
-                            (oid, n, h)
-                            for oid, n, h in waits
-                            if isinstance(content, dict)
-                            and content.get("interaction_id") == h["handle"]["interaction_id"]
-                            and content.get("operation_id") == oid
-                            and "text" in content
-                            and target_tid == tid
-                        ),
-                        None,
+                typed_content = (
+                    isinstance(content, dict)
+                    and isinstance(content.get("metadata"), dict)
+                    and "interaction_response" in content["metadata"]
+                )
+                if item.kind == "follow_up" and typed_content:
+                    disposition, reason = "rejected", "invalid_interaction_answer"
+                elif previous is not None:
+                    equal = (
+                        previous._payload["input"]["payload"] == item.payload
+                        and previous._payload["input"]["generation"] == item.generation
                     )
-                    if match is None:
-                        disposition, reason = "rejected", "reply must identify the parked interaction"
+                    disposition, reason = ("noop", "retained user reply") if equal else ("rejected", "user reply conflict")
+                elif item.kind == "user" and (
+                    target_tid is not None or typed_content or (isinstance(content, dict) and "interaction_id" in content)
+                ):
+                    from .interactions import InteractionError, validate_inbox_reply
+
+                    try:
+                        reply_target, answer = validate_inbox_reply(self.state, self.sid, item)
+                    except InteractionError as exc:
+                        disposition, reason = "rejected", exc.reason
                     else:
-                        target, number, h = match
-                        wait = h["handle"]["interaction_id"]
-                        plan = self.state.operations[target].attempts[number].execution_plan
-                        context = self.runtime.context(
-                            self.task(),
-                            plan,
-                            self.scope.token,
-                            shared_state=self.shared_state(),
-                            store=self.store,
-                            session_id=self.sid,
-                        )
-                        outcome = self.finalize_tool(
-                            plan,
-                            context,
-                            Definitive(
-                                ToolExecutionResult(
-                                    tool_call_id=plan._payload["request"]["id"], content=str(content["text"])
-                                ).to_dict(),
-                                (),
-                            ),
-                        )
-                        extra = self.completed(plan, outcome)
+                        target, wait = reply_target.operation_id, reply_target.interaction_id
+                        if target is not None:
+                            plan = self.state.operations[target].attempts[reply_target.attempt].execution_plan
+                            context = self.runtime.context(
+                                self.task(),
+                                plan,
+                                self.scope.token,
+                                shared_state=self.shared_state(),
+                                store=self.store,
+                                session_id=self.sid,
+                            )
+                            outcome = self.finalize_tool(
+                                plan,
+                                context,
+                                Definitive(
+                                    ToolExecutionResult(
+                                        tool_call_id=plan._payload["request"]["id"], content=answer.model_text()
+                                    ).to_dict(),
+                                    (),
+                                ),
+                            )
+                            extra = self.completed(plan, outcome)
                 elif tid and item.kind == "user":
-                    disposition, reason = "rejected", "turn already active"
+                    disposition, reason = "rejected", "reply must identify the parked interaction"
                 else:
                     disposition = "queued"
             elif item.kind == "model_selection":
@@ -1461,11 +1450,33 @@ class _Driver:
             outcome = self.runtime.functions.submit(plan, context=context)
             if not isinstance(outcome, Definitive):
                 raise ValueError("ask_user must be a synchronous interaction")
+            if outcome.result.get("directive") != "wait_user":
+                self.commit(self.completed(plan, self.finalize_tool(plan, context, outcome)), guarded=True)
+                return
             question = outcome.result.get("metadata", {}).get("question", outcome.result["content"])
             parked = self.parked(
                 plan, {"kind": "user", "interaction_id": f"interaction/{plan.operation_id}", "question": question}, after=False
             )
             parked = replace(parked, payload=parked._payload | {"interaction_result": outcome.result})
+            from .interactions import InteractionError, user_interaction
+
+            assert plan.turn_id is not None
+            try:
+                user_interaction(
+                    self.sid,
+                    plan.turn_id,
+                    self.state.turns[plan.turn_id].start._payload["generation"],
+                    parked._payload,
+                    operation_id=plan.operation_id,
+                    attempt=plan.attempt,
+                )
+            except InteractionError:
+                invalid = builtin_error("Interaction form exceeds the UTF-8 size or option limit.", "interaction_form_too_large")
+                invalid.tool_call_id = plan._payload["request"]["id"]
+                self.commit(
+                    self.completed(plan, self.finalize_tool(plan, context, Definitive(invalid.to_dict(), ()))), guarded=True
+                )
+                return
             skipped = []
             for oid, op in self.state.operations.items():
                 pending = op.attempts[max(op.attempts)]

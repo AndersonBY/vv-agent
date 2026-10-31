@@ -40,6 +40,7 @@ def test_resume_keeps_original_owner_and_turn(tmp_path: Path):
                 }
             },
             tid,
+            0,
         ),
     )
     receiving = Runner.configured(RunConfig(model_provider=ScriptedModelProvider.new("other", "other", [])))

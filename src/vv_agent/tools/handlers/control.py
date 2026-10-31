@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json, trim_portable_whitespace
+from vv_agent.tools.handlers.common import builtin_error, to_json, trim_portable_whitespace
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
 
 
@@ -35,6 +35,16 @@ def ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionRe
     }
     if options is not None:
         payload["options"] = options
+
+    from vv_agent.canonical_json import canonical_json_bytes
+
+    if (
+        len(question.encode("utf-8")) > 16_384
+        or len(options or []) > 64
+        or any(len(v.encode("utf-8")) > 1024 for v in options or [])
+        or len(canonical_json_bytes(payload)) > 65_536
+    ):
+        return builtin_error("Interaction form exceeds the UTF-8 size or option limit.", "interaction_form_too_large")
 
     return ToolExecutionResult(
         tool_call_id="",

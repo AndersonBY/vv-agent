@@ -809,3 +809,57 @@ def test_json_large_integer_stays_exact_in_body_without_unsafe_inline_value(stor
         assert json.loads(body) == value
     finally:
         server.close()
+
+
+def test_64mib_resource_pages_read_at_most_twice_the_retained_bytes(store):
+    from io import BytesIO
+
+    from test_workspace_backends import _make_s3_backend
+
+    backend = _make_s3_backend()
+    backend = cast(Any, backend)
+    data = bytes(range(256)) * (64 * 1024 * 1024 // 256)
+    backend._client.objects[backend._key("output.bin")] = data
+    read_bytes = 0
+    original_get = backend._client.get_object
+
+    class CountedBody(BytesIO):
+        def read(self, size=-1):
+            nonlocal read_bytes
+            chunk = super().read(size)
+            read_bytes += len(chunk)
+            return chunk
+
+    def get_object(**kwargs):
+        response = original_get(**kwargs)
+        body = response["Body"]
+        try:
+            return {"Body": CountedBody(body.read())}
+        finally:
+            body.close()
+
+    backend._client.get_object = get_object
+    server = ResultServer(store, ResultHost(backend, kinds=("file",)))
+    try:
+        server.start()
+        summary = server.summaries()[0]
+        read_bytes = 0  # Measure paging the already retained resource, including initial verification.
+        digest, offset = hashlib.sha256(), 0
+        while offset < len(data):
+            response = server.page(summary["ref"], part="resource:0", offset=offset, limit=65_536)
+            assert "result" in response, response
+            page = response["result"]
+            chunk = base64.b64decode(page["data"], validate=True)
+            digest.update(chunk)
+            offset = page["nextOffset"]
+        assert offset == len(data) and digest.hexdigest() == hashlib.sha256(data).hexdigest()
+        assert read_bytes <= 2 * len(data), read_bytes
+        assert read_bytes >= len(data)
+        print(f"retained_bytes={len(data)} backend_bytes_read={read_bytes}")
+        raw = store.read(THREAD, after_seq=summary["ref"]["seq"] - 1, limit=1).records[0].record.payload["result"]
+        ref = raw["metadata"]["app_server_resources"][0]["ref"]
+        backend._client.objects[backend._key(ref["locator"])] = b"x" * len(data)
+        error(server.page(summary["ref"], part="resource:0"), "stale_reference")
+        assert read_bytes <= 2 * len(data)
+    finally:
+        server.close()

@@ -441,6 +441,35 @@ def test_interactive_real_same_turn_user_reply(surface, tmp_path):
     assert sum(r.record.kind == "turn_ended" for r in records) == 1
 
 
+def test_interactive_reply_uses_the_last_displayed_question_not_the_current_wait(surface, tmp_path):
+    provider = ScriptedModelProvider.new(
+        "test",
+        "m",
+        [
+            LLMResponse("", [ToolCall("first", "ask_user", {"question": "First?"})]),
+            LLMResponse("", [ToolCall("second", "ask_user", {"question": "Second?"})]),
+            LLMResponse("done"),
+        ],
+    )
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    agent = Agent("assistant", "Ask.", model="m")
+    session = client.create_session(agent=agent, session_id="displayed-question")
+    session.prompt("go", auto_follow_up=False)
+    stale = client.create_session(agent=agent, session_id=session.session_id)
+    second = session.continue_run("first answer")
+    form = second.metadata["session_waits"][0]["interaction"]
+    assert form["prompt"] == "Second?"
+    before = surface.store.read_state(session.session_id)[1]
+    with pytest.raises(ValueError, match="stale_interaction"):
+        stale.continue_run("late first answer")
+    assert surface.store.read_state(session.session_id)[1] == before
+    assert not surface.store.peek_inbox(session.session_id)
+    fresh = client.create_session(agent=agent, session_id=session.session_id)
+    restored = fresh.latest_run
+    assert restored is not None and restored.metadata["session_waits"][0]["interaction"] == form
+    assert fresh.continue_run("second answer").final_output == "done"
+
+
 def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
     import threading
 

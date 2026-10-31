@@ -130,10 +130,24 @@ class MemoryWorkspaceBackend:
         _exclusive_workspace_path_segments(path)
         return self._read_bytes_chunks(path)
 
-    def open_retained(self, ref):
-        from vv_agent.workspace.resources import validate_retained_workspace
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
 
-        return self._read_output_chunks(validate_retained_workspace(ref, self.retained_workspace_id))
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        length = retained_range(ref, offset, length)
+        with self._lock:
+            if path not in self._files:
+                raise FileNotFoundError(path)
+            data = self._files[path]
+        if len(data) != ref.size_bytes:
+            raise ValueError("stale_reference")
+        # Bytes are immutable; holding the value also prevents identity reuse during this read.
+        verify_retained(ref, (id(data), data), lambda: (data,))
+        for start in range(offset, offset + length, 65_536):
+            yield data[start : min(start + 65_536, offset + length)]
+        with self._lock:
+            if self._files.get(path) is not data:
+                raise ValueError("stale_reference")
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._norm(path)

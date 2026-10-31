@@ -7,7 +7,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Iterable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -187,8 +187,9 @@ class LocalWorkspaceBackend:
 
         return copy_retained_output(self, path, expected=expected)
 
-    def _read_output_chunks(self, path):
-        """Open every path component without following links, even in permissive workspaces."""
+    @contextmanager
+    def _open_output(self, path):
+        """Open every path component without following links."""
         segments = _exclusive_workspace_path_segments(path)
         root = self._artifact_root if self._artifact_segments(path) else self._root
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -198,8 +199,7 @@ class LocalWorkspaceBackend:
                 if root.joinpath(*segments[:index]).is_symlink():
                     raise ValueError("resource path contains a symlink")
             with target.open("rb") as source:
-                while chunk := source.read(65_536):
-                    yield chunk
+                yield source
             return
         directory = os.open(root, flags | os.O_DIRECTORY)
         try:
@@ -211,15 +211,44 @@ class LocalWorkspaceBackend:
             with os.fdopen(descriptor, "rb") as source:
                 if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                     raise ValueError("resource must be a regular file")
-                while chunk := source.read(65_536):
-                    yield chunk
+                yield source
         finally:
             os.close(directory)
 
-    def open_retained(self, ref):
-        from vv_agent.workspace.resources import validate_retained_workspace
+    def _read_output_chunks(self, path):
+        with self._open_output(path) as source:
+            while chunk := source.read(65_536):
+                yield chunk
 
-        return self._read_output_chunks(validate_retained_workspace(ref, self.retained_workspace_id))
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
+
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        remaining = retained_range(ref, offset, length)
+        with self._open_output(path) as source:
+
+            def version():
+                info = os.fstat(source.fileno())
+                return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            original = version()
+            if original[2] != ref.size_bytes:
+                raise ValueError("stale_reference")
+
+            def chunks():
+                while chunk := source.read(65_536):
+                    yield chunk
+
+            verify_retained(ref, original, chunks)
+            source.seek(offset)
+            while remaining:
+                chunk = source.read(min(remaining, 65_536))
+                if not chunk:
+                    raise ValueError("stale_reference")
+                remaining -= len(chunk)
+                yield chunk
+            if version() != original:
+                raise ValueError("stale_reference")
 
     def file_info(self, path: str) -> FileInfo | None:
         target, logical_path = self._resolve_read_target(path)

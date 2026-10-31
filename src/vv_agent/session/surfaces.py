@@ -189,11 +189,17 @@ class SessionDriver:
         state, records, _ = self.store.read_state(sid)
         return [m for m in project_context(records, state) if m.role != "system"]
 
-    def waits(self, sid: str, runtime: Runtime | None = None) -> list[tuple[str, Runtime | None, dict[str, Any]]]:
-        state, _records, _ = self.store.read_state(sid)
+    def waits(
+        self, sid: str, runtime: Runtime | None = None, *, snapshot=None
+    ) -> list[tuple[str, Runtime | None, dict[str, Any]]]:
+        state, _records, _ = snapshot or self.store.read_state(sid)
+        from .interactions import user_interaction
+
         found = []
         tid = state.active_turn_id
-        turn_wait = state.turns[tid].wait if tid else None
+        if tid is None:
+            return found
+        turn_wait = state.turns[tid].wait
         if turn_wait:
             found.append(
                 (
@@ -203,6 +209,9 @@ class SessionDriver:
                         "interaction_id": turn_wait._payload["interaction_id"],
                         "question": turn_wait._payload["question"],
                         "turn_id": tid,
+                        "interaction": user_interaction(
+                            sid, tid, state.turns[tid].start._payload["generation"], turn_wait._payload
+                        ),
                     },
                 )
             )
@@ -215,31 +224,62 @@ class SessionDriver:
                     child_id = child["session_id"]
                     found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id) if runtime else None))
             elif handle["kind"] in {"user", "approval"}:
-                found.append((sid, runtime, handle | {"operation_id": oid, "attempt": number, "turn_id": tid}))
+                public = {}
+                if handle["kind"] == "user":
+                    public["interaction"] = user_interaction(
+                        sid, tid, state.turns[tid].start._payload["generation"], wait, operation_id=oid, attempt=number
+                    )
+                found.append((sid, runtime, handle | {"operation_id": oid, "attempt": number, "turn_id": tid} | public))
+        # Background admissions retain a child handle after their parent tool completes.
+        seen = {child_sid for child_sid, _, _ in found}
+        for op in state.operations.values():
+            if op.turn_id != tid:
+                continue
+            for admitted in op.attempts.values():
+                if admitted.child_handle is None:
+                    continue
+                for child in child_handles(admitted.child_handle):
+                    child_id = child["session_id"]
+                    if child["background"] and child_id not in seen:
+                        found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id) if runtime else None))
+                        seen.add(child_id)
         return found
 
-    def answer(self, sid: str, runtime: Runtime, text: str, input_id: str):
+    def answer(self, sid: str, runtime: Runtime, target, answer, input_id: str):
+        from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
+
+        from .interactions import InteractionError, reply_content, validate_reply
+        from .tool_result_read import ToolResultReadError, validate_child_graph
+
+        if not isinstance(target, InteractionReplyTarget) or not isinstance(answer, InteractionAnswer):
+            raise TypeError("answer requires InteractionReplyTarget and InteractionAnswer")
+        try:
+            chain, root_turn = validate_child_graph(self.store, sid, target.session_id)
+        except ToolResultReadError:
+            raise InteractionError("stale_interaction") from None
         previous = self._retained_reply(sid, input_id)
+        item = InboxItem(input_id, "user", {"content": reply_content(target, answer)}, target.turn_id, target.generation)
         if previous:
-            target, item = previous
-            if item.kind != "user":
+            if previous[0] != target.session_id or previous[1].encode() != item.encode():
                 raise Conflict("input_id reused with different bytes")
-            content = item.payload["content"] | {"text": text}
-            return self.push(target, replace(item, payload={"content": content}))
-        waits = [w for w in self.waits(sid, runtime) if "interaction_id" in w[2]]
-        if len(waits) != 1:
-            raise ValueError("reply requires exactly one pending user interaction")
-        target, _, wait = waits[0]
-        state, _, _ = self.store.read_state(target)
-        content = {"interaction_id": wait["interaction_id"], "text": text}
-        if "operation_id" in wait:
-            content["operation_id"] = wait["operation_id"]
-        return self.push(
-            target,
-            InboxItem(
-                input_id, "user", {"content": content}, wait["turn_id"], state.turns[wait["turn_id"]].start._payload["generation"]
-            ),
-        )
+            return self.push(target.session_id, item)
+        captured = {identity: self.store.read_state(identity) for identity in [sid, *chain]}
+        try:
+            validate_child_graph(self.store, sid, target.session_id, active=True)
+        except ToolResultReadError:
+            raise InteractionError("stale_interaction") from None
+        root_state, _, _ = captured[sid]
+        if target.session_id != sid and root_turn != root_state.active_turn_id:
+            raise InteractionError("stale_interaction")
+        state, _, _ = captured[target.session_id]
+        validate_reply(state, target.session_id, target, answer)
+        with self.store.atomic() as tx:
+            # Prepare outside row locks; recheck the captured heads before mutation.
+            for identity in [sid, *chain]:
+                tx.lock_session(identity)
+                if self.store.lease_status(identity)[0] != captured[identity][1][-1].seq:
+                    raise InteractionError("stale_interaction")
+            return self.push(target.session_id, item)
 
     def approve(self, sid: str, runtime: Runtime, request_id: str, decision: ApprovalDecision | str, input_id: str):
         if isinstance(decision, str):

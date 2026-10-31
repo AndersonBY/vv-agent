@@ -49,3 +49,25 @@ def surface(request, monkeypatch):
 def isolated_working_directory(tmp_path, monkeypatch):
     """Default workspace projections belong to each disposable test directory."""
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def repository_artifact_guard():
+    """Fail the full run if any test or generator creates files in the checkout."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    excluded = {".git", ".venv", ".pytest_cache", ".ruff_cache", "__pycache__"}
+
+    def files():
+        import os
+
+        found = set()
+        for directory, children, names in os.walk(root):
+            children[:] = [name for name in children if name not in excluded]
+            found.update((Path(directory) / name).relative_to(root).as_posix() for name in names)
+        return found
+
+    before = files()
+    yield
+    assert not (created := files() - before), f"tests created repository artifacts: {sorted(created)}"

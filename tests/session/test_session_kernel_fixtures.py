@@ -15,8 +15,9 @@ from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator
+from support.interactions import displayed_target
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker
 from vv_agent.events import ApprovalRequestedEvent, event_from_dict
 from vv_agent.model import ScriptedModelProvider
@@ -65,7 +66,7 @@ def generated_fixtures(tmp_path_factory):
     reports = []
     for output in directories:
         generated = subprocess.run(
-            [sys.executable, str(SCRIPT), "--output", str(output)], capture_output=True, text=True, timeout=600
+            [sys.executable, str(SCRIPT), "--output", str(output)], cwd=root, capture_output=True, text=True, timeout=600
         )
         assert generated.returncode == 0, generated.stderr
         assert {p.name for p in output.iterdir()} == FILES
@@ -585,7 +586,9 @@ def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes
         tid = result.raw_result.turn_id
         assert tid is not None and result.status.value == "wait_user"
         original = kernel.handles[-1]
-        kernel.answer("resume", original.runtime, "reply", "reply")
+        kernel.answer(
+            "resume", original.runtime, displayed_target(kernel, "resume"), InteractionAnswer("text", text="reply"), "reply"
+        )
         resumed = runner.resume("resume", tid)
         assert resumed.raw_result.turn_id == tid
         assert len(resumed.raw_result.cycles) == 2

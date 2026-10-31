@@ -32,6 +32,7 @@ from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
 from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
+from vv_agent.session.interactions import InteractionError
 from vv_agent.session.store import Conflict
 
 CLIENT_METHODS: tuple[str, ...] = (
@@ -260,6 +261,12 @@ class MessageProcessor:
             return
         try:
             future.result()
+        except InteractionError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError(-32602, exc.reason, {"reason": exc.reason}))
+        except PermissionError:
+            self._router.send_error(
+                connection_id, request.id, AppServerError(-32027, "permission_denied", {"reason": "permission_denied"})
+            )
         except SubmissionConflict:
             self._router.send_error(
                 connection_id, request.id, AppServerError(AppServerErrorCode.SUBMISSION_CONFLICT, "submission_conflict")
@@ -847,8 +854,12 @@ class MessageProcessor:
             return
         try:
             action = TurnActionParams.from_dict(params)
-        except (TypeError, ValueError) as exc:
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+        except (TypeError, ValueError):
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError(-32602, "invalid_interaction_answer", {"reason": "invalid_interaction_answer"}),
+            )
             return
         try:
             snapshot = self._store.read_thread(action.thread_id)
@@ -860,7 +871,7 @@ class MessageProcessor:
             return
         if not any(candidate.turn_id == action.turn_id for candidate in snapshot.turns):
             self._router.send_error(
-                connection_id, request.id, AppServerError.invalid_params("Turn does not belong to the requested thread")
+                connection_id, request.id, AppServerError(-32025, "Turn does not belong to the requested thread")
             )
             return
         try:
@@ -961,6 +972,7 @@ class MessageProcessor:
                 for turn in snapshot.turns
             ],
             "items": [item.to_dict() for item in snapshot.items],
+            "state": snapshot.state,
         }
         return result
 

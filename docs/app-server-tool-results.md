@@ -120,3 +120,18 @@ old output.
 File reads keep only the requested page and one bounded stream chunk in
 memory. Text reads still decode a complete SQL record; their page limit is
 not a bound on the record decoder's allocation.
+
+
+Backends implement `open_retained(ref, *, offset=0, length=None)` as a range read.
+Every page must attest size and the same immutable version. Built-in backends
+verify SHA-256 once per process-cached reference, then check file identity or
+object version around each page. Local files use nofollow opens and device,
+inode, size, mtime and ctime; S3 uses ETag/VersionId and conditional range GETs.
+Memory reads hold immutable bytes. Cache eviction or restart can require one
+fresh digest pass. Paging one retained resource costs at most one digest scan
+plus its returned bytes while its verification remains cached. Retention itself
+may separately copy the original output. The cache has at most 1024 entries and
+bounds retained memory-byte versions to 256 MiB (one larger entry may remain).
+Host implementations can attest their already verified immutable versions.
+Changed content remains stale_reference; missing content remains resource_missing.
+Authorization precedes metadata and byte access.

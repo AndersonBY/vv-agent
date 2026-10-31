@@ -21,7 +21,7 @@ class ToolResultReadError(ValueError):
         self.reason, self.denied = reason, denied
 
 
-def validate_child_graph(store, root, sid):
+def validate_child_graph(store, root, sid, *, active=False):
     """Follow immutable admission handles, not child-supplied parent strings alone."""
     visited, chain, root_turn = set(), [], None
     while sid != root:
@@ -44,6 +44,15 @@ def validate_child_graph(store, root, sid):
                 if attempt.child_handle is not None
                 for h in child_handles(attempt.child_handle)
             ]
+            if active:
+                child_state, _, _ = store.read_state(sid)
+                if (
+                    state.active_turn_id != op.turn_id
+                    or state.closed
+                    or state.archived
+                    or child_state.active_turn_id != handle["turn_id"]
+                ):
+                    raise KeyError("inactive admission")
             if (
                 handle not in admitted
                 or handle["session_id"] != sid
@@ -153,20 +162,14 @@ def read_tool_result(adapter, host, connection_id, params):
         if retained.workspace_id != getattr(backend, "retained_workspace_id", None):
             raise ToolResultReadError("permission_denied", denied=True)
         total, digest = retained.size_bytes, retained.sha256
+        if offset > total:
+            raise ToolResultReadError("invalid_range")
         page = bytearray()
-        size, scan = 0, hashlib.sha256()
         try:
-            for chunk in backend.open_retained(retained):
-                if not isinstance(chunk, bytes) or len(chunk) > PAGE_BYTES:
+            for chunk in backend.open_retained(retained, offset=offset, length=limit):
+                if not isinstance(chunk, bytes) or len(chunk) > PAGE_BYTES or len(page) + len(chunk) > limit:
                     raise ToolResultReadError("stale_reference")
-                start = max(offset - size, 0)
-                stop = min(offset + limit - size, len(chunk))
-                if start < stop:
-                    page.extend(chunk[start:stop])
-                size += len(chunk)
-                scan.update(chunk)
-                if size > total:
-                    raise ToolResultReadError("stale_reference")
+                page.extend(chunk)
         except FileNotFoundError:
             raise ToolResultReadError("resource_missing") from None
         except PermissionError:
@@ -175,7 +178,7 @@ def read_tool_result(adapter, host, connection_id, params):
             if isinstance(exc, ToolResultReadError):
                 raise
             raise ToolResultReadError("stale_reference") from None
-        if size != total or scan.hexdigest() != digest:
+        if len(page) != min(limit, total - offset):
             raise ToolResultReadError("stale_reference")
         data = page
     if offset > total:

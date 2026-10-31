@@ -190,9 +190,12 @@ jobs:
               urllib.parse.quote(expected["version"]),
           )
           last_error = ""
-          for attempt in range(1, 13):
+          deadline = time.monotonic() + 300
+          attempt = 0
+          while True:
+              attempt += 1
               try:
-                  with urllib.request.urlopen(url, timeout=20) as response:
+                  with urllib.request.urlopen(url, timeout=min(20, max(0.1, deadline - time.monotonic()))) as response:
                       payload = json.load(response)
                   actual = {
                       item["filename"]: item["digests"]["sha256"]
@@ -207,7 +210,7 @@ jobs:
                   last_error = "remote artifact names or hashes do not match the local build"
               except Exception as error:  # PyPI metadata can lag immediately after publication.
                   last_error = str(error)
-              if attempt == 12:
+              if time.monotonic() >= deadline:
                   raise SystemExit(f"PyPI verification failed after {attempt} attempts: {last_error}")
-              time.sleep(5)
+              time.sleep(min(5, max(0, deadline - time.monotonic())))
           PY

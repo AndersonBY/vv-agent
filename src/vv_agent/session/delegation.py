@@ -663,29 +663,6 @@ class ChildTasks:
         generation = state.turns[target].start._payload["generation"] if target else None
         action = "message_queued" if target else "continued"
         kind, payload = ("steer", {"content": text}) if target else ("follow_up", {"content": text})
-        turn_wait = state.turns[target].wait if target else None
-        if turn_wait:
-            kind = "user"
-            payload = {"content": {"interaction_id": turn_wait._payload["interaction_id"], "text": text}}
-        elif target:
-            waits = [
-                a.wait
-                for op in state.operations.values()
-                for a in op.attempts.values()
-                if a.wait and a.wait["handle"]["kind"] == "user"
-            ]
-            if waits:
-                wait = waits[0]
-                kind = "user"
-                payload = {
-                    "content": {
-                        "interaction_id": wait["handle"]["interaction_id"],
-                        "operation_id": next(
-                            oid for oid, op in state.operations.items() if any(a.wait is wait for a in op.attempts.values())
-                        ),
-                        "text": text,
-                    }
-                }
         with self.store.atomic() as tx:
             tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
         self.runtime.wake(task_id)

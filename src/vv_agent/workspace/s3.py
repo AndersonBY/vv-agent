@@ -232,14 +232,49 @@ class S3WorkspaceBackend:
         _exclusive_workspace_path_segments(path)
         return self._read_bytes_chunks(path)
 
-    def open_retained(self, ref):
-        from vv_agent.workspace.resources import validate_retained_workspace
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
 
         path = validate_retained_workspace(ref, self.retained_workspace_id)
+        length = retained_range(ref, offset, length)
+        request = {"Bucket": self._bucket, "Key": self._key(path)}
         try:
-            yield from self._read_output_chunks(path)
-        except self._client.exceptions.NoSuchKey as exc:
-            raise FileNotFoundError("retained resource missing") from exc
+            head = self._client.head_object(**request)
+            etag = head.get("ETag")
+            if head["ContentLength"] != ref.size_bytes or not etag:
+                raise ValueError("stale_reference")
+            request["IfMatch"] = etag
+            if head.get("VersionId"):
+                request["VersionId"] = head["VersionId"]
+
+            def read(extra):
+                body = self._client.get_object(**request, **extra)["Body"]
+                try:
+                    while chunk := body.read(65_536):
+                        yield chunk
+                finally:
+                    body.close()
+
+            verify_retained(ref, (etag, head.get("VersionId")), lambda: read({}))
+            if length:
+                yield from read({"Range": f"bytes={offset}-{offset + length - 1}"})
+            after = self._client.head_object(Bucket=self._bucket, Key=self._key(path))
+            if (after.get("ETag"), after.get("VersionId"), after["ContentLength"]) != (
+                etag,
+                head.get("VersionId"),
+                ref.size_bytes,
+            ):
+                raise ValueError("stale_reference")
+        except self._client.exceptions.ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = exc.response.get("Error", {}).get("Code")
+            if status == 404 or code in {"NoSuchKey", "NotFound", "404"} or isinstance(exc, self._client.exceptions.NoSuchKey):
+                raise FileNotFoundError("retained resource missing") from exc
+            if status == 403 or code in {"AccessDenied", "Forbidden", "403"}:
+                raise PermissionError("retained resource access denied") from exc
+            if status == 412 or code == "PreconditionFailed":
+                raise ValueError("stale_reference") from exc
+            raise
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._key(path)

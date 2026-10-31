@@ -80,7 +80,7 @@ class VersionWorkspace(MemoryWorkspaceBackend):
             expected.name,
         )
 
-    def open_retained(self, ref):
+    def open_retained(self, ref, *, offset=0, length=None):
         if ref.workspace_id != self.retained_workspace_id:
             raise PermissionError("wrong workspace")
         self.opens += 1
@@ -88,8 +88,9 @@ class VersionWorkspace(MemoryWorkspaceBackend):
         data = next((data for data, digest in self.versions.values() if "version:" + digest == ref.locator), None)
         if data is None:
             raise FileNotFoundError("missing version")
-        for offset in range(0, len(data), 65_536):
-            chunk = data[offset : offset + 65_536]
+        end = len(data) if length is None else min(len(data), offset + length)
+        for start in range(offset, end, 65_536):
+            chunk = data[start : min(start + 65_536, end)]
             self.peak_chunk = max(self.peak_chunk, len(chunk))
             yield chunk
 

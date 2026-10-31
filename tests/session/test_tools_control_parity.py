@@ -8,8 +8,9 @@ from typing import Any
 
 import pytest
 from support import FixedModelProvider
+from support.interactions import displayed_target
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker, ApprovalDecision
 from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.run_config import ToolPolicy
@@ -200,7 +201,7 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
                 m.content for m in request.messages if m.tool_call_id == "pending"
             )
         replies = [m.content for m in request.messages if m.role in {"user", "tool"}]
-        assert "blue" in replies
+        assert "blue" in replies or '"reply_mode":"free_text","text":"blue"' in "".join(replies)
         return LLMResponse("", [ToolCall("f", "finish", {"text": "blue"})])
 
     steps: list[ScriptStep] = [LLMResponse("Which?", calls), answered]
@@ -212,7 +213,7 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
     owner = waiting._session_driver
     sid, tid = waiting.raw_result.session_id, waiting.raw_result.turn_id
     assert sid is not None and tid is not None
-    owner.answer(sid, owner.handles[-1].runtime, "blue", "reply")
+    owner.answer(sid, owner.handles[-1].runtime, displayed_target(owner, sid), InteractionAnswer("text", text="blue"), "reply")
     resumed = runner.resume(sid, tid)
     assert resumed.final_output == "blue"
     admit(store, config)

@@ -89,6 +89,7 @@ from vv_agent.events import (
 )
 from vv_agent.guardrails import GuardrailResult, input_guardrail, output_guardrail
 from vv_agent.handoffs import Handoff, handoff
+from vv_agent.interaction import AppServerUserInteraction, InteractionAnswer, InteractionAnswerSpec, InteractionReplyTarget
 from vv_agent.interactive import (
     AgentSession,
     AgentSessionOptions,
@@ -128,6 +129,7 @@ from vv_agent.runtime.lifecycle import (
 from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.events import SessionRunEventStore
+from vv_agent.session.kernel import HeartbeatStopped
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.providers import Accepted, Definitive, Provider, Unknown
 from vv_agent.session.records import InboxItem, Record, SessionSpec
@@ -196,6 +198,7 @@ __all__ = [
     "AppServer",
     "AppServerApprovalProvider",
     "AppServerHost",
+    "AppServerUserInteraction",
     "ApprovalBroker",
     "ApprovalDecision",
     "ApprovalError",
@@ -240,9 +243,13 @@ __all__ = [
     "Handoff",
     "HandoffCompletedEvent",
     "HandoffStartedEvent",
+    "HeartbeatStopped",
     "HostCost",
     "HostCostMeter",
     "InboxItem",
+    "InteractionAnswer",
+    "InteractionAnswerSpec",
+    "InteractionReplyTarget",
     "InteractiveAgentClient",
     "InteractiveAgentDefinition",
     "JsonlRunEventStore",

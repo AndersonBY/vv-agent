@@ -65,7 +65,7 @@ queues the next turn. Stale expected turns return `-32025 turn_mismatch`.
 
 Any authorized connection, including one on another API node, can submit
 `turn/action`. The closed actions are cancel, suspend, resume, abort, and respond.
-Respond takes `message: {role: "user", content: "..."}`. The server derives a
+Respond takes a typed `target` and `answer`; see [user interactions](app-server-interactions.md). The server derives a
 stable inbox command from threadId, turnId and actionId. Retried actions do not
 repeat side effects. Replies keep their retained interaction target.
 
@@ -174,7 +174,7 @@ not a mutable UI entity: `item_{event_id}`.
 - threadId, status and kernel phase;
 - waitKind: provider, child, user, approval, retry, or null;
 - nextDriveAt: Unix milliseconds, or null when unknown;
-- pendingInteraction: sessionId, turnId and optional prompt/interactionId/requestId, or null;
+- pendingInteraction: a closed approval or user form, or null; see [user interactions](app-server-interactions.md);
 - unconfirmedCount: operations in the current turn (the latest turn when terminal) with an attempt that has no definitive completion;
 - projectionWatermark: the last record sequence used for this projection.
 
@@ -182,7 +182,7 @@ Statuses distinguish provider_running, child_running, user_wait, approval_wait,
 retry_backoff, suspended and terminal. Idle means no turn yet; running means
 work is admitted or ready. Archived and closed retain their lifecycle meanings.
 A child can expose a pending interaction while the parent is child_running.
-No provider handles, job secrets, arguments or digests appear in status.
+No provider handles or job secrets appear in status. A user form carries its public requestDigest.
 
 A turn/completed notification can describe an interrupted execution attempt.
 Only a retained turn_ended record makes a turn terminal. Each node tails durable
