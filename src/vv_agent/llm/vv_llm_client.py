@@ -1154,53 +1154,49 @@ class VvLlmClient(LLMClient):
 
         extra_content = self._read_field(tool_delta, "extra_content") if keep_extra_content else None
 
-        if name:
+        target_id = next(
+            (key for key, slot in tool_call_parts.items() if delta_id and slot.get("id") == delta_id),
+            None,
+        )
+        candidate_id = None
+        if isinstance(index_raw, int):
+            candidate_id = next(
+                (key for key, slot in tool_call_parts.items() if slot.get("_stream_index") == index_raw),
+                None,
+            )
+        elif len(tool_call_parts) == 1:
+            candidate_id = next(iter(tool_call_parts))
+        if target_id is None and not name and candidate_id is not None:
+            candidate = tool_call_parts[candidate_id]
+            if not delta_id or str(candidate.get("id", "")).startswith("generated_"):
+                target_id = candidate_id
+
+        if target_id is None and name:
+            # A named delta without an ID may start another call to the same tool.
             tool_id = delta_id or f"generated_{index}_{len(tool_call_parts)}"
-            unique_id = f"{index}_{tool_id}"
+            target_id = f"{index}_{tool_id}"
+            tool_call_parts[target_id] = {"id": tool_id, "name": name, "arguments": ""}
 
-            if unique_id in tool_call_parts:
-                slot = tool_call_parts[unique_id]
-                if arguments:
-                    slot["arguments"] = self._merge_tool_arguments(
-                        existing=str(slot.get("arguments", "")),
-                        incoming=arguments,
-                        incremental=incremental,
-                    )
-                if delta_id and (not slot.get("id") or str(slot["id"]).startswith("generated_")):
-                    slot["id"] = delta_id
-                if keep_extra_content and extra_content:
-                    slot["extra_content"] = extra_content
-            else:
-                tool_call_parts[unique_id] = {
-                    "id": tool_id,
-                    "name": name,
-                    "arguments": arguments,
-                }
-                if keep_extra_content and extra_content:
-                    tool_call_parts[unique_id]["extra_content"] = extra_content
+        if target_id is None:
+            return None
 
-            return unique_id
-
-        if not arguments and not delta_id:
-            return last_active_tool_call_id
-
-        target_id = last_active_tool_call_id
-        if target_id is None and delta_id:
-            for existing_id, slot in tool_call_parts.items():
-                if slot.get("id") == delta_id:
-                    target_id = existing_id
-                    break
-
-        if target_id and target_id in tool_call_parts:
-            slot = tool_call_parts[target_id]
-            if arguments:
-                slot["arguments"] = self._merge_tool_arguments(
-                    existing=str(slot.get("arguments", "")),
-                    incoming=arguments,
-                    incremental=incremental,
-                )
-            if delta_id and (not slot.get("id") or str(slot["id"]).startswith("generated_")):
-                slot["id"] = delta_id
+        slot = tool_call_parts[target_id]
+        if name and isinstance(index_raw, int):
+            # vv-llm may reuse a chunk-local index for each newly opened call.
+            for existing in tool_call_parts.values():
+                if existing.get("_stream_index") == index_raw:
+                    existing.pop("_stream_index")
+            slot["_stream_index"] = index_raw
+        if arguments:
+            slot["arguments"] = self._merge_tool_arguments(
+                existing=str(slot.get("arguments", "")),
+                incoming=arguments,
+                incremental=incremental,
+            )
+        if delta_id and (not slot.get("id") or str(slot["id"]).startswith("generated_")):
+            slot["id"] = delta_id
+        if name and keep_extra_content and extra_content:
+            slot["extra_content"] = extra_content
 
         return target_id
 
