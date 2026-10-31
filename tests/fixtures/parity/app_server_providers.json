@@ -1,0 +1,138 @@
+{
+  "accepted": {
+    "effect_count": 1,
+    "handle": {
+      "attempt": 1,
+      "cancel_ref": "provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "evidence": "business-accept/provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "job_id": "provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "kind": "provider",
+      "operation_id": "provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "provider": "work",
+      "query_ref": "provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "request_digest": "3448e2f5a78d9c38e78354c3272f66fb651f3ef78ad69b40d1db6ac32dcb6adb"
+    },
+    "phase": "active",
+    "status": "provider_running"
+  },
+  "cancellation": [
+    {
+      "business_state": "stopped",
+      "completion_context": "audit",
+      "provider_return": "confirmed",
+      "requested": true,
+      "turn_status": "cancelled",
+      "unconfirmed_count": 0
+    },
+    {
+      "business_state": "running",
+      "completion_context": null,
+      "provider_return": "accepted",
+      "requested": true,
+      "turn_status": "cancelled",
+      "unconfirmed_count": 1
+    },
+    {
+      "business_state": "running",
+      "completion_context": null,
+      "provider_return": "unknown",
+      "requested": true,
+      "turn_status": "cancelled",
+      "unconfirmed_count": 1
+    },
+    {
+      "business_state": "stopped",
+      "completion_context": null,
+      "provider_return": "invalid",
+      "requested": true,
+      "turn_status": "cancelled",
+      "unconfirmed_count": 1
+    }
+  ],
+  "protocol_version": "v5",
+  "receipt": {
+    "accepted": true,
+    "inputId": "work",
+    "inputSeq": 1,
+    "replayed": false,
+    "threadId": "provider-thread",
+    "turnId": "provider-thread/turn/work"
+  },
+  "recovered": {
+    "context": "normal",
+    "effect_count": 1,
+    "evidence": [
+      "business-accept/provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
+      "business-result/provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0"
+    ],
+    "phase": "idle",
+    "result": {
+      "content": "business complete",
+      "directive": "continue",
+      "status_code": "SUCCESS",
+      "tool_call_id": "business-call"
+    },
+    "status": "terminal",
+    "submit_count": 1,
+    "usage": {
+      "business_units": 1
+    }
+  },
+  "schema_version": 1,
+  "strict_results": [
+    {
+      "case": "call",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    },
+    {
+      "case": "status",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    },
+    {
+      "case": "evidence",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    },
+    {
+      "case": "empty_evidence",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    },
+    {
+      "case": "ambiguous",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    },
+    {
+      "case": "fields",
+      "effect_count": 1,
+      "handle_retained": true,
+      "state": "parked",
+      "submit_count": 1,
+      "turn_ended": false,
+      "warning": "provider_result_invalid"
+    }
+  ]
+}

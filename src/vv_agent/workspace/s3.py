@@ -15,6 +15,7 @@ import importlib
 import importlib.util
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from hashlib import sha256
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
@@ -186,13 +187,17 @@ class S3WorkspaceBackend:
         return self.write_text_chunks_exclusive(path, (content,))
 
     def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
+        return self.write_bytes_chunks_exclusive(path, (chunk.encode("utf-8") for chunk in chunks))
+
+    def write_bytes_chunks_exclusive(self, path: str, chunks: Iterable[bytes]) -> int:
         normalized = "/".join(_exclusive_workspace_path_segments(path))
         with SpooledTemporaryFile(max_size=1_048_576, mode="w+b") as staging:
             size = 0
             for chunk in chunks:
-                data = chunk.encode("utf-8")
-                staging.write(data)
-                size += len(data)
+                if not isinstance(chunk, bytes):
+                    raise TypeError("resource chunks must be bytes")
+                staging.write(chunk)
+                size += len(chunk)
             staging.seek(0)
             try:
                 self._client.put_object(
@@ -212,6 +217,64 @@ class S3WorkspaceBackend:
                     raise FileExistsError(path) from exc
                 raise
         return size
+
+    @property
+    def retained_workspace_id(self) -> str:
+        endpoint = self._client.meta.endpoint_url
+        return sha256(f"{endpoint}\n{self._bucket}\n{self._prefix}".encode()).hexdigest()
+
+    def retain_output(self, path, *, expected):
+        from vv_agent.workspace.resources import copy_retained_output
+
+        return copy_retained_output(self, path, expected=expected)
+
+    def _read_output_chunks(self, path):
+        _exclusive_workspace_path_segments(path)
+        return self._read_bytes_chunks(path)
+
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
+
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        length = retained_range(ref, offset, length)
+        request = {"Bucket": self._bucket, "Key": self._key(path)}
+        try:
+            head = self._client.head_object(**request)
+            etag = head.get("ETag")
+            if head["ContentLength"] != ref.size_bytes or not etag:
+                raise ValueError("stale_reference")
+            request["IfMatch"] = etag
+            if head.get("VersionId"):
+                request["VersionId"] = head["VersionId"]
+
+            def read(extra):
+                body = self._client.get_object(**request, **extra)["Body"]
+                try:
+                    while chunk := body.read(65_536):
+                        yield chunk
+                finally:
+                    body.close()
+
+            verify_retained(ref, (etag, head.get("VersionId")), lambda: read({}))
+            if length:
+                yield from read({"Range": f"bytes={offset}-{offset + length - 1}"})
+            after = self._client.head_object(Bucket=self._bucket, Key=self._key(path))
+            if (after.get("ETag"), after.get("VersionId"), after["ContentLength"]) != (
+                etag,
+                head.get("VersionId"),
+                ref.size_bytes,
+            ):
+                raise ValueError("stale_reference")
+        except self._client.exceptions.ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = exc.response.get("Error", {}).get("Code")
+            if status == 404 or code in {"NoSuchKey", "NotFound", "404"} or isinstance(exc, self._client.exceptions.NoSuchKey):
+                raise FileNotFoundError("retained resource missing") from exc
+            if status == 403 or code in {"AccessDenied", "Forbidden", "403"}:
+                raise PermissionError("retained resource access denied") from exc
+            if status == 412 or code == "PreconditionFailed":
+                raise ValueError("stale_reference") from exc
+            raise
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._key(path)

@@ -74,6 +74,7 @@ rebuilds the runtime.
 
 ## Resume and child runs
 
+Budgets are per-turn; child sessions count separately.
 An approval or user reply continues the same turn. Usage and the cycle
 allowance carry over, and the time spent waiting does not count toward
 `max_wall_time_ms`. A new turn starts with fresh counters.
@@ -82,7 +83,9 @@ Child runs created by the framework inherit the parent's limits but start
 with fresh token, tool, cycle, and elapsed-time counters. Children get no host
 meter, so `max_host_cost` is enforced on the parent only. If child spending
 must count against the parent's limit, have the parent's meter read a
-host-side ledger that also records the children's cost.
+host-side ledger that also records the children's cost. This accounting alone
+does not prevent simultaneous children from exceeding a shared allowance; a
+strict task-tree limit needs the host's atomic admission control.
 
 The session log records usage for each stretch of active execution, measured
 with a monotonic clock. Time spent queued is not counted. If the process dies

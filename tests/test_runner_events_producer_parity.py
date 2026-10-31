@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import closing
 from pathlib import Path
@@ -254,6 +255,12 @@ def test_real_runner_events_match_cross_language_producer_fixture(tmp_path: Path
                 after_cycle_hooks=[AfterCycle()],
             ),
         ).result()
+        for event in result.events:
+            summary = event.metadata.get("tool_result")
+            if summary:
+                ref = summary["ref"]
+                row = driver.store.read(ref["sessionId"], after_seq=ref["seq"] - 1, limit=1).records[0]
+                assert ref["recordDigest"] == hashlib.sha256(row.record.encode()).hexdigest()
     expected = [json.loads(line) for line in RUNNER_EVENTS_FIXTURE.read_text().splitlines()]
     by_id = {e.event_id: e.to_dict() for e in result.events}
     assert [_normalize_event(by_id[e["event_id"]]) for e in expected] == [_normalize_event(e) for e in expected]
@@ -296,4 +303,8 @@ def _normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     if "budget_usage" in normalized:
         normalized["budget_usage"] = normalized["budget_usage"] | {"elapsed_ms": 0}
     normalized.pop("metadata", None)
+    if normalized.get("code") == "tool_result":
+        details = dict(normalized["details"])
+        details["ref"] = details["ref"] | {"recordDigest": "receipt_digest"}
+        normalized["details"] = details
     return normalized

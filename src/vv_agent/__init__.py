@@ -13,6 +13,11 @@ from vv_agent.app_server import (
     ThreadContextReadParams,
     ThreadEventsListParams,
     ThreadForkParams,
+    ToolResultReadParams,
+    ToolResultReadResponse,
+    ToolResultRef,
+    ToolResultResourceAuthorizationRequest,
+    ToolResultSummary,
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest
 from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskHandle, BackgroundAgentTaskSnapshot
@@ -84,6 +89,7 @@ from vv_agent.events import (
 )
 from vv_agent.guardrails import GuardrailResult, input_guardrail, output_guardrail
 from vv_agent.handoffs import Handoff, handoff
+from vv_agent.interaction import AppServerUserInteraction, InteractionAnswer, InteractionAnswerSpec, InteractionReplyTarget
 from vv_agent.interactive import (
     AgentSession,
     AgentSessionOptions,
@@ -123,8 +129,9 @@ from vv_agent.runtime.lifecycle import (
 from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.events import SessionRunEventStore
+from vv_agent.session.kernel import HeartbeatStopped
 from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.providers import Accepted, Definitive, Unknown
+from vv_agent.session.providers import Accepted, Definitive, Provider, Unknown
 from vv_agent.session.records import InboxItem, Record, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict, LeaseLost, SessionStore, SessionTx
@@ -170,6 +177,7 @@ from vv_agent.types import (
     ToolResultStatus,
     UsageSource,
 )
+from vv_agent.workspace.resources import OutputRetentionBackend, ToolResultResourceExpectation, ToolResultResourceRef
 
 __all__ = [
     "OUTPUT_VALIDATION_FAILED",
@@ -190,6 +198,7 @@ __all__ = [
     "AppServer",
     "AppServerApprovalProvider",
     "AppServerHost",
+    "AppServerUserInteraction",
     "ApprovalBroker",
     "ApprovalDecision",
     "ApprovalError",
@@ -234,9 +243,13 @@ __all__ = [
     "Handoff",
     "HandoffCompletedEvent",
     "HandoffStartedEvent",
+    "HeartbeatStopped",
     "HostCost",
     "HostCostMeter",
     "InboxItem",
+    "InteractionAnswer",
+    "InteractionAnswerSpec",
+    "InteractionReplyTarget",
     "InteractiveAgentClient",
     "InteractiveAgentDefinition",
     "JsonlRunEventStore",
@@ -268,12 +281,14 @@ __all__ = [
     "OutgoingRouter",
     "OutputRepair",
     "OutputRepairRequest",
+    "OutputRetentionBackend",
     "OutputValidationContext",
     "OutputValidationResult",
     "OutputValidator",
     "PostgresStore",
     "PromptBundle",
     "PromptSection",
+    "Provider",
     "ReasoningDeltaEvent",
     "Record",
     "ResolvedModelConfig",
@@ -334,8 +349,15 @@ __all__ = [
     "ToolPolicy",
     "ToolRegistry",
     "ToolResultCursor",
+    "ToolResultReadParams",
+    "ToolResultReadResponse",
+    "ToolResultRef",
+    "ToolResultResourceAuthorizationRequest",
+    "ToolResultResourceExpectation",
+    "ToolResultResourceRef",
     "ToolResultRetention",
     "ToolResultStatus",
+    "ToolResultSummary",
     "ToolSideEffect",
     "TraceProcessor",
     "TraceSink",

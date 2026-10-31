@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -113,8 +116,33 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
         started = [m for m in messages if m.get("method") == "item/started" and m["params"]["type"] == "toolCall"]
         completed = [m for m in messages if m.get("method") == "item/completed" and m["params"]["type"] == "toolCall"]
         assert started == contract["executed"]["startedNotifications"]
-        assert completed == contract["executed"]["completedNotifications"][:1]
+        lifecycle = deepcopy(completed)
+        expected_lifecycle = deepcopy(contract["executed"]["completedNotifications"][:1])
+        # This case has a one-cycle "child"; the canonical producer has a two-cycle "worker".
+        # Compare their common lifecycle, then verify this producer's own immutable result bytes.
+        for notification in lifecycle + expected_lifecycle:
+            notification["params"]["payload"].pop("result")
+        assert lifecycle == expected_lifecycle
         assert all(m["params"]["payload"]["executionStarted"] for m in completed)
+        summary = completed[0]["params"]["payload"]["result"]
+        ref = summary["ref"]
+        row = _server.kernel.store.read(ref["sessionId"], after_seq=ref["seq"] - 1, limit=1).records[0]
+        assert ref["recordDigest"] == hashlib.sha256(row.record.encode()).hexdigest()
+        _server.processor.process_message(
+            "conn_1",
+            {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "thread/toolResult/read",
+                "params": {"threadId": ref["sessionId"], "ref": ref, "part": "content", "offset": 0, "limit": 65536},
+            },
+        )
+        page = _response(_server.transport, 99)["result"]
+        content = row.record.payload["result"]["content"]
+        assert base64.b64decode(page["data"]).decode() == content == summary["preview"]
+        assert json.loads(content)["agent_name"] == "child"
+        assert json.loads(content)["cycles"] == 1
+        assert page["ref"] == ref and page["context"] == summary["context"] == "normal"
 
 
 def test_model_lifecycle_app_server_projection_matches_shared_fixture():

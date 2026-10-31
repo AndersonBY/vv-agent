@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from vv_agent import Agent, RunConfig, handoff, input_guardrail
+from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConfig, handoff, input_guardrail
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import RunBudgetLimits, UnavailableMetricPolicy
@@ -494,7 +494,13 @@ class Fixtures:
             )
             self.run(name)
             wait = self.kernel.waits(name, self.runtimes[name])[0][2]
-            self.kernel.answer(name, self.runtimes[name], "blue", "reply")
+            self.kernel.answer(
+                name,
+                self.runtimes[name],
+                AppServerUserInteraction.from_dict(wait["interaction"]).target,
+                InteractionAnswer("text", text="blue"),
+                "reply",
+            )
             self.run(name)
             assert self.result(name).final_output == "answered"
             self.semantics.append({"case": name, "interaction_id": wait["interaction_id"], "same_turn": True})
@@ -1130,7 +1136,7 @@ class Fixtures:
             notices.clear()
             return result
 
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v4"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         request(None, "initialized")
         request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
         request(
@@ -1260,7 +1266,11 @@ class Fixtures:
             "threadId": sid,
             "turnId": tid,
             "actionId": "reply-child",
-            "action": {"kind": "respond", "message": {"role": "user", "content": "answer"}},
+            "action": {
+                "kind": "respond",
+                "target": AppServerUserInteraction.from_dict(status["pendingInteraction"]).target.to_dict(),
+                "answer": {"kind": "text", "text": "answer"},
+            },
         }
         request(25, "turn/action", action)
         server.run_adapter.join()
@@ -1408,7 +1418,7 @@ class Fixtures:
         assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
         assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
         return {
-            "protocol_version": "v4",
+            "protocol_version": "v5",
             "host_interaction_values": {"request": request_value, "outcome": outcome_value},
             "transcripts": transcript,
             "schemas": exported,
@@ -1988,8 +1998,9 @@ def generate(output: Path):
                 replacement_report["replaced"] = {
                     name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE
                 }
-                replacements.write_report(replacement_report, Path("/tmp/c1c1b-fixture-diff.md"))
-                with Path("/tmp/c1c1b-fixture-diff.md").open("a") as report:
+                report_path = output.with_name(f"{output.name}-diff.md")
+                replacements.write_report(replacement_report, report_path)
+                with report_path.open("a") as report:
                     report.write("\n## Coverage counts (full producer = curated)\n\n")
                     report.write("| File | Full | Curated |\n| --- | ---: | ---: |\n")
                     for name, keys in curated_coverage.items():

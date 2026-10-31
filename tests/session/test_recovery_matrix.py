@@ -1,6 +1,7 @@
 """Real-store kernel recovery; external calls are always the scripted client."""
 
 # Fork-free subprocesses communicate exact fault positions through duplex pipes.
+import json
 import multiprocessing
 import os
 import signal
@@ -517,6 +518,7 @@ def test_ask_user_is_same_turn_parked_interaction(store, database):
                     }
                 },
                 target_turn_id=park.turn_id,
+                generation=0,
             ),
         )
     seen = []
@@ -527,7 +529,9 @@ def test_ask_user_is_same_turn_parked_interaction(store, database):
 
     drive(store, "s", runtime=runtime(database, [answer]))
     assert len(records_of(store, "turn_started")) == 1
-    assert len([m for m in seen if m.role == "tool" and m.content == "blue"]) == 1
+    assert (
+        len([m for m in seen if m.role == "tool" and json.loads(m.content) == {"reply_mode": "free_text", "text": "blue"}]) == 1
+    )
     assert not [m for m in seen if m.role == "user" and m.content == "blue"]
     assert_event_projection(store)
 

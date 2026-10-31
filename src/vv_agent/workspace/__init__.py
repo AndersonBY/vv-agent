@@ -9,6 +9,7 @@ from vv_agent.workspace.base import (
 )
 from vv_agent.workspace.local import LocalWorkspaceBackend
 from vv_agent.workspace.memory import MemoryWorkspaceBackend
+from vv_agent.workspace.resources import OutputRetentionBackend, ToolResultResourceExpectation, ToolResultResourceRef
 
 __all__ = [
     "INVALID_EXCLUDE_FILES_PATTERN_CODE",
@@ -18,7 +19,10 @@ __all__ = [
     "InvalidPortableRegexError",
     "LocalWorkspaceBackend",
     "MemoryWorkspaceBackend",
+    "OutputRetentionBackend",
     "S3WorkspaceBackend",
+    "ToolResultResourceExpectation",
+    "ToolResultResourceRef",
     "WorkspaceBackend",
     "compile_portable_workspace_regex",
 ]

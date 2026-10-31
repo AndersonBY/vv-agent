@@ -941,7 +941,7 @@
             ],
             "tool_results": [
               {
-                "content": "blue",
+                "content": "{\"reply_mode\":\"free_text\",\"text\":\"blue\"}",
                 "directive": "continue",
                 "status_code": "SUCCESS",
                 "tool_call_id": "ask"
@@ -988,7 +988,7 @@
             ]
           },
           {
-            "content": "blue",
+            "content": "{\"reply_mode\":\"free_text\",\"text\":\"blue\"}",
             "role": "tool",
             "tool_call_id": "ask"
           },

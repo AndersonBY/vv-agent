@@ -26,6 +26,12 @@ from vv_agent.app_server.protocol.thread import (
     ThreadStatusParams,
     ThreadUnsubscribeParams,
 )
+from vv_agent.app_server.protocol.tool_result import (
+    ToolResultReadParams,
+    ToolResultReadResponse,
+    ToolResultRef,
+    ToolResultSummary,
+)
 from vv_agent.app_server.protocol.turn import (
     TurnActionParams,
     TurnActionResponse,
@@ -71,6 +77,10 @@ __all__ = [
     "ThreadStartParams",
     "ThreadStatusParams",
     "ThreadUnsubscribeParams",
+    "ToolResultReadParams",
+    "ToolResultReadResponse",
+    "ToolResultRef",
+    "ToolResultSummary",
     "TurnActionParams",
     "TurnActionResponse",
     "TurnFollowUpParams",

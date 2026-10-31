@@ -88,7 +88,7 @@ cycle reported that metric.
 | Path | Responsibility |
 | --- | --- |
 | `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
-| `src/vv_agent/interaction.py` | Host-interaction request values, wire validation, and request digests. |
+| `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
 | `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes, and validation of definitive results. The session store owns admission and receipts. |
 | `src/vv_agent/llm/errors.py` | Prompt-too-long classification and its retry limit, shared by model calls and compaction. |

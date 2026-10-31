@@ -39,9 +39,11 @@ from vv_agent.interaction import HostInteractionRequest
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .children import child_handles
+from .interactions import user_interaction
 from .records import copy_json, digest
 from .runtime import model_usage
 from .store import StoredRecord
+from .tool_results import project_tool_result
 
 
 def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
@@ -64,6 +66,19 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         if r.turn_id in turns:
             common["agent_name"] = turns[r.turn_id]["definition"].get("agent_name")
         event: RunEvent | None = None
+        if r.kind in {"op_unknown", "input_applied"} and p.get("reason") == "provider_result_invalid":
+            invalid_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/provider_result_invalid"}
+            events.append(
+                DiagnosticEvent(
+                    **invalid_common,
+                    level="warning",
+                    code="provider_result_invalid",
+                    details={
+                        "operation_id": r.operation_id or p.get("target_operation_id"),
+                        "attempt": r.attempt or p.get("input", {}).get("payload", {}).get("attempt"),
+                    },
+                )
+            )
         if r.kind == "input_applied" and p["reason"] == "host compaction request" and p["disposition"] in {"queued", "applied"}:
             compactions[p["input"]["input_id"]] = r.turn_id
         if r.kind == "turn_started":
@@ -154,6 +169,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     **common, level="info", code="session_memory_saved", details={"entry_count": len(data["state"]["entries"])}
                 )
         elif r.kind == "turn_parked":
+            common["metadata"]["interaction"] = user_interaction(r.session_id, r.turn_id, turns[r.turn_id]["generation"], p)
             event = RunStateChangedEvent(**common, state="wait_user")
         elif r.kind == "input_applied" and p["disposition"] == "applied":
             item = p["input"]
@@ -329,7 +345,9 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     event = cls(
                         **common, **tool, arguments=copy_json(request["arguments"]), tool_metadata=copy_json(plan["tool"]) or None
                     )
-                elif r.kind == "op_completed" and p["context"] == "normal":
+                elif r.kind == "op_completed":
+                    descriptor = project_tool_result(stored)
+                    common["metadata"] = common["metadata"] | {"tool_result": descriptor}
                     result = ToolExecutionResult.from_dict(p["result"])
                     tool_result_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/diagnostic"}
                     events.append(
@@ -338,16 +356,7 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                             cycle_index=cycle,
                             level="info",
                             code="tool_result",
-                            details={
-                                "tool_name": request["name"],
-                                "tool_call_id": request["id"],
-                                "tool_arguments": request["arguments"],
-                                "content": result.content,
-                                "status": result.status_code.value,
-                                "directive": result.directive.value,
-                                "error_code": result.error_code,
-                                "metadata": result.metadata,
-                            },
+                            details=descriptor,
                         )
                     )
                     event = ToolCallCompletedEvent(
@@ -375,6 +384,14 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                     if h["kind"] == "approval":
                         event = ApprovalRequestedEvent(**common, **tool, request_id=h["request_id"], message="Approval required")
                     elif h["kind"] == "user":
+                        common["metadata"]["interaction"] = user_interaction(
+                            r.session_id,
+                            r.turn_id,
+                            turns[r.turn_id]["generation"],
+                            p,
+                            operation_id=r.operation_id,
+                            attempt=r.attempt,
+                        )
                         interaction = HostInteractionRequest(
                             interaction_id=h["interaction_id"],
                             logical_cycle=cycle,

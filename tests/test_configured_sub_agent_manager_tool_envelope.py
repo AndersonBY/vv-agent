@@ -7,9 +7,10 @@ from typing import Any
 import pytest
 from session.test_delegation_parity import routed
 from support import require_tool_result
+from support.interactions import displayed_target
 from support.kernel_runtime import start_runner
 
-from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
+from vv_agent import Agent, InteractionAnswer, RunConfig, ScriptedModelProvider, SubAgentConfig
 from vv_agent.session.delegation import status_with_store
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolContext, build_default_registry
@@ -230,7 +231,9 @@ def test_sync_wait_stays_on_child_until_terminal_delivery(monkeypatch):
         assert not contract["parent_adopts_intermediate_wait"]
         assert not any(r.record.kind == "child_terminal" for r in rows)
         monkeypatch.setattr(parent, "_schedule_background", lambda: None)
-        parent.runtime.child_tasks(driver.store, "parent").message(child["session_id"], "answer", "choice")
+        driver.answer(
+            "parent", parent.runtime, displayed_target(driver, "parent"), InteractionAnswer("text", text="choice"), "answer"
+        )
         assert Runner.resume(parent.session_id, parent.run_id).final_output == "parent done"
         state = driver.store.read_state(child["session_id"])[0]
         assert list(state.turns) == [child["turn_id"]] and contract["same_turn_reply"]

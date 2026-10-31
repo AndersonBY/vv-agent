@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 from support import FixedModelProvider, ModelMapProvider
+from support.interactions import displayed_target
 from test_workspace_backends import _FakeS3Client, _make_s3_backend
 
-from vv_agent import Agent, RunConfig, Runner, handoff
+from vv_agent import Agent, InteractionAnswer, RunConfig, Runner, handoff
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.event_store import RunEventReplayQuery
@@ -26,6 +27,7 @@ from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, Record, RecordError, digest
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.function import function_tool
 from vv_agent.types import (
@@ -843,7 +845,8 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
     assert not store.peek_inbox("control")
     rt = runtime(store, database, parent, config, llm_for(config))
     store._fold_cache = None
-    rt.child_tasks(store, "control").message(sid, "reply", "supplied input")
+    owner = SessionDriver(store=store)
+    owner.answer("control", rt, displayed_target(owner, "control"), InteractionAnswer("text", text="supplied input"), "reply")
     drive(store, sid, runtime=rt.child_runtime(store, sid))
     with store.atomic() as tx:
         child_delivery(store, tx, sid)

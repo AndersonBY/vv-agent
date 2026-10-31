@@ -26,15 +26,64 @@ This guide is for a desktop app, worker, IDE or service that runs the
   threadId. Validate the requested agentKey, cwd and metadata for that account too.
 - `AppServerHost.resolve_agent()` maps an `agent_key` to the current `Agent`
   instructions and tools.
+- `authorize_tool_result_resource(request)` is required for file/image and
+  artifact reads. It receives the verified result reference and workspace
+  resource; return false before opening bytes when access is denied.
+  See [tool result reads](app-server-tool-results.md) for optional workspace
+  retention and immutable version references.
 - `build_run_config()` supplies context providers, memory providers, workspace
-  storage, approvals, tracing metadata, event persistence and execution policy.
+  storage, approvals, tracing metadata, event persistence, execution policy and
+  named `tool_providers`. It runs on start and when recovering a binding; it
+  must only rebuild dependencies, without submitting business work.
 - `resolve_model(request)` resolves the exact provider model ID to a client and config
   without calling a provider. Enforce model and route permissions here. The frozen
   model with an empty route reuses its frozen binding before this hook.
 - `list_models()` reads the same canonical model settings that the host's
   scheduler or UI uses.
-- Browser, IM, notifications, product memory, release management and other
-  product modules stay outside the framework.
+- The host manages browser, computer and MCP services, their connections,
+  permissions and lifecycle. The framework provides tool registration.
+- To resume after a restart, persist both the session store and the workspace
+  or artifact bytes. The default memory store disappears with the process.
+- IM, notifications, product memory, release management and other product
+  modules stay outside the framework.
+
+## Registering business jobs
+
+Define the tool schema in `Agent.tools` or your registry, then bind its exact
+name to a `Provider`. The synchronous handler is not called for that binding.
+
+```python
+from vv_agent import DefaultAppServerHost, RunConfig
+
+class ProductHost(DefaultAppServerHost):
+    def build_run_config(self, request):
+        return RunConfig(
+            model_provider=models,
+            tool_providers={"start_workflow": workflow_jobs},
+            workspace_backend=workspace_for(request.thread_id),
+        )
+```
+
+A provider implements `submit(plan, context=...)`, `query(handle)`,
+`cancel(handle)` and `authenticate(item, plan)`. Return `Accepted(handle)` for
+a running job, `Definitive(result, evidence)` for a known terminal result, or
+`Unknown(reason)` when the outcome cannot be confirmed. `result` is the current
+`ToolExecutionResult.to_dict()` shape. Use the call ID from
+`plan.payload["request"]["id"]`; do not synthesize one during recovery.
+
+A provider handle contains `kind="provider"`, its exact binding name, `job_id`,
+original `operation_id`, `attempt`, prepared `request_digest`, acceptance
+`evidence`, `query_ref` and `cancel_ref`. References are stable business IDs,
+not credentials. Query and cancel completions include that same acceptance
+evidence in `Definitive.evidence`.
+
+The kernel checks policy, arguments, approval and budget before `submit`.
+Accepted handles are queried after restart, resume or reconnect. Rebuild the
+same named binding through this configuration method. Missing bindings report
+`missing_host_binding` and retain the wait. Invalid results report
+`provider_result_invalid`: queries retain the handle; a submit without a valid
+handle stays Unknown and cannot automatically retry. See
+[provider outcomes](session-kernel.md#providers).
 
 ## Client lifecycle
 
@@ -192,3 +241,8 @@ leave reusable immutable artifacts, but cannot leave a partly created session.
 Keep forked sessions on 0.29.0 or newer. Older workers can parse the extension
 maps but do not apply the inherited model default. This release has no store
 schema boundary and supplies no migration.
+
+
+For question UIs, preserve the full retained target and send typed answers as
+shown in [user interactions](app-server-interactions.md). Free-text input remains
+available for choice questions. Do not turn a child's wait into its final result.

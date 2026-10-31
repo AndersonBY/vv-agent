@@ -46,7 +46,7 @@ def _integer(value: Any, label: str, *, minimum: int = 0, maximum: int = _MAX_WI
 
 
 def _digest(value: Any, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
         raise ValueError(f"{label} must be a lowercase SHA-256 digest")
     try:
         int(value, 16)
@@ -222,3 +222,187 @@ class HostInteractionOutcome:
         if payload["schema_version"] != HOST_OUTCOME_SCHEMA:
             raise ValueError("unsupported host interaction outcome schema")
         return cls(**{field: payload[field] for field in fields if field != "schema_version"})
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionReplyTarget:
+    session_id: str
+    turn_id: str
+    generation: int
+    interaction_id: str
+    operation_id: str | None
+    attempt: int | None
+    request_digest: str
+
+    def __post_init__(self):
+        for name in ("session_id", "turn_id", "interaction_id"):
+            _text(getattr(self, name), name, max_bytes=4096)
+        _integer(self.generation, "generation")
+        _digest(self.request_digest, "requestDigest")
+        if (self.operation_id is None) != (self.attempt is None):
+            raise ValueError("operationId and attempt must both be null or present")
+        if self.operation_id is not None:
+            _text(self.operation_id, "operationId", max_bytes=4096)
+            _integer(self.attempt, "attempt", minimum=1)
+
+    def to_dict(self):
+        return dict(
+            zip(
+                ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest"),
+                (
+                    self.session_id,
+                    self.turn_id,
+                    self.generation,
+                    self.interaction_id,
+                    self.operation_id,
+                    self.attempt,
+                    self.request_digest,
+                ),
+                strict=True,
+            )
+        )
+
+    @classmethod
+    def from_dict(cls, payload):
+        names = ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")
+        if not isinstance(payload, dict):
+            raise ValueError("interaction target must be an object")
+        _strict_fields(payload, set(names), "interaction target")
+        return cls(*(payload[k] for k in names))
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionAnswerSpec:
+    kind: str
+    options: tuple[str, ...] = ()
+    allow_custom_options: bool = False
+
+    def __post_init__(self):
+        object.__setattr__(self, "options", tuple(self.options))
+        if self.kind not in {"text", "single", "multi"} or type(self.allow_custom_options) is not bool:
+            raise ValueError("invalid interaction answer spec")
+        if self.kind == "text" and (self.options or self.allow_custom_options):
+            raise ValueError("text form must have no options or custom selections")
+        if self.kind != "text" and not self.options:
+            raise ValueError("choice form requires options")
+        if len(self.options) > 64 or len(set(self.options)) != len(self.options):
+            raise ValueError("interaction_form_too_large")
+        for option in self.options:
+            _text(option, "option", max_bytes=1024)
+
+    def to_dict(self):
+        return {"kind": self.kind, "options": list(self.options), "allowCustomOptions": self.allow_custom_options}
+
+    @classmethod
+    def from_dict(cls, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("answerSpec must be an object")
+        _strict_fields(payload, {"kind", "options", "allowCustomOptions"}, "answerSpec")
+        if not isinstance(payload["options"], list):
+            raise ValueError("options must be an array")
+        return cls(payload["kind"], tuple(payload["options"]), payload["allowCustomOptions"])
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionAnswer:
+    kind: str
+    text: str | None = None
+    selected: tuple[str, ...] = ()
+    custom: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "selected", tuple(self.selected))
+        object.__setattr__(self, "custom", tuple(self.custom))
+        if self.kind == "text":
+            _content(self.text, "answer.text")
+            if self.selected or self.custom:
+                raise ValueError("text answer cannot contain selections")
+        elif self.kind in {"single", "multi"}:
+            if self.text is not None:
+                raise ValueError("selection answer cannot contain text")
+            values = self.selected + self.custom
+            if not (len(values) == 1 if self.kind == "single" else 1 <= len(values) <= 64):
+                raise ValueError("invalid selection count")
+            for value in values:
+                _text(value, "selection", max_bytes=1024)
+            # Custom text has one portable normalization on every input path.
+            custom = tuple(v.strip(" \t\r\n") for v in self.custom)
+            if any(not v for v in custom) or len(set(self.selected + custom)) != len(values):
+                raise ValueError("empty or duplicate selection")
+        else:
+            raise ValueError("unsupported interaction answer kind")
+        if len(canonical_json_bytes(self.to_dict())) > 65536:
+            raise ValueError("answer exceeds the UTF-8 byte limit")
+
+    def to_dict(self):
+        return (
+            {"kind": "text", "text": self.text}
+            if self.kind == "text"
+            else {"kind": self.kind, "selected": list(self.selected), "custom": list(self.custom)}
+        )
+
+    @classmethod
+    def from_dict(cls, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("answer must be an object")
+        kind = payload.get("kind")
+        _strict_fields(payload, {"kind", "text"} if kind == "text" else {"kind", "selected", "custom"}, "answer")
+        if kind == "text":
+            return cls(kind, text=payload["text"])
+        if not isinstance(payload["selected"], list) or not isinstance(payload["custom"], list):
+            raise ValueError("selected and custom must be arrays")
+        return cls(kind, selected=tuple(payload["selected"]), custom=tuple(payload["custom"]))
+
+    def validate(self, spec: InteractionAnswerSpec):
+        if self.kind == "text":
+            return
+        if self.kind != spec.kind or any(v not in spec.options for v in self.selected):
+            raise ValueError("invalid_interaction_answer")
+        if self.custom and (not spec.allow_custom_options or any(v.strip(" \t\r\n") in spec.options for v in self.custom)):
+            raise ValueError("invalid_interaction_answer")
+
+    def model_text(self):
+        payload = (
+            {"reply_mode": "free_text", "text": self.text}
+            if self.kind == "text"
+            else {
+                "reply_mode": "selection",
+                "selection_type": self.kind,
+                "selected": list(self.selected),
+                "custom": [v.strip(" \t\r\n") for v in self.custom],
+            }
+        )
+        return canonical_json_bytes(payload).decode("utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class AppServerUserInteraction:
+    target: InteractionReplyTarget
+    prompt: str
+    answer_spec: InteractionAnswerSpec
+
+    def __post_init__(self):
+        if not isinstance(self.target, InteractionReplyTarget) or not isinstance(self.answer_spec, InteractionAnswerSpec):
+            raise ValueError("invalid user interaction types")
+        _content(self.prompt, "prompt")
+        from vv_agent.session.interactions import check_form
+
+        check_form(self.to_dict())
+
+    def to_dict(self):
+        return {"kind": "user", **self.target.to_dict(), "prompt": self.prompt, "answerSpec": self.answer_spec.to_dict()}
+
+    @classmethod
+    def from_dict(cls, payload):
+        if not isinstance(payload, dict) or payload.get("kind") != "user":
+            raise ValueError("invalid user interaction")
+        target = {k: v for k, v in payload.items() if k not in {"kind", "prompt", "answerSpec"}}
+        value = cls(
+            InteractionReplyTarget.from_dict(target),
+            _content(payload.get("prompt"), "prompt"),
+            InteractionAnswerSpec.from_dict(payload.get("answerSpec")),
+        )
+        from vv_agent.session.interactions import check_form
+
+        check_form(value.to_dict())
+        return value

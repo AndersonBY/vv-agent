@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from support.interactions import displayed_target
 
 from vv_agent import (
     AfterCycleDecision,
     AfterCycleSnapshot,
     Agent,
+    InteractionAnswer,
     ModelRef,
     ModelSettings,
     RetrySettings,
@@ -281,7 +283,7 @@ def test_resume_uses_the_runner_that_created_the_state(tmp_path: Path) -> None:
     sid, tid = interrupted.raw_result.session_id, interrupted.raw_result.turn_id
     assert sid is not None and tid is not None
     owner = interrupted._session_driver
-    owner.answer(sid, owner.handles[-1].runtime, "blue", "reply")
+    owner.answer(sid, owner.handles[-1].runtime, displayed_target(owner, sid), InteractionAnswer("text", text="blue"), "reply")
     resumed = receiving.resume(sid, tid)
 
     assert resumed.status == AgentStatus.COMPLETED

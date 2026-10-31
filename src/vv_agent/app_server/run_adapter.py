@@ -53,26 +53,12 @@ class _RunAdapterFormatting:
         kind = action.get("kind")
         if kind not in {"respond", "suspend", "resume", "cancel", "abort"}:
             raise TurnResumeError("action kind is unsupported")
-        expected = {"kind", "message"} if kind == "respond" else {"kind"}
-        actual = set(action)
-        if actual != expected:
-            missing = expected - actual
-            unknown = actual - expected
-            raise TurnResumeError(
-                f"action fields do not match the public schema: missing={sorted(missing)}, unknown={sorted(unknown)}"
-            )
-        if kind != "respond":
-            return
-        message = action["message"]
-        if not isinstance(message, dict) or set(message) != {"role", "content"}:
-            raise TurnResumeError("respond message must contain exactly role and content")
-        if message["role"] != "user":
-            raise TurnResumeError("respond message role must be user")
-        content = message["content"]
-        if not isinstance(content, str) or not content.strip():
-            raise TurnResumeError("respond message content must be a non-empty string")
-        if len(content.encode("utf-8")) > 65536:
-            raise TurnResumeError("respond message content exceeds the UTF-8 byte limit")
+        from vv_agent.app_server.protocol.turn import TurnActionParams
+
+        try:
+            TurnActionParams("thread", "turn", "action", action)
+        except (ValueError, TypeError) as exc:
+            raise TurnResumeError(str(exc)) from exc
 
     @staticmethod
     def _result_error_text(error: dict[str, Any] | None, wait_reason: str | None = None) -> str:

@@ -77,6 +77,53 @@ old-version session.
 
 ## Version notes
 
+### 0.31.0
+
+Regenerate App Server bindings for v5 and public API inventory v15. Hosts can
+register business job providers through `RunConfig.tool_providers`; direct
+`Runtime.providers` integrations use the same result validation. Rebuild all
+named bindings after restart, including during revoked-authority cleanup.
+Only an explicit `function` binding selects the synchronous handler.
+
+Provider completions must use the original tool call ID and a definitive
+status. Include the original acceptance evidence after a job was parked.
+Invalid results keep the job unresolved and report `provider_result_invalid`;
+a missing binding reports `missing_host_binding`. Cancel receipts acknowledge
+a request, while unconfirmed jobs remain visible after the turn ends.
+
+Record schema 1, inbox schema 3, SQLite user_version 3 and RunEvent v6 remain
+unchanged. There is no store boundary. Existing stored bytes still load, but
+hosts must rebuild the required providers before driving them.
+
+Completed tool items now carry bounded results and exact receipt references.
+The `tool_result` diagnostic no longer contains the full body or arbitrary
+metadata. Use `thread/toolResult/read` for byte pages, and implement the required
+`AppServerHost.authorize_tool_result_resource` method. A workspace can opt in
+to `OutputRetentionBackend`; immutable hosts can name existing versions without
+copying them. Without that capability, file/image resources are `not_retained`.
+See [tool result reads](app-server-tool-results.md).
+
+Reprojected events change bytes under their existing stable event IDs.
+Hosts that store immutable event projections must plan their product projection
+version boundary before upgrading; a kernel store schema bump is not required.
+
+User questions now carry a retained typed form in status and snapshot `state`.
+Replace `respond.message` with `respond.target` and `respond.answer`. Free text remains
+legal for every form, including choices with custom selections disabled; the
+model-facing ask_user result is now JSON labeled free_text or selection. Update
+product projections and answer parsers accordingly. Existing direct host text
+inbox replies remain legal with explicit interaction, turn and generation.
+Child-task messages now queue steering instead of inferring a user-wait target.
+See [user interactions](app-server-interactions.md) for the exact shapes.
+
+Update output-retention backends for offset/length reads and per-page immutable
+version checks. A digest must not be rescanned for every page. Replace private
+`vv_agent.session.kernel._HeartbeatStopped` imports with public
+`vv_agent.HeartbeatStopped`. Stored records, inbox envelopes and SQL versions
+remain unchanged. Older applied text replies and retained questions still load;
+only new replies use the labeled result. Reprojected events and snapshots gain
+metadata.interaction and state, so hosts own any materialized projection update.
+
 ### 0.30.5
 
 PostgreSQL heartbeats now continue while child admission and `before_commit`

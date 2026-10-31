@@ -480,6 +480,7 @@ _VALIDATORS = {
         TASK_SESSION_METADATA,
         REQUEST_SESSION_METADATA,
         MODEL_BINDING,
+        HANDLE,
         *PAYLOADS.values(),
         *INPUT_PAYLOADS.values(),
         *BOUNDARY_DATA.values(),

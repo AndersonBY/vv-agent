@@ -6,6 +6,7 @@ import argparse
 import json
 from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from scripts.session_kernel_fixtures import FixedDatetime, Fixtures, facts, independent_bytes, write_json
@@ -79,7 +80,7 @@ def produce() -> dict:
         stack.callback(fixtures.kernel.close)
         stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
         stack.enter_context(patch("vv_agent.prompt.builder.datetime", FixedDatetime))
-        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v4"
+        assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         with fixtures.kernel.store.atomic() as tx:
             tx.create(
                 SessionSpec(
@@ -143,7 +144,7 @@ def produce() -> dict:
             },
             "lifecycle": lifecycle,
             "schema_version": 1,
-            "protocol_version": "v4",
+            "protocol_version": "v5",
             "before": before,
             "after": after,
             "receipt": receipt,
@@ -159,6 +160,8 @@ def exports(output):
     from scripts._session_kernel_replacements import Author
 
     with (
+        TemporaryDirectory(prefix="a2-fixtures-") as workspace,
+        patch("vv_agent.memory.session_memory.SessionMemory.storage_path", return_value=Path(workspace) / "session_memory.json"),
         patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000),
         patch("vv_agent.prompt.builder.datetime", FixedDatetime),
     ):
@@ -169,8 +172,9 @@ def exports(output):
             author = Author(fixtures, independent_bytes, facts)
             author.app_observable(app)
             author.public_api()
-            write_json(output, "public_api.json", author.outputs["public_api.json"])
-            from scripts._session_kernel_curation import app_server_source, curate_app_server
+            from scripts._session_kernel_curation import app_server_source, curate_app_server, public_api_source
+
+            (output / "public_api.json").write_text(public_api_source(author.outputs["public_api.json"]))
 
             write_json(output, "app_server_observable.json", author.outputs["app_server_observable.json"])
             for entry, raw in zip(app["transcripts"], independent_bytes(app["transcripts"]), strict=True):

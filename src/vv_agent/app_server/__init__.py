@@ -5,6 +5,7 @@ from vv_agent.app_server.host import (
     AppServerHost,
     DefaultAppServerHost,
     RunConfigResolutionRequest,
+    ToolResultResourceAuthorizationRequest,
 )
 from vv_agent.app_server.outgoing import OutgoingRouter, PendingServerRequest
 from vv_agent.app_server.processor import MessageProcessor
@@ -48,6 +49,12 @@ from vv_agent.app_server.protocol import (
     TurnStartParams,
     TurnSteerParams,
     WarningParams,
+)
+from vv_agent.app_server.protocol.tool_result import (
+    ToolResultReadParams,
+    ToolResultReadResponse,
+    ToolResultRef,
+    ToolResultSummary,
 )
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import ChannelTransport, StdioJsonlTransport
@@ -96,6 +103,11 @@ __all__ = [
     "ThreadStartParams",
     "ThreadStatusParams",
     "ThreadUnsubscribeParams",
+    "ToolResultReadParams",
+    "ToolResultReadResponse",
+    "ToolResultRef",
+    "ToolResultResourceAuthorizationRequest",
+    "ToolResultSummary",
     "TurnActionParams",
     "TurnActionResponse",
     "TurnFollowUpParams",

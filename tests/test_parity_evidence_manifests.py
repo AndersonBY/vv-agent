@@ -75,6 +75,7 @@ EXPECTED_APP_SERVER_PROTOCOL_OPERATIONS = (
     "thread/context/read",
     "thread/compact/start",
     "thread/fork",
+    "thread/toolResult/read",
 )
 
 
@@ -450,7 +451,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 250
+    assert len(capability_ids) == 273
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -460,9 +461,14 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 296
+        == 383
     )
-    assert tuple(member["id"] for member in surfaces["app_server_host"]["members"]) == ("resolve_model", "authorize")
+    assert tuple(member["id"] for member in surfaces["app_server_host"]["members"]) == (
+        "resolve_model",
+        "authorize",
+        "build_run_config",
+        "authorize_tool_result_resource",
+    )
     assert tuple(member["id"] for member in surfaces["app_server"]["members"]) == ("run", "wake")
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

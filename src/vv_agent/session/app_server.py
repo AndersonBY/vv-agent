@@ -95,6 +95,55 @@ def _content(
     }
 
 
+def thread_status(kernel, thread_id, *, snapshot=None):
+    import time
+
+    state, records, _ = snapshot or kernel.store.read_state(thread_id)
+    pending = any(
+        x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None for x in kernel.store.peek_inbox(thread_id)
+    )
+    pending = pending or any(
+        r._payload["disposition"] == "queued" and key not in state.admitted_inputs for key, r in state.applied_inputs.items()
+    )
+    status = project_thread_status(state, pending=pending, now_ms=int(time.time() * 1000))
+    wait_kind = {
+        "provider_running": "provider",
+        "child_running": "child",
+        "user_wait": "user",
+        "approval_wait": "approval",
+        "retry_backoff": "retry",
+    }.get(status.value)
+    interaction = None
+    if state.active_turn_id:
+        waits = [{"session_id": sid, **wait} for sid, _, wait in kernel.waits(thread_id, snapshot=(state, records, 0))]
+        if waits:
+            waits.sort(key=lambda w: ("request_id" not in w, w["session_id"], w.get("operation_id", "")))
+            interaction = (
+                waits[0]["interaction"]
+                if "interaction" in waits[0]
+                else {
+                    "kind": "approval",
+                    "sessionId": waits[0]["session_id"],
+                    "turnId": waits[0]["turn_id"],
+                    "requestId": waits[0]["request_id"],
+                }
+            )
+    return {
+        "threadId": thread_id,
+        "status": status.value,
+        "phase": state.phase,
+        "waitKind": wait_kind,
+        "nextDriveAt": state.next_drive_ms,
+        "pendingInteraction": interaction,
+        "unconfirmedCount": sum(
+            any(a.state != "completed" for a in op.attempts.values())
+            for op in state.operations.values()
+            if op.turn_id == (state.active_turn_id or next(reversed(state.turns), None))
+        ),
+        "projectionWatermark": records[-1].seq,
+    }
+
+
 class SubmissionConflict(ValueError):
     pass
 
@@ -255,7 +304,7 @@ class _KernelThreadStore:
             projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
             if projection.item:
                 items.append(projection.item)
-        return ThreadSnapshot(thread, turns, items)
+        return ThreadSnapshot(thread, turns, items, thread_status(self.kernel, thread_id, snapshot=(state, records, 0)))
 
     def list_threads(self, *, include_archived=False, authorize=None, archived=None, offset=0, limit=None):
         candidates = []
@@ -503,11 +552,12 @@ class _KernelRunAdapter(RunAdapter):
         if self._notification_thread is not None:
             self._notification_thread.join()
 
-    def _binding(self, thread_id, content=None):
+    def _binding(self, thread_id, content=None, *, turn_id=None):
         thread = self._store.read_thread(thread_id).thread
         state, _records, _ = self.kernel.store.read_state(thread_id)
         if content is None:
-            initial_id = state.turns[state.active_turn_id].start._payload["input_ids"][0] if state.active_turn_id else None
+            selected_turn = turn_id or state.active_turn_id
+            initial_id = state.turns[selected_turn].start._payload["input_ids"][0] if selected_turn else None
             queued = next(
                 (
                     r._payload["input"]
@@ -539,7 +589,7 @@ class _KernelRunAdapter(RunAdapter):
         shared_state = config.shared_state
         if state.turns:
             prior = project_result(
-                self.kernel.store, thread_id, next(reversed(state.turns)), runtime=self.kernel.runtime(agent, config)
+                self.kernel.store, thread_id, turn_id or next(reversed(state.turns)), runtime=self.kernel.runtime(agent, config)
             )
             shared_state = prior.raw_result.shared_state
         return (
@@ -706,6 +756,8 @@ class _KernelRunAdapter(RunAdapter):
         return started
 
     def recover(self, connection_id, thread_id, *, follow_up_only=False, lease_retry=True):
+        if self._notification_stop.is_set():
+            return
         try:
             with self._state_manager.turn_lock(thread_id):
                 if self._state_manager.active_turn(thread_id) is None:
@@ -721,7 +773,8 @@ class _KernelRunAdapter(RunAdapter):
                         state.active_turn_id
                         or queued
                         or any(
-                            x.item.kind in kinds and x.item.target_turn_id is None
+                            (x.item.kind in kinds and x.item.target_turn_id is None)
+                            or x.item.kind in {"provider_result", "provider_evidence", "child_result"}
                             for x in self.kernel.store.peek_inbox(thread_id)
                         )
                     ):
@@ -767,57 +820,7 @@ class _KernelRunAdapter(RunAdapter):
         self._start(connection_id, thread_id, None, request_id=request_id)
 
     def public_thread_status(self, thread_id):
-        import time
-
-        state, records, _ = self.kernel.store.read_state(thread_id)
-        pending = any(
-            x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None
-            for x in self.kernel.store.peek_inbox(thread_id)
-        )
-        pending = pending or any(
-            r._payload["disposition"] == "queued" and key not in state.admitted_inputs for key, r in state.applied_inputs.items()
-        )
-        status = project_thread_status(state, pending=pending, now_ms=int(time.time() * 1000))
-        wait_kind = {
-            "provider_running": "provider",
-            "child_running": "child",
-            "user_wait": "user",
-            "approval_wait": "approval",
-            "retry_backoff": "retry",
-        }.get(status.value)
-        interaction = None
-        if state.active_turn_id:
-            waits = [{"session_id": sid, **wait} for sid, _, wait in self.kernel.waits(thread_id)]
-            if waits:
-                waits.sort(key=lambda w: "request_id" not in w)
-                interaction = self._public_waits(waits)[0]
-        return {
-            "threadId": thread_id,
-            "status": status.value,
-            "phase": state.phase,
-            "waitKind": wait_kind,
-            "nextDriveAt": state.next_drive_ms,
-            "pendingInteraction": interaction,
-            "unconfirmedCount": sum(
-                any(a.state != "completed" for a in op.attempts.values())
-                for op in state.operations.values()
-                if op.turn_id == (state.active_turn_id or next(reversed(state.turns), None))
-            ),
-            "projectionWatermark": records[-1].seq,
-        }
-
-    @staticmethod
-    def _public_waits(waits):
-        return [
-            {
-                "sessionId": wait["session_id"],
-                "turnId": wait["turn_id"],
-                **({"prompt": wait["question"]} if "question" in wait else {}),
-                **({"interactionId": wait["interaction_id"]} if "interaction_id" in wait else {}),
-                **({"requestId": wait["request_id"]} if "request_id" in wait else {}),
-            }
-            for wait in waits
-        ]
+        return thread_status(self.kernel, thread_id)
 
     def fork_thread(self, params):
         from .fork import fork_thread
@@ -903,11 +906,34 @@ class _KernelRunAdapter(RunAdapter):
             raise TurnResumeError(str(exc)) from exc
         self._validate_public_controller_action(action)
         input_id = "controller/" + derive_controller_command_id(thread_id, turn_id, action_id)
+        from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
+
+        from .interactions import InteractionError
+        from .tool_result_read import ToolResultReadError, validate_child_graph
+
+        if action["kind"] == "respond":
+            target = InteractionReplyTarget.from_dict(action["target"])
+            if target.session_id != thread_id:
+                if not self._host.authorize(
+                    connection_id,
+                    "turn/action",
+                    {"threadId": target.session_id, "turnId": target.turn_id, "actionId": action_id, "action": action},
+                ):
+                    raise PermissionError("permission_denied")
+                try:
+                    _, root_turn = validate_child_graph(self.kernel.store, thread_id, target.session_id)
+                except ToolResultReadError:
+                    raise InteractionError("stale_interaction") from None
+                if root_turn != turn_id:
+                    raise TurnMismatch("Turn does not own the child interaction")
+            target_state, _, _ = self.kernel.store.read_state(target.session_id)
+            if target.turn_id not in target_state.turns:
+                raise TurnMismatch("Turn does not belong to the target session")
         previous = self.kernel._retained_reply(thread_id, input_id)
         if previous:
             retained = previous[1]
             original = (
-                {"kind": "respond", "message": {"role": "user", "content": retained.payload["content"]["text"]}}
+                {"kind": "respond", **retained.payload["content"]["metadata"]["interaction_response"]}
                 if retained.kind == "user"
                 else {"kind": retained.payload["action"]}
                 if retained.kind == "control"
@@ -918,16 +944,16 @@ class _KernelRunAdapter(RunAdapter):
             return {"threadId": thread_id, "turnId": turn_id, "actionId": action_id, "accepted": True, "status": "running"}
         state, _, _ = self.kernel.store.read_state(thread_id)
         if turn_id not in state.turns:
-            raise TurnResumeError("Turn does not belong to the requested thread")
+            raise TurnMismatch("Turn does not belong to the requested thread")
         if state.active_turn_id is not None and state.active_turn_id != turn_id:
-            raise TurnResumeError("Thread has a different active turn")
+            raise TurnMismatch("Thread has a different active turn")
         runtime = self._store.runtimes.get(thread_id)
         if runtime is None:
             _, agent, config = self._binding(thread_id)
             runtime = self.kernel.runtime(agent, config)
         try:
             if action["kind"] == "respond":
-                receipt = self.kernel.answer(thread_id, runtime, action["message"]["content"], input_id)
+                receipt = self.kernel.answer(thread_id, runtime, target, InteractionAnswer.from_dict(action["answer"]), input_id)
             else:
                 receipt = self.kernel.push(
                     thread_id,
@@ -941,6 +967,8 @@ class _KernelRunAdapter(RunAdapter):
                 )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
+        except InteractionError:
+            raise
         except ValueError as exc:
             raise TurnResumeError(str(exc)) from exc
         active = self._state_manager.active_turn(thread_id)
@@ -987,13 +1015,20 @@ class _KernelRunAdapter(RunAdapter):
                     self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
                 return
             if error is not None:
+                from .bindings import MissingHostBinding
+                from .providers import ProviderResultInvalid
                 from .store import LeaseRetryExhausted
 
-                code = error.code if isinstance(error, LeaseRetryExhausted) else "event_stream"
+                retained_wait = isinstance(error, (MissingHostBinding, ProviderResultInvalid))
+                code = (
+                    error.code
+                    if isinstance(error, (LeaseRetryExhausted, MissingHostBinding, ProviderResultInvalid))
+                    else "event_stream"
+                )
                 self._notify_subscribers(sid, "error/warning", {"message": str(error), "code": code})
                 self._publish_turns(sid)
                 state, _, _ = self.kernel.store.read_state(sid)
-                if tid not in state.turns or not state.turns[tid].ended:
+                if not retained_wait and (tid not in state.turns or not state.turns[tid].ended):
                     self._notify_subscribers(
                         sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": "failed", "error": str(error)}
                     )

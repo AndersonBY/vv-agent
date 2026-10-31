@@ -11,9 +11,9 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 [cloud host integration](host-integration.md). This page is the reference for
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
-The package implements contract 31.0.0, pinned in `contract.lock.json`. Current
-versions: public API v14, inbox schema 3, record schema 1, RunEvent v6,
-model-call v2, task-token-usage v3, strict Message, App Server protocol v4 and
+The kernel follows contract 32.0.0, pinned in `contract.lock.json`. Current
+versions: public API v15, inbox schema 3, record schema 1, RunEvent v6,
+model-call v2, task-token-usage v3, strict Message, App Server protocol v5 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
 ## Terms
@@ -378,6 +378,36 @@ and `authenticate(input, plan)`, returning `Definitive`, `Accepted` or
 `Unknown`. The adapter owns evidence authenticity and real idempotency; a job ID
 or a model-produced value is not enough.
 
+Register exact tool names through `RunConfig.tool_providers`. Effective configs
+merge defaults and explicit mappings, then the driver copies them into
+`Runtime.providers`. Children inherit those bindings when created and rebuilt.
+Registration does not supply a tool schema and cannot replace the model,
+interaction or delegation adapters. Only a stored `function` binding uses
+`FunctionProvider`; a missing named binding raises `MissingHostBinding` before
+any replacement dispatch and keeps the original wait.
+
+Before completion, named provider returns must parse as a strict
+`ToolExecutionResult`, match the prepared call ID, and have SUCCESS or ERROR
+status. An ambiguous timeout, connection loss or cancellation error needs
+`metadata.definitive_outcome=true`. Dispatched completions need nonempty evidence;
+parked completions also include the original handle's acceptance evidence.
+Callbacks authenticate result and usage with the original operation, attempt,
+request digest, provider, turn and generation.
+
+Invalid query results raise `ProviderResultInvalid` with code
+`provider_result_invalid`; the App Server reports a warning and retains the wait.
+Invalid callbacks have a rejected input receipt with that reason. An invalid
+submit without a valid retained handle records Unknown with dispatch evidence
+and disables automatic retry. Invalid cancellation results also retain the
+original acceptance as an unconfirmed operation. A cancellation receipt means
+requested; only a valid terminal result confirms the operation's outcome.
+
+An external service may accept before the kernel commits its handle. Declare
+`ToolMetadata.idempotency="supported"` only when the provider actually dedupes
+and recovers by `context.idempotency_key`, including across attempts. Otherwise
+that crash window stays Unknown until trusted evidence arrives. Committing a
+handle does not create an unconditional exactly-once guarantee.
+
 Each handle is queried at most once per drive, and a failed query leaves the
 operation parked. `SessionStore.next_drive_delay_ms` reads `next_drive_ms` under
 the held lease in database time, so the first query happens no earlier than
@@ -403,8 +433,9 @@ Ready receipts and controls apply before repair.
   window forces a recompute.
 
 A reply to `ask_user` is a `user` input with the active `target_turn_id` and
-content `{operation_id, interaction_id, text}`. It produces one tool result in
-the same turn, not an extra user message. A no-tool `wait_user` result appends
+content `{interaction_id, text}` with the target turn and generation. An optional
+operation_id must match. It produces one explicitly labeled free-text tool result
+in the same turn, not an extra user message. A no-tool `wait_user` result appends
 `turn_parked` with no due time and no tool operation; its reply carries
 `interaction_id` and `text` and appends the user message in the same turn. A
 tool returning WAIT_USER parks with `turn_parked`, and the reply resumes it
@@ -445,6 +476,14 @@ stable session-scoped IDs, original database timestamps and
 `metadata.session_seq`. Child events come from parent records and carry the
 child's session and turn. Provider waits project as a typed parked run state.
 Projection never dispatches or acknowledges.
+
+Tool completions carry a bounded `metadata.tool_result` descriptor derived from
+the exact immutable receipt. The `tool_result` diagnostic contains the same
+descriptor instead of the full body. Workspace backends optionally retain
+file/image outputs before completion; an immutable backend can name an existing
+version without copying it. App Server body/resource pages rebuild dependencies
+for the original turn and do not drive execution. See
+[tool result reads](app-server-tool-results.md).
 
 `SessionRunEventStore` replays events and validates appends against the
 projection. `batch(tx)` turns a consumer batch into events, so a host can write
@@ -716,3 +755,11 @@ params, lineage, effective_model and last_compaction. It is creation evidence,
 not a copied execution plan. The inherited model remains the frozen default
 across turns and selection clears. Seed shared_state is empty; host process
 objects and operational state are never copied. Store versions stay unchanged.
+
+
+User forms and typed answers use the retained wait, not a newly executed tool.
+Both direct inbox application and App Server admission validate the same identity
+and answer rules. See [user interactions](app-server-interactions.md).
+`HeartbeatStopped`, exported from `vv_agent`, reports intentional renewal-worker
+shutdown. Catch it before `LeaseLost` when a host must distinguish normal stop
+from ownership failure. It does not permit another execution or commit.

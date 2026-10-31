@@ -274,7 +274,7 @@
       "supportsVision": null
     }
   ],
-  "protocol_version": "v4",
+  "protocol_version": "v5",
   "receipt": {
     "accepted": true,
     "actionId": "compact",

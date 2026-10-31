@@ -40,6 +40,10 @@ JSON_SCHEMA_NAMES = (
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
+    "ToolResultReadParams",
+    "ToolResultReadResponse",
+    "ToolResultRef",
+    "ToolResultSummary",
     "TurnResumeParams",
     "TurnResumeResponse",
     "TurnStartResponse",
@@ -284,17 +288,10 @@ def _definitions() -> dict[str, dict[str, Any]]:
                         _object(
                             {
                                 "kind": {"const": "respond"},
-                                "message": {
-                                    "type": "object",
-                                    "properties": {
-                                        "role": {"const": "user"},
-                                        "content": {"type": "string", "minLength": 1, "maxLength": 65536},
-                                    },
-                                    "required": ["role", "content"],
-                                    "additionalProperties": False,
-                                },
+                                "target": {"$ref": "#/$defs/InteractionReplyTarget"},
+                                "answer": {"$ref": "#/$defs/InteractionAnswer"},
                             },
-                            required=["kind", "message"],
+                            required=["kind", "target", "answer"],
                         ),
                         *[
                             _object({"kind": {"const": kind}}, required=["kind"])
@@ -370,6 +367,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
         ),
     }
     definitions.update(_result_definitions())
+    definitions.update(_tool_result_definitions())
     definitions.update(_context_definitions())
     from vv_agent.session.app_server import ThreadStatus
 
@@ -385,16 +383,77 @@ def _definitions() -> dict[str, dict[str, Any]]:
     definitions["ThreadStartResponse"]["properties"].update(accepted={"const": True}, replayed={"type": "boolean"})
     definitions["ThreadStartResponse"]["required"].extend(["accepted", "replayed"])
     definitions["TurnInterruptResponse"] = deepcopy(definitions["TurnActionResponse"])
-    definitions["Interaction"] = _object(
+    target = {
+        **{name: {"type": "string", "minLength": 1, "maxLength": 4096} for name in ("sessionId", "turnId", "interactionId")},
+        "generation": {"type": "integer", "minimum": 0, "maximum": 2**53 - 1},
+        "operationId": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096},
+        "attempt": {"type": ["integer", "null"], "minimum": 1, "maximum": 2**53 - 1},
+        "requestDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    }
+    definitions["InteractionReplyTarget"] = _object(target, required=list(target))
+    definitions["InteractionReplyTarget"]["oneOf"] = [
+        {"properties": {"operationId": {"type": "null"}, "attempt": {"type": "null"}}},
+        {"properties": {"operationId": {"type": "string"}, "attempt": {"type": "integer"}}},
+    ]
+    definitions["InteractionAnswerSpec"] = _object(
         {
-            "sessionId": {"type": "string"},
-            "turnId": {"type": "string"},
-            "interactionId": {"type": "string"},
-            "requestId": {"type": "string"},
-            "prompt": {"type": "string"},
+            "kind": {"enum": ["text", "single", "multi"]},
+            "options": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "maxItems": 64,
+                "uniqueItems": True,
+            },
+            "allowCustomOptions": {"type": "boolean"},
         },
-        required=["sessionId", "turnId"],
+        required=["kind", "options", "allowCustomOptions"],
     )
+    definitions["InteractionAnswer"] = {
+        "oneOf": [
+            _object(
+                {"kind": {"const": "text"}, "text": {"type": "string", "minLength": 1, "maxLength": 65536}},
+                required=["kind", "text"],
+            ),
+            *[
+                _object(
+                    {
+                        "kind": {"const": kind},
+                        **{
+                            name: {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                                "maxItems": 64,
+                                "uniqueItems": True,
+                            }
+                            for name in ("selected", "custom")
+                        },
+                    },
+                    required=["kind", "selected", "custom"],
+                )
+                for kind in ("single", "multi")
+            ],
+        ]
+    }
+    definitions["AppServerUserInteraction"] = _object(
+        {
+            "kind": {"const": "user"},
+            **target,
+            "prompt": {"type": "string", "maxLength": 16384},
+            "answerSpec": {"$ref": "#/$defs/InteractionAnswerSpec"},
+        },
+        required=["kind", *target, "prompt", "answerSpec"],
+    )
+    definitions["Interaction"] = {
+        "oneOf": [
+            _object(
+                {"kind": {"const": "approval"}, **{k: {"type": "string"} for k in ("sessionId", "turnId", "requestId")}},
+                required=["kind", "sessionId", "turnId", "requestId"],
+            ),
+            {"$ref": "#/$defs/AppServerUserInteraction"},
+        ]
+    }
+    definitions["ThreadSnapshotResponse"]["properties"]["state"] = {"$ref": "#/$defs/ThreadStatusResponse"}
+    definitions["ThreadSnapshotResponse"]["required"].append("state")
     definitions["CacheUsage"] = _object(
         {
             "status": {"type": "string", "enum": ["provider_reported", "accounting_missing", "unsupported"]},
@@ -486,7 +545,7 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
         "InitializeResponse": _object(
             {
                 "userAgent": {"type": "string"},
-                "protocolVersion": {"const": "v4"},
+                "protocolVersion": {"const": "v5"},
                 "capabilities": {"$ref": "#/$defs/ServerCapabilities"},
             },
             required=["userAgent", "protocolVersion", "capabilities"],
@@ -719,6 +778,86 @@ def _context_definitions() -> dict[str, dict[str, Any]]:
     }
 
 
+def _tool_result_definitions():
+    integer = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
+    digest = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    ref = _object(
+        {
+            **{
+                name: {"type": "string", "minLength": 1, "maxLength": 4096}
+                for name in ("sessionId", "turnId", "operationId", "toolCallId")
+            },
+            "attempt": integer | {"minimum": 1},
+            "seq": integer | {"minimum": 1},
+            "recordDigest": digest,
+        }
+    )
+    ref["required"] = list(ref["properties"])
+    resource = _object(
+        {
+            "id": {"type": "string", "pattern": "^resource:[0-7]$"},
+            "status": {"enum": ["retained", "not_retained", "unavailable"]},
+            "name": {"type": "string", "maxLength": 256},
+            "mediaType": {"type": "string", "maxLength": 256},
+            "fullText": {"type": "boolean"},
+            "byteLength": integer,
+            "sha256": digest,
+        },
+        required=["id", "status", "name", "mediaType", "fullText"],
+    )
+    kind = {"enum": ["text", "json", "image", "file", "error"]}
+    summary = _object(
+        {
+            "kind": kind,
+            "context": {"enum": ["normal", "correction", "audit"]},
+            "preview": {"type": "string", "maxLength": 2048},
+            "byteLength": integer,
+            "truncated": {"type": "boolean"},
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "resources": {"type": "array", "maxItems": 8, "items": resource},
+            "value": {},
+            "cursor": _object(
+                {"kind": {"const": "read_file"}, "offsetChars": integer, "sha256": digest},
+                required=["kind", "offsetChars", "sha256"],
+            ),
+        },
+        required=["kind", "context", "preview", "byteLength", "truncated", "ref", "resources"],
+    )
+    part = {"type": "string", "pattern": "^(content|resource:[0-7])$"}
+    params = _object(
+        {
+            "threadId": {"type": "string", "minLength": 1},
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "part": part,
+            "offset": integer,
+            "limit": {"type": "integer", "minimum": 1, "maximum": 65536},
+        },
+        required=["threadId", "ref", "part", "offset", "limit"],
+    )
+    response = _object(
+        {
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "kind": kind,
+            "context": {"enum": ["normal", "correction", "audit"]},
+            "part": part,
+            "encoding": {"const": "base64"},
+            "data": {"type": "string", "maxLength": 87384},
+            "offset": integer,
+            "nextOffset": integer,
+            "totalBytes": integer,
+            "sha256": digest,
+            "eof": {"type": "boolean"},
+        }
+    )
+    response["required"] = list(response["properties"])
+    return {
+        "ToolResultRef": ref,
+        "ToolResultSummary": summary,
+        "ToolResultReadParams": params,
+        "ToolResultReadResponse": response,
+    }
+
+
 CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "initialize": ("InitializeParams", True, True),
     "initialized": (None, False, False),
@@ -730,6 +869,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/context/read": ("ThreadContextReadParams", True, True),
     "thread/compact/start": ("ThreadCompactStartParams", True, True),
     "thread/events/list": ("ThreadEventsListParams", True, True),
+    "thread/toolResult/read": ("ToolResultReadParams", True, True),
     "thread/model/select": ("ThreadModelSelectParams", True, True),
     "thread/status": ("ThreadStatusParams", True, True),
     "thread/list": ("ThreadListParams", True, False),
@@ -853,6 +993,10 @@ def _schema_bundle() -> dict[str, Any]:
         "$defs": deepcopy(definitions),
     }
     standalone_sources = {
+        **{
+            name: definitions[name]
+            for name in ("ToolResultRef", "ToolResultSummary", "ToolResultReadParams", "ToolResultReadResponse")
+        },
         "AppItem": definitions["AppItem"],
         "AppThread": definitions["AppThread"],
         "AppTurn": definitions["AppTurn"],
@@ -987,6 +1131,19 @@ def _typescript_protocol_source() -> str:
         "export interface ThreadModelSelectResponse { threadId: string; inputId: string; accepted: true; }\n"
         "export interface ThreadModelSelectParams { threadId: string; inputId: string; "
         "selection: { model: string; model_settings?: Record<string, unknown>; route: Record<string, unknown> } | null; }\n"
+        "export interface ToolResultRef { sessionId: string; turnId: string; operationId: string; attempt: number; "
+        "toolCallId: string; seq: number; recordDigest: string; }\n"
+        "export interface ToolResultSummary { kind: 'text' | 'json' | 'image' | 'file' | 'error'; preview: string; "
+        "context: 'normal' | 'correction' | 'audit'; "
+        "byteLength: number; truncated: boolean; ref: ToolResultRef; resources: ToolResultResource[]; value?: JsonValue; "
+        "cursor?: { kind: 'read_file'; offsetChars: number; sha256: string }; }\n"
+        "export interface ToolResultResource { id: string; status: 'retained' | 'not_retained' | 'unavailable'; "
+        "name: string; mediaType: string; fullText: boolean; byteLength?: number; sha256?: string; }\n"
+        "export interface ToolResultReadParams { threadId: string; ref: ToolResultRef; part: string; "
+        "offset: number; limit: number; }\n"
+        "export interface ToolResultReadResponse { ref: ToolResultRef; kind: ToolResultSummary['kind']; "
+        "context: 'normal' | 'correction' | 'audit'; part: string; encoding: 'base64'; data: string; offset: number; "
+        "nextOffset: number; totalBytes: number; sha256: string; eof: boolean; }\n"
         "export interface EventCursor { threadId: string; seq: number; offset: number; recordDigest: string; }\n"
         "export interface ThreadEventsListParams { threadId: string; afterCursor?: EventCursor; "
         "throughCursor?: EventCursor; limit: number; }\n"
@@ -1044,7 +1201,7 @@ def _typescript_protocol_source() -> str:
         "}\n"
         "export interface ToolCallDeltaParams extends AppItem { delta: JsonValue; }\n"
         "export interface WarningParams { message: string; code?: string; }\n"
-        'export interface InitializeResponse { userAgent: string; protocolVersion: "v4"; '
+        'export interface InitializeResponse { userAgent: string; protocolVersion: "v5"; '
         "capabilities: ServerCapabilities; }\n"
         "export interface ModelSummary {\n"
         "  id: string; provider?: string; displayName?: string; contextLength: number | null;\n"
@@ -1056,8 +1213,10 @@ def _typescript_protocol_source() -> str:
         "export interface ModelListResponse { models: ModelSummary[]; }\n"
         "export interface ThreadStartResponse { threadId: string; agentKey: string; cwd: string | "
         "null; status: ThreadStatus; accepted: true; replayed: boolean; }\n"
-        "export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
-        "export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; }\n"
+        "export interface ThreadReadResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; "
+        "state: ThreadStatusResponse; }\n"
+        "export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; items: AppItem[]; "
+        "state: ThreadStatusResponse; }\n"
         "export interface ThreadListResponse { threads: AppThread[]; }\n"
         "export interface ThreadArchiveResponse { threadId: string; archived: boolean; }\n"
         "export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; }\n"
@@ -1075,7 +1234,7 @@ def _typescript_protocol_source() -> str:
         "export interface TurnQueueResponse extends TurnStartResponse {}\n"
         "export interface TurnInterruptResponse extends TurnActionResponse {}\n"
         "export type TurnAction =\n"
-        '  | { kind: "respond"; message: { role: "user"; content: string } }\n'
+        '  | { kind: "respond"; target: InteractionReplyTarget; answer: InteractionAnswer }\n'
         '  | { kind: "suspend" } | { kind: "resume" } | { kind: "cancel" } | { kind: "abort" };\n'
         "export interface TurnActionParams { threadId: string; turnId: string; actionId: string; action: TurnAction; }\n"
         "export interface TurnActionResponse {\n"
@@ -1108,6 +1267,7 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/context/read"; params: ThreadContextReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/compact/start"; params: ThreadCompactStartParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/toolResult/read"; params: ToolResultReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/events/list"; params: ThreadEventsListParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; '
@@ -1141,7 +1301,7 @@ def _typescript_protocol_source() -> str:
         '  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;\n'
         "};\n"
         "export type ClientResult =\n"
-        "  | ThreadForkResponse | ThreadContextReadResponse | ThreadCompactStartResponse | "
+        "  | ToolResultReadResponse | ThreadForkResponse | ThreadContextReadResponse | ThreadCompactStartResponse | "
         "InitializeResponse | ModelListResponse "
         "| ThreadStartResponse | ThreadReadResponse\n"
         "  | ThreadModelSelectResponse | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "
@@ -1157,8 +1317,16 @@ def _typescript_protocol_source() -> str:
         "export type JsonRpcMessage = ClientRequest | ServerNotification | ServerRequest | "
         "JsonRpcSuccess | JsonRpcError;\n"
         "\n"
-        "export interface Interaction { sessionId: string; turnId: string; interactionId?: string; "
-        "requestId?: string; prompt?: string; }\n"
+        "export interface InteractionReplyTarget { sessionId: string; turnId: string; generation: number; "
+        "interactionId: string; operationId: string | null; attempt: number | null; requestDigest: string; }\n"
+        'export interface InteractionAnswerSpec { kind: "text" | "single" | "multi"; options: string[]; '
+        "allowCustomOptions: boolean; }\n"
+        'export type InteractionAnswer = { kind: "text"; text: string } | { kind: "single" | "multi"; '
+        "selected: string[]; custom: string[] };\n"
+        'export interface AppServerUserInteraction extends InteractionReplyTarget { kind: "user"; prompt: '
+        "string; answerSpec: InteractionAnswerSpec; }\n"
+        'export type Interaction = { kind: "approval"; sessionId: string; turnId: string; requestId: string '
+        "} | AppServerUserInteraction;\n"
         "\n"
         "export interface CacheUsage {\n"
         '  status: "provider_reported" | "accounting_missing" | "unsupported";\n'

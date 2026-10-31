@@ -39,6 +39,7 @@ class ThreadSnapshot:
     thread: ThreadRecord
     turns: list[TurnRecord]
     items: list[ThreadItem]
+    state: dict[str, Any] = field(default_factory=dict)
 
 
 class ThreadStore:

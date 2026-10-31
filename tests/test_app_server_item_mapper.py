@@ -165,6 +165,9 @@ def test_typed_tool_metadata_and_completed_observations_are_projected() -> None:
         tool_metadata=metadata,
         event_id="evt_typed_completed",
         created_at=4,
+        operation_id="operation-typed",
+        attempt=1,
+        metadata={"tool_result": {"kind": "text", "preview": "inspected"}},
     )
     started_projection = map_run_event(started, thread_id="thread_1", turn_id="turn_1")
     completed_projection = map_run_event(completed, thread_id="thread_1", turn_id="turn_1")
@@ -191,6 +194,9 @@ def test_typed_tool_metadata_and_completed_observations_are_projected() -> None:
         "errorCode": None,
         "executionStarted": True,
         "durationMs": 7,
+        "operationId": "operation-typed",
+        "attempt": 1,
+        "result": {"kind": "text", "preview": "inspected"},
         "toolMetadata": {
             "sideEffect": "read",
             "idempotency": "supported",

@@ -121,7 +121,11 @@ def example(schema):
     return True if kind == "boolean" else None
 
 
-@pytest.mark.parametrize("validator", list(records._VALIDATORS.values()), ids=lambda v: str(list(v.schema["properties"])))
+@pytest.mark.parametrize(
+    "validator",
+    list(records._VALIDATORS.values()),
+    ids=lambda v: str(list(v.schema.get("properties", v.schema))),
+)
 def test_compiled_checks_match_jsonschema(validator):
     value = example(validator.schema)
     check = records._CHECKS[id(validator.schema)]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from hashlib import sha256
 from threading import RLock
+from uuid import uuid4
 
 from vv_agent.workspace.artifacts import is_reserved_artifact_path
 from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
@@ -36,12 +38,13 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 class MemoryWorkspaceBackend:
-    __slots__ = ("_dirs", "_files", "_lock")
+    __slots__ = ("_dirs", "_files", "_lock", "_retained_workspace_id")
 
     def __init__(self) -> None:
         self._files: dict[str, bytes] = {}
         self._dirs: set[str] = {""}
         self._lock = RLock()
+        self._retained_workspace_id = sha256(uuid4().bytes).hexdigest()
 
     @staticmethod
     def _norm(path: str) -> str:
@@ -97,8 +100,11 @@ class MemoryWorkspaceBackend:
         return self.write_text_chunks_exclusive(path, (content,))
 
     def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
+        return self.write_bytes_chunks_exclusive(path, (chunk.encode("utf-8") for chunk in chunks))
+
+    def write_bytes_chunks_exclusive(self, path: str, chunks: Iterable[bytes]) -> int:
         key = "/".join(_exclusive_workspace_path_segments(path))
-        data = b"".join(chunk.encode("utf-8") for chunk in chunks)
+        data = b"".join(chunks)
         with self._lock:
             if key in self._files or key in self._dirs:
                 raise FileExistsError(path)
@@ -110,6 +116,38 @@ class MemoryWorkspaceBackend:
             self._files[key] = data
             self._ensure_parents(key)
         return len(data)
+
+    @property
+    def retained_workspace_id(self) -> str:
+        return self._retained_workspace_id
+
+    def retain_output(self, path, *, expected):
+        from vv_agent.workspace.resources import copy_retained_output
+
+        return copy_retained_output(self, path, expected=expected)
+
+    def _read_output_chunks(self, path):
+        _exclusive_workspace_path_segments(path)
+        return self._read_bytes_chunks(path)
+
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
+
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        length = retained_range(ref, offset, length)
+        with self._lock:
+            if path not in self._files:
+                raise FileNotFoundError(path)
+            data = self._files[path]
+        if len(data) != ref.size_bytes:
+            raise ValueError("stale_reference")
+        # Bytes are immutable; holding the value also prevents identity reuse during this read.
+        verify_retained(ref, (id(data), data), lambda: (data,))
+        for start in range(offset, offset + length, 65_536):
+            yield data[start : min(start + 65_536, offset + length)]
+        with self._lock:
+            if self._files.get(path) is not data:
+                raise ValueError("stale_reference")
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._norm(path)

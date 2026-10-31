@@ -125,6 +125,7 @@ class Runtime:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
 
         self.config = effective_run_config(self.agent, self.config)
+        self.providers = {**self.config.tool_providers, **self.providers}
         self._dynamic_tools: dict[str, FunctionTool] = {}
         self._enabled_dynamic_tools: set[str] = set()
         self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
@@ -147,6 +148,10 @@ class Runtime:
         self._memory_routes: dict[str, tuple[LLMClient, ResolvedModelConfig]] = {}
         self._memory_binding_key: tuple | None = None
         self._memory_binding: dict[str, Any] = {}
+        if self.providers:
+            conflicts = self.providers.keys() & (self.children.keys() | self.delegated_tools | {"ask_user", "function"})
+            if conflicts:
+                raise ValueError(f"Tool providers conflict with runtime bindings: {', '.join(sorted(conflicts))}")
 
     @cached_property
     def workspace_backend(self):
@@ -210,7 +215,7 @@ class Runtime:
             resolved,
             client,
             self.heartbeat_store,
-            providers=self.providers,
+            providers=dict(self.providers),
             model_resolver=self.model_resolver,
             children=self.children,
             host_bindings=self.host_bindings,

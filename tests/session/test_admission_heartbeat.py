@@ -679,3 +679,17 @@ def test_append_lock_wait_over_250ms_succeeds_within_lease(store, database):
             store._rows("SELECT pg_sleep(0.5)")
         future.result(timeout=5)
     assert len(rows(store)) == 2
+
+
+def test_public_heartbeat_stopped_distinguishes_normal_stop_from_lease_loss(store):
+    from vv_agent import HeartbeatStopped
+
+    start(store)
+    lease = store.acquire("s", owner="normal-stop", ttl_ms=2000)
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 2000, INTERVAL)
+    heartbeat.thread.start()
+    heartbeat.close()
+    with pytest.raises(HeartbeatStopped) as caught:
+        heartbeat.poll(store)
+    assert type(caught.value) is HeartbeatStopped
+    assert isinstance(caught.value, LeaseLost)

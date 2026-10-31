@@ -190,7 +190,7 @@ def persist_captured_text_artifact(
 
 def is_reserved_artifact_path(path: str) -> bool:
     normalized = _normalize_workspace_path(path)
-    return normalized.startswith(".vv-agent/artifacts/")
+    return normalized.startswith((".vv-agent/artifacts/", ".vv-agent/resources/"))
 
 
 def _artifact_segment(value: str, fallback: str) -> str:

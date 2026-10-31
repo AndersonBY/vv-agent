@@ -126,16 +126,20 @@ class FunctionTool:
                 output.tool_call_id = tool_call_id
             return output
         if isinstance(output, ToolOutputText):
-            return ToolExecutionResult(tool_call_id=tool_call_id, content=output.text, metadata=dict(output.metadata))
+            return ToolExecutionResult(
+                tool_call_id=tool_call_id,
+                content=output.text,
+                metadata={k: v for k, v in output.metadata.items() if k != "output_type"},
+            )
         if isinstance(output, ToolOutputJson):
-            metadata = {"output_type": "json", **dict(output.metadata)}
+            metadata = {**dict(output.metadata), "output_type": "json"}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 content=json.dumps(output.data, ensure_ascii=False),
                 metadata=metadata,
             )
         if isinstance(output, ToolOutputImage):
-            metadata = {"output_type": "image", **dict(output.metadata)}
+            metadata = {**dict(output.metadata), "output_type": "image"}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 content=json.dumps({"url": output.url, "path": output.path, "mime_type": output.mime_type}, ensure_ascii=False),
@@ -144,7 +148,7 @@ class FunctionTool:
                 metadata=metadata,
             )
         if isinstance(output, ToolOutputFile):
-            metadata = {"output_type": "file", **dict(output.metadata)}
+            metadata = {**dict(output.metadata), "output_type": "file"}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 content=json.dumps({"path": output.path, "mime_type": output.mime_type}, ensure_ascii=False),
@@ -152,9 +156,9 @@ class FunctionTool:
             )
         if isinstance(output, ToolOutputError):
             metadata = {
+                **dict(output.metadata),
                 "output_type": "error",
                 "retryable": output.retryable,
-                **dict(output.metadata),
             }
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,

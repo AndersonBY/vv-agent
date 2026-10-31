@@ -7,7 +7,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Iterable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -161,6 +161,15 @@ class LocalWorkspaceBackend:
         return self.write_text_chunks_exclusive(path, (content,))
 
     def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
+        def encoded():
+            for chunk in chunks:
+                if not isinstance(chunk, str):
+                    raise TypeError("artifact text chunks must be strings")
+                yield chunk.encode("utf-8")
+
+        return self.write_bytes_chunks_exclusive(path, encoded())
+
+    def write_bytes_chunks_exclusive(self, path: str, chunks: Iterable[bytes]) -> int:
         segments = _exclusive_workspace_path_segments(path)
         artifact = self._resolve_artifact(path)
         root = self._artifact_root if artifact is not None else self._root
@@ -168,6 +177,78 @@ class LocalWorkspaceBackend:
         if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
             return _write_exclusive_chunks_at(root, segments, chunks)
         return _write_exclusive_chunks_portable(root, segments, chunks)
+
+    @property
+    def retained_workspace_id(self) -> str:
+        return hashlib.sha256(os.fsencode(str(self._root))).hexdigest()
+
+    def retain_output(self, path, *, expected):
+        from vv_agent.workspace.resources import copy_retained_output
+
+        return copy_retained_output(self, path, expected=expected)
+
+    @contextmanager
+    def _open_output(self, path):
+        """Open every path component without following links."""
+        segments = _exclusive_workspace_path_segments(path)
+        root = self._artifact_root if self._artifact_segments(path) else self._root
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        if os.name == "nt":
+            target = root.joinpath(*segments)
+            for index in range(1, len(segments) + 1):
+                if root.joinpath(*segments[:index]).is_symlink():
+                    raise ValueError("resource path contains a symlink")
+            with target.open("rb") as source:
+                yield source
+            return
+        directory = os.open(root, flags | os.O_DIRECTORY)
+        try:
+            for segment in segments[:-1]:
+                next_directory = os.open(segment, flags | os.O_DIRECTORY, dir_fd=directory)
+                os.close(directory)
+                directory = next_directory
+            descriptor = os.open(segments[-1], flags | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ValueError("resource must be a regular file")
+                yield source
+        finally:
+            os.close(directory)
+
+    def _read_output_chunks(self, path):
+        with self._open_output(path) as source:
+            while chunk := source.read(65_536):
+                yield chunk
+
+    def open_retained(self, ref, *, offset=0, length=None):
+        from vv_agent.workspace.resources import retained_range, validate_retained_workspace, verify_retained
+
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        remaining = retained_range(ref, offset, length)
+        with self._open_output(path) as source:
+
+            def version():
+                info = os.fstat(source.fileno())
+                return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            original = version()
+            if original[2] != ref.size_bytes:
+                raise ValueError("stale_reference")
+
+            def chunks():
+                while chunk := source.read(65_536):
+                    yield chunk
+
+            verify_retained(ref, original, chunks)
+            source.seek(offset)
+            while remaining:
+                chunk = source.read(min(remaining, 65_536))
+                if not chunk:
+                    raise ValueError("stale_reference")
+                remaining -= len(chunk)
+                yield chunk
+            if version() != original:
+                raise ValueError("stale_reference")
 
     def file_info(self, path: str) -> FileInfo | None:
         target, logical_path = self._resolve_read_target(path)
@@ -203,6 +284,8 @@ class LocalWorkspaceBackend:
         self._resolve(path).mkdir(parents=True, exist_ok=True)
 
     def _is_reserved_target(self, target: Path) -> bool:
+        if target == self._artifact_root or self._artifact_root in target.parents:
+            return True
         try:
             relative = target.relative_to(self._root).as_posix()
         except ValueError:
@@ -236,7 +319,7 @@ def _write_all(file_descriptor: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _write_exclusive_chunks_at(root: Path, segments: tuple[str, ...], chunks: Iterable[str]) -> int:
+def _write_exclusive_chunks_at(root: Path, segments: tuple[str, ...], chunks: Iterable[bytes]) -> int:
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     directory_fd = os.open(root, directory_flags)
     try:
@@ -274,7 +357,7 @@ def _write_exclusive_chunks_at(root: Path, segments: tuple[str, ...], chunks: It
         os.close(directory_fd)
 
 
-def _write_exclusive_chunks_portable(root: Path, segments: tuple[str, ...], chunks: Iterable[str]) -> int:
+def _write_exclusive_chunks_portable(root: Path, segments: tuple[str, ...], chunks: Iterable[bytes]) -> int:
     parent = root
     for segment in segments[:-1]:
         parent /= segment
@@ -299,12 +382,11 @@ def _write_exclusive_chunks_portable(root: Path, segments: tuple[str, ...], chun
     return total
 
 
-def _write_chunks(file_descriptor: int, chunks: Iterable[str]) -> int:
+def _write_chunks(file_descriptor: int, chunks: Iterable[bytes]) -> int:
     total = 0
     for chunk in chunks:
-        if not isinstance(chunk, str):
-            raise TypeError("artifact text chunks must be strings")
-        data = chunk.encode("utf-8")
-        _write_all(file_descriptor, data)
-        total += len(data)
+        if not isinstance(chunk, bytes):
+            raise TypeError("resource chunks must be bytes")
+        _write_all(file_descriptor, chunk)
+        total += len(chunk)
     return total

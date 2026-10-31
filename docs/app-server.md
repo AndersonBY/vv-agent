@@ -26,7 +26,7 @@ Every line is one JSON object. Requests and notifications carry
 {"jsonrpc":"2.0","method":"initialized"}
 ```
 
-The response reports `protocolVersion: "v4"`. Schema exports describe the
+The response reports `protocolVersion: "v5"`. Schema exports describe the
 current closed wire shapes. Regenerate client bindings when upgrading.
 Malformed JSON returns `-32700`; an invalid message returns `-32600`.
 
@@ -65,7 +65,7 @@ queues the next turn. Stale expected turns return `-32025 turn_mismatch`.
 
 Any authorized connection, including one on another API node, can submit
 `turn/action`. The closed actions are cancel, suspend, resume, abort, and respond.
-Respond takes `message: {role: "user", content: "..."}`. The server derives a
+Respond takes a typed `target` and `answer`; see [user interactions](app-server-interactions.md). The server derives a
 stable inbox command from threadId, turnId and actionId. Retried actions do not
 repeat side effects. Replies keep their retained interaction target.
 
@@ -76,7 +76,10 @@ repeat side effects. Replies keep their retained interaction target.
 ```
 
 Interrupt submits durable cancel, including when that API node has no handle.
-Its result is the turn/action receipt. Resume checks durable execution state,
+Its result is the turn/action receipt. Accepted means cancellation was requested.
+A valid provider completion confirms the original operation's terminal outcome.
+When the provider cannot confirm it, the turn can end cancelled with a nonzero
+`unconfirmedCount`; the external work remains unresolved. Resume checks durable execution state,
 reuses an available local handle and respects the session lease. It never needs
 the original connection. A terminal turn returns its retained result.
 
@@ -137,6 +140,12 @@ See [host integration](app-server-host-integration.md#task-cloning).
 
 ## Bounded replay
 
+Completed tool items contain a bounded result descriptor and an exact completion
+reference. Use `thread/toolResult/read` for base64 byte pages of the body or a
+retained file/image resource. The `tool_result` diagnostic contains the same
+descriptor. See [tool result reads](app-server-tool-results.md) for the request
+shape, limits, retention capability and errors.
+
 Use `thread/events/list` for a long thread. Supply threadId and a limit from 1
 to 256, plus optional afterCursor and throughCursor. The result contains events,
 nextCursor, throughCursor and more. Each event entry contains its cursor and
@@ -165,7 +174,7 @@ not a mutable UI entity: `item_{event_id}`.
 - threadId, status and kernel phase;
 - waitKind: provider, child, user, approval, retry, or null;
 - nextDriveAt: Unix milliseconds, or null when unknown;
-- pendingInteraction: sessionId, turnId and optional prompt/interactionId/requestId, or null;
+- pendingInteraction: a closed approval or user form, or null; see [user interactions](app-server-interactions.md);
 - unconfirmedCount: operations in the current turn (the latest turn when terminal) with an attempt that has no definitive completion;
 - projectionWatermark: the last record sequence used for this projection.
 
@@ -173,7 +182,7 @@ Statuses distinguish provider_running, child_running, user_wait, approval_wait,
 retry_backoff, suspended and terminal. Idle means no turn yet; running means
 work is admitted or ready. Archived and closed retain their lifecycle meanings.
 A child can expose a pending interaction while the parent is child_running.
-No provider handles, job secrets, arguments or digests appear in status.
+No provider handles or job secrets appear in status. A user form carries its public requestDigest.
 
 A turn/completed notification can describe an interrupted execution attempt.
 Only a retained turn_ended record makes a turn terminal. Each node tails durable

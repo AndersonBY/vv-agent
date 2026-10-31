@@ -184,6 +184,20 @@ class RunHandle:
                     runtime.lease_retry_sleep(runtime.lease_retry_jitter(delay / 2, delay))
                     continue
             state, _, _ = self.kernel.store.read_state(sid)
+            if tid in state.turns and state.turns[tid].ended:
+                # Parent closure enqueues descendant cancellation atomically. Drain those
+                # controls even though terminal parents no longer have active child waits.
+                for operation in state.operations.values():
+                    if operation.turn_id != tid:
+                        continue
+                    for attempt in operation.attempts.values():
+                        if attempt.child_handle is None:
+                            continue
+                        for child in child_handles(attempt.child_handle):
+                            child_id = child["session_id"]
+                            if any(i.item.kind == "control" for i in self.kernel.store.peek_inbox(child_id)):
+                                self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
+                                self._deliver_child(child_id, runtime)
             completed = False
             for (oid, _), wait in state.waits.items():
                 handle = wait["handle"]

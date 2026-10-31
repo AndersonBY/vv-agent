@@ -5,13 +5,67 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.tools.outcomes import HostToolOutcome
+from vv_agent.tools.outcomes import HostToolOutcome, validate_definitive_result
 from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
 
-from .records import InboxItem, Record
+from .records import HANDLE, InboxItem, Record, validate
+
+
+class ProviderResultInvalid(ValueError):
+    code = "provider_result_invalid"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+def validate_provider_handle(plan: Record, handle: dict[str, Any]) -> None:
+    try:
+        validate(handle, HANDLE)
+        if handle["kind"] != "provider" or any(
+            handle[key] != expected
+            for key, expected in (
+                ("provider", plan._payload["provider_binding"]),
+                ("operation_id", plan.operation_id),
+                ("attempt", plan.attempt),
+                ("request_digest", plan._payload["request_digest"]),
+            )
+        ):
+            raise ValueError("provider handle mismatch")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ProviderResultInvalid() from exc
+
+
+def validate_provider_result(plan: Record, outcome: Definitive, handle: dict[str, Any] | None = None) -> None:
+    """Validate external returns before hooks, receipt creation or state mutation."""
+    try:
+        canonical_json_bytes(outcome.result)
+        if plan._payload["op_kind"] != "model":
+            from .tool_results import validate_output_body
+
+            result = ToolExecutionResult.from_dict(outcome.result)
+            validate_definitive_result(result)
+            validate_output_body(result)
+            if result.tool_call_id != plan._payload["request"]["id"]:
+                raise ValueError("provider result call ID mismatch")
+        if (
+            not isinstance(outcome.evidence, tuple)
+            or not outcome.evidence
+            or any(not isinstance(value, str) or not value.strip() for value in outcome.evidence)
+            or not isinstance(outcome.usage, dict)
+            or (outcome.shared_state is not None and not isinstance(outcome.shared_state, dict))
+        ):
+            raise ValueError("provider result evidence or usage is incomplete")
+        canonical_json_bytes([list(outcome.evidence), outcome.usage, outcome.shared_state])
+        if handle is not None:
+            validate_provider_handle(plan, handle)
+            if handle["evidence"] not in outcome.evidence:
+                raise ValueError("provider result lost acceptance evidence")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ProviderResultInvalid() from exc
 
 
 @dataclass(frozen=True)
@@ -99,6 +153,7 @@ class FunctionProvider:
                     content="Cooperative cancellation confirmed.",
                     status_code=ToolResultStatus.ERROR,
                     error_code="tool_cancelled",
+                    metadata={"definitive_outcome": True},
                 ).to_dict(),
                 ("cooperative-stop",),
             )

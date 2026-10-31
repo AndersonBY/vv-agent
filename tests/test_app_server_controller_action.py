@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support.interactions import displayed_target
 
 from vv_agent.app_server import AppServer
 from vv_agent.app_server.host import DefaultAppServerHost
@@ -38,15 +39,15 @@ def test_turn_action_rejects_identity_over_utf8_limit_without_store_access(
         adapter.controller_action(connection_id="conn_1", **kwargs)
 
 
-def test_turn_action_rejects_message_unknown_fields_before_durable_lookup(surface) -> None:
+def test_turn_action_rejects_respond_unknown_fields_before_durable_lookup(surface) -> None:
     adapter = AppServer(store=surface.store).run_adapter
-    with pytest.raises(TurnResumeError, match="respond message"):
+    with pytest.raises(TurnResumeError, match="respond action fields"):
         adapter.controller_action(
             connection_id="conn_1",
             thread_id="thread-1",
             turn_id="turn-1",
             action_id="action-1",
-            action={"kind": "respond", "message": {"role": "user", "content": "ok", "secret": "x"}},
+            action={"kind": "respond", "target": {}, "answer": {}, "secret": "x"},
         )
 
 
@@ -100,7 +101,11 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
         drive(kernel.store, thread.thread_id, runtime=handle.runtime, _one_turn=True)
         assert adapter.public_thread_status(thread.thread_id)["status"] == "suspended"
         assert server.store.read_thread(thread.thread_id).turns[0].result["waitReason"] == "suspended"
-        reply = {"kind": "respond", "message": {"role": "user", "content": "value"}}
+        reply = {
+            "kind": "respond",
+            "target": displayed_target(kernel, thread.thread_id).to_dict(),
+            "answer": {"kind": "text", "text": "value"},
+        }
         adapter.controller_action(
             connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="reply", action=reply
         )
