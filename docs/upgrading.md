@@ -77,6 +77,11 @@ old-version session.
 
 ## Version notes
 
+### 0.31.2
+
+No host action. Streamed arguments of parallel tool calls are routed by call
+ID and index instead of the last opened call; see [0.31.2](releases/0.31.2.md).
+
 ### 0.31.1
 
 No host action. `import vv_agent` loads the model SDKs on first model use

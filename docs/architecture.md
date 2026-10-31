@@ -75,6 +75,18 @@ deltas, and `model_tool_call_started` and `model_tool_call_progress` events;
 they drop unknown or malformed provider payloads before those payloads leave
 the adapter.
 
+The `vv-llm` bridge routes streamed tool arguments by call ID first, then by
+the index owned by the most recent named call at that index. This lets
+sequential calls reuse an index. A named delta without a call ID always
+starts a new call, even when its name and index match an earlier call.
+Providers that repeat the name on every delta need call IDs to avoid
+splitting one call into several. A continuation without either field is
+accepted only when there is one call. Arguments and progress events use the
+same resolved call. `tests/test_llm_tool_call_streaming.py` covers this
+routing and both argument append and snapshot replacement. Providers must
+preserve call IDs or stable indexes for interleaved calls; when an upstream
+adapter overwrites indexes, some interleaved streams lose their identity.
+
 Two families of events describe tools. `model_tool_call_*` events report the
 model generating a tool call. `tool_call_planned`, `tool_call_started`, and
 `tool_call_completed` report the runtime executing it. Reasoning is private
