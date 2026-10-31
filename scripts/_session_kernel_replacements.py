@@ -877,6 +877,94 @@ class Author:
                         domain["capabilities"].append(
                             {"id": "export." + name if domain["id"] == "exports" else "app_server." + name, "python": target}
                         )
+        result_types = (
+            "ToolResultRef",
+            "ToolResultSummary",
+            "ToolResultReadParams",
+            "ToolResultReadResponse",
+            "ToolResultResourceAuthorizationRequest",
+            "ToolResultResourceExpectation",
+            "ToolResultResourceRef",
+        )
+        exports = next(domain for domain in d["domains"] if domain["id"] == "exports")
+        for name in (*result_types, "OutputRetentionBackend"):
+            target = "vv_agent." + name
+            if not any(c["python"] == target for c in exports["capabilities"]):
+                exports["capabilities"].append({"id": "exports." + name, "python": target})
+        identifiers = {"tool_result_" + name for name in result_types} | {"workspace_output_retention"}
+        d["surfaces"] = [surface for surface in d["surfaces"] if surface["id"] not in identifiers]
+        for name in result_types:
+            target = "vv_agent." + name
+            value = resolve(target)
+            members = [
+                {
+                    "id": item.name,
+                    "kind": "field",
+                    "python": {"kind": "field", "name": item.name, "declaration": "dataclass_field"},
+                }
+                for item in fields(value)
+            ]
+            if hasattr(value, "to_dict"):
+                members.append(
+                    {
+                        "id": "to_dict",
+                        "kind": "operation",
+                        "python": {"kind": "method", "name": "to_dict", "signature": signature(value.to_dict)},
+                    }
+                )
+            d["surfaces"].append({"id": "tool_result_" + name, "python_target": target, "members": members})
+        retention = resolve("vv_agent.OutputRetentionBackend")
+        d["surfaces"].append(
+            {
+                "id": "workspace_output_retention",
+                "python_target": "vv_agent.OutputRetentionBackend",
+                "members": [
+                    {
+                        "id": "retained_workspace_id",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "property",
+                            "declaration": "property",
+                            "name": "retained_workspace_id",
+                            "signature": signature(retention.retained_workspace_id.fget),
+                        },
+                    },
+                    *[
+                        {
+                            "id": name,
+                            "kind": "operation",
+                            "python": {"kind": "method", "name": name, "signature": signature(getattr(retention, name))},
+                        }
+                        for name in ("retain_output", "open_retained")
+                    ],
+                ],
+            }
+        )
+        host = next(surface for surface in d["surfaces"] if surface["id"] == "app_server_host")
+        host["members"].append(
+            {
+                "id": "authorize_tool_result_resource",
+                "kind": "operation",
+                "python": {
+                    "kind": "method",
+                    "name": "authorize_tool_result_resource",
+                    "signature": signature(resolve(host["python_target"]).authorize_tool_result_resource),
+                },
+            }
+        )
+        client = next(surface for surface in d["surfaces"] if surface["id"] == "app_server_client")
+        client["protocol_operations"] = [m for m in client["protocol_operations"] if m["id"] != "thread/toolResult/read"]
+        client["protocol_operations"].append(
+            {
+                "id": "thread/toolResult/read",
+                "kind": "operation",
+                "python": {
+                    "kind": "method",
+                    "name": "read_tool_result",
+                    "signature": signature(resolve(client["python_target"]).read_tool_result),
+                },
+            }
+        )
         for domain in d["domains"]:
             for capability in domain["capabilities"]:
                 resolve(capability["python"])
@@ -1036,6 +1124,7 @@ class Author:
         d = self.outputs["bounded_tool_result.json"]
         for name, raw in d["canonical_results"].items():
             backend = MemoryWorkspaceBackend()
+            backend._retained_workspace_id = sha256(("bounded-fixture:" + name).encode()).hexdigest()
             raw = deepcopy(raw)
             for pointer in ("artifact", "cursor"):
                 if pointer in raw:

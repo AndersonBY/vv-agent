@@ -50,6 +50,9 @@ def test_default_runtime_uses_custom_host_resolver(tmp_path, monkeypatch):
     resolved_requests = []
 
     class Host(AppServerHost):
+        def authorize_tool_result_resource(self, request):
+            return False
+
         def resolve_model(self, request):
             resolved_requests.append(request)
             assert request["model"] == "a-2024" and request["route"] == {}
@@ -140,7 +143,10 @@ def test_authorization_precedes_every_thread_dispatch(tmp_path, monkeypatch):
         for identity, method in enumerate(CLIENT_METHODS, 1):
             if method.startswith(("thread/", "turn/")) or method == "approval/resolve":
                 response = request(server, identity, method, {"threadId": "T", "inputId": "T"})
-                assert response["error"] == {"code": -32027, "message": "permission_denied"}, method
+                expected_error: dict[str, object] = {"code": -32027, "message": "permission_denied"}
+                if method == "thread/toolResult/read":
+                    expected_error["data"] = {"reason": "permission_denied"}
+                assert response["error"] == expected_error, method
         monkeypatch.undo()
         server.kernel.create("U", ".", {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}})
         listed = request(server, "list", "thread/list", {})["result"]["threads"]

@@ -93,9 +93,21 @@ a request, while unconfirmed jobs remain visible after the turn ends.
 
 Record schema 1, inbox schema 3, SQLite user_version 3 and RunEvent v6 remain
 unchanged. There is no store boundary. Existing stored bytes still load, but
-hosts must rebuild the required providers before driving them. This is a draft
-upgrade entry; result/resource and structured-interaction changes follow in
-the same contract release.
+hosts must rebuild the required providers before driving them.
+
+Completed tool items now carry bounded results and exact receipt references.
+The `tool_result` diagnostic no longer contains the full body or arbitrary
+metadata. Use `thread/toolResult/read` for byte pages, and implement the required
+`AppServerHost.authorize_tool_result_resource` method. A workspace can opt in
+to `OutputRetentionBackend`; immutable hosts can name existing versions without
+copying them. Without that capability, file/image resources are `not_retained`.
+See [tool result reads](app-server-tool-results.md).
+
+Reprojected events change bytes under their existing stable event IDs.
+Hosts that store immutable event projections must plan their product projection
+version boundary before upgrading; a kernel store schema bump is not required.
+This remains an unreleased draft; structured interaction follows in the same
+contract release.
 
 ### 0.30.5
 

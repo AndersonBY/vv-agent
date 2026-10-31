@@ -968,10 +968,29 @@
                   "createdAt": 1041.102,
                   "itemId": "item_sk/91862734db0c2e50c0a8d1149719a632af29bb626ff55ed7fbecd491026f1f7c/event",
                   "payload": {
+                    "attempt": 1,
                     "directive": "continue",
                     "durationMs": null,
                     "errorCode": "tool_approval_denied",
                     "executionStarted": false,
+                    "operationId": "thread_3/turn/turn_1/model/primary/1/attempt/1/tool/0",
+                    "result": {
+                      "byteLength": 123,
+                      "context": "normal",
+                      "kind": "text",
+                      "preview": "{\"ok\": false, \"error\": \"Approval denied for tool approved.\", \"error_code\": \"tool_approval_denied\", \"tool_name\": \"approved\"}",
+                      "ref": {
+                        "attempt": 1,
+                        "operationId": "thread_3/turn/turn_1/model/primary/1/attempt/1/tool/0",
+                        "recordDigest": "422e77afc1661d7bbc29076528db4f51e8e64f425bc95bb521b51596fa2d5b20",
+                        "seq": 16,
+                        "sessionId": "thread_3",
+                        "toolCallId": "approved",
+                        "turnId": "thread_3/turn/turn_1"
+                      },
+                      "resources": [],
+                      "truncated": false
+                    },
                     "status": "error",
                     "toolCallId": "approved",
                     "toolName": "approved"
@@ -1811,6 +1830,10 @@
       "ThreadReadResponse",
       "ThreadResumeResponse",
       "ThreadStartResponse",
+      "ToolResultReadParams",
+      "ToolResultReadResponse",
+      "ToolResultRef",
+      "ToolResultSummary",
       "TurnResumeParams",
       "TurnResumeResponse",
       "TurnStartResponse"
@@ -1834,6 +1857,10 @@
       "ThreadReadResponse.ts",
       "ThreadResumeResponse.ts",
       "ThreadStartResponse.ts",
+      "ToolResultReadParams.ts",
+      "ToolResultReadResponse.ts",
+      "ToolResultRef.ts",
+      "ToolResultSummary.ts",
       "TurnResumeParams.ts",
       "TurnResumeResponse.ts",
       "TurnStartResponse.ts"
@@ -2061,10 +2088,29 @@
             "createdAt": 1041.102,
             "itemId": "item_sk/ab7ac42a40e3a941ab2a5ae20e25142563d352a49e4fdcca38e55eb79988de1c/event",
             "payload": {
+              "attempt": 1,
               "directive": "continue",
               "durationMs": null,
               "errorCode": null,
               "executionStarted": true,
+              "operationId": "thread_2/turn/turn_1/model/primary/1/attempt/1/tool/0",
+              "result": {
+                "byteLength": 344,
+                "context": "normal",
+                "kind": "text",
+                "preview": "{\"agent_name\":\"worker\",\"completion_reason\":\"no_tool_finish\",\"cycles\":2,\"error\":null,\"final_answer\":\"child done\",\"resolved\":{\"backend\":\"scripted\",\"model_id\":\"m\",\"selected_model\":\"m\"},\"session_id\":\"thread_2/child/3de00d534564135ab7cc3892\",\"status\":\"completed\",\"task_id\":\"thread_2/child/3de00d534564135ab7cc3892\",\"todo_list\":[],\"wait_reason\":null}",
+                "ref": {
+                  "attempt": 1,
+                  "operationId": "thread_2/turn/turn_1/model/primary/1/attempt/1/tool/0",
+                  "recordDigest": "8bde1157f03300f691bfc3c38078a86fbee5648d24ec235a75d7ee793109e497",
+                  "seq": 16,
+                  "sessionId": "thread_2",
+                  "toolCallId": "child",
+                  "turnId": "thread_2/turn/turn_1"
+                },
+                "resources": [],
+                "truncated": false
+              },
               "status": "success",
               "toolCallId": "child",
               "toolName": "create_sub_task"
@@ -2083,10 +2129,29 @@
             "createdAt": 1101.102,
             "itemId": "item_sk/2ec5bc238067e55b764d007c5ddeefc4d3a1fc317a9753926243bf546368793f/event",
             "payload": {
+              "attempt": 1,
               "directive": "continue",
               "durationMs": null,
               "errorCode": "tool_approval_timeout",
               "executionStarted": false,
+              "operationId": "thread_3/turn/turn_2/model/primary/1/attempt/1/tool/0",
+              "result": {
+                "byteLength": 117,
+                "context": "normal",
+                "kind": "text",
+                "preview": "{\"ok\": false, \"error\": \"Approval request timed out.\", \"error_code\": \"tool_approval_timeout\", \"tool_name\": \"approved\"}",
+                "ref": {
+                  "attempt": 1,
+                  "operationId": "thread_3/turn/turn_2/model/primary/1/attempt/1/tool/0",
+                  "recordDigest": "4888f6227a6487bb9f646860619affa15334587e70c3f9c78f16cb3b33114d5f",
+                  "seq": 39,
+                  "sessionId": "thread_3",
+                  "toolCallId": "approved-again",
+                  "turnId": "thread_3/turn/turn_2"
+                },
+                "resources": [],
+                "truncated": false
+              },
               "status": "error",
               "toolCallId": "approved-again",
               "toolName": "approved"

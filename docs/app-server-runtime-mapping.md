@@ -10,6 +10,7 @@ providers.
 | Thread | Session record metadata and the projected `ThreadStatus` |
 | Turn | The retained kernel turn identity, plus a process-local `RunHandle` |
 | Item | A typed event derived from records and projected to a protocol item |
+| Tool result read | The exact immutable completion record; the workspace backend owns retained byte versions |
 | Approval | The parked operation keeps the request binding and deadline; any authorized connection may answer |
 | Context read | Immutable log/inbox projection and the shared memory-policy resolver |
 | Manual compaction | Existing content extension, summary model operations and memory boundaries; an idle request admits a compaction-only turn |
@@ -22,6 +23,11 @@ providers.
 an optional sink. `thread_store` and `thread_state` hold projected values and
 local handles; they own no queue, transcript or execution ledger. Host controls
 enter the inbox.
+
+Completed tool items and the `tool_result` diagnostic share the bounded
+`RunEvent.metadata.tool_result` projection. The body is read separately by
+record sequence and digest. See [tool result reads](app-server-tool-results.md)
+for retention, page limits and permission checks.
 
 `thread/model/select` maps `threadId` to the session ID and passes `inputId`
 unchanged as `InboxItem.input_id`, with `kind="model_selection"`,

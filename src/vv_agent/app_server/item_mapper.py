@@ -205,6 +205,9 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             "errorCode": event.error_code,
             "executionStarted": event.execution_started,
             "durationMs": event.duration_ms,
+            "operationId": event.operation_id,
+            "attempt": event.attempt,
+            "result": event.metadata.get("tool_result"),
         }
         tool_metadata = _tool_metadata_payload(event.tool_metadata)
         if tool_metadata is not None:

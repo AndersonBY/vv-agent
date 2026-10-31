@@ -44,8 +44,11 @@ def validate_provider_result(plan: Record, outcome: Definitive, handle: dict[str
     try:
         canonical_json_bytes(outcome.result)
         if plan._payload["op_kind"] != "model":
+            from .tool_results import validate_output_body
+
             result = ToolExecutionResult.from_dict(outcome.result)
             validate_definitive_result(result)
+            validate_output_body(result)
             if result.tool_call_id != plan._payload["request"]["id"]:
                 raise ValueError("provider result call ID mismatch")
         if (

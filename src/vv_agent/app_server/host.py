@@ -19,12 +19,14 @@ from vv_agent.app_server.protocol import (
     ModelSummary,
     RequestId,
 )
+from vv_agent.app_server.protocol.tool_result import ToolResultRef
 from vv_agent.approval import ApprovalDecision as RuntimeApprovalDecision
 from vv_agent.approval import ApprovalProvider, ApprovalRequest
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm.base import LLMClient
 from vv_agent.model import resolve_model_selection
 from vv_agent.run_config import RunConfig
+from vv_agent.workspace.resources import ToolResultResourceRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +45,19 @@ class RunConfigResolutionRequest:
     metadata: dict[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolResultResourceAuthorizationRequest:
+    connection_id: str
+    thread_id: str
+    ref: ToolResultRef
+    workspace_backend: Any
+    resource: ToolResultResourceRef
+
+
 class AppServerHost(Protocol):
+    def authorize_tool_result_resource(self, request: ToolResultResourceAuthorizationRequest) -> bool:
+        raise NotImplementedError
+
     def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
         raise NotImplementedError
 
@@ -75,6 +89,9 @@ class DefaultAppServerHost:
     def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
         """Local, single-user host: all initialized connections are trusted."""
         return True
+
+    def authorize_tool_result_resource(self, request: ToolResultResourceAuthorizationRequest) -> bool:
+        return request.resource.workspace_id == getattr(request.workspace_backend, "retained_workspace_id", None)
 
     def resolve_agent(self, request: AgentResolutionRequest) -> Agent:
         if self._agent is not None:

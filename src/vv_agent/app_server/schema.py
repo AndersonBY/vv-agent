@@ -40,6 +40,10 @@ JSON_SCHEMA_NAMES = (
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
+    "ToolResultReadParams",
+    "ToolResultReadResponse",
+    "ToolResultRef",
+    "ToolResultSummary",
     "TurnResumeParams",
     "TurnResumeResponse",
     "TurnStartResponse",
@@ -370,6 +374,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
         ),
     }
     definitions.update(_result_definitions())
+    definitions.update(_tool_result_definitions())
     definitions.update(_context_definitions())
     from vv_agent.session.app_server import ThreadStatus
 
@@ -719,6 +724,86 @@ def _context_definitions() -> dict[str, dict[str, Any]]:
     }
 
 
+def _tool_result_definitions():
+    integer = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
+    digest = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    ref = _object(
+        {
+            **{
+                name: {"type": "string", "minLength": 1, "maxLength": 4096}
+                for name in ("sessionId", "turnId", "operationId", "toolCallId")
+            },
+            "attempt": integer | {"minimum": 1},
+            "seq": integer | {"minimum": 1},
+            "recordDigest": digest,
+        }
+    )
+    ref["required"] = list(ref["properties"])
+    resource = _object(
+        {
+            "id": {"type": "string", "pattern": "^resource:[0-7]$"},
+            "status": {"enum": ["retained", "not_retained", "unavailable"]},
+            "name": {"type": "string", "maxLength": 256},
+            "mediaType": {"type": "string", "maxLength": 256},
+            "fullText": {"type": "boolean"},
+            "byteLength": integer,
+            "sha256": digest,
+        },
+        required=["id", "status", "name", "mediaType", "fullText"],
+    )
+    kind = {"enum": ["text", "json", "image", "file", "error"]}
+    summary = _object(
+        {
+            "kind": kind,
+            "context": {"enum": ["normal", "correction", "audit"]},
+            "preview": {"type": "string", "maxLength": 2048},
+            "byteLength": integer,
+            "truncated": {"type": "boolean"},
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "resources": {"type": "array", "maxItems": 8, "items": resource},
+            "value": {},
+            "cursor": _object(
+                {"kind": {"const": "read_file"}, "offsetChars": integer, "sha256": digest},
+                required=["kind", "offsetChars", "sha256"],
+            ),
+        },
+        required=["kind", "context", "preview", "byteLength", "truncated", "ref", "resources"],
+    )
+    part = {"type": "string", "pattern": "^(content|resource:[0-7])$"}
+    params = _object(
+        {
+            "threadId": {"type": "string", "minLength": 1},
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "part": part,
+            "offset": integer,
+            "limit": {"type": "integer", "minimum": 1, "maximum": 65536},
+        },
+        required=["threadId", "ref", "part", "offset", "limit"],
+    )
+    response = _object(
+        {
+            "ref": {"$ref": "#/$defs/ToolResultRef"},
+            "kind": kind,
+            "context": {"enum": ["normal", "correction", "audit"]},
+            "part": part,
+            "encoding": {"const": "base64"},
+            "data": {"type": "string", "maxLength": 87384},
+            "offset": integer,
+            "nextOffset": integer,
+            "totalBytes": integer,
+            "sha256": digest,
+            "eof": {"type": "boolean"},
+        }
+    )
+    response["required"] = list(response["properties"])
+    return {
+        "ToolResultRef": ref,
+        "ToolResultSummary": summary,
+        "ToolResultReadParams": params,
+        "ToolResultReadResponse": response,
+    }
+
+
 CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "initialize": ("InitializeParams", True, True),
     "initialized": (None, False, False),
@@ -730,6 +815,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/context/read": ("ThreadContextReadParams", True, True),
     "thread/compact/start": ("ThreadCompactStartParams", True, True),
     "thread/events/list": ("ThreadEventsListParams", True, True),
+    "thread/toolResult/read": ("ToolResultReadParams", True, True),
     "thread/model/select": ("ThreadModelSelectParams", True, True),
     "thread/status": ("ThreadStatusParams", True, True),
     "thread/list": ("ThreadListParams", True, False),
@@ -853,6 +939,10 @@ def _schema_bundle() -> dict[str, Any]:
         "$defs": deepcopy(definitions),
     }
     standalone_sources = {
+        **{
+            name: definitions[name]
+            for name in ("ToolResultRef", "ToolResultSummary", "ToolResultReadParams", "ToolResultReadResponse")
+        },
         "AppItem": definitions["AppItem"],
         "AppThread": definitions["AppThread"],
         "AppTurn": definitions["AppTurn"],
@@ -987,6 +1077,19 @@ def _typescript_protocol_source() -> str:
         "export interface ThreadModelSelectResponse { threadId: string; inputId: string; accepted: true; }\n"
         "export interface ThreadModelSelectParams { threadId: string; inputId: string; "
         "selection: { model: string; model_settings?: Record<string, unknown>; route: Record<string, unknown> } | null; }\n"
+        "export interface ToolResultRef { sessionId: string; turnId: string; operationId: string; attempt: number; "
+        "toolCallId: string; seq: number; recordDigest: string; }\n"
+        "export interface ToolResultSummary { kind: 'text' | 'json' | 'image' | 'file' | 'error'; preview: string; "
+        "context: 'normal' | 'correction' | 'audit'; "
+        "byteLength: number; truncated: boolean; ref: ToolResultRef; resources: ToolResultResource[]; value?: JsonValue; "
+        "cursor?: { kind: 'read_file'; offsetChars: number; sha256: string }; }\n"
+        "export interface ToolResultResource { id: string; status: 'retained' | 'not_retained' | 'unavailable'; "
+        "name: string; mediaType: string; fullText: boolean; byteLength?: number; sha256?: string; }\n"
+        "export interface ToolResultReadParams { threadId: string; ref: ToolResultRef; part: string; "
+        "offset: number; limit: number; }\n"
+        "export interface ToolResultReadResponse { ref: ToolResultRef; kind: ToolResultSummary['kind']; "
+        "context: 'normal' | 'correction' | 'audit'; part: string; encoding: 'base64'; data: string; offset: number; "
+        "nextOffset: number; totalBytes: number; sha256: string; eof: boolean; }\n"
         "export interface EventCursor { threadId: string; seq: number; offset: number; recordDigest: string; }\n"
         "export interface ThreadEventsListParams { threadId: string; afterCursor?: EventCursor; "
         "throughCursor?: EventCursor; limit: number; }\n"
@@ -1108,6 +1211,7 @@ def _typescript_protocol_source() -> str:
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/context/read"; params: ThreadContextReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/compact/start"; params: ThreadCompactStartParams }\n'
+        '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/toolResult/read"; params: ToolResultReadParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/events/list"; params: ThreadEventsListParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }\n'
         '  | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; '
@@ -1141,7 +1245,7 @@ def _typescript_protocol_source() -> str:
         '  jsonrpc: "2.0"; id: RequestId; method: "approval/request"; params: ApprovalRequestParams;\n'
         "};\n"
         "export type ClientResult =\n"
-        "  | ThreadForkResponse | ThreadContextReadResponse | ThreadCompactStartResponse | "
+        "  | ToolResultReadResponse | ThreadForkResponse | ThreadContextReadResponse | ThreadCompactStartResponse | "
         "InitializeResponse | ModelListResponse "
         "| ThreadStartResponse | ThreadReadResponse\n"
         "  | ThreadModelSelectResponse | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | "

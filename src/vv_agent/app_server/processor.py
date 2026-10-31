@@ -45,6 +45,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/context/read",
     "thread/compact/start",
     "thread/events/list",
+    "thread/toolResult/read",
     "thread/model/select",
     "thread/status",
     "thread/list",
@@ -187,6 +188,9 @@ class MessageProcessor:
         if request.method == "thread/events/list":
             self._serialize_or_run(connection_id, request, lambda: self._handle_events_list(connection_id, request))
             return
+        if request.method == "thread/toolResult/read":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_tool_result_read(connection_id, request))
+            return
         if request.method == "thread/status":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_status(connection_id, request))
             return
@@ -234,7 +238,13 @@ class MessageProcessor:
                 params = request.params if isinstance(request.params, dict) else {}
                 if not self._host.authorize(connection_id, request.method, params):
                     self._router.send_error(
-                        connection_id, request.id, AppServerError(AppServerErrorCode.PERMISSION_DENIED, "permission_denied")
+                        connection_id,
+                        request.id,
+                        AppServerError(
+                            AppServerErrorCode.PERMISSION_DENIED,
+                            "permission_denied",
+                            {"reason": "permission_denied"} if request.method == "thread/toolResult/read" else None,
+                        ),
                     )
                     return
             handler()
@@ -281,6 +291,7 @@ class MessageProcessor:
             "thread/read",
             "thread/status",
             "thread/events/list",
+            "thread/toolResult/read",
             "thread/context/read",
         }:
             return "shared_read"
@@ -985,6 +996,33 @@ class MessageProcessor:
             )
             return
         except (KeyError, Conflict):
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, result)
+
+    def _handle_tool_result_read(self, connection_id, request):
+        import json
+
+        from vv_agent.session.tool_result_read import ToolResultReadError, read_tool_result
+        from vv_agent.session.tool_results import RESPONSE_BYTES
+
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        try:
+            if set(params) != {"threadId", "ref", "part", "offset", "limit"}:
+                raise ToolResultReadError("invalid_result_ref")
+            if not isinstance(params["threadId"], str) or not params["threadId"]:
+                raise ToolResultReadError("invalid_result_ref")
+            result = read_tool_result(self._run_adapter, self._host, connection_id, params)
+            envelope = {"jsonrpc": "2.0", "id": request.id.require_wire(), "result": result}
+            if len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_BYTES:
+                raise ToolResultReadError("invalid_range")
+        except ToolResultReadError as exc:
+            code = AppServerErrorCode.PERMISSION_DENIED if exc.denied else AppServerErrorCode.INVALID_PARAMS
+            self._router.send_error(connection_id, request.id, AppServerError(code, exc.reason, {"reason": exc.reason}))
+            return
+        except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
         self._router.send_response(connection_id, request.id, result)

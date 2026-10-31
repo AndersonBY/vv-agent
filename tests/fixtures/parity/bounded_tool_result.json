@@ -100,6 +100,25 @@
       },
       "content": "first output\n... output omitted; full text in artifact ...\nlast output",
       "directive": "continue",
+      "metadata": {
+        "app_server_resources": [
+          {
+            "artifact": true,
+            "media_type": "text/plain",
+            "name": "call-bash-0123456789abcdef.txt",
+            "ref": {
+              "locator": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+              "media_type": "text/plain",
+              "name": "call-bash-0123456789abcdef.txt",
+              "owner": "b162958fe62681be139d6677418adfc621ab3f6d7fde3b4943fd21918ef64d81",
+              "sha256": "b4b76eea3be90f9c8fd1be40b57c8369a44586071049a3cb7f3a4e993d10a751",
+              "size_bytes": 100000,
+              "workspace_id": "c0029094dd3e65485cb00dc122b3b4603fc741392203cfc86fd7d47b98482b3c"
+            },
+            "status": "retained"
+          }
+        ]
+      },
       "original_bytes": 100000,
       "status_code": "SUCCESS",
       "tool_call_id": "call-bash",
@@ -119,6 +138,23 @@
       "directive": "wait_user",
       "error_code": "provider_rejected",
       "metadata": {
+        "app_server_resources": [
+          {
+            "artifact": true,
+            "media_type": "text/plain",
+            "name": "error-output.txt",
+            "ref": {
+              "locator": ".vv-agent/artifacts/task-7/error-output.txt",
+              "media_type": "text/plain",
+              "name": "error-output.txt",
+              "owner": "b638cc1571da37ebe76052aa8e60bb2210191f9c38d5c20a281d79f952bc2581",
+              "sha256": "7aaf34db1c7fcb2b24da4106424293956f66c4762412ec0a963e61abcb672d92",
+              "size_bytes": 100,
+              "workspace_id": "7641f50ed67f1678c86dda2e89bfc68542de5e18bf0060fa5ca541edf4bff490"
+            },
+            "status": "retained"
+          }
+        ],
         "provider": "gateway",
         "retryable": false
       },

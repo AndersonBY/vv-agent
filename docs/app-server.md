@@ -140,6 +140,12 @@ See [host integration](app-server-host-integration.md#task-cloning).
 
 ## Bounded replay
 
+Completed tool items contain a bounded result descriptor and an exact completion
+reference. Use `thread/toolResult/read` for base64 byte pages of the body or a
+retained file/image resource. The `tool_result` diagnostic contains the same
+descriptor. See [tool result reads](app-server-tool-results.md) for the request
+shape, limits, retention capability and errors.
+
 Use `thread/events/list` for a long thread. Supply threadId and a limit from 1
 to 256, plus optional afterCursor and throughCursor. The result contains events,
 nextCursor, throughCursor and more. Each event entry contains its cursor and

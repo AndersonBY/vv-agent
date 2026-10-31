@@ -476,6 +476,14 @@ stable session-scoped IDs, original database timestamps and
 child's session and turn. Provider waits project as a typed parked run state.
 Projection never dispatches or acknowledges.
 
+Tool completions carry a bounded `metadata.tool_result` descriptor derived from
+the exact immutable receipt. The `tool_result` diagnostic contains the same
+descriptor instead of the full body. Workspace backends optionally retain
+file/image outputs before completion; an immutable backend can name an existing
+version without copying it. App Server body/resource pages rebuild dependencies
+for the original turn and do not drive execution. See
+[tool result reads](app-server-tool-results.md).
+
 `SessionRunEventStore` replays events and validates appends against the
 projection. `batch(tx)` turns a consumer batch into events, so a host can write
 its projection and acknowledge in one transaction. `consume(sink)` is at least

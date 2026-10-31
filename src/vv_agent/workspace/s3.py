@@ -15,6 +15,7 @@ import importlib
 import importlib.util
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from hashlib import sha256
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
@@ -186,13 +187,17 @@ class S3WorkspaceBackend:
         return self.write_text_chunks_exclusive(path, (content,))
 
     def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
+        return self.write_bytes_chunks_exclusive(path, (chunk.encode("utf-8") for chunk in chunks))
+
+    def write_bytes_chunks_exclusive(self, path: str, chunks: Iterable[bytes]) -> int:
         normalized = "/".join(_exclusive_workspace_path_segments(path))
         with SpooledTemporaryFile(max_size=1_048_576, mode="w+b") as staging:
             size = 0
             for chunk in chunks:
-                data = chunk.encode("utf-8")
-                staging.write(data)
-                size += len(data)
+                if not isinstance(chunk, bytes):
+                    raise TypeError("resource chunks must be bytes")
+                staging.write(chunk)
+                size += len(chunk)
             staging.seek(0)
             try:
                 self._client.put_object(
@@ -212,6 +217,29 @@ class S3WorkspaceBackend:
                     raise FileExistsError(path) from exc
                 raise
         return size
+
+    @property
+    def retained_workspace_id(self) -> str:
+        endpoint = self._client.meta.endpoint_url
+        return sha256(f"{endpoint}\n{self._bucket}\n{self._prefix}".encode()).hexdigest()
+
+    def retain_output(self, path, *, expected):
+        from vv_agent.workspace.resources import copy_retained_output
+
+        return copy_retained_output(self, path, expected=expected)
+
+    def _read_output_chunks(self, path):
+        _exclusive_workspace_path_segments(path)
+        return self._read_bytes_chunks(path)
+
+    def open_retained(self, ref):
+        from vv_agent.workspace.resources import validate_retained_workspace
+
+        path = validate_retained_workspace(ref, self.retained_workspace_id)
+        try:
+            yield from self._read_output_chunks(path)
+        except self._client.exceptions.NoSuchKey as exc:
+            raise FileNotFoundError("retained resource missing") from exc
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._key(path)

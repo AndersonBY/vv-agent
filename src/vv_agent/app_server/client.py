@@ -29,6 +29,7 @@ from vv_agent.app_server.protocol import (
     TurnStartParams,
     TurnSteerParams,
 )
+from vv_agent.app_server.protocol.tool_result import ToolResultReadParams
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import ChannelTransport
 from vv_agent.model import ScriptedModelProvider
@@ -96,6 +97,9 @@ class AppServerClient:
 
     def list_events(self, params: ThreadEventsListParams) -> dict[str, Any]:
         return self._send_request("thread/events/list", params.to_dict())
+
+    def read_tool_result(self, params: ToolResultReadParams) -> dict[str, Any]:
+        return self._send_request("thread/toolResult/read", params.to_dict())
 
     def thread_status(self, params: ThreadStatusParams) -> dict[str, Any]:
         return self._send_request("thread/status", params.to_dict())

@@ -122,6 +122,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | Provider usage | `session/kernel.py`, `session/providers.py` | `tests/session/test_provider_usage.py`, `tests/session/test_recovery_matrix.py` |
 | Session supervision and dispatch | `session/supervisor.py`, `session/children.py`, `session/kernel.py` | `tests/session/test_batch_children.py`, `test_supervisor.py`, `test_dispatch.py` |
 | App Server v5 | `app_server/`, `session/app_server.py` | schema, protocol, turn, approval, replay and lifecycle tests |
+| App Server result reads | `session/tool_results.py`, `session/tool_result_read.py`, `workspace/resources.py` | `session/test_app_server_tool_results.py`, `app_server_tool_results.json` |
 | Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
 
 The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the

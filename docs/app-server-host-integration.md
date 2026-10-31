@@ -26,6 +26,11 @@ This guide is for a desktop app, worker, IDE or service that runs the
   threadId. Validate the requested agentKey, cwd and metadata for that account too.
 - `AppServerHost.resolve_agent()` maps an `agent_key` to the current `Agent`
   instructions and tools.
+- `authorize_tool_result_resource(request)` is required for file/image and
+  artifact reads. It receives the verified result reference and workspace
+  resource; return false before opening bytes when access is denied.
+  See [tool result reads](app-server-tool-results.md) for optional workspace
+  retention and immutable version references.
 - `build_run_config()` supplies context providers, memory providers, workspace
   storage, approvals, tracing metadata, event persistence, execution policy and
   named `tool_providers`. It runs on start and when recovering a binding; it

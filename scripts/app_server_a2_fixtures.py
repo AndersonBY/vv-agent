@@ -169,8 +169,9 @@ def exports(output):
             author = Author(fixtures, independent_bytes, facts)
             author.app_observable(app)
             author.public_api()
-            write_json(output, "public_api.json", author.outputs["public_api.json"])
-            from scripts._session_kernel_curation import app_server_source, curate_app_server
+            from scripts._session_kernel_curation import app_server_source, curate_app_server, public_api_source
+
+            (output / "public_api.json").write_text(public_api_source(author.outputs["public_api.json"]))
 
             write_json(output, "app_server_observable.json", author.outputs["app_server_observable.json"])
             for entry, raw in zip(app["transcripts"], independent_bytes(app["transcripts"]), strict=True):

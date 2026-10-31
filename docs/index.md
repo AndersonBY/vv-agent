@@ -25,6 +25,7 @@ place to start if you are new.
 | [session-model-selection.md](session-model-selection.md) | Let users switch the model of a running session. |
 | [upgrading.md](upgrading.md) | Move a host with stored sessions to a newer release. |
 | [app-server.md](app-server.md) | Talk to vv-agent over the JSONL App Server protocol. |
+| [app-server-tool-results.md](app-server-tool-results.md) | Read paged tool bodies and retained file/image resources. |
 | [app-server-host-integration.md](app-server-host-integration.md) | Embed the App Server in a desktop app, IDE or service. |
 | [app-server-runtime-mapping.md](app-server-runtime-mapping.md) | See how App Server threads, turns and items map onto sessions. |
 

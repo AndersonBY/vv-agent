@@ -503,11 +503,12 @@ class _KernelRunAdapter(RunAdapter):
         if self._notification_thread is not None:
             self._notification_thread.join()
 
-    def _binding(self, thread_id, content=None):
+    def _binding(self, thread_id, content=None, *, turn_id=None):
         thread = self._store.read_thread(thread_id).thread
         state, _records, _ = self.kernel.store.read_state(thread_id)
         if content is None:
-            initial_id = state.turns[state.active_turn_id].start._payload["input_ids"][0] if state.active_turn_id else None
+            selected_turn = turn_id or state.active_turn_id
+            initial_id = state.turns[selected_turn].start._payload["input_ids"][0] if selected_turn else None
             queued = next(
                 (
                     r._payload["input"]
@@ -539,7 +540,7 @@ class _KernelRunAdapter(RunAdapter):
         shared_state = config.shared_state
         if state.turns:
             prior = project_result(
-                self.kernel.store, thread_id, next(reversed(state.turns)), runtime=self.kernel.runtime(agent, config)
+                self.kernel.store, thread_id, turn_id or next(reversed(state.turns)), runtime=self.kernel.runtime(agent, config)
             )
             shared_state = prior.raw_result.shared_state
         return (

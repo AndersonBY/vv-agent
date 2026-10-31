@@ -569,7 +569,12 @@ class _Driver:
         }
 
     def completed(self, plan: Record, outcome: Definitive) -> list[Record]:
-        outcome = replace(outcome, result=self.compaction_intent(plan, outcome.result))
+        from .tool_results import prepare_tool_resources
+
+        result = self.compaction_intent(plan, outcome.result)
+        if plan._payload["op_kind"] != "model":
+            result = prepare_tool_resources(plan, result, self.runtime.workspace_backend)
+        outcome = replace(outcome, result=result)
         assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
         op = self.state.operations[plan.operation_id]
         attempt = op.attempts[plan.attempt]
@@ -744,6 +749,8 @@ class _Driver:
         )
 
     def apply_input(self) -> bool:
+        from .tool_results import provider_result_identity
+
         for stored in self.store.peek_inbox(self.sid, through_input_seq=self.watermark):
             item, extra, disposition, reason, target, wait = stored.item, [], "applied", None, None, None
             tid = self.state.active_turn_id
@@ -818,9 +825,13 @@ class _Driver:
                         disposition = (
                             "noop"
                             if all(
-                                canonical_json_bytes(attempt.result._payload[key])
+                                canonical_json_bytes(
+                                    provider_result_identity(attempt.result._payload[key])
+                                    if key == "result"
+                                    else attempt.result._payload[key]
+                                )
                                 == canonical_json_bytes(
-                                    self.compaction_intent(attempt.execution_plan, item.payload[key])
+                                    provider_result_identity(self.compaction_intent(attempt.execution_plan, item.payload[key]))
                                     if key == "result"
                                     else item.payload[key]
                                 )

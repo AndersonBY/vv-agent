@@ -351,9 +351,10 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert model_call_completed["usage"]["usage_source"] == "accounting_missing"
 
     tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
-    assert isinstance(tool_payload.get("content"), str)
-    assert "result" not in tool_payload
-    assert isinstance(tool_payload.get("metadata"), dict)
+    assert isinstance(tool_payload["preview"], str)
+    assert tool_payload["kind"] == "text"
+    assert tool_payload["ref"]["toolCallId"] == first_tool_call_map["id"]
+    assert "content" not in tool_payload and "metadata" not in tool_payload
 
 
 def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, monkeypatch) -> None:
@@ -675,7 +676,7 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
     assert result.status == AgentStatus.COMPLETED
 
 
-def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path) -> None:
+def test_runtime_tool_result_event_uses_descriptor_and_keeps_full_receipt(tmp_path: Path) -> None:
     long_title = "x" * 500
     llm = ScriptedLLM(
         steps=[
@@ -712,10 +713,12 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     assert result.status == AgentStatus.COMPLETED
 
     tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
-    full_result = str(tool_payload.get("content") or "")
+    full_result = result.cycles[0].tool_results[0].content
     assert long_title in full_result
     assert len(full_result) > 220
-    assert "content_preview" not in tool_payload
+    assert tool_payload["preview"] == full_result
+    assert tool_payload["byteLength"] == len(full_result.encode())
+    assert "content" not in tool_payload and "metadata" not in tool_payload
 
 
 def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path: Path) -> None:

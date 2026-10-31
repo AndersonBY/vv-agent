@@ -335,6 +335,11 @@ def app_server_source(app):
     return json.dumps(app, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def public_api_source(value):
+    # Keep one catalogue field per line without repeating indentation at every nesting level.
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, indent=0) + "\n"
+
+
 def curate_app_server(app):
     app["transcripts"] = select("app_server_protocol.json", app["transcripts"])
     # Whitespace is not a schema contract. Keep every exported bundle and all types.
@@ -479,6 +484,8 @@ def curate(output, streams, semantics, independent, facts):
             path.write_bytes(b"".join(raw + b"\n" for raw in independent(value)))
         elif name == "app_server_protocol.json":
             path.write_text(app_server_source(value))
+        elif name == "public_api.json":
+            path.write_text(public_api_source(value))
         elif name == "session_projection.json":
             # One source row per line keeps real wire objects readable without repeated indentation.
             lines = [
