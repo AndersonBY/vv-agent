@@ -24,6 +24,12 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
+Importing `vv_agent`, its session stores or the App Server does not load model
+provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
+adapter when accessed. Model execution also loads it when the kernel checks
+endpoint bindings. These exports resolve to the same classes as direct imports
+from `vv_agent.llm.vv_llm_client`.
+
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply
 resumes the same turn. Resource budgets control what may start and how usage

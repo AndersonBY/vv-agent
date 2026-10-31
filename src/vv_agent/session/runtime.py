@@ -31,7 +31,6 @@ from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.llm.base import LLMClient, LlmRequest
-from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef, resolve_run_model
 from vv_agent.model_settings import ModelSettings, RetrySettings
@@ -316,6 +315,8 @@ class Runtime:
 
     @staticmethod
     def model_binding(client: LLMClient, resolved: ResolvedModelConfig) -> dict[str, Any]:
+        from vv_agent.llm.vv_llm_client import VvLlmClient
+
         return {
             "backend": resolved.backend,
             "model": resolved.model_id,
@@ -326,6 +327,8 @@ class Runtime:
 
     def prepare_model(self, planned_request: dict[str, Any], purpose: str, attempt: int) -> LLMClient:
         """Bind one current endpoint before admitting a dispatch."""
+        from vv_agent.llm.vv_llm_client import VvLlmClient
+
         client, resolved = self.resolve_model(planned_request) if purpose == "primary" else self.model_route(purpose)
         retained = planned_request.get("metadata", {}).get("vv_session", {}).get("model_binding")
         if retained is not None and _model_identity(self.model_binding(client, resolved)) != _model_identity(retained):

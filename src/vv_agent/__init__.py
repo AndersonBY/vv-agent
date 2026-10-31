@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import vv_agent.skills as skills
 from vv_agent.agent import Agent, RunContext
 from vv_agent.app_server import (
@@ -99,7 +101,6 @@ from vv_agent.interactive import (
     InteractiveAgentDefinition,
     create_agent_session,
 )
-from vv_agent.llm import VvLlmClient
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ModelError, ModelProvider, ModelRef, ScriptedModelProvider, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings, ResponseFormat, RetrySettings, ToolChoice
@@ -178,6 +179,9 @@ from vv_agent.types import (
     UsageSource,
 )
 from vv_agent.workspace.resources import OutputRetentionBackend, ToolResultResourceExpectation, ToolResultResourceRef
+
+if TYPE_CHECKING:
+    from vv_agent.llm import VvLlmClient
 
 __all__ = [
     "OUTPUT_VALIDATION_FAILED",
@@ -382,3 +386,16 @@ __all__ = [
     "resolve_model_endpoint",
     "skills",
 ]
+
+
+def __getattr__(name: str):
+    if name == "VvLlmClient":
+        from vv_agent.llm import VvLlmClient
+
+        globals()[name] = VvLlmClient
+        return VvLlmClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

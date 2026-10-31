@@ -77,6 +77,11 @@ old-version session.
 
 ## Version notes
 
+### 0.31.1
+
+No host action. `import vv_agent` loads the model SDKs on first model use
+instead of at import time; see [0.31.1](releases/0.31.1.md).
+
 ### 0.31.0
 
 Regenerate App Server bindings for v5 and public API inventory v15. Hosts can

@@ -16,7 +16,6 @@ from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import _project_provider_stream_payload
 from vv_agent.llm.errors import is_prompt_too_long_error
-from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory.microcompact import is_microcompacted_tool_content
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.output_validation import OutputRepairRequest
@@ -497,6 +496,8 @@ class _Driver:
         purpose: str = "primary",
     ) -> Record:
         if kind == "model":
+            from vv_agent.llm.vv_llm_client import VvLlmClient
+
             client, resolved = self.runtime.resolve_model(request) if purpose == "primary" else self.runtime.model_route(purpose)
             session = request["metadata"].get("vv_session", {})
             if purpose != "output_repair":
