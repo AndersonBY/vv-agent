@@ -1,6 +1,6 @@
 [project]
 name = "vv-agent"
-version = "0.31.2"
+version = "0.31.3"
 description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
 readme = "README.md"
 authors = [
@@ -18,7 +18,7 @@ dependencies = [
     "ripgrep>=14.1.0,<15; platform_system == 'Windows'",
     "ripgrep>=14.1.0; platform_system != 'Windows'",
     "tiktoken>=0.14.0",
-    "vv-llm>=0.8.3",
+    "vv-llm>=0.8.5",
 ]
 
 [project.optional-dependencies]

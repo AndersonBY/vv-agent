@@ -77,6 +77,23 @@ old-version session.
 
 ## Version notes
 
+### 0.31.3
+
+Upgrade vv-llm to 0.8.5 when adopting this release. It is the recommended
+version and the new minimum dependency. It preserves provider tool-call indexes,
+resolving the [0.31.2 known limit](releases/0.31.2.md) for interleaved calls
+sent one piece per chunk without continuation IDs. Providers still need to
+send a stable index or call ID.
+
+Local incremental counting now also allows vv-llm 0.8.5 with
+deepseek-tokenizer 0.3.0 or tiktoken 0.14.0. This keeps unchanged text from
+being tokenized again after the dependency upgrade. The formatter, model
+routing and counting paths match 0.8.4; the existing boundary checks still
+apply. The previously verified 0.8.3 and 0.8.4 pairs remain listed.
+
+Contract 32.0.0, App Server v5, record schema 1, inbox schema 3 and SQL layouts
+are unchanged. This is not a store boundary. Existing sessions need no migration.
+
 ### 0.31.2
 
 No host action. Streamed arguments of parallel tool calls are routed by call
@@ -244,7 +261,7 @@ boundaries, then add the exact version pair to the verified set. Versions are
 listed individually; a newer version is not assumed safe. The gates are
 `_VERIFIED_DEEPSEEK_VERSIONS` and `_VERIFIED_TIKTOKEN_VERSIONS` in
 `memory/token_utils.py`. The repository lock
-uses vv-llm 0.8.4, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
+uses vv-llm 0.8.5, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
 qwen-tokenizer 0.3.0.
 
 Model request encoding reuses private canonical message fragments. Internal
