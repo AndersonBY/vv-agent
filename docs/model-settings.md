@@ -157,7 +157,7 @@ model names. These fields do not select a model or change request settings.
 
 ## Cache usage accounting
 
-`vv-agent` requires `vv-llm` 0.8.3 or newer. For generic OpenAI-compatible
+`vv-agent` requires `vv-llm` 0.8.5 or newer. For generic OpenAI-compatible
 providers, an omitted cache reading stays unknown, and an explicit
 `cached_tokens: 0` is an observed zero. Moonshot is the one exception. When a
 cold completion omits both top-level `cached_tokens` and

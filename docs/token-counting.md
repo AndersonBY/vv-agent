@@ -7,7 +7,7 @@ global token server or the model has an enabled provider endpoint.
 ## Local methods
 
 For families whose vv-llm counter can call a provider, compaction uses the
-same fallback that vv-llm 0.8.4 uses when no endpoint is available:
+same fallback that vv-llm uses when no endpoint is available:
 
 | Model name starts with | Local text method | Incremental counting |
 | --- | --- | --- |
@@ -41,7 +41,7 @@ with a trailing newline. The cache holds at most 4096 entries per process.
 Keys hold digests and counting identities; values hold integers. The cache
 retains no message bodies.
 
-The verified pairs are vv-llm `0.8.3` or `0.8.4` with DeepSeek tokenizer
+The verified pairs are vv-llm `0.8.3`, `0.8.4` or `0.8.5` with DeepSeek tokenizer
 `0.3.0`, or with tiktoken `0.14.0`. Versions are listed individually in
 `memory/token_utils.py`. A newer dependency version counts the whole text
 locally and logs one warning per encoding per process.

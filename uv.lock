@@ -1476,7 +1476,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.31.2"
+version = "0.31.3"
 source = { editable = "." }
 dependencies = [
     { name = "deepseek-tokenizer" },
@@ -1522,7 +1522,7 @@ requires-dist = [
     { name = "ripgrep", marker = "sys_platform != 'win32'", specifier = ">=14.1.0" },
     { name = "ripgrep", marker = "sys_platform == 'win32'", specifier = ">=14.1.0,<15" },
     { name = "tiktoken", specifier = ">=0.14.0" },
-    { name = "vv-llm", specifier = ">=0.8.3" },
+    { name = "vv-llm", specifier = ">=0.8.5" },
 ]
 provides-extras = ["postgres", "s3"]
 
@@ -1537,7 +1537,7 @@ dev = [
 
 [[package]]
 name = "vv-llm"
-version = "0.8.4"
+version = "0.8.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1549,7 +1549,7 @@ dependencies = [
     { name = "qwen-tokenizer" },
     { name = "tiktoken" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/09/fc/33f53cb46e79398ad9f6ea00128d3168eecfe1c27013087266a6103a1ee7/vv_llm-0.8.4.tar.gz", hash = "sha256:1f9535aa47c1425de9395dd8b99976ba52dc809772d5be773207f5b24e39a042", size = 127209, upload-time = "2026-10-24T01:41:00.788Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/18/1a0171ede9ed1a7ddaafa8d31296f2655814cc731bc4b8173d330d1f3187/vv_llm-0.8.5.tar.gz", hash = "sha256:dea064a71dd4d07bc8ea3d59e68e4456c9700b7f3ef6930ed4118557997776db", size = 127652, upload-time = "2026-11-01T06:15:12.977Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/f5/e61291b01dc00793545928147aef805c3d38444eb7260762224405a5e356/vv_llm-0.8.4-py3-none-any.whl", hash = "sha256:89e709362920a4160457e1ee21c2a1aebb14bb3decc594029928d86f626de17c", size = 155200, upload-time = "2026-10-24T01:40:59.085Z" },
+    { url = "https://files.pythonhosted.org/packages/35/15/9632004452fe9ab12eb702d3c0a5ce127c51b6cfcdc458b5e02830d6285b/vv_llm-0.8.5-py3-none-any.whl", hash = "sha256:87ece58d188fde7b592ffd3a5d3f9c2252537bc3de88814d4c78d3b5d0398bc8", size = 155666, upload-time = "2026-11-01T06:15:11.591Z" },
 ]

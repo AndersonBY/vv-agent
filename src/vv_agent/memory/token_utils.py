@@ -17,9 +17,9 @@ _TOKEN_CACHE_LIMIT = 4096
 _TOKEN_CACHE: OrderedDict[tuple[Any, ...], tuple[int, int]] = OrderedDict()
 _TOKEN_CACHE_LOCK = Lock()
 _VERSION_FALLBACK_LOGGED: set[str] = set()
-_VERIFIED_DEEPSEEK_VERSIONS = frozenset({("0.8.3", "0.3.0"), ("0.8.4", "0.3.0")})
-_VERIFIED_TIKTOKEN_VERSIONS = frozenset({("0.8.3", "0.14.0"), ("0.8.4", "0.14.0")})
-# vv-llm 0.8.4 get_token_counts: use its no-endpoint fallback, never its provider branch.
+_VERIFIED_DEEPSEEK_VERSIONS = frozenset({("0.8.3", "0.3.0"), ("0.8.4", "0.3.0"), ("0.8.5", "0.3.0")})
+_VERIFIED_TIKTOKEN_VERSIONS = frozenset({("0.8.3", "0.14.0"), ("0.8.4", "0.14.0"), ("0.8.5", "0.14.0")})
+# vv-llm get_token_counts: use its no-endpoint fallback, never its provider branch.
 _PROVIDER_LOCAL_FALLBACKS = (
     (("abab", "MiniMax"), "int(len(text) / 1.33)"),
     (("moonshot", "kimi", "gemini", "stepfun", "glm"), "cl100k_base"),

@@ -233,12 +233,14 @@ def test_replaced_functions_and_unreviewed_versions_keep_the_whole_local_path(mo
 def test_public_status_and_version_fallback_warning_once_per_family(monkeypatch, caplog):
     from vv_agent.memory import incremental_token_counting_status
 
-    assert incremental_token_counting_status("deepseek-flash")[0] is True
+    for model in ("deepseek-flash", "gpt-4o", "gpt-3.5-turbo"):
+        enabled, reason = incremental_token_counting_status(model)
+        assert enabled, reason
     assert incremental_token_counting_status("qwen-plus") == (False, "local qwen; whole-conversation counting")
-    monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("0.8.5", "0.3.0"))
+    monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("future", "0.3.0"))
     monkeypatch.setattr(token_utils, "_VERSION_FALLBACK_LOGGED", set())
     enabled, reason = incremental_token_counting_status("deepseek-flash")
-    assert not enabled and "0.8.5" in reason and "0.3.0" in reason
+    assert not enabled and "future" in reason and "0.3.0" in reason
     for model in ("deepseek-flash", "deepseek-v4-pro", "deepseek-flash"):
         messages = [{"role": "user", "content": s} for s in ("hello", "world")]
         assert token_utils.count_messages_tokens(messages, model=model) == legacy_count(messages, model=model)
