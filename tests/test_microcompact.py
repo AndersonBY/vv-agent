@@ -216,8 +216,8 @@ def test_microcompact_preserve_retention_excludes_only_that_candidate() -> None:
 
 
 class FailingArtifactBackend(MemoryWorkspaceBackend):
-    def write_text_exclusive(self, path: str, content: str) -> int:
-        del path, content
+    def write_text_chunks_exclusive(self, path, chunks) -> int:
+        del path, chunks
         raise OSError("storage unavailable")
 
 
@@ -261,15 +261,16 @@ def test_microcompact_invalid_existing_artifact_preserves_original_without_rearc
         def __init__(self) -> None:
             super().__init__()
             self.exclusive_writes = 0
+            self.corrupt = False
 
         def read_bytes(self, path: str) -> bytes:
-            if invalid_field == "utf8":
+            if invalid_field == "utf8" and self.corrupt:
                 return b"\xff"
             return super().read_bytes(path)
 
-        def write_text_exclusive(self, path: str, content: str) -> int:
+        def write_text_chunks_exclusive(self, path, chunks) -> int:
             self.exclusive_writes += 1
-            return super().write_text_exclusive(path, content)
+            return super().write_text_chunks_exclusive(path, chunks)
 
     backend = InvalidReadBackend()
     manager = _manager(backend)
@@ -280,6 +281,7 @@ def test_microcompact_invalid_existing_artifact_preserves_original_without_rearc
         Message(role="assistant", content="recent response"),
     ]
     artifact = persist_text_artifact(backend, "run-7", "existing", "complete prior output")
+    backend.corrupt = True
     if invalid_field == "missing":
         artifact = ToolArtifactRef(
             path=".vv-agent/artifacts/run-7/missing.txt",
@@ -370,9 +372,9 @@ def test_compact_marker_excerpt_omits_recovery_bookkeeping() -> None:
 
 
 class ShortWriteBackend(MemoryWorkspaceBackend):
-    def write_text_exclusive(self, path: str, content: str) -> int:
+    def write_text_chunks_exclusive(self, path, chunks) -> int:
         del path
-        return max(len(content.encode("utf-8")) - 1, 0)
+        return max(sum(len(chunk.encode("utf-8")) for chunk in chunks) - 1, 0)
 
 
 def test_microcompact_short_artifact_write_preserves_original_text() -> None:
@@ -445,7 +447,7 @@ def test_rebuilt_artifact_conflict_does_not_overwrite_or_hide_original(monkeypat
     first = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
     artifact = next(m.artifact_ref for m in first.messages if m.artifact_ref is not None)
     original = backend.read_bytes(artifact.path)
-    monkeypatch.setattr(MemoryWorkspaceBackend, "read_bytes", lambda _self, _path: b"corrupt")
+    monkeypatch.setattr(MemoryWorkspaceBackend, "_read_bytes_chunks", lambda _self, _path: iter([b"corrupt"]))
     rebuilt = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
     assert rebuilt.artifact_failure_count > 0
     assert rebuilt.messages[3] == messages[3]

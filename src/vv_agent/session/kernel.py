@@ -751,7 +751,7 @@ class _Driver:
         )
 
     def apply_input(self) -> bool:
-        from .tool_results import provider_result_identity
+        from .tool_results import project_tool_content, provider_result_identity
 
         for stored in self.store.peek_inbox(self.sid, through_input_seq=self.watermark):
             item, extra, disposition, reason, target, wait = stored.item, [], "applied", None, None, None
@@ -833,7 +833,13 @@ class _Driver:
                                     else attempt.result._payload[key]
                                 )
                                 == canonical_json_bytes(
-                                    provider_result_identity(self.compaction_intent(attempt.execution_plan, item.payload[key]))
+                                    provider_result_identity(
+                                        project_tool_content(
+                                            attempt.execution_plan,
+                                            self.compaction_intent(attempt.execution_plan, item.payload[key]),
+                                            self.runtime.workspace_backend,
+                                        )
+                                    )
                                     if key == "result"
                                     else item.payload[key]
                                 )

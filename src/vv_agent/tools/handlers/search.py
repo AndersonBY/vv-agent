@@ -14,6 +14,9 @@ from typing import Any
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
+from vv_agent.workspace.artifacts import _artifact_segment
+from vv_agent.workspace.base import _normalize_workspace_path
+from vv_agent.workspace.streaming import scan_text
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "py": (".py", ".pyw", ".pyi"),
@@ -587,6 +590,12 @@ def _cap_structured_items(
 
 
 def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    path = str(arguments.get("path", "."))
+    artifact_root = ".vv-agent/artifacts"
+    normalized = _normalize_workspace_path(path)
+    slash_path = path.replace("\\", "/")
+    if normalized == artifact_root or normalized.startswith(artifact_root + "/") or f"/{artifact_root}/" in f"/{slash_path}/":
+        return _search_artifact(context, arguments, path)
     pattern = str(arguments.get("pattern", "")).strip()
     if not pattern:
         return _result_error("Search pattern is required")
@@ -890,3 +899,150 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
         content=truncated_text,
         metadata=metadata,
     )
+
+
+_ARTIFACT_SEARCH_PATH = re.compile(
+    r"\.vv-agent/artifacts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
+    r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,58}-[0-9a-f]{64}|"
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[0-9a-f]{32})\.txt"
+)
+_ARTIFACT_LINE_HINT = "Artifact line numbers can be used directly with read_file start_line/end_line."
+_ARTIFACT_SEARCH_LIMIT = (
+    "Search truncated; narrow pattern or use offset/head_limit for fewer matches. "
+    "For an oversized line, use read_file start_line/end_line and its cursor."
+)
+
+
+def _artifact_search_error(message: str, code: str) -> ToolExecutionResult:
+    return ToolExecutionResult("", message, status_code=ToolResultStatus.ERROR, error_code=code)
+
+
+def _search_artifact(context: ToolContext, arguments: dict[str, Any], path: str) -> ToolExecutionResult:
+    matched_path = _ARTIFACT_SEARCH_PATH.fullmatch(path)
+    task_id = str(getattr(context.workspace_backend, "task_id", context.task_id))
+    if matched_path is None or matched_path[1] != _artifact_segment(task_id, "task"):
+        return _artifact_search_error("Artifact search requires one valid file in the current task.", "artifact_search_denied")
+    pattern = str(arguments.get("pattern", "")).strip()
+    mode = str(arguments.get("output_mode", "files_with_matches"))
+    if not pattern or mode not in _OUTPUT_MODES:
+        return _artifact_search_error("A pattern and valid output_mode are required.", "invalid_arguments")
+    if arguments.get("multiline"):
+        return _artifact_search_error("Artifact searches match individual lines; multiline is unsupported.", "invalid_arguments")
+    try:
+        offset = _to_int(arguments.get("offset", 0), name="offset")
+        head_limit = _to_int(arguments.get("head_limit", 250), name="head_limit")
+        insensitive = (
+            not bool(arguments["case_sensitive"])
+            if "case_sensitive" in arguments
+            else _smart_case_defaults_to_case_insensitive(pattern)
+        )
+        regex = re.compile(re.escape(pattern) if arguments.get("literal") else pattern, re.IGNORECASE if insensitive else 0)
+    except (ValueError, re.error) as exc:
+        return _artifact_search_error(f"Invalid search arguments: {exc}", "invalid_arguments")
+
+    page = _ArtifactSearch(regex, path, mode, offset, head_limit)
+    try:
+        if not context.workspace_backend.is_file(path):
+            return _artifact_search_error("Artifact is unavailable.", "artifact_unavailable")
+        scanned = scan_text(context.workspace_backend, path, page.consume)
+        if not scanned.valid_utf8:
+            return _artifact_search_error("Artifact is not readable UTF-8.", "artifact_unavailable")
+    except (OSError, ValueError):
+        return _artifact_search_error("Artifact is unavailable.", "artifact_unavailable")
+    page.finish()
+    return ToolExecutionResult(
+        "",
+        page.content(),
+        metadata={
+            "artifact_search": {
+                "path": path,
+                "matched_lines": page.matched_lines,
+                "returned_lines": page.returned_lines,
+                "truncated": page.truncated,
+                "oversized_line": page.oversized_line,
+            }
+        },
+    )
+
+
+class _ArtifactSearch:
+    """Keep one bounded unfinished line and one bounded result page."""
+
+    def __init__(self, regex: re.Pattern[str], path: str, mode: str, offset: int, head_limit: int) -> None:
+        self.regex, self.path, self.mode = regex, path, mode
+        self.offset, self.head_limit = offset, head_limit
+        self.line = 1
+        self.pending = ""
+        self.dropping_line = False
+        self.oversized_line: int | None = None
+        self.rows: list[str] = []
+        self.matched_lines = self.matches = self.returned_lines = 0
+        self.truncated = False
+        # Reserve both notices so the complete rendered result obeys the existing budgets.
+        self.used = len(f"File: {path}\n") + len(_ARTIFACT_LINE_HINT) + len(_ARTIFACT_SEARCH_LIMIT) + 2
+
+    def consume(self, text: str) -> None:
+        start = 0
+        while start < len(text):
+            end = text.find("\n", start)
+            stop = len(text) if end == -1 else end
+            if not self.dropping_line:
+                if len(self.pending) + stop - start > _MAX_RESULT_CHARS:
+                    self.oversized_line = self.oversized_line or self.line
+                    self.truncated = self.dropping_line = True
+                    self.pending = ""
+                else:
+                    self.pending += text[start:stop]
+            if end == -1:
+                return
+            if not self.dropping_line:
+                self.match_line(self.pending.removesuffix("\r"))
+            self.pending = ""
+            self.dropping_line = False
+            self.line += 1
+            start = end + 1
+
+    def match_line(self, text: str) -> None:
+        count = sum(1 for _ in self.regex.finditer(text))
+        if not count:
+            return
+        self.matches += count
+        self.matched_lines += 1
+        if self.mode != "content" or self.matched_lines <= self.offset:
+            return
+        row = f"{self.line}: {text}"
+        if (
+            len(self.rows) + 4 >= _MAX_RESULT_LINES
+            or self.used + len(row) + 1 > _MAX_RESULT_CHARS
+            or (self.head_limit and self.returned_lines >= self.head_limit)
+        ):
+            self.truncated = True
+            return
+        self.rows.append(row)
+        self.used += len(row) + 1
+        self.returned_lines += 1
+
+    def finish(self) -> None:
+        if self.pending and not self.dropping_line:
+            self.match_line(self.pending)
+
+    def content(self) -> str:
+        if self.mode == "count":
+            body = f"{self.path}: {self.matches} matches on {self.matched_lines} lines"
+        elif self.mode == "files_with_matches":
+            body = self.path if self.matches else "No matches found in the searched lines."
+        else:
+            body = "\n".join(self.rows) if self.rows else "No matching rows returned from the searched lines."
+        parts = [f"File: {self.path}", body]
+        if self.truncated:
+            parts.append(_ARTIFACT_SEARCH_LIMIT)
+            if self.oversized_line is not None:
+                parts.append(f"Line {self.oversized_line} exceeds the search character budget and was not matched.")
+        parts.append(_ARTIFACT_LINE_HINT)
+        result = "\n".join(parts)
+        if len(result) > _MAX_RESULT_CHARS and self.rows:
+            self.rows.pop()
+            self.returned_lines -= 1
+            self.truncated = True
+            return self.content()
+        return result

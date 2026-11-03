@@ -8,6 +8,13 @@ from pathlib import PurePosixPath
 
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.types import ToolExecutionResult
+from vv_agent.workspace.artifacts import (
+    BOUNDED_TEXT_CHARS,
+    bounded_text_preview,
+    persist_text_artifact,
+    text_artifact_ref,
+    verify_text_artifact,
+)
 from vv_agent.workspace.resources import ToolResultResourceExpectation, ToolResultResourceRef
 
 PREVIEW_BYTES = 2048
@@ -72,7 +79,65 @@ def output_location(result):
     return value if isinstance(value, dict) else None
 
 
+def project_tool_content(record, raw, backend):
+    """Pure receipt projection, also used when comparing repeated provider receipts."""
+    if record._payload["op_kind"] == "model":
+        return raw
+    raw = provider_result_identity(raw)
+    result = ToolExecutionResult.from_dict(raw)
+    if result.truncated or len(result.content) <= BOUNDED_TEXT_CHARS:
+        return raw
+    artifact = text_artifact_ref(
+        str(getattr(backend, "task_id", record.turn_id)), "result", result.content, identity=result_owner(record)
+    )
+    preview = bounded_text_preview(result.content, artifact_path=artifact.path)
+    return raw | {
+        "content": preview.content,
+        "truncated": True,
+        "truncation_reason": "output_limit",
+        "original_bytes": preview.original_bytes,
+        "visible_bytes": preview.visible_bytes,
+        "artifact": artifact.to_dict(),
+    }
+
+
+def prepare_tool_artifact(record, raw, backend):
+    projected = project_tool_content(record, raw, backend)
+    result = ToolExecutionResult.from_dict(projected)
+    if result.artifact is None:
+        return projected, False
+    newly_bounded = raw.get("truncated") is not True
+    try:
+        if newly_bounded:
+            persist_text_artifact(
+                backend,
+                str(getattr(backend, "task_id", record.turn_id)),
+                "result",
+                raw["content"],
+                reuse_existing=True,
+                identity=result_owner(record),
+            )
+        else:
+            verify_text_artifact(backend, result.artifact)
+    except Exception:
+        # Retention cannot turn a completed external effect into a tool retry.
+        return projected, True
+    metadata = dict(result.metadata)
+    metadata["vv_artifact"] = result.artifact.to_dict() | {
+        "source": {
+            "operation_id": record.operation_id,
+            "attempt": record.attempt,
+            "tool_call_id": result.tool_call_id,
+            "arguments_sha256": hashlib.sha256(canonical_json_bytes(record._payload["request"]["arguments"])).hexdigest(),
+        },
+        "source_complete": newly_bounded,
+        "capture_incomplete_reason": None if newly_bounded else "capture_completeness_unverified",
+    }
+    return projected | {"metadata": metadata}, False
+
+
 def prepare_tool_resources(record, raw, backend):
+    raw, artifact_unavailable = prepare_tool_artifact(record, raw, backend)
     result = ToolExecutionResult.from_dict(raw)
     metadata = dict(result.metadata)
     # Only trusted preparation may write retained locators; provider metadata is not authority.
@@ -97,6 +162,10 @@ def prepare_tool_resources(record, raw, backend):
             "media_type": bounded_label(media_type),
             "artifact": artifact,
         }
+        if artifact and artifact_unavailable:
+            entry["status"] = "unavailable"
+            resources.append(entry)
+            continue
         if isinstance(path, str) and callable(retain) and callable(opener):
             try:
                 expected = ToolResultResourceExpectation(result_owner(record), entry["media_type"], entry["name"], size, sha)
@@ -126,7 +195,7 @@ def provider_result_identity(raw):
     if not isinstance(raw, dict) or not isinstance(raw.get("metadata"), dict):
         return raw
     result = dict(raw)
-    metadata = {k: v for k, v in raw["metadata"].items() if k != "app_server_resources"}
+    metadata = {k: v for k, v in raw["metadata"].items() if k not in {"app_server_resources", "vv_artifact"}}
     if metadata:
         result["metadata"] = metadata
     else:

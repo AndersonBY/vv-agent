@@ -115,10 +115,10 @@ def test_memory_local_microcompact_boundaries_match_fixture() -> None:
                 super().__init__()
                 self._fail_writes = fail_writes
 
-            def write_text_exclusive(self, path: str, content: str) -> int:
+            def write_text_chunks_exclusive(self, path, chunks) -> int:
                 if self._fail_writes:
                     raise OSError("fixture archive failure")
-                return super().write_text_exclusive(path, content)
+                return super().write_text_chunks_exclusive(path, chunks)
 
         backend = CaseWorkspaceBackend(fail_writes=case.get("artifact_write_succeeds") is False)
         manager = MemoryManager(

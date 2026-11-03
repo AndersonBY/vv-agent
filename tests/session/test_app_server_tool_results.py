@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import os
 import runpy
 import tracemalloc
 from dataclasses import replace
@@ -52,8 +53,16 @@ def test_five_kinds_artifact_cursor_unicode_all_projections_and_recreated_pages(
         server.start()
         summaries = server.summaries()
         assert [s["kind"] for s in summaries] == ["text", "json", "image", "file", "error", "text", "text", "text", "image"]
-        assert backend.storage_calls == ["put_version"]  # Only the tool's own text artifact write.
-        assert backend.retains == 3 and backend.copies == 0 and backend.opens == 0
+        assert backend.storage_calls.count("put_version") == 2  # Producer capture plus kernel-bounded Unicode output.
+        assert backend.storage_calls.count("get_current_stream") == 1  # Only the producer's existing artifact is read back.
+        assert backend.storage_calls == [
+            "put_version",
+            "stat_current",
+            "get_current_stream",
+            "put_version",
+            "stat_current",
+        ]
+        assert backend.retains == 4 and backend.copies == 0 and backend.opens == 0
         completed = [e for e in events(server) if e["type"] == "tool_call_completed"]
         diagnostics = [e for e in events(server) if e["type"] == "diagnostic" and e["code"] == "tool_result"]
         assert [e["metadata"]["tool_result"] for e in completed] == summaries
@@ -81,10 +90,13 @@ def test_five_kinds_artifact_cursor_unicode_all_projections_and_recreated_pages(
                     data, pages = server.all_bytes(summary["ref"], part=resource["id"], limit=65_536)
                     bodies[kind + "-resource"] = data
                     pages_before[(kind, resource["id"])] = pages
-        assert bodies["unicode"] == UNICODE.encode()
+        from vv_agent.workspace.artifacts import bounded_text_preview
+
         unicode_ref = summaries[7]["ref"]
         raw = store.read(THREAD, after_seq=unicode_ref["seq"] - 1, limit=1).records[0].record.payload["result"]
-        assert "metadata" not in raw
+        assert bodies["unicode"] == bounded_text_preview(UNICODE, artifact_path=raw["artifact"]["path"]).content.encode()
+        assert bodies["unicode-resource"] == UNICODE.encode()
+        assert raw["metadata"]["vv_artifact"]["source_complete"] is True
         assert bodies["file-resource"] == BINARY
         assert bodies["artifact-resource"] == UNICODE.encode()
         assert bodies["cursor"] == "第一页".encode()
@@ -384,6 +396,8 @@ def test_child_results_require_real_admission_and_child_permission(store):
 
 def test_canonical_fixture_is_generated_by_real_app_server():
     canonical = Path(__file__).parents[1] / "fixtures/parity/app_server_tool_results.json"
+    if source := os.environ.get("VV_AGENT_CONTRACT_SOURCE"):
+        canonical = Path(source) / "fixtures/app_server_tool_results.json"
     assert PRODUCER["produce"]() == json.loads(canonical.read_text())
 
 

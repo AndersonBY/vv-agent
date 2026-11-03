@@ -60,6 +60,10 @@ class VersionWorkspace(MemoryWorkspaceBackend):
         self.storage_calls.append("get_current_stream")
         return super()._read_bytes_chunks(path)
 
+    def file_info(self, path):
+        self.storage_calls.append("stat_current")
+        return super().file_info(path)
+
     def write_bytes_chunks_exclusive(self, path, chunks):
         self.storage_calls.append("put_version")
         size = super().write_bytes_chunks_exclusive(path, chunks)

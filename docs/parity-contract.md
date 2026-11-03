@@ -115,6 +115,43 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | App Server result reads | `session/tool_results.py`, `session/tool_result_read.py`, `workspace/resources.py` | `session/test_app_server_tool_results.py`, `app_server_tool_results.json` |
 | Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
 
+The 32.1.0 draft bounded-result producer (S1/S2) is `session/tool_results.py`, called by
+`Kernel.completed` before receipt construction. It applies the existing 12,000
+character head/tail limit once, streams long receipt text through
+`write_text_chunks_exclusive`, checks new-write byte counts and available file
+size metadata, and adds the reserved
+`metadata.vv_artifact` entry. Archive failures retain successful tool outcomes
+and expose an unavailable expected recovery object. Reused objects and existing
+producer artifacts still undergo streaming UTF-8/size/digest validation. New
+completion notices include the expected path, source character counts and
+read_file/search_files recovery hints within the same 12,000-character budget.
+Existing producer previews keep their original marker. Existing producer captures
+have `source_complete=false` with `capture_completeness_unverified`; preview
+truncation does not prove provider capture loss. `session/reducer.py` binds the
+reserved source to the admitted operation and arguments. Record 1 and inbox 3
+are unchanged. `scripts/tool_result_artifact_fixtures.py` and
+`tests/session/test_tool_result_artifacts.py` cover these real producers,
+identity conflicts and process death around archive and receipt persistence.
+For local unpublished contract work, `VV_AGENT_CONTRACT_SOURCE` selects the
+canonical tool-result and artifact-search fixtures from that checkout. It does not update the
+release lock or vendored snapshot.
+
+S2 artifact search is produced by `tools/handlers/search.py`, which routes
+reserved explicit paths before discovery options and compares the path's task
+segment to the same trusted task identity used for completion storage: backend
+`task_id` when present, otherwise `ToolContext.task_id`. `workspace/streaming.py` incrementally decodes
+UTF-8; the search retains a bounded unfinished line and result page. Oversized
+lines are explicitly reported as unsearched; regex matching is line based. Real
+artifact line numbers map directly to read_file ranges. The handler performs no
+writes; long search results use the ordinary kernel projection. Producers and
+checks are `scripts/artifact_search_fixtures.py` and
+`tests/session/test_artifact_search.py`, including real built-in execution through
+`Kernel.completed`, read/discovery coexistence, byte-boundary splits and memory
+bounds. `scripts/tool_result_artifact_fixtures.py` covers S2 notice bytes, and
+`scripts/app_server_tool_result_fixtures.py` records completion storage calls.
+The immutable lock and vendored snapshot remain on their published version until
+release synchronization; these local fixtures do not establish adoption.
+
 The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the
 canonical edit receipt and file metadata. `test_builtin_tool_behavior_contract.py`
 checks it against the central success fixture. The workspace tool tests cover

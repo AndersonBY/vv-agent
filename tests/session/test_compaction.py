@@ -201,8 +201,8 @@ def micro_runtime(database, root, steps, **kwargs):
     from vv_agent.workspace.local import LocalWorkspaceBackend
 
     class CountedBackend(LocalWorkspaceBackend):
-        def write_text_exclusive(self, path, content):
-            count = super().write_text_exclusive(path, content)
+        def write_text_chunks_exclusive(self, path, chunks):
+            count = super().write_text_chunks_exclusive(path, chunks)
             with open_store(database) as counter:
                 counter.connection.execute("INSERT INTO artifact_writes VALUES (1)")
             return count
@@ -299,10 +299,15 @@ def test_two_successive_summaries_keep_artifact_and_cursor_evidence(store, datab
     assert len(accepted) == 2
     assert len(seen) == 2 and "Previous Summary" in seen[1].messages[0].content
     first, second = [r.payload["evidence_manifest"] for r in accepted]
-    assert first == second and first["artifacts"][0]["artifact_ref"] == artifact.to_dict()
+    assert second["artifacts"][: len(first["artifacts"])] == first["artifacts"]
+    assert first["artifacts"][0]["artifact_ref"] == artifact.to_dict()
+    new_artifact = second["artifacts"][-1]
+    assert new_artifact["tool_call_id"] == "new" and new_artifact["tool_name"] == "more"
+    assert rt.workspace_backend.read_text(new_artifact["artifact_ref"]["path"]) == "new facts " * 5000
+    assert second["cursors"] == first["cursors"]
     assert first["cursors"][0]["cursor"] == cursor.to_dict()
     plans = [r for r in records_of(store, "op_planned") if r.payload["purpose"] == "primary"]
-    assert plans[-1].payload["request"]["messages"][1]["metadata"]["_vv_agent_compaction"] == first
+    assert plans[-1].payload["request"]["messages"][1]["metadata"]["_vv_agent_compaction"] == second
 
 
 @pytest.mark.parametrize(
