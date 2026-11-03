@@ -409,6 +409,25 @@ def _operation(state: ExecutionState, record: Record) -> None:
         attempt.state, attempt.unknown = "unknown", record
     elif record.kind == "op_completed":
         require(attempt.state in {"planned", "started", "parked", "unknown"}, "result after completion")
+        if (
+            op.kind != "model"
+            and isinstance(p["result"], dict)
+            and isinstance(p["result"].get("metadata"), dict)
+            and "vv_artifact" in p["result"]["metadata"]
+        ):
+            from vv_agent.types import ToolExecutionResult
+
+            result = ToolExecutionResult.from_dict(p["result"])
+            require(
+                result.metadata["vv_artifact"]["source"]
+                == {
+                    "operation_id": record.operation_id,
+                    "attempt": record.attempt,
+                    "tool_call_id": attempt.execution_plan._payload["request"]["id"],
+                    "arguments_sha256": digest(attempt.execution_plan._payload["request"]["arguments"]),
+                },
+                "artifact source does not match admitted operation",
+            )
         require(
             p["request_digest"] == attempt.execution_plan._payload["request_digest"]
             and p["provider_binding"] == attempt.execution_plan._payload["provider_binding"],

@@ -777,6 +777,35 @@ class ToolExecutionResult:
         forbidden_metadata = sorted(set(self.metadata).intersection(_TOOL_RESULT_FORBIDDEN_METADATA_KEYS))
         if forbidden_metadata:
             raise ValueError(f"tool_result_invalid: metadata contains model-visible payload keys: {forbidden_metadata}")
+        if "vv_artifact" in self.metadata:
+            retained = self.metadata["vv_artifact"]
+            ref_keys = {"path", "media_type", "encoding", "size_bytes", "sha256"}
+            if not isinstance(retained, dict) or set(retained) != ref_keys | {
+                "source",
+                "source_complete",
+                "capture_incomplete_reason",
+            }:
+                raise ValueError("tool_result_invalid: invalid vv_artifact fields")
+            ref = ToolArtifactRef.from_dict({key: retained[key] for key in ref_keys})
+            if ref != self.artifact:
+                raise ValueError("tool_result_invalid: vv_artifact does not match artifact")
+            source = retained["source"]
+            if (
+                not isinstance(source, dict)
+                or set(source) != {"operation_id", "attempt", "tool_call_id", "arguments_sha256"}
+                or not isinstance(source["operation_id"], str)
+                or not source["operation_id"].strip()
+                or type(source["attempt"]) is not int
+                or not 1 <= source["attempt"] <= MAX_WIRE_INTEGER
+                or source["tool_call_id"] != self.tool_call_id
+            ):
+                raise ValueError("tool_result_invalid: invalid vv_artifact source")
+            validate_sha256(source["arguments_sha256"], "artifact arguments_sha256")
+            complete, reason = retained["source_complete"], retained["capture_incomplete_reason"]
+            if type(complete) is not bool or (
+                (complete and reason is not None) or (not complete and (not isinstance(reason, str) or not reason.strip()))
+            ):
+                raise ValueError("tool_result_invalid: invalid artifact capture completeness")
         try:
             canonical_json_bytes(self.metadata, "tool result metadata")
         except (TypeError, ValueError, UnicodeError) as exc:
