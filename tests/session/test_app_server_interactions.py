@@ -475,13 +475,25 @@ def test_historical_oversize_form_remains_parked_and_reports_explicit_error(stor
         first.close()
 
 
-def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store):
+@pytest.mark.parametrize("hold_child_lease", [False, True])
+def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, monkeypatch, hold_child_lease):
     from threading import Event
     from time import monotonic
 
     from vv_agent import function_tool
 
     child_ids, servers = [], []
+    child_exiting, release_child = Event(), Event()
+    release = store.release
+
+    def held_release(lease):
+        if lease.session_id != THREAD and not child_exiting.is_set():
+            child_exiting.set()
+            assert release_child.wait(10)
+        return release(lease)
+
+    if hold_child_lease:
+        monkeypatch.setattr(store, "release", held_release)
 
     @function_tool
     def stop_child() -> str:
@@ -517,7 +529,10 @@ def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store):
         child_ids.append(child_form["sessionId"])
         root_form = next(wait["interaction"] for sid, _, wait in waits if sid == THREAD)
         assert server.form() == root_form
+        if hold_child_lease:
+            assert child_exiting.wait(10)
         assert "result" in server.answer(root_form, text("yes"))
+        release_child.set()
         deadline = monotonic() + 10
         while not store.read_state(child_ids[0])[0].turns[child_form["turnId"]].ended and monotonic() < deadline:
             Event().wait(0.01)
@@ -534,6 +549,7 @@ def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store):
         error(server.answer(child_form, text(), action_id="after-child-cancel"), "stale_interaction")
         assert server.host.calls == calls
     finally:
+        release_child.set()
         server.close()
 
 

@@ -301,7 +301,10 @@ Wake the parent after that transaction commits. A child that is itself waiting
 is not finished and sends nothing to the parent.
 
 Local `RunHandle` execution schedules children through the `after_drive` and
-`after_input` hooks, separately from `wake`.
+`after_input` hooks, separately from `wake`. An exiting background child driver
+rechecks runnable work under the child scheduling lock when marking itself done.
+This hands off inputs that arrived during lease release even if its parent has
+already ended.
 
 ### Provider waits
 

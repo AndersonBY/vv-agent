@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from support.kernel_runtime import KernelRuntime
 
 from vv_agent import constants as constants_module
@@ -31,6 +32,7 @@ from vv_agent.types import (
     ToolCall,
     ToolExecutionResult,
 )
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
@@ -1009,7 +1011,8 @@ def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: P
     assert manager.summary_model == "task-model"
 
 
-def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("recovery_tool_available", [False, True])
+def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path, recovery_tool_available: bool) -> None:
     from support.compaction import section
 
     from vv_agent.memory import MemoryManager
@@ -1055,7 +1058,8 @@ def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path)
         memory_compact_threshold=1_000_000,
         metadata={"model_context_window": 2_000_000},
     )
-    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    backend = MemoryWorkspaceBackend()
+    runtime = KernelRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path, workspace_backend=backend)
     result = runtime.run(task, interruption_messages=steering)
     assert result.status is AgentStatus.COMPLETED
     original = result.messages
@@ -1066,14 +1070,23 @@ def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path)
             assert original[index + 3].role == "user" and original[index + 3].image_url
     assert checks == 3
     assert original[-2].image_url
+    artifacts = [message.artifact_ref for message in original if message.role == "tool" and message.artifact_ref]
+    assert len(artifacts) == 2
+    assert all(backend.read_text(artifact.path) == "checked application state " * 600 for artifact in artifacts)
     captured = []
     manager = MemoryManager(
         keep_recent_messages=2,
+        workspace_backend=backend,
+        recovery_tool_available=recovery_tool_available,
         summary_callback=lambda prompt, *_: captured.append(prompt) or '{"current_work_state":"Screenshots checked."}',
     )
     assert manager._summary_parts(original, 2) is not None
     output, changed = manager.compact(original, force=True)
-    assert changed
+    assert changed is recovery_tool_available
+    if not recovery_tool_available:
+        assert output == original
+        assert [message.to_dict() for message in original] == snapshot
+        return
     assert len(output) == 4
     assert output[-2:] == original[-2:]
     prefix = section(captured[0], "Conversation Prefix")

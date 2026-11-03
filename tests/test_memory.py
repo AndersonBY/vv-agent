@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any, Literal
 
 import pytest
@@ -420,7 +421,7 @@ def test_compaction_stages_propagate_cancellation(stage: str) -> None:
     from vv_agent.runtime.cancellation import CancelledError
 
     class CancelledBackend(MemoryWorkspaceBackend):
-        def write_text_exclusive(self, path: str, content: str) -> int:
+        def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
             raise CancelledError("cancelled archive")
 
     def cancelled_extract(*_args):
@@ -453,7 +454,7 @@ def test_compaction_stages_propagate_cancellation(stage: str) -> None:
         Message(role="tool", content="evidence " * 1000, tool_call_id="old"),
         Message(role="assistant", content="recent"),
     ]
-    with pytest.raises(CancelledError):
+    with pytest.raises(CancelledError, match=f"cancelled {'archive' if stage == 'archive' else 'extraction'}"):
         manager.compact(original, cycle_index=1000)
 
 

@@ -77,6 +77,30 @@ old-version session.
 
 ## Version notes
 
+### 0.32.0
+
+Requires contract 32.1.1. Long tool results are no longer cut down: the model
+sees a 12,000-character head-and-tail preview, and the complete text is
+archived under `.vv-agent/artifacts/` with a marker naming both the
+`read_file` range read and the `search_files` route back to it.
+
+If your host registers its own tool handlers, check whether you shorten result
+content before returning it. A result your handler already cut is not the
+complete original, and vv-agent must not claim otherwise. Leave `truncated`
+unset unless you are handing over an artifact that holds the full text; when
+you do, the receipt's `source_complete` follows your declaration and the kernel
+verifies the artifact instead of writing a second copy. Results you do not
+shorten need no change.
+
+`metadata.vv_artifact` appears only on results that were bounded. It is
+kernel-owned, and the reducer rejects a completion whose `source` does not match
+the operation that produced it. Do not write to that key from a host handler.
+
+Contract 32.1.1 is pinned in `contract.lock.json`; run
+`scripts/contract_snapshot.py check` after upgrading. Record schema 1, inbox
+schema 3, SQLite user_version 3 and RunEvent v6 are unchanged. This is not a
+store boundary and existing sessions need no migration.
+
 ### 0.31.3
 
 Upgrade vv-llm to 0.8.5 when adopting this release. It is the recommended

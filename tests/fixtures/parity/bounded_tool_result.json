@@ -117,7 +117,22 @@
             },
             "status": "retained"
           }
-        ]
+        ],
+        "vv_artifact": {
+          "capture_incomplete_reason": "capture_completeness_unverified",
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+          "sha256": "b4b76eea3be90f9c8fd1be40b57c8369a44586071049a3cb7f3a4e993d10a751",
+          "size_bytes": 100000,
+          "source": {
+            "arguments_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "attempt": 1,
+            "operation_id": "c1c/bounded_truncated_bash/turn/initial/model/primary/1/attempt/1/tool/0",
+            "tool_call_id": "call-bash"
+          },
+          "source_complete": false
+        }
       },
       "original_bytes": 100000,
       "status_code": "SUCCESS",
@@ -156,7 +171,22 @@
           }
         ],
         "provider": "gateway",
-        "retryable": false
+        "retryable": false,
+        "vv_artifact": {
+          "capture_incomplete_reason": "capture_completeness_unverified",
+          "encoding": "utf-8",
+          "media_type": "text/plain",
+          "path": ".vv-agent/artifacts/task-7/error-output.txt",
+          "sha256": "7aaf34db1c7fcb2b24da4106424293956f66c4762412ec0a963e61abcb672d92",
+          "size_bytes": 100,
+          "source": {
+            "arguments_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "attempt": 1,
+            "operation_id": "c1c/bounded_truncated_error/turn/initial/model/primary/1/attempt/1/tool/0",
+            "tool_call_id": "call-error"
+          },
+          "source_complete": false
+        }
       },
       "original_bytes": 100,
       "status_code": "ERROR",
