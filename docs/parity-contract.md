@@ -115,7 +115,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | App Server result reads | `session/tool_results.py`, `session/tool_result_read.py`, `workspace/resources.py` | `session/test_app_server_tool_results.py`, `app_server_tool_results.json` |
 | Workspace and tool results | `tools/`, `workspace/`, `runtime/tool_results.py` | workspace parity, Bash, custom tool and metadata tests |
 
-The 32.1.0 draft bounded-result producer (S1/S2) is `session/tool_results.py`, called by
+The contract 32.1 bounded-result producer is `session/tool_results.py`, called by
 `Kernel.completed` before receipt construction. It applies the existing 12,000
 character head/tail limit once, streams long receipt text through
 `write_text_chunks_exclusive`, checks new-write byte counts and available file

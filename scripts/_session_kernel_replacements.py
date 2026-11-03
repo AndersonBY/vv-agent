@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import re
+import runpy
 from copy import deepcopy
 from dataclasses import fields, replace
 from datetime import datetime
@@ -1133,10 +1134,28 @@ class Author:
 
     def bounded(self):
         d = self.outputs["bounded_tool_result.json"]
+        cases = runpy.run_path(str(Path(__file__).with_name("tool_result_artifact_fixtures.py")))["generate"]()["cases"]
+        d["unified_projection"] = {
+            "limit_chars": 12000,
+            "marker": {
+                "source_character_count_excludes_notice": True,
+                "includes_artifact_path": True,
+                "read_range": "read_file(start_line, end_line)",
+                "search_regex": "search_files(pattern)",
+                "head_chars": 6000,
+                "tail_chars": "12000 - head_chars - marker_chars",
+                "already_truncated": "preserve_producer_marker_and_recovery",
+            },
+            "ordinary_unchanged": cases["short"],
+            "newly_truncated": cases["long_ascii"],
+            "already_truncated": cases["already_truncated"],
+        }
         for name, raw in d["canonical_results"].items():
             backend = MemoryWorkspaceBackend()
             backend._retained_workspace_id = sha256(("bounded-fixture:" + name).encode()).hexdigest()
             raw = deepcopy(raw)
+            # Kernel-owned capture metadata is output, never producer input.
+            raw.get("metadata", {}).pop("vv_artifact", None)
             for pointer in ("artifact", "cursor"):
                 if pointer in raw:
                     raw[pointer]["sha256"] = sha256(b"placeholder input").hexdigest()

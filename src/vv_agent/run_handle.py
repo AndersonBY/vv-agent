@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from threading import Condition, Thread
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
 from vv_agent.events import RunEvent
@@ -60,6 +60,7 @@ class RunHandle:
         self._cancel_bound = False
         self._error: BaseException | None = None
         self._deliver_to_parent = False
+        self._background_child: tuple[RunHandle, dict[str, Any]] | None = None
         self._wait_for_lease = True
         self._lease_acquired = False
         self._lease_unavailable = False
@@ -154,6 +155,7 @@ class RunHandle:
                 return
             handle = RunHandle(self.kernel, sid, child["turn_id"], self.runtime.child_runtime(self.kernel.store, sid), None)
             handle._deliver_to_parent = True
+            handle._background_child = self, child
             self.kernel._background[sid] = handle
             self.kernel.handles.append(handle)
             handle.start()
@@ -238,9 +240,14 @@ class RunHandle:
         except BaseException as exc:
             self._error = exc
         finally:
-            with self._condition:
-                self._done = True
-                self._condition.notify_all()
+            # Pair completion with child scheduling so input cannot miss an exiting driver.
+            with self.kernel._background_lock:
+                with self._condition:
+                    self._done = True
+                    self._condition.notify_all()
+                if self._background_child is not None and self._error is None and self.kernel.store.is_runnable(self.session_id):
+                    parent, child = self._background_child
+                    parent._schedule_child(child)
 
     def events(self) -> Iterator[RunEvent]:
         position = 0

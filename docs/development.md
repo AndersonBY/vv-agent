@@ -126,6 +126,16 @@ VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live
   `VV_AGENT_TEST_POSTGRES_DSN`. They create disposable databases and drop them
   afterwards. Without either, the PostgreSQL cases are skipped.
 
+### Bounded-result fixture ownership
+
+`scripts/session_kernel_fixtures.py` owns the whole `bounded_tool_result.json`,
+including canonical results and `unified_projection`. It calls the real cases
+from `scripts/tool_result_artifact_fixtures.py`, whose CLI writes only
+`tool_result_artifact.json`. Regenerate with
+`uv run python scripts/session_kernel_fixtures.py --output <dir>` outside any
+sandbox that blocks the Bash process supervisor, and copy only the files you
+mean to change into the contract checkout.
+
 ## Which tests cover what
 
 | Change area | Primary tests |

@@ -79,7 +79,7 @@ old-version session.
 
 ### 0.32.0
 
-Requires contract 32.1.0. Long tool results are no longer cut down: the model
+Requires contract 32.1.1. Long tool results are no longer cut down: the model
 sees a 12,000-character head-and-tail preview, and the complete text is
 archived under `.vv-agent/artifacts/` with a marker naming both the
 `read_file` range read and the `search_files` route back to it.
@@ -96,7 +96,7 @@ shorten need no change.
 kernel-owned, and the reducer rejects a completion whose `source` does not match
 the operation that produced it. Do not write to that key from a host handler.
 
-Contract 32.1.0 is pinned in `contract.lock.json`; run
+Contract 32.1.1 is pinned in `contract.lock.json`; run
 `scripts/contract_snapshot.py check` after upgrading. Record schema 1, inbox
 schema 3, SQLite user_version 3 and RunEvent v6 are unchanged. This is not a
 store boundary and existing sessions need no migration.

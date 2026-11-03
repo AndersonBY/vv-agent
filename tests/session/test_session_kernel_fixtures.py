@@ -73,7 +73,8 @@ def generated_fixtures(tmp_path_factory):
         report = json.loads(generated.stdout)
         reports.append(report)
         coverage_runs.append(report["coverage"])
-        assert sum(p.stat().st_size for p in output.iterdir()) <= 3_000_000
+        # Bound aggregate fixture growth, including contract 32.1.0's 12,000-character artifact preview.
+        assert sum(p.stat().st_size for p in output.iterdir()) <= 3_050_000
         assert all(p.stat().st_size <= 512_000 for p in output.iterdir())
     assert set(coverage_runs[0]) == FILES
     first = directories[0]

@@ -187,24 +187,6 @@ def main():
     generated = generate()
     fixture = args.contract_root / "fixtures/tool_result_artifact.json"
     fixture.write_text(json.dumps(generated, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    bounded = args.contract_root / "fixtures/bounded_tool_result.json"
-    value = json.loads(bounded.read_text(encoding="utf-8"))
-    value["unified_projection"] = {
-        "limit_chars": 12000,
-        "marker": {
-            "source_character_count_excludes_notice": True,
-            "includes_artifact_path": True,
-            "read_range": "read_file(start_line, end_line)",
-            "search_regex": "search_files(pattern)",
-            "head_chars": 6000,
-            "tail_chars": "12000 - head_chars - marker_chars",
-            "already_truncated": "preserve_producer_marker_and_recovery",
-        },
-        "ordinary_unchanged": generated["cases"]["short"],
-        "newly_truncated": generated["cases"]["long_ascii"],
-        "already_truncated": generated["cases"]["already_truncated"],
-    }
-    bounded.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
