@@ -422,3 +422,21 @@ def test_old_child_audit_during_new_model_does_not_force_another_model(store, da
     assert state.operations[target["operation_id"]].attempts[1].context == "audit"
     assert [r.record.payload["result"] for r in records if r.record.kind == "turn_ended"] == [None, "new generation result"]
     assert sum(op.kind == "model" and op.turn_id == "s/turn/next" for op in state.operations.values()) == 1
+
+
+def test_read_schema_drift_closes_parent_and_requests_child_cancellation(store, database):
+    from copy import deepcopy
+
+    start(store)
+    rt = parent_runtime(database)
+    current = rt.registry.get_schema("read_file")
+    old = deepcopy(current)
+    old["function"]["parameters"]["properties"].pop("start_char")
+    rt.registry.register_schema("read_file", old)
+    drive(store, "s", runtime=rt)
+    assert any(row.record.kind == "op_parked" for row in read_state(store, "s")[1])
+    rt.registry.register_schema("read_file", current)
+    drive(store, "s", runtime=rt)
+    ended = next(row.record for row in read_state(store, "s")[1] if row.record.kind == "turn_ended")
+    assert ended.payload["reason"] == "handler_schema_or_capability_mismatch"
+    assert any(row.item.kind == "control" and row.item.payload["action"] == "cancel" for row in store.peek_inbox("child"))

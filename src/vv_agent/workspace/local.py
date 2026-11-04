@@ -13,33 +13,10 @@ from pathlib import Path
 
 from vv_agent.workspace.artifacts import ArtifactPathInvalidError, is_reserved_artifact_path
 from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_glob, matching_request
 
 _PRIVATE_ARTIFACT_ROOT_ENV = "VV_AGENT_PRIVATE_ARTIFACT_ROOT"
 _PRIVATE_ARTIFACT_ROOT_NAME = "vv-agent-artifacts"
-
-
-def _glob_match(path: str, pattern: str) -> bool:
-    """Match a posix path against a glob pattern supporting ``**``."""
-    parts: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern[i : i + 3] == "**/":
-            parts.append("(?:.+/)?")
-            i += 3
-        elif pattern[i : i + 2] == "**":
-            parts.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            parts.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            parts.append("[^/]")
-            i += 1
-        else:
-            parts.append(re.escape(pattern[i]))
-            i += 1
-    regex = "^" + "".join(parts) + "$"
-    return re.match(regex, path) is not None
 
 
 class LocalWorkspaceBackend:
@@ -104,30 +81,42 @@ class LocalWorkspaceBackend:
             return str(path)
 
     def list_files(self, base: str, glob: str) -> list[str]:
+        with matching_request():
+            files = self._list_files(base, glob)
+            check_matching_budget()
+            return files
+
+    def _list_files(self, base: str, glob: str) -> list[str]:
         if self._artifact_segments(base) is not None:
             return []
         root = self._resolve(base)
         if not root.exists() or not root.is_dir():
             return []
 
-        pattern = str(glob or "**/*")
+        matcher = RegexBudget(compile_glob(str(glob or "**/*")))
         files: list[str] = []
+        check_matching_budget()
         for current_root, dirs, filenames in os.walk(root, topdown=True, onerror=lambda _e: None, followlinks=False):
+            check_matching_budget()
             dirs.sort(key=str.lower)
             filenames.sort(key=str.lower)
             current = Path(current_root)
             for filename in filenames:
+                check_matching_budget()
                 candidate = current / filename
                 try:
                     rel_from_base = candidate.relative_to(root).as_posix()
-                    if not _glob_match(rel_from_base, pattern):
+                    if not matcher.match(rel_from_base):
                         continue
                     rel = self._to_output_path(candidate)
                     if is_reserved_artifact_path(rel):
                         continue
+                except TimeoutError:
+                    raise
                 except (OSError, ValueError):
                     continue
                 files.append(rel)
+            check_matching_budget()
         files.sort()
         return files
 

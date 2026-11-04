@@ -7,6 +7,7 @@ from typing import Any
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import builtin_error, to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
+from vv_agent.workspace.artifacts import is_artifact_namespace_path
 
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _EXTENSION_TO_MIME = {
@@ -23,6 +24,8 @@ def read_image(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     raw_path = str(arguments.get("path", "")).strip()
     if not raw_path:
         return builtin_error("`path` is required", "path_required")
+    if is_artifact_namespace_path(raw_path) and not context.is_task_artifact_path(raw_path):
+        return builtin_error("Artifact is outside the current task.", "artifact_read_denied")
 
     lowered = raw_path.lower()
     if lowered.startswith("http://") or lowered.startswith("https://"):

@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 import pytest
+from support.contract import fixture_root
 
 from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.tools.outcomes import DefinitiveResultInvalid, validate_definitive_result
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
-BOUNDED_RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "bounded_tool_result.json"
+BOUNDED_RESULT_FIXTURE = fixture_root() / "bounded_tool_result.json"
 
 
 def _produced_tool_calls(calls):
@@ -101,7 +101,6 @@ def test_bounded_tool_result_rejects_invalid_sparse_fixture_cases() -> None:
     runtime_only = {
         "artifact_symlink_segment",
         "artifact_collision",
-        "artifact_persist_failure",
         "cursor_path_mismatch",
         "cursor_source_changed",
         "cursor_offset_past_end",

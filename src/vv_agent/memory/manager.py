@@ -225,7 +225,7 @@ class MemoryManager:
     tool_result_retentions: dict[str, ToolResultRetention] = field(default_factory=dict)
     workspace_backend: WorkspaceBackend | None = None
     recovery_tool_available: bool = False
-    artifact_scope: str = "run"
+    artifact_scope: str | tuple[str, str] = "run"
     summary_event_limit: int = 40
     summary_backend: str | None = None
     summary_model: str | None = None

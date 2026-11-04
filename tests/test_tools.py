@@ -594,7 +594,7 @@ def test_read_file_returns_cursor_when_char_limit_exceeded(registry, tool_contex
     result = registry.execute(call, tool_context)
 
     _assert_truncated_read(result, path="chars.txt")
-    assert result.content == "a" * 12000
+    assert result.content.partition("\nNext page:")[0] == "a" * 12000
 
 
 def test_read_file_returns_cursor_when_requested_range_exceeds_limit(registry, tool_context: ToolContext) -> None:

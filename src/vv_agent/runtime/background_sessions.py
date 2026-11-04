@@ -19,7 +19,6 @@ from vv_agent.runtime.processes import (
 from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.types import ToolArtifactRef
 from vv_agent.workspace.artifacts import (
-    ArtifactPathInvalidError,
     BoundedTextPreview,
     bounded_captured_text_preview,
     persist_captured_text_artifact,
@@ -260,7 +259,7 @@ class BackgroundSessionManager:
         with session.lock:
             if session.artifact_backend is None:
                 session.artifact_backend = backend
-                session.artifact_task_id = task_id
+                session.artifact_task_id = str(getattr(backend, "task_id", task_id))
                 session.artifact_tool_call_id = tool_call_id
             listeners = self._advance(session)
             if stop and session.status not in _TERMINAL_STATUSES:
@@ -361,7 +360,7 @@ class BackgroundSessionManager:
                 remove_captured_output(session.output_path)
         if not session.preview.truncated:
             return
-        if session.artifact is not None or session.artifact_backend is None:
+        if (session.artifact is not None and session.artifact_error is None) or session.artifact_backend is None:
             return
         try:
             session.artifact = persist_captured_text_artifact(
@@ -373,10 +372,9 @@ class BackgroundSessionManager:
             session.artifact_error = session.artifact_error_code = None
             remove_captured_output(session.output_path)
         except Exception as exc:
+            session.artifact = None
             session.artifact_error = str(exc)
-            session.artifact_error_code = (
-                "artifact_path_invalid" if isinstance(exc, ArtifactPathInvalidError) else "artifact_persist_failed"
-            )
+            session.artifact_error_code = "artifact_persist_failed"
 
     @staticmethod
     def _notify_listeners(listeners: list[BackgroundSessionListener], payload: dict[str, Any]) -> None:
@@ -425,9 +423,7 @@ class BackgroundSessionManager:
                         except Exception as exc:
                             payload.update(
                                 artifact_error=str(exc),
-                                artifact_error_code="artifact_path_invalid"
-                                if isinstance(exc, ArtifactPathInvalidError)
-                                else "artifact_persist_failed",
+                                artifact_error_code="artifact_persist_failed",
                             )
             except Exception as exc:
                 payload.update(output_error=str(exc))

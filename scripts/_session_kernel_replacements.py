@@ -6,6 +6,7 @@ import base64
 import importlib
 import inspect
 import json
+import os
 import re
 import runpy
 from copy import deepcopy
@@ -177,7 +178,8 @@ REASONS = {
 
 
 def load(name):
-    path = BASE / name
+    source = Path(os.environ["VV_AGENT_CONTRACT_SOURCE"]) / "fixtures" if "VV_AGENT_CONTRACT_SOURCE" in os.environ else BASE
+    path = source / name
     if path.suffix == ".json":
         return json.loads(path.read_text())
     rows = []
@@ -725,7 +727,7 @@ class Author:
         )
         for domain in d["domains"]:
             names = (
-                ("Provider", "Accepted", "Definitive", "Unknown")
+                ("Provider", "Accepted", "Definitive", "Unknown", "is_task_artifact_path")
                 if domain["id"] == "exports"
                 else ("Provider",)
                 if domain["id"] == "session"

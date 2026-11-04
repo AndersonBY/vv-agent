@@ -5,6 +5,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
+import regex
+
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_pattern, matching_request
+
 INVALID_EXCLUDE_FILES_PATTERN_CODE = "invalid_exclude_files_pattern"
 INVALID_EXCLUDE_FILES_PATTERN_MESSAGE = "exclude_files_pattern must be a valid portable regular expression"
 
@@ -66,7 +70,7 @@ class InvalidPortableRegexError(ValueError):
     pass
 
 
-def compile_portable_workspace_regex(pattern: str) -> re.Pattern[str]:
+def compile_portable_workspace_regex(pattern: str) -> regex.Pattern:
     if not isinstance(pattern, str):
         raise InvalidPortableRegexError(INVALID_EXCLUDE_FILES_PATTERN_MESSAGE)
 
@@ -113,8 +117,8 @@ def compile_portable_workspace_regex(pattern: str) -> re.Pattern[str]:
         index += 1
 
     try:
-        return re.compile(pattern, flags=re.ASCII)
-    except re.error as exc:
+        return compile_pattern(pattern, flags=regex.ASCII)
+    except (ValueError, regex.error) as exc:
         raise InvalidPortableRegexError(INVALID_EXCLUDE_FILES_PATTERN_MESSAGE) from exc
 
 
@@ -137,7 +141,11 @@ class DiscoveryFilteredWorkspaceBackend:
         return self._exclude_pattern
 
     def list_files(self, base: str, glob: str) -> list[str]:
-        return [path for path in self._backend.list_files(base, glob) if not self._regex.search(_normalize_workspace_path(path))]
+        with matching_request():
+            matcher = RegexBudget(self._regex)
+            paths = [path for path in self._backend.list_files(base, glob) if not matcher.search(_normalize_workspace_path(path))]
+            check_matching_budget()
+            return paths
 
     def read_text(self, path: str) -> str:
         return self._backend.read_text(path)

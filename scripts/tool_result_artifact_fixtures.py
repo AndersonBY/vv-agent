@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import time
 from contextlib import nullcontext
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.canonical_json import canonical_json_bytes
@@ -18,6 +22,8 @@ from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.runtime import Runtime
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.tool_results import prepare_tool_resources
+from vv_agent.tools.base import ToolContext
+from vv_agent.tools.builtins import build_default_registry
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 from vv_agent.workspace import MemoryWorkspaceBackend
 from vv_agent.workspace.artifacts import bounded_text_preview, persist_text_artifact
@@ -49,12 +55,41 @@ class ArchiveWorkspace(MemoryWorkspaceBackend):
         return written
 
 
-def produce(text, *, backend=None, truncated=False, named=False, forged=False):
+def terminal_capture_result(backend, text):
+    from vv_agent.runtime.background_sessions import BackgroundSessionManager
+
+    class CompletedProcess:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    with TemporaryDirectory(prefix="capture-fixture-") as directory:
+        root = Path(directory)
+        capture = root / "capture.txt"
+        capture.write_text(text)
+        started = SimpleNamespace(process=CompletedProcess(), output_path=capture, started_at=time.monotonic())
+        with (
+            patch("vv_agent.tools.handlers.bash.start_captured_process", return_value=started),
+            patch("vv_agent.tools.handlers.bash.background_session_manager", BackgroundSessionManager()),
+            patch("vv_agent.runtime.background_sessions.process_tree_is_running", return_value=False),
+        ):
+            return build_default_registry().execute(
+                ToolCall("call-s1", "bash", {"command": "printf fixture"}),
+                ToolContext(root, {}, 0, backend, task_id="s1", tool_call_id="call-s1"),
+            )
+
+
+def produce(text, *, backend=None, truncated=False, named=False, forged=False, terminal=False):
     backend = backend if backend is not None else ArchiveWorkspace()
     effects = []
 
     def result():
         effects.append("effect")
+        if terminal:
+            value = terminal_capture_result(backend, text)
+            value.tool_call_id = "call-s1"
+            return value
         if truncated:
             artifact = persist_text_artifact(backend, "s1", "existing", text, reuse_existing=True)
             preview = bounded_text_preview(text)
@@ -130,6 +165,13 @@ def generate():
         "input": {"unit": "F", "repeat": 12001, "write_fails": True},
         "result": receipt._payload["result"],
     }
+    broken = ArchiveWorkspace()
+    broken.fail_write = True
+    _plan, receipt, _ = produce("T" * 12001, backend=broken, terminal=True)
+    cases["terminal_retention_unavailable"] = {
+        "input": {"unit": "T", "repeat": 12001, "write_fails": True, "producer": "builtin_bash"},
+        "result": receipt._payload["result"],
+    }
     backend = ArchiveWorkspace()
     first = persist_text_artifact(backend, "identity", "call", "first", reuse_existing=True, identity="one-receipt")
     try:
@@ -172,6 +214,7 @@ def generate():
             "identity": "session_turn_operation_attempt",
             "same_identity_different_bytes": "EIO_never_overwrite",
             "archive_failure": "success_receipt_expected_pointer_unavailable_no_retry",
+            "terminal_retention_failure": "confirmed_command_result_unavailable_without_pointer_no_retry",
             "source_complete": "complete_received_text_not_upstream_capture_attestation",
             "producer_capture_without_attestation": "false_capture_completeness_unverified",
             "record_schema": 1,

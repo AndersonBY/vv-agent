@@ -54,10 +54,12 @@ def test_read_file_too_large_counts_unicode_characters(tmp_path: Path) -> None:
     assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
-    assert result.metadata == {}
+    assert result.metadata["read_page"] == {"next_line": 1, "next_start_char": 12000}
     assert result.truncated is True
-    assert result.content == "中" * 12_000
-    assert result.original_bytes == len(content.encode())
+    source, separator, notice = result.content.partition("\nNext page:")
+    assert source == "中" * 12_000
+    assert separator and "start_line=1, start_char=12000" in notice
+    assert result.original_bytes == len(content.encode()) + len((separator + notice).encode())
     assert result.visible_bytes == len(result.content.encode())
     assert result.cursor is not None
     assert result.cursor.path == "large-cjk.txt"
@@ -82,7 +84,7 @@ def test_read_file_line_limit_returns_recoverable_cursor(tmp_path: Path) -> None
 
     assert result.status_code is ToolResultStatus.SUCCESS
     assert result.truncated is True
-    assert result.content == "x\n" * 2_000
+    assert result.content.partition("\nNext page:")[0] == "x\n" * 2_000
     assert result.cursor is not None
     assert result.cursor.offset_chars == 4_000
 
@@ -107,8 +109,11 @@ def test_read_file_line_number_previews_preserve_rendered_output_across_cursors(
     for _ in range(10):
         result = _execute(registry, context, READ_FILE_TOOL_NAME, arguments)
         assert result.status_code is ToolResultStatus.SUCCESS
-        assert len(result.content) <= 12_000
-        chunks.append(result.content)
+        source, separator, notice = result.content.partition("\nNext page:")
+        assert len(source) <= 12_000
+        chunks.append(source)
+        if result.cursor is not None:
+            assert separator and "start_line=" in notice and "start_char=" in notice
         if result.cursor is None:
             break
         assert result.truncated is True
@@ -175,8 +180,10 @@ def test_read_file_cursor_rejects_range_path_mismatch_stale_source_and_invalid_o
 
 def test_read_file_recovers_reserved_artifact_through_normal_tool_path(tmp_path: Path) -> None:
     registry, context = _tool_runtime(tmp_path)
-    artifact_path = ".vv-agent/artifacts/task-7/call-7.txt"
-    context.workspace_backend.write_text_exclusive(artifact_path, "complete artifact output")
+    from vv_agent.workspace.artifacts import persist_text_artifact
+
+    context.task_id = "task-7"
+    artifact_path = persist_text_artifact(context.workspace_backend, "task-7", "call-7", "complete artifact output").path
 
     result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": artifact_path})
 
@@ -336,7 +343,7 @@ def test_read_file_streams_full_source_and_rejects_changed_tail(tmp_path: Path, 
     monkeypatch.setattr(LocalWorkspaceBackend, "read_bytes", forbid_unbounded)
     first = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt", "show_line_numbers": True})
     assert first.status_code is ToolResultStatus.SUCCESS and first.truncated
-    assert first.content == "1: " + "x" * 11997
+    assert first.content.partition("\nNext page:")[0] == "1: " + "x" * 11997
     assert context.shared_state[FILE_BASELINES_STATE_KEY]["large.txt"]["size"] == len(text.encode("utf-8"))
     cursor = first.cursor.to_dict()
     second = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt", "cursor": cursor})

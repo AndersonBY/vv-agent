@@ -132,25 +132,67 @@ reserved source to the admitted operation and arguments. Record 1 and inbox 3
 are unchanged. `scripts/tool_result_artifact_fixtures.py` and
 `tests/session/test_tool_result_artifacts.py` cover these real producers,
 identity conflicts and process death around archive and receipt persistence.
-For local unpublished contract work, `VV_AGENT_CONTRACT_SOURCE` selects the
-canonical tool-result and artifact-search fixtures from that checkout. It does not update the
-release lock or vendored snapshot.
+For local unpublished contract work, `VV_AGENT_CONTRACT_SOURCE` selects canonical
+producer fixtures and built-in schema generation from that checkout. It does not
+update the release lock or vendored snapshot. Use this variable for the full local
+producer gate until the new immutable release exists.
 
-S2 artifact search is produced by `tools/handlers/search.py`, which routes
-reserved explicit paths before discovery options and compares the path's task
-segment to the same trusted task identity used for completion storage: backend
-`task_id` when present, otherwise `ToolContext.task_id`. `workspace/streaming.py` incrementally decodes
-UTF-8; the search retains a bounded unfinished line and result page. Oversized
-lines are explicitly reported as unsearched; regex matching is line based. Real
-artifact line numbers map directly to read_file ranges. The handler performs no
-writes; long search results use the ordinary kernel projection. Producers and
-checks are `scripts/artifact_search_fixtures.py` and
-`tests/session/test_artifact_search.py`, including real built-in execution through
-`Kernel.completed`, read/discovery coexistence, byte-boundary splits and memory
-bounds. `scripts/tool_result_artifact_fixtures.py` covers S2 notice bytes, and
-`scripts/app_server_tool_result_fixtures.py` records completion storage calls.
-The immutable lock and vendored snapshot remain on their published version until
-release synchronization; these local fixtures do not establish adoption.
+Artifact search is produced by `tools/handlers/search.py`, which routes reserved
+explicit paths before discovery options. It uses the public
+`is_task_artifact_path(path, *, task_id, session_id=None, session_task_id=None)`
+predicate shared with model-facing read_file, file_info and read_image. The
+runtime supplies the session id separately from model arguments. The accepted
+scopes are the current host task (or SDK task without a host id) and the exact
+current session/SDK-task compaction scope. A scope match never replaces host ACLs.
+`_session_artifact_scope` carries a session/task tuple inside Python. Hash input
+is compact Unicode JSON `["session", sid, tid]` for that tuple and `["task", id]`
+for other task ids requiring hashing. Short readable task ids remain literal
+unless prefixed s-. Hashes use s- plus 62 lowercase SHA-256 hex characters;
+tool-call filename encoding is unchanged.
+
+`workspace/streaming.py` incrementally decodes UTF-8. Search retains a 30,000
+character window with 4,096 characters of overlap and a bounded page of match
+excerpts. Content rows contain one-based line numbers and zero-based Unicode
+columns. offset/head_limit paginate match items, including repeated hits on one
+line. Long lines are always scanned and explicitly marked incomplete for
+patterns wider than the overlap or sensitive to window boundaries. The same
+line and column can be passed as read_file start_line/start_char. A leading BOM
+is excluded from both coordinate systems. The existing digest-bound cursor is
+still the continuation mechanism across lines.
+
+`workspace/matching.py` uses regex VERSION0 with an interruptible operation
+timeout. A request shares a 250 ms thread CPU deadline across enumeration,
+globs, child exclusion filters and portable content matching. Time in storage
+I/O is not charged as thread CPU. The engine's process CPU timer may interrupt
+earlier under contention. Each matcher operation receives the remaining budget.
+S3 checks the same deadline within each page and object iteration, including
+empty pages. Local checks within directory and file iteration, including empty
+directories, before traversal can advance. Ordinary S3 shell globs retain the
+platform's fnmatch normcase behavior; the separate recursive glob branch keeps
+its existing case-sensitive rules.
+Content timeouts preserve earlier hits and the start of the interrupted window;
+discovery timeouts are explicit tool errors. Native ripgrep retains its bounded
+subprocess and non-backtracking matching. A native listing process is killed
+and reaped if its Python glob matcher times out.
+
+VERSION0 uses simple case folding. Scoped/leading inline flags, variable-width
+lookbehind, Unicode property escapes and global flags after a prefix are
+accepted. REVERSE mode is rejected after compilation, including explicit flags.
+Unicode word and dotless-i changes are listed in [upgrading](upgrading.md).
+Terminal capture failures preserve the process outcome with metadata.retention
+unavailable and no recovery pointer. Failure handlers never reread capture;
+UUID exclusive paths preserve partial objects. Head, notice and tail remain
+separate while previews shrink, with a strict-decrease assertion and loop bound.
+
+Producers and checks are `scripts/artifact_search_fixtures.py`,
+`tests/session/test_artifact_search.py` and
+`tests/session/test_artifact_reread_gaps.py`. They cover real kernel dispatch,
+compaction scope, line/column readback, pathological regex interruption, Unicode
+chunk boundaries, partial edit baselines and memory bounds. Terminal retention
+failures use ordinary results with unavailable metadata; real Bash and
+kernel tests prove that status, exit code and directive survive and the command
+is not repeated. The immutable snapshot is still the published baseline until
+release synchronization; local gates do not establish central adoption.
 
 The workspace edit producer is `tools/handlers/workspace_io.py`. It builds the
 canonical edit receipt and file metadata. `test_builtin_tool_behavior_contract.py`

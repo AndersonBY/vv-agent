@@ -8,33 +8,7 @@ from uuid import uuid4
 
 from vv_agent.workspace.artifacts import is_reserved_artifact_path
 from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
-
-
-def _glob_match(path: str, pattern: str) -> bool:
-    """Match a posix path against a glob pattern supporting ``**``."""
-    # Convert glob pattern to regex: ** matches any path segments, * matches within a segment
-    import re as _re
-
-    parts: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern[i : i + 3] == "**/":
-            parts.append("(?:.+/)?")
-            i += 3
-        elif pattern[i : i + 2] == "**":
-            parts.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            parts.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            parts.append("[^/]")
-            i += 1
-        else:
-            parts.append(_re.escape(pattern[i]))
-            i += 1
-    regex = "^" + "".join(parts) + "$"
-    return _re.match(regex, path) is not None
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_glob, matching_request
 
 
 class MemoryWorkspaceBackend:
@@ -51,12 +25,19 @@ class MemoryWorkspaceBackend:
         return _normalize_workspace_path(path)
 
     def list_files(self, base: str, glob: str) -> list[str]:
+        with matching_request():
+            files = self._list_files(base, glob)
+            check_matching_budget()
+            return files
+
+    def _list_files(self, base: str, glob: str) -> list[str]:
         base_n = self._norm(base)
         if is_reserved_artifact_path(base_n):
             return []
         pattern = f"{base_n}/{glob}" if base_n else glob
+        matcher = RegexBudget(compile_glob(pattern))
         with self._lock:
-            files = [p for p in self._files if not is_reserved_artifact_path(p) and _glob_match(p, pattern)]
+            files = [p for p in self._files if not is_reserved_artifact_path(p) and matcher.match(p)]
         files.sort()
         return files
 

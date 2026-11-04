@@ -607,3 +607,39 @@ The SQL schedule changes only when execution changes. A commit that only adds
 input or usage, and leaves the turn and the reducer's due times unchanged, keeps
 the existing schedule. A commit that changes execution recomputes the schedule
 from the log.
+
+## Artifact read authorization
+
+Use the public scope predicate when implementing a host read_file or search_files:
+
+```python
+from vv_agent import is_task_artifact_path
+
+allowed = is_task_artifact_path(
+    path,
+    task_id=host_task_id,
+    session_id=current_session_id,
+    session_task_id=current_sdk_task_id,
+)
+```
+
+All identities must come from the admitted runtime or trusted host records. The
+model supplies only the path. session_task_id is the SDK turn/task identity,
+which can differ from the backend's host task id. Omit it only when those ids are
+the same. The predicate accepts one canonical artifact filename in the current
+task or current session/task compaction scope. It grants neither account access
+nor inherited access from another task, turn or session. Apply your account and
+organization ACLs and storage availability checks as well. Do not use raw
+workspace read methods as model-facing authorization boundaries.
+
+The built-in read_file accepts start_char with a fixed 12,000-character page. Search columns use the
+same zero-based Unicode units; line numbers start at one. Hosts with their own
+reader should provide this same mapping, bounded streaming and a next position.
+An interrupted or windowed search must say it is incomplete.
+
+Task scopes use the encoding described in [Python mapping](parity-contract.md).
+The host must ensure task/session ids do not differ only by case on its chosen
+storage. This includes filesystem alias rules such as ignored trailing dots.
+Built-in remote object storage is case-sensitive. A scope predicate does not
+check a custom filesystem's alias behavior. See [upgrading](upgrading.md) for
+old compaction references and frozen turns.

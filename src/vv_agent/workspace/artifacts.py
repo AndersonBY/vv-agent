@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -117,7 +118,9 @@ def _text_chunks(text: str) -> Iterator[str]:
         yield text[start : start + _CAPTURE_CHUNK_CHARS]
 
 
-def text_artifact_ref(task_id: str, tool_call_id: str, text: str, *, identity: str | None = None) -> ToolArtifactRef:
+def text_artifact_ref(
+    task_id: str | tuple[str, str], tool_call_id: str, text: str, *, identity: str | None = None
+) -> ToolArtifactRef:
     """Describe deterministic content reuse or one immutable completion identity."""
     digest = hashlib.sha256()
     size = 0
@@ -126,7 +129,7 @@ def text_artifact_ref(task_id: str, tool_call_id: str, text: str, *, identity: s
         digest.update(data)
         size += len(data)
     suffix = digest.hexdigest() if identity is None else hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    path = f".vv-agent/artifacts/{_artifact_segment(task_id, 'task')}/{_artifact_segment(tool_call_id, 'call')[:59]}-{suffix}.txt"
+    path = f".vv-agent/artifacts/{_artifact_task_segment(task_id)}/{_artifact_segment(tool_call_id, 'call')[:59]}-{suffix}.txt"
     return ToolArtifactRef(path, "text/plain", "utf-8", size, digest.hexdigest())
 
 
@@ -138,7 +141,7 @@ def verify_text_artifact(backend: WorkspaceBackend, artifact: ToolArtifactRef) -
 
 def persist_text_artifact(
     backend: WorkspaceBackend,
-    task_id: str,
+    task_id: str | tuple[str, str],
     tool_call_id: str,
     text: str,
     *,
@@ -151,7 +154,7 @@ def persist_text_artifact(
     for _ in range(32):
         artifact = expected
         if not reuse_existing and identity is None:
-            task_segment = _artifact_segment(task_id, "task")
+            task_segment = _artifact_task_segment(task_id)
             call_segment = _artifact_segment(tool_call_id, "call")
             path = f".vv-agent/artifacts/{task_segment}/{call_segment}-{uuid.uuid4().hex}.txt"
             artifact = ToolArtifactRef(path, "text/plain", "utf-8", expected.size_bytes, expected.sha256)
@@ -183,12 +186,12 @@ def persist_text_artifact(
 
 def persist_captured_text_artifact(
     backend: WorkspaceBackend,
-    task_id: str,
+    task_id: str | tuple[str, str],
     tool_call_id: str,
     capture_path: Path,
 ) -> ToolArtifactRef:
     """Persist a completed capture through the backend's exclusive chunk writer."""
-    task_segment = _artifact_segment(task_id, "task")
+    task_segment = _artifact_task_segment(task_id)
     call_segment = _artifact_segment(tool_call_id, "call")
     last_collision: FileExistsError | None = None
 
@@ -229,9 +232,50 @@ def persist_captured_text_artifact(
     raise FileExistsError(errno.EEXIST, "could not allocate an exclusive artifact path")
 
 
+def _session_artifact_scope(session_id: str, task_id: str) -> tuple[str, str]:
+    return session_id, task_id
+
+
 def is_reserved_artifact_path(path: str) -> bool:
     normalized = _normalize_workspace_path(path)
     return normalized.startswith((".vv-agent/artifacts/", ".vv-agent/resources/"))
+
+
+_TASK_ARTIFACT_PATH = re.compile(
+    r"\.vv-agent/artifacts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
+    r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,58}-[0-9a-f]{64}|"
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[0-9a-f]{32})\.txt"
+)
+
+
+def is_artifact_namespace_path(path: str) -> bool:
+    root = ".vv-agent/artifacts"
+    normalized = _normalize_workspace_path(path)
+    slash_path = path.replace("\\", "/")
+    return normalized == root or normalized.startswith(root + "/") or f"/{root}/" in f"/{slash_path}/"
+
+
+def is_task_artifact_path(path: str, *, task_id: str, session_id: str | None = None, session_task_id: str | None = None) -> bool:
+    """Check a canonical task/compaction path; the host must still enforce its ACL."""
+    match = _TASK_ARTIFACT_PATH.fullmatch(path)
+    if match is None:
+        return False
+    scopes = {_artifact_task_segment(task_id)}
+    if session_id:
+        sdk_task = task_id if session_task_id is None else session_task_id
+        scopes.add(_artifact_task_segment(_session_artifact_scope(session_id, sdk_task)))
+    return match[1] in scopes
+
+
+def _artifact_task_segment(value: str | tuple[str, str]) -> str:
+    if isinstance(value, tuple):
+        identity = ["session", *value]
+    else:
+        if not value.startswith("s-") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            return value
+        identity = ["task", value]
+    encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "s-" + hashlib.sha256(encoded).hexdigest()[:62]
 
 
 def _artifact_segment(value: str, fallback: str) -> str:

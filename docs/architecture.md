@@ -339,8 +339,16 @@ it.
 chunks. The SHA-256 digest, UTF-8 validation, line counts, and page output all
 come from one pass over the bytes. No page is returned until the whole file
 has been validated. This keeps memory use bounded, although every page request
-still reads the full file. Custom backends are read with their own
-`read_bytes`.
+still reads the full file. Custom backends without chunk reads are read with their own
+`read_bytes`; their streaming memory bound depends on the backend. A line range
+may include `start_char` (zero-based Unicode offset in its first line). Each
+page reads up to 12,000 characters. A partial page reports the next line/local offset
+and a digest-bound cursor. The model receives the next position explicitly.
+Partial reads never authorize an overwrite of unseen content.
+
+Model-facing artifact search, reads and file metadata use the same current-task
+scope predicate; see [host-integration.md](host-integration.md#artifact-read-authorization)
+for trusted identities and host ACL responsibilities.
 
 ## Invariants
 

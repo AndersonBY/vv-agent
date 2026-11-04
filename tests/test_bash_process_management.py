@@ -610,7 +610,10 @@ def test_terminal_capture_read_failure_is_retryable_without_duplicate_notificati
     saved = tmp_path / "saved-capture"
     state.output_path.rename(saved)
     failed = call(ctx, "check_background_command", {"session_id": session_id})
-    assert failed.status_code is ToolResultStatus.ERROR
+    assert failed.status_code is ToolResultStatus.SUCCESS
+    assert failed.error_code is None and failed.directive.value == "continue"
+    assert failed.metadata["retention"] == {"status": "unavailable", "reason": "artifact_persist_failed"}
+    assert failed.artifact is None
     assert failed.metadata["status"] == "completed"
     assert len(notifications) == 1
     assert saved.read_text() == "x" * output_size
@@ -647,7 +650,10 @@ def test_live_capture_read_failure_is_retryable(tmp_path, manager, monkeypatch):
     state.output_path.rename(saved)
     try:
         failed = call(ctx, "check_background_command", {"session_id": session_id})
-        assert failed.status_code is ToolResultStatus.ERROR
+        assert failed.status_code is ToolResultStatus.SUCCESS
+        assert failed.error_code is None and failed.directive.value == "continue"
+        assert failed.metadata["retention"] == {"status": "unavailable", "reason": "artifact_persist_failed"}
+        assert failed.artifact is None
         assert failed.metadata["status"] == "running"
     finally:
         saved.rename(state.output_path)

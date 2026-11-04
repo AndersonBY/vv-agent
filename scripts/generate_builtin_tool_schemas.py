@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -103,7 +104,15 @@ def _schema_payload(fixture: dict[str, object]) -> dict[str, dict[str, object]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=(
+            Path(os.environ["VV_AGENT_CONTRACT_SOURCE"]) / "fixtures/builtin_tools.json"
+            if "VV_AGENT_CONTRACT_SOURCE" in os.environ
+            else DEFAULT_FIXTURE
+        ),
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 

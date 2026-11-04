@@ -7,6 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from support.contract import fixture_root
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 ARTIFACTS = runpy.run_path(str(SCRIPTS / "tool_result_artifact_fixtures.py"))
@@ -73,8 +74,6 @@ def test_session_bounded_regenerates_projection_and_capture_provenance(tmp_path)
             assert entry["capture_incomplete_reason"] == "capture_completeness_unverified"
             assert {key: entry[key] for key in result["artifact"]} == result["artifact"]
         SESSION["write_json"](tmp_path, "bounded_tool_result.json", bounded)
-        assert (tmp_path / "bounded_tool_result.json").read_bytes() == (
-            REPLACEMENTS["BASE"] / "bounded_tool_result.json"
-        ).read_bytes()
+        assert (tmp_path / "bounded_tool_result.json").read_bytes() == (fixture_root() / "bounded_tool_result.json").read_bytes()
     finally:
         fixtures.kernel.close()

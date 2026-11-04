@@ -9,6 +9,7 @@ from vv_agent.llm.errors import MAX_PTL_RETRIES
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
+from vv_agent.workspace.artifacts import _session_artifact_scope
 
 from .context import message_ids, project_context
 from .memory import extract_memory, finish_compact, start_compact
@@ -53,7 +54,7 @@ def manager_for(driver: _Driver) -> MemoryManager:
     fork = driver.records[0].record._payload["attributes"].get("app_server_fork")
     baseline = driver.records[0].record._payload["attributes"].get("app_server_context") if fork else None
     settings = memory_settings(baseline or definition, driver.state.model_selection)
-    settings["artifact_scope"] = f"session/{driver.sid}/{task.task_id}"
+    settings["artifact_scope"] = _session_artifact_scope(driver.sid, task.task_id)
     return MemoryManager(
         **settings,
         workspace_backend=(

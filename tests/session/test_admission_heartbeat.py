@@ -1,11 +1,11 @@
-"""Real PostgreSQL leases during admission, append preparation and shutdown."""
+"""Real PostgreSQL transactions and elapsed-time leases during admission and shutdown."""
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
-from time import monotonic
+from time import monotonic, monotonic_ns
 
 import pytest
 
@@ -26,11 +26,34 @@ INTERVAL = 0.025
 CHILDREN = tuple(f"child-{i}" for i in range(4))
 
 
-def wait_until(callback, *, timeout=5):
+@pytest.fixture(autouse=True)
+def elapsed_lease_clock(monkeypatch):
+    # Keep real elapsed TTLs and SQL fencing independent of adjustable wall time.
+    monkeypatch.setattr(PostgresStore, "clock_sql", property(lambda _: str(monotonic_ns() // 1_000_000)))
+
+
+def wait_until(callback, *, timeout=5, future=None):
     deadline = monotonic() + timeout
     while not callback():
+        if future is not None and future.done():
+            pytest.fail(f"background worker exited before condition: {future.result()!r}")
         assert monotonic() < deadline, "database condition did not become true"
         threading.Event().wait(0.01)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_wait_until_reports_worker_exit(failed):
+    future = Future()
+    error = RuntimeError("worker failed before admission")
+    if failed:
+        future.set_exception(error)
+        with pytest.raises(RuntimeError) as caught:
+            wait_until(lambda: False, future=future)
+        assert caught.value is error
+    else:
+        future.set_result(False)
+        with pytest.raises(pytest.fail.Exception, match=r"background worker exited.*False"):
+            wait_until(lambda: False, future=future)
 
 
 def lease_row(store):
@@ -92,14 +115,14 @@ def test_four_children_survive_three_real_ttls(store, database, competitor, phas
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(run_parent, database, entered, finish, calls, phase=phase)
         try:
-            assert entered.wait(5)
+            wait_until(entered.is_set, future=future)
             initial, expiries = observe_three_ttls(store)
             if competitor:
                 assert not kernel.drive(store, "s", runtime=lambda _: pytest.fail("competitor acquired live lease"))
             assert calls == [1]
         finally:
             finish.set()
-        assert future.result(timeout=10)
+            assert future.result(timeout=10)
     assert len(expiries) >= 4
     assert store.list_sessions() == (*CHILDREN, "s")
     assert store._rows("SELECT * FROM host_child") == [(1,)]
@@ -140,11 +163,11 @@ def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(work)
         try:
-            assert entered.wait(5)
+            wait_until(entered.is_set, future=future)
             initial, _ = observe_three_ttls(store)
         finally:
             finish.set()
-        assert future.result(timeout=10)
+            assert future.result(timeout=10)
     assert rows(store)[-1].record.kind == "turn_ended"
     assert {r.writer_epoch for r in rows(store)[1:]} == {initial[1]}
 
@@ -166,7 +189,8 @@ def test_real_expiry_fences_old_admission_and_preserves_new_schedule(store, data
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(run_parent, database, entered, finish, calls, scheduled=True)
         try:
-            assert entered.wait(5) and blocked.wait(5)
+            wait_until(entered.is_set, future=future)
+            wait_until(blocked.is_set, future=future)
             initial = lease_row(store)
             wait_until(lambda: store._now() >= initial[2])
             # Even the original identity cannot revive a genuinely expired lease.
@@ -206,7 +230,7 @@ def test_heartbeat_database_timeout_is_bounded_lease_loss(store, database, monke
         return renew(self, value, ttl_ms=ttl_ms)
 
     monkeypatch.setattr(PostgresStore, "renew", paused)
-    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, TTL, INTERVAL)
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, TTL, INTERVAL, now_ms=store._now())
     with PostgresStore.standalone(database) as locker, locker.atomic() as tx:
         if fault == "row_lock":
             tx.lock_session("s")
@@ -251,7 +275,7 @@ def test_close_waits_for_inflight_heartbeat_without_publishing_after_stop(store,
             pause()
 
     monkeypatch.setattr(PostgresStore, "renew", controlled)
-    heartbeat = kernel._LeaseHeartbeat(lease, connection, 2000, INTERVAL)
+    heartbeat = kernel._LeaseHeartbeat(lease, connection, 2000, INTERVAL, now_ms=store._now())
     heartbeat.thread.start()
     if phase == "exit":
         assert heartbeat.ready.wait(5)
@@ -340,7 +364,7 @@ def test_concurrent_polls_serialize_and_never_publish_another_identity(store, da
     start(store)
     lease = store.acquire("s", owner="old", ttl_ms=2000)
     assert lease is not None
-    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 2000, INTERVAL)
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 2000, INTERVAL, now_ms=store._now())
     entered, finish = threading.Event(), threading.Event()
     renew = PostgresStore.renew
     incoming = []
@@ -582,12 +606,13 @@ def test_persistent_heartbeat_timeouts_exhaust_margin_and_abort_append(store, da
     assert len(attempts) == count
 
 
-def test_committing_refuses_expired_published_lease(store):
+def test_committing_refuses_expired_published_lease(store, monkeypatch):
     start(store)
     lease = store.acquire("s", owner="old", ttl_ms=100)
     assert lease is not None
-    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, INTERVAL)
-    wait_until(lambda: store._now() >= lease.expires_at_ms)
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, INTERVAL, now_ms=store._now())
+    # A database wall-clock jump does not imply the local monotonic deadline elapsed.
+    monkeypatch.setattr(kernel.time, "monotonic", lambda: heartbeat.expires_deadline)
     with pytest.raises(LeaseLost, match="expired"), heartbeat.committing():
         pytest.fail("expired published lease admitted an append")
 
@@ -607,7 +632,7 @@ def test_close_interrupts_transient_retry_wait_without_another_renew(store, data
         raise LockNotAvailable("injected row lock timeout")
 
     monkeypatch.setattr(PostgresStore, "renew", failing)
-    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 4000, 1.0)
+    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 4000, 1.0, now_ms=store._now())
     heartbeat.thread.start()
     assert failed.wait(5)
     begin = monotonic()
@@ -640,7 +665,7 @@ def test_host_heartbeat_retries_two_real_lock_timeouts_then_renews(store, databa
         return result
 
     monkeypatch.setattr(PostgresStore, "renew", observed)
-    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 3000, INTERVAL)
+    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 3000, INTERVAL, now_ms=store._now())
     try:
         with PostgresStore.standalone(database) as locker, locker.atomic() as tx:
             tx.lock_session("s")
@@ -675,7 +700,7 @@ def test_append_lock_wait_over_250ms_succeeds_within_lease(store, database):
         with store.atomic() as tx:
             tx.lock_session("s")
             future = pool.submit(append)
-            assert entered.wait(5)
+            wait_until(entered.is_set, future=future)
             store._rows("SELECT pg_sleep(0.5)")
         future.result(timeout=5)
     assert len(rows(store)) == 2
@@ -686,7 +711,7 @@ def test_public_heartbeat_stopped_distinguishes_normal_stop_from_lease_loss(stor
 
     start(store)
     lease = store.acquire("s", owner="normal-stop", ttl_ms=2000)
-    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 2000, INTERVAL)
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 2000, INTERVAL, now_ms=store._now())
     heartbeat.thread.start()
     heartbeat.close()
     with pytest.raises(HeartbeatStopped) as caught:

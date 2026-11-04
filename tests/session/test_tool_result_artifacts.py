@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from support.contract import fixture_root
 
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive
@@ -460,5 +461,5 @@ def test_process_death_around_artifact_and_receipt_never_replays_effect(store, d
 
 
 def test_contract_vectors_come_from_the_real_producer():
-    expected = json.loads((Path(__file__).parents[1] / "fixtures/parity/tool_result_artifact.json").read_text())
+    expected = json.loads((fixture_root() / "tool_result_artifact.json").read_text())
     assert PRODUCER["generate"]() == expected

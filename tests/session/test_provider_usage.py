@@ -210,3 +210,166 @@ def test_provider_result_usage_codec(usage):
             replace(provider.item, payload=invalid).encode()
         with pytest.raises(RecordError):
             InboxItem.parse(json.dumps(provider.item.to_dict() | {"payload": invalid}).encode())
+
+
+def test_read_schema_drift_closes_turn_and_cancels_provider(store, database):
+    cancelled = []
+
+    class Pending(ReceiptProvider):
+        def query(self, handle):
+            return Accepted(handle)
+
+        def authenticate(self, item, plan):
+            return item.kind == "provider_evidence" and item.payload["handle"] == self.handle
+
+        def cancel(self, handle):
+            cancelled.append(handle)
+            return Definitive(self.result, (handle["evidence"],), usage=self.usage)
+
+    provider = Pending({"content": "done", "tool_calls": [], "raw": {}}, {})
+    start(store)
+
+    def lost(point, plan):
+        if point == "after_external_call":
+            provider.bind(plan)
+            raise WorkerDeath
+
+    rt = runtime(database, [LLMResponse("done")], providers={"model": provider}, hook=lost)
+    current = rt.registry.get_schema("read_file")
+    old = json.loads(json.dumps(current))
+    old["function"]["parameters"]["properties"].pop("start_char")
+    rt.registry.register_schema("read_file", old)
+    with pytest.raises(WorkerDeath):
+        drive(store, "s", runtime=rt)
+    with store.atomic() as tx:
+        tx.push(
+            "s",
+            replace(
+                provider.item,
+                kind="provider_evidence",
+                payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")}
+                | {"handle": provider.handle},
+            ),
+        )
+    drive(store, "s", runtime=rt)
+    assert records_of(store, "op_parked")
+    rt.registry.register_schema("read_file", current)
+    drive(store, "s", runtime=rt)
+    assert records_of(store, "turn_ended")[0].payload["reason"] == "handler_schema_or_capability_mismatch"
+    assert cancelled == [provider.handle]
+    assert len(records_of(store, "op_started")) == 1
+
+
+@pytest.mark.parametrize(
+    "closing,cancel_reply",
+    [
+        (closing, reply)
+        for closing in ("schema", "cancel", "abort")
+        for reply in ("unknown", "accepted", "exception", "timeout", "invalid")
+    ]
+    + [("version", "unknown")],
+)
+def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(store, database, closing, cancel_reply):
+    release, exited = Event(), Event()
+    cancellations = []
+
+    class Pending(ReceiptProvider):
+        def query(self, handle):
+            return Accepted(handle)
+
+        def authenticate(self, item, plan):
+            if item.kind == "provider_evidence":
+                return item.payload["handle"] == self.handle
+            return super().authenticate(item, plan)
+
+        def cancel(self, handle):
+            cancellations.append(handle)
+            try:
+                if cancel_reply == "exception":
+                    raise OSError("cancel unavailable")
+                if cancel_reply == "timeout":
+                    assert release.wait(5)
+                if cancel_reply == "accepted":
+                    return Accepted(handle)
+                if cancel_reply == "invalid":
+                    return Definitive(self.result, ("wrong acceptance evidence",))
+                return Unknown("stop unconfirmed")
+            finally:
+                exited.set()
+
+    provider = Pending({"content": "late", "tool_calls": [], "raw": {}}, {})
+    start(store)
+    rt = runtime(database, [LLMResponse("initial")], providers={"model": provider})
+    current = rt.registry.get_schema("read_file")
+    old = json.loads(json.dumps(current))
+    old["function"]["parameters"]["properties"].pop("start_char")
+    if closing == "schema":
+        rt.registry.register_schema("read_file", old)
+
+    def lost(point, plan):
+        if point == "after_external_call":
+            provider.bind(plan)
+            raise WorkerDeath
+
+    rt.hook = lost
+    with pytest.raises(WorkerDeath):
+        drive(store, "s", runtime=rt)
+    with store.atomic() as tx:
+        tx.push(
+            "s",
+            replace(
+                provider.item,
+                kind="provider_evidence",
+                payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")}
+                | {"handle": provider.handle},
+            ),
+        )
+    drive(store, "s", runtime=rt)
+    wait = records_of(store, "op_parked")[-1].payload
+    if closing == "schema":
+        rt.registry.register_schema("read_file", current)
+    elif closing == "version":
+        rt.handler_version = "changed"
+    else:
+        with store.atomic() as tx:
+            tx.push("s", InboxItem("stop", "control", {"action": closing}, target_turn_id=provider.item.target_turn_id))
+    try:
+        drive(store, "s", runtime=rt)
+    finally:
+        release.set()
+        assert exited.wait(2)
+
+    ended = records_of(store, "turn_ended")
+    assert len(ended) == 1
+    assert ended[0].payload["status"] == ({"cancel": "cancelled", "abort": "aborted"}.get(closing, "failed"))
+    if closing == "schema":
+        assert ended[0].payload["reason"] == "handler_schema_or_capability_mismatch"
+    assert ended[0].payload["unconfirmed_operations"] == [provider.handle["operation_id"]]
+    state = store.read_state("s")[0]
+    attempt = state.operations[provider.handle["operation_id"]].attempts[1]
+    assert state.active_turn_id is None and attempt.wait == wait
+    unknown = records_of(store, "op_unknown")
+    if closing in {"cancel", "abort"}:
+        assert state.turns[provider.item.target_turn_id].cancelled
+        assert attempt.state == "unknown" and len(unknown) == 1
+        assert attempt.unknown == unknown[0]
+        assert unknown[0].payload["reason"] == ("provider_result_invalid" if cancel_reply == "invalid" else "cancel_requested")
+        assert unknown[0].payload["dispatch_evidence"] == [records_of(store, "op_started")[0].record_id]
+        assert unknown[0].payload["retry"] == "stop"
+    else:
+        assert not state.turns[provider.item.target_turn_id].cancelled
+        assert attempt.state == "parked" and attempt.unknown is None
+        assert not unknown
+    assert not records_of(store, "op_completed")
+
+    provider.item = replace(provider.item, input_id="late")
+    with store.atomic() as tx:
+        tx.push("s", provider.item)
+    drive(store, "s", runtime=rt)
+    drive(store, "s", runtime=rt)
+    completed = records_of(store, "op_completed")
+    assert len(completed) == 1 and completed[0].payload["context"] == "audit"
+    assert store.read_state("s")[0].applied_inputs["late"].payload["disposition"] == "applied"
+    assert len(records_of(store, "turn_ended")) == 1
+    assert len(records_of(store, "op_started")) == 1
+    assert provider.submits == 0 and cancellations == [provider.handle]

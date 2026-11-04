@@ -8,15 +8,16 @@ import platform
 from copy import deepcopy
 from dataclasses import fields, is_dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
+
+from support.contract import fixture_root
 
 from vv_agent.context_providers import ContextFragment
 from vv_agent.prompt import PromptBundle, PromptSection, SystemPromptBuilder, build_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.tools import ToolExposure, build_default_registry
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
+FIXTURE_DIR = fixture_root()
 CANONICAL_FIXTURES = ("public_api.json", "prompt_bundle.json", "builtin_tools.json")
 EXPECTED_DOMAINS = (
     "agent",
@@ -451,7 +452,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 273
+    assert len(capability_ids) == 274
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])

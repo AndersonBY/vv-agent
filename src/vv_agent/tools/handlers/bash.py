@@ -165,7 +165,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         owner_task_id=context.task_id,
         owner_workspace=context.workspace,
         artifact_backend=context.workspace_backend,
-        artifact_task_id=context.task_id,
+        artifact_task_id=str(getattr(context.workspace_backend, "task_id", context.task_id)),
         artifact_tool_call_id=context.tool_call_id,
     )
     background_session_manager.wait(session_id, yield_time_ms)

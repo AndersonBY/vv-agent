@@ -21,7 +21,7 @@ python -m pip install 'vv-agent[postgres,s3]'
 
 从源码开发时，运行 `python -m pip install -e .` 或 `uv sync --dev`。
 
-vv-agent 0.27.1 实现了语言无关的 `vv-agent-contract` 29.1.0 版，具体版本锁定在 `contract.lock.json`。Python 是持续维护的实现。Rust 版 `vv-agent-rs` 冻结在合约 23.0.0（包版本 0.21.x），只做维护修复。Python API 沿用 Python 的命名习惯，详见[合约工作流](docs/parity-contract.md)。
+vv-agent 0.33.0 要求语言无关的 `vv-agent-contract` 33.0.0 版，升级前请读[发布说明](docs/releases/0.33.0.md)和[升级要求](docs/upgrading.md#0330--2026-11-04)。Python 是持续维护的实现。Rust 版 `vv-agent-rs` 冻结在合约 23.0.0（包版本 0.21.x），只做维护修复。Python API 沿用 Python 的命名习惯，详见[合约工作流](docs/parity-contract.md)。
 
 如果你从旧版本升级，并且把会话存在 SQLite 文件或 PostgreSQL 里，请先读[宿主升级指南](docs/upgrading.md)。新版本可能读不了已存储的会话，指南里写了升级前要做哪些准备。
 
