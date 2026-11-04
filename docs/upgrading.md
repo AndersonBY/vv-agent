@@ -77,15 +77,31 @@ old-version session.
 
 ## Version notes
 
-### Unreleased artifact reread changes (contract 33.0.0 draft)
+### 0.33.0 — 2026-11-04
 
-Record, inbox, SQL and App Server schema versions are unchanged. read_file adds
-start_char and uses a fixed 12,000-character page. Its schema participates in the
+Requires contract 33.0.0. Record, inbox, SQL and App Server schema versions are
+unchanged. read_file adds start_char, removes max_chars and uses a fixed
+12,000-character page. Its schema participates in the
 frozen definition digest. An executable turn with the old schema closes as
 `handler_schema_or_capability_mismatch` at its next dispatch, even if its next
 call is another tool. Paused turns and turn-level waits reach this check after
 resumption. Closing the turn can cancel providers and child tasks; outstanding
 external effects still need reconciliation.
+
+For a guard closure on a turn that is not marked cancelled, an already parked,
+started provider operation keeps its original wait when cancellation is not
+definitively confirmed. The terminal record lists it in `unconfirmed_operations`
+without writing `op_unknown`. Late authenticated results are audit-only; driving
+the session again does not resubmit the work. User cancel/abort keeps its existing
+`op_unknown` behavior, including `provider_result_invalid` for invalid Definitive
+replies. A closed turn does not prove the external effect stopped.
+
+If saving command output or reading its capture for the first time fails, the
+result preserves the confirmed status, exit code and directive. It returns a
+bounded preview and
+`metadata.retention={"status":"unavailable","reason":"artifact_persist_failed"}`,
+without an artifact or cursor recovery pointer. Handle this as unavailable
+output, not a reason to run the command again.
 
 Drain running and paused turns on the old runtime before upgrading. If draining
 is impossible, users can continue from the conclusion in a new session. New
@@ -117,7 +133,7 @@ are observable changes from stdlib re. Reverse matching (`(?r)` or REVERSE flags
 is rejected. Glob and child exclusion patterns share the interruptible request
 budget; timeouts are explicit errors. Native ripgrep retains its engine semantics.
 See [Python mapping](parity-contract.md) for implementation details and the
-[release draft](releases/unreleased-artifact-reread.md) for scope.
+[release notes](releases/0.33.0.md) for scope.
 
 
 ### 0.32.0
