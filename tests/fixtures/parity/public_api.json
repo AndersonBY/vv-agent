@@ -1283,6 +1283,10 @@
 {
 "id": "exports.HeartbeatStopped",
 "python": "vv_agent.HeartbeatStopped"
+},
+{
+"id": "exports.is_task_artifact_path",
+"python": "vv_agent.is_task_artifact_path"
 }
 ],
 "id": "exports"
