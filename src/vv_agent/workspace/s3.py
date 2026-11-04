@@ -10,17 +10,19 @@ by setting ``endpoint_url``.
 
 from __future__ import annotations
 
-import fnmatch
 import importlib
 import importlib.util
+import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from fnmatch import translate
 from hashlib import sha256
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
 from vv_agent.workspace.artifacts import is_reserved_artifact_path
 from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_glob, compile_pattern, matching_request
 
 _BOTO3_AVAILABLE = importlib.util.find_spec("boto3") is not None
 
@@ -115,14 +117,25 @@ class S3WorkspaceBackend:
         """List all object keys under *prefix* (handles pagination)."""
         keys: list[str] = []
         paginator = self._client.get_paginator("list_objects_v2")
+        check_matching_budget()
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            check_matching_budget()
             for obj in page.get("Contents", []):
+                check_matching_budget()
                 keys.append(obj["Key"])
+                check_matching_budget()
+            check_matching_budget()
         return keys
 
     # -- Protocol implementation --------------------------------------------
 
     def list_files(self, base: str, glob: str) -> list[str]:
+        with matching_request():
+            files = self._list_files(base, glob)
+            check_matching_budget()
+            return files
+
+    def _list_files(self, base: str, glob: str) -> list[str]:
         base_norm = _normalize_workspace_path(base)
         if is_reserved_artifact_path(base_norm):
             return []
@@ -139,12 +152,15 @@ class S3WorkspaceBackend:
         all_keys = self._list_keys(search_prefix)
 
         pattern = f"{base_norm}/{glob}" if base_norm else glob
+        matcher = RegexBudget(compile_glob(pattern))
+        shell_matcher = RegexBudget(compile_pattern(translate(os.path.normcase(pattern))))
         result: list[str] = []
         for key in all_keys:
+            check_matching_budget()
             rel = self._rel(key)
             if not rel or rel.endswith("/") or is_reserved_artifact_path(rel):
                 continue
-            if fnmatch.fnmatch(rel, pattern) or self._glob_match(rel, pattern):
+            if shell_matcher.match(os.path.normcase(rel)) or matcher.match(rel):
                 result.append(rel)
         result.sort()
         return result
@@ -310,29 +326,3 @@ class S3WorkspaceBackend:
     def mkdir(self, path: str) -> None:
         # S3 没有真正的目录, 无需操作
         pass
-
-    @staticmethod
-    def _glob_match(path: str, pattern: str) -> bool:
-        """支持 ``**`` 的 glob 匹配."""
-        import re as _re
-
-        parts: list[str] = []
-        i = 0
-        while i < len(pattern):
-            if pattern[i : i + 3] == "**/":
-                parts.append("(?:.+/)?")
-                i += 3
-            elif pattern[i : i + 2] == "**":
-                parts.append(".*")
-                i += 2
-            elif pattern[i] == "*":
-                parts.append("[^/]*")
-                i += 1
-            elif pattern[i] == "?":
-                parts.append("[^/]")
-                i += 1
-            else:
-                parts.append(_re.escape(pattern[i]))
-                i += 1
-        regex = "^" + "".join(parts) + "$"
-        return _re.match(regex, path) is not None

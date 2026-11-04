@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from support.contract import fixture_root
 
 from vv_agent import Agent, RunConfig
 from vv_agent.config import ResolvedModelConfig
@@ -21,7 +22,7 @@ from vv_agent.tools.handlers.search import _MAX_RESULT_CHARS, _MAX_RESULT_LINES,
 from vv_agent.tools.handlers.workspace_io import read_file
 from vv_agent.types import LLMResponse, ToolCall
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
-from vv_agent.workspace.artifacts import _artifact_segment, persist_text_artifact
+from vv_agent.workspace.artifacts import _artifact_task_segment, _session_artifact_scope, persist_text_artifact
 from vv_agent.workspace.base import DiscoveryFilteredWorkspaceBackend
 
 PRODUCER = runpy.run_path(str(Path(__file__).parents[2] / "scripts/artifact_search_fixtures.py"))
@@ -31,7 +32,7 @@ TASK = PRODUCER["TASK"]
 @pytest.mark.parametrize("name", list(PRODUCER["CASES"]))
 def test_real_handler_cases(name):
     result, _backend, arguments = PRODUCER["produce"](PRODUCER["CASES"][name])
-    if name in {"denied", "invalid_path"}:
+    if name in {"denied", "invalid_path", "other_session"}:
         assert result.error_code == "artifact_search_denied"
     elif name == "missing":
         assert result.error_code == "artifact_unavailable"
@@ -48,13 +49,16 @@ def test_real_handler_cases(name):
             assert details["matched_lines"] == 0 and not details["truncated"]
         elif name == "long_line":
             assert details["truncated"] and details["oversized_line"] == 1
-            assert "was not matched" in result.content and "Search truncated" in result.content
+            assert "scanned in 30000-character windows" in result.content and "Search truncated" in result.content
+        elif name == "late_keyword":
+            assert details["matches"][0]["column"] == 40000
+            assert "needle" in result.content and "4096-character overlap" in result.content
         elif name.startswith("budget"):
             assert details["truncated"] and "narrow pattern" in result.content
         else:
             expected_line = 3001 if name == "line_numbers" else 2
-            assert f"\n{expected_line}: " in result.content
-            context = ToolContext(Path("/tmp"), {}, 0, _backend, task_id=TASK)
+            assert f"\n{expected_line}:" in result.content
+            context = ToolContext(Path("/tmp"), {}, 0, _backend, task_id=TASK, metadata={"session_id": "fixture-session"})
             recovered = read_file(context, {"path": arguments["path"], "start_line": expected_line, "end_line": expected_line})
             assert recovered.content.removesuffix("\r") in result.content
 
@@ -72,7 +76,7 @@ def test_direct_read_and_discovery_exclusion_coexist(tmp_path, backend_kind):
         ToolContext(tmp_path, {}, 0, backend, task_id=TASK),
         {"path": ref.path, "pattern": "needle", "output_mode": "content", "type": "invalid", "glob": "no"},
     )
-    assert "\n2: needle\n" in result.content
+    assert "\n2:0: needle\n" in result.content
 
 
 def test_host_task_identity_uses_the_same_rule_as_completion_storage(tmp_path):
@@ -92,9 +96,9 @@ def test_host_task_identity_uses_the_same_rule_as_completion_storage(tmp_path):
     [
         ({"output_mode": "count"}, "2 matches on 2 lines"),
         ({"output_mode": "files_with_matches"}, ".vv-agent/artifacts/"),
-        ({"output_mode": "content", "offset": 1, "head_limit": 1}, "\n3: needle SECOND\n"),
-        ({"output_mode": "content", "case_sensitive": True}, "\n3: needle SECOND\n"),
-        ({"output_mode": "content", "literal": True, "pattern": "a.b"}, "\n4: a.b\n"),
+        ({"output_mode": "content", "offset": 1, "head_limit": 1}, "\n3:0: needle SECOND\n"),
+        ({"output_mode": "content", "case_sensitive": True}, "\n3:0: needle SECOND\n"),
+        ({"output_mode": "content", "literal": True, "pattern": "a.b"}, "\n4:0: a.b\n"),
     ],
 )
 def test_modes_case_literal_and_pagination(tmp_path, options, expected):
@@ -110,16 +114,16 @@ def test_modes_case_literal_and_pagination(tmp_path, options, expected):
         assert "NEEDLE FIRST" not in result.content
 
 
-def test_oversized_line_is_not_falsely_matched_and_later_lines_stay_searchable(tmp_path):
+def test_oversized_line_and_later_lines_are_both_searched(tmp_path):
     backend = MemoryWorkspaceBackend()
     ref = persist_text_artifact(backend, TASK, "call", "prefix\n" + "needle" * 10000 + "\nneedle last", reuse_existing=True)
     result = search_files(
         ToolContext(tmp_path, {}, 0, backend, task_id=TASK),
         {"path": ref.path, "pattern": "^needle", "output_mode": "content"},
     )
-    assert "\n3: needle last\n" in result.content
+    assert "\n3:0: needle last\n" in result.content
     assert result.metadata["artifact_search"]["oversized_line"] == 2
-    assert result.metadata["artifact_search"]["matched_lines"] == 1
+    assert result.metadata["artifact_search"]["matched_lines"] == 2
     assert "Search truncated" in result.content
 
 
@@ -152,7 +156,7 @@ def test_invalid_paths_never_read_or_list(tmp_path, path):
 
     result = search_files(
         ToolContext(tmp_path, {}, 0, NoAccessBackend(), task_id=TASK),
-        {"path": path.format(task=_artifact_segment(TASK, "task")), "pattern": "needle"},
+        {"path": path.format(task=_artifact_task_segment(TASK)), "pattern": "needle"},
     )
     assert result.error_code == "artifact_search_denied"
 
@@ -202,7 +206,7 @@ def test_regex_utf8_crlf_and_lines_across_chunk_boundaries(tmp_path, chunk_size)
         ToolContext(tmp_path, {}, 0, backend, task_id=TASK),
         {"path": ref.path, "pattern": "^prefix漢.跨块suffix$", "output_mode": "content"},
     )
-    assert "\n2: prefix漢🙂跨块suffix\n" in result.content
+    assert "\n2:0: prefix漢🙂跨块suffix\n" in result.content
     assert backend.reads == 1 and backend.writes == 1
     assert result.artifact is None
 
@@ -220,17 +224,19 @@ def test_streaming_search_memory_is_bounded(tmp_path, long_line, record_property
     tracemalloc.stop()
     record_property("peak_bytes", peak)
     assert peak < 4_000_000
-    assert result.metadata["artifact_search"]["truncated"] is long_line
+    assert result.metadata["artifact_search"]["truncated"] is (long_line or result.metadata["artifact_search"]["timed_out"])
 
 
 @pytest.mark.parametrize("host_task", [False, True])
-def test_real_kernel_search_completion_uses_unified_projection_without_repeating_effect(tmp_path, host_task):
+@pytest.mark.parametrize("compaction", [False, True])
+def test_real_kernel_search_completion_uses_unified_projection_without_repeating_effect(tmp_path, host_task, compaction):
     class TaskWorkspace(MemoryWorkspaceBackend):
         task_id = "host-task / 漢🙂"
 
     backend = TaskWorkspace() if host_task else MemoryWorkspaceBackend()
     text = ("needle" + "x" * 1000 + "\n") * 100
-    ref = persist_text_artifact(backend, getattr(backend, "task_id", TASK), "call", text, reuse_existing=True)
+    scope = _session_artifact_scope("artifact-search", TASK) if compaction else getattr(backend, "task_id", TASK)
+    ref = persist_text_artifact(backend, scope, "call", text, reuse_existing=True)
     arguments = {"path": ref.path, "pattern": "needle", "output_mode": "content", "head_limit": 0}
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
@@ -264,5 +270,5 @@ def test_real_kernel_search_completion_uses_unified_projection_without_repeating
 
 
 def test_vectors_are_generated_by_the_real_handler():
-    expected = json.loads((Path(__file__).parents[1] / "fixtures/parity/artifact_search.json").read_text())
+    expected = json.loads((fixture_root() / "artifact_search.json").read_text())
     assert PRODUCER["generate"]() == expected

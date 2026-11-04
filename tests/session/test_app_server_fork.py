@@ -89,7 +89,7 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         a.kernel.close()
 
 
-def test_accepted_summary_artifacts_and_prepared_workspace_binding(store, tmp_path, monkeypatch):
+def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_grant(store, tmp_path, monkeypatch):
     backend = LocalWorkspaceBackend(tmp_path / "source")
     target = LocalWorkspaceBackend(tmp_path / "prepared")
     artifact_path = ".vv-agent/artifacts/session-source/old.txt"
@@ -178,7 +178,13 @@ def test_accepted_summary_artifacts_and_prepared_workspace_binding(store, tmp_pa
         assert context_view(store, early["threadId"])["lastCompaction"] is None
         run_turn(a, sid, "fork-turn")
         assert any(m.name == "memory_summary" for m in calls[-1].messages)
-        assert any(m.role == "tool" and body in m.content for m in calls[-1].messages)
+        recovery = next(
+            row.record.payload["result"]
+            for row in store.read_state(sid)[1]
+            if row.record.kind == "op_completed" and row.record.payload["result"].get("tool_call_id") == "recover"
+        )
+        assert recovery["error_code"] == "artifact_read_denied", recovery
+        assert not any(m.role == "tool" and body in m.content for m in calls[-1].messages)
         assert store.read_state("source")[1] == records
         (target._artifact_root / artifact_path).write_text("corrupt")
         a.processor.process_message(

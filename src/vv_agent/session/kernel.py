@@ -1258,6 +1258,9 @@ class _Driver:
                         # Failure keeps the authentic child wait as unconfirmed, until terminal delivery.
                         continue
                     if a.wait and a.wait["handle"]["kind"] == "provider":
+                        can_be_unknown = a.state == "started" or (
+                            a.state == "parked" and a.started and self.state.turns[tid].cancelled
+                        )
                         handle = copy_json(a.wait["handle"])
                         provider = self.provider(a.execution_plan)
                         outcome = _invoke(self.scope, lambda handle=handle, provider=provider: provider.cancel(handle), 1)
@@ -1265,9 +1268,13 @@ class _Driver:
                             try:
                                 self.check_provider_result(a.execution_plan, outcome)
                             except ProviderResultInvalid:
-                                records.append(self.unknown(a.execution_plan, "provider_result_invalid"))
+                                if can_be_unknown:
+                                    records.append(self.unknown(a.execution_plan, "provider_result_invalid"))
                             else:
                                 records.extend(self.completed(a.execution_plan, outcome))
+                            continue
+                        if not can_be_unknown:
+                            # Guard closure keeps the authentic wait for terminal audit.
                             continue
                     records.append(self.unknown(a.execution_plan, reason or "turn stopped"))
 

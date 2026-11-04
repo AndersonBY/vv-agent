@@ -1190,3 +1190,21 @@ def test_hook_patch_preserves_hidden_tool_boundary(store, database, tmp_path, vi
     if not visible:
         assert result["error_code"] == "tool_not_allowed"
         assert not [r for r in records(store, kind="op_started") if "/tool/" in (r.operation_id or "")]
+
+
+def test_read_schema_drift_is_checked_after_turn_wait_is_answered(store, database, tmp_path):
+    config = RunConfig(workspace=tmp_path, no_tool_policy="wait_user")
+    admit(store, config)
+    rt = runtime(store, database, Agent("test", "test"), config, ScriptedLLM([LLMResponse("Which?")]))
+    current = rt.registry.get_schema("read_file")
+    old = deepcopy(current)
+    old["function"]["parameters"]["properties"].pop("start_char")
+    rt.registry.register_schema("read_file", old)
+    drive(store, "control", runtime=rt)
+    park = records(store, kind="turn_parked")[0]
+    rt.registry.register_schema("read_file", current)
+    drive(store, "control", runtime=rt)
+    assert not records(store, kind="turn_ended")
+    reply(store, park)
+    drive(store, "control", runtime=rt)
+    assert records(store, kind="turn_ended")[0].payload["reason"] == "handler_schema_or_capability_mismatch"

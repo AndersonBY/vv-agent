@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
+
+from support.contract import fixture_root
 
 from vv_agent.tools import ToolRegistry, build_default_registry
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "builtin_tools.json"
+_FIXTURE_PATH = fixture_root() / "builtin_tools.json"
 _FIXTURE: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 

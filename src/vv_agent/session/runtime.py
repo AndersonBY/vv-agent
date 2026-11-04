@@ -505,6 +505,7 @@ class Runtime:
             else None,
             idempotency_key=plan._payload["idempotency_key"],
             metadata={
+                "session_id": session_id,
                 "operation_id": plan.operation_id,
                 "attempt": plan.attempt,
                 "session_tool_names": [s["function"]["name"] for s in plan._payload["request"].get("tools", [])],

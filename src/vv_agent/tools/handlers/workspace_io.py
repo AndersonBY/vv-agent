@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import os
 import posixpath
-import re
 import shutil
 import subprocess
 import sysconfig
@@ -14,6 +13,8 @@ from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult, ToolResultCursor, ToolResultStatus
+from vv_agent.workspace.artifacts import is_artifact_namespace_path
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_glob, matching_request
 from vv_agent.workspace.streaming import scan_text
 
 READ_FILE_MAX_LINES = 2_000
@@ -59,30 +60,6 @@ def _is_workspace_root(path: str) -> bool:
     if not normalized:
         return True
     return Path(normalized).as_posix() in {".", ""}
-
-
-def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
-    """Compile glob once; callers can reuse the regex across many paths."""
-    parts: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern[i : i + 3] == "**/":
-            parts.append("(?:.+/)?")
-            i += 3
-        elif pattern[i : i + 2] == "**":
-            parts.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            parts.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            parts.append("[^/]")
-            i += 1
-        else:
-            parts.append(re.escape(pattern[i]))
-            i += 1
-    regex = "^" + "".join(parts) + "$"
-    return re.compile(regex)
 
 
 def _normalize_relative_path(path: str) -> str:
@@ -240,7 +217,7 @@ def _find_files_local_rg(
     ignored_root_names: list[str],
     max_results: int,
     scan_limit: int,
-    glob_regex: re.Pattern[str],
+    glob_regex: RegexBudget,
 ) -> tuple[list[str], int, bool, bool] | None:
     rg_executable = _resolve_rg_executable()
     if not rg_executable:
@@ -282,40 +259,46 @@ def _find_files_local_rg(
     should_stop = False
     remainder = b""
 
-    while True:
-        chunk = process.stdout.read(64 * 1024)
-        if not chunk:
-            break
-
-        payload = remainder + chunk
-        entries = payload.split(b"\x00")
-        remainder = entries.pop()
-
-        for raw_entry in entries:
-            if not raw_entry:
-                continue
-
-            scanned_count += 1
-            if scanned_count > scan_limit:
-                scan_limited = True
-                should_stop = True
+    try:
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
                 break
 
-            rel_from_base = _normalize_relative_path(raw_entry.decode("utf-8", errors="replace"))
-            if not rel_from_base:
-                continue
-            if not glob_regex.match(rel_from_base):
-                continue
+            payload = remainder + chunk
+            entries = payload.split(b"\x00")
+            remainder = entries.pop()
 
-            candidate_path = base_path / rel_from_base
-            rel_workspace = _format_output_path(context, candidate_path)
+            for raw_entry in entries:
+                if not raw_entry:
+                    continue
 
-            matched_count += 1
-            if len(matched_files) < max_results:
-                matched_files.append(rel_workspace)
+                scanned_count += 1
+                if scanned_count > scan_limit:
+                    scan_limited = True
+                    should_stop = True
+                    break
 
-        if should_stop:
-            break
+                rel_from_base = _normalize_relative_path(raw_entry.decode("utf-8", errors="replace"))
+                if not rel_from_base:
+                    continue
+                if not glob_regex.match(rel_from_base):
+                    continue
+
+                candidate_path = base_path / rel_from_base
+                rel_workspace = _format_output_path(context, candidate_path)
+
+                matched_count += 1
+                if len(matched_files) < max_results:
+                    matched_files.append(rel_workspace)
+
+            if should_stop:
+                break
+
+    except TimeoutError:
+        process.kill()
+        process.wait(timeout=1)
+        raise
 
     if should_stop:
         process.terminate()
@@ -381,7 +364,7 @@ def _find_files_local_fast(
             # Ignore listing errors from inaccessible roots.
             pass
 
-    glob_regex = _compile_glob_pattern(glob_pattern)
+    glob_regex = RegexBudget(compile_glob(glob_pattern))
     rg_result = _find_files_local_rg(
         context=context,
         base_path=base_path,
@@ -462,6 +445,16 @@ def _sort_find_files(context: ToolContext, files: list[str], sort: str) -> list[
 
 
 def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    with matching_request():
+        try:
+            result = _find_files(context, arguments)
+            check_matching_budget()
+            return result
+        except TimeoutError:
+            return _workspace_error("Regular expression too slow; aborted during file enumeration", error_code="regex_timeout")
+
+
+def _find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     if "pattern" in arguments:
         return _workspace_error(
             "`glob` is required for file patterns; `pattern` is not supported",
@@ -520,11 +513,15 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             if message.startswith("Path escapes workspace:"):
                 return _workspace_error(message, error_code="path_escapes_workspace", path=path)
             return _workspace_error(message, error_code="workspace_backend_error", path=path)
+        except TimeoutError:
+            raise
         except OSError as exc:
             return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
     else:
         try:
             all_files = backend.list_files(path, glob_pattern)
+        except TimeoutError:
+            raise
         except (OSError, ValueError) as exc:
             return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
         if not include_hidden:
@@ -596,6 +593,8 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             missing_arguments=["path"],
         )
     path = str(arguments["path"])
+    if is_artifact_namespace_path(path) and not context.is_task_artifact_path(path):
+        return _workspace_error("Artifact is outside the current task.", error_code="artifact_read_denied", path=path)
 
     raw_cursor = arguments.get("cursor")
     cursor: ToolResultCursor | None = None
@@ -615,9 +614,9 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
                 path=path,
             )
 
-    if cursor is not None and ("start_line" in arguments or "end_line" in arguments):
+    if cursor is not None and any(key in arguments for key in ("start_line", "end_line", "start_char")):
         return _workspace_error(
-            "`cursor` is incompatible with `start_line` and `end_line`",
+            "`cursor` is incompatible with `start_line`, `end_line` and `start_char`",
             error_code="invalid_arguments",
             path=path,
         )
@@ -641,9 +640,12 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         start_line = max(int(arguments.get("start_line", 1)), 1)
         end_line_raw = arguments.get("end_line")
         end_line_int = int(end_line_raw) if end_line_raw is not None else None
+        start_char = arguments.get("start_char", 0)
+        if type(start_char) is not int or start_char < 0:
+            raise ValueError("invalid character range")
     except (TypeError, ValueError):
         return _workspace_error(
-            "`start_line`/`end_line` must be integers",
+            "Line numbers must be integers; start_char must be a nonnegative integer.",
             error_code="invalid_arguments",
             path=path,
         )
@@ -653,7 +655,13 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     show_line_numbers = bool(arguments.get("show_line_numbers", False))
 
-    page = _ReadPage(start_line, end_line_int, cursor.offset_chars if cursor is not None else None, show_line_numbers)
+    page = _ReadPage(
+        start_line,
+        end_line_int,
+        cursor.offset_chars if cursor is not None else None,
+        show_line_numbers,
+        start_char=start_char,
+    )
     try:
         scanned = scan_text(backend, path, page.consume)
     except (OSError, ValueError) as exc:
@@ -668,8 +676,15 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     content = "".join(page.output)
     next_offset = page.next_offset
     truncated = page.truncated
-    original_bytes = page.original_bytes if truncated else None
-    is_partial = start_line != 1 or end_line_int is not None or cursor is not None or truncated
+    hint = (
+        f"\nNext page: use the returned cursor, or read_file(start_line={page.next_line}, "
+        f"start_char={page.next_char}) on the same path."
+        if truncated
+        else ""
+    )
+    content += hint
+    original_bytes = page.original_bytes + len(hint.encode("utf-8")) if truncated else None
+    is_partial = start_line != 1 or start_char != 0 or end_line_int is not None or cursor is not None or truncated
     _get_file_baselines(context)[_baseline_key(path)] = {
         "hash": source_digest,
         "size": scanned.size_bytes,
@@ -696,6 +711,14 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             if truncated
             else None
         ),
+        metadata={
+            "read_page": {
+                "next_line": page.next_line,
+                "next_start_char": page.next_char,
+            }
+        }
+        if truncated
+        else {},
     )
 
 
@@ -705,11 +728,23 @@ def _normalize_cursor_path(path: str) -> str:
 
 
 class _ReadPage:
-    def __init__(self, start_line: int, end_line: int | None, offset: int | None, show_line_numbers: bool) -> None:
+    def __init__(
+        self,
+        start_line: int,
+        end_line: int | None,
+        offset: int | None,
+        show_line_numbers: bool,
+        *,
+        start_char: int = 0,
+    ) -> None:
         self.start_line = start_line
         self.end_line = end_line
         self.requested_offset = offset
         self.show_line_numbers = show_line_numbers
+        self.start_char = start_char
+        self.column = 0
+        self.next_line = start_line
+        self.next_char = start_char
         self.output: list[str] = []
         self.offset = 0
         self.next_offset = offset or 0
@@ -738,10 +773,11 @@ class _ReadPage:
                 self.offset >= self.requested_offset
                 if self.requested_offset is not None
                 else self.line >= self.start_line
+                and (self.line != self.start_line or self.column >= self.start_char)
                 and (self.end_line is None or self.line < self.end_line or (self.line == self.end_line and character != "\n"))
             )
             if selected:
-                prefix = f"{self.line}: " if self.show_line_numbers and self.at_line_start else ""
+                prefix = f"{self.line}: " if self.show_line_numbers and (self.at_line_start or not self.output) else ""
                 self.original_bytes += len(prefix.encode("utf-8")) + len(character.encode("utf-8"))
                 added_chars = len(prefix) + 1
                 if (
@@ -754,6 +790,8 @@ class _ReadPage:
                     self.output.extend((prefix, character))
                     self.visible_chars += added_chars
                     self.next_offset = self.offset + 1
+                    self.next_line = self.line + (character == "\n")
+                    self.next_char = 0 if character == "\n" else self.column + 1
                     if character == "\n":
                         self.output_lines += 1
             elif not self.truncated and self.requested_offset is None and self.line < self.start_line:
@@ -765,6 +803,7 @@ class _ReadPage:
             self.at_line_start = character == "\n"
             self.previous = character
             self.offset += 1
+            self.column = 0 if character == "\n" else self.column + 1
 
 
 def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -873,6 +912,8 @@ def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             missing_arguments=["path"],
         )
     path = str(arguments["path"])
+    if is_artifact_namespace_path(path) and not context.is_task_artifact_path(path):
+        return _workspace_error("Artifact is outside the current task.", error_code="artifact_read_denied", path=path)
     try:
         context.resolve_workspace_path(path)
     except ValueError as exc:

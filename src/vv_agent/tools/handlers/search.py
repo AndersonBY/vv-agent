@@ -11,11 +11,13 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import regex as regex_engine
+
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
-from vv_agent.workspace.artifacts import _artifact_segment
-from vv_agent.workspace.base import _normalize_workspace_path
+from vv_agent.workspace.artifacts import is_artifact_namespace_path
+from vv_agent.workspace.matching import RegexBudget, check_matching_budget, compile_pattern, matching_request
 from vv_agent.workspace.streaming import scan_text
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -590,11 +592,16 @@ def _cap_structured_items(
 
 
 def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    with matching_request():
+        try:
+            return _search_files(context, arguments)
+        except TimeoutError:
+            return _result_error("Regular expression too slow; aborted during file enumeration")
+
+
+def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     path = str(arguments.get("path", "."))
-    artifact_root = ".vv-agent/artifacts"
-    normalized = _normalize_workspace_path(path)
-    slash_path = path.replace("\\", "/")
-    if normalized == artifact_root or normalized.startswith(artifact_root + "/") or f"/{artifact_root}/" in f"/{slash_path}/":
+    if is_artifact_namespace_path(path):
         return _search_artifact(context, arguments, path)
     pattern = str(arguments.get("pattern", "")).strip()
     if not pattern:
@@ -643,8 +650,8 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
         regex_flags |= re.MULTILINE | re.DOTALL
     regex_pattern = re.escape(pattern) if literal else pattern
     try:
-        regex = re.compile(regex_pattern, regex_flags)
-    except re.error as exc:
+        regex = compile_pattern(regex_pattern, regex_flags | regex_engine.V0)
+    except (ValueError, regex_engine.error) as exc:
         return _result_error(f"Invalid regular expression: {exc}")
 
     context_before = context_lines if context_lines is not None else (lines_before or 0)
@@ -657,9 +664,12 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     content_rows: list[dict[str, Any]] = []
     sensitive_files_omitted = 0
     sensitive_candidates: list[str] = []
+    budget = RegexBudget(regex)
+    regex_timeout: dict[str, Any] | None = None
 
     if not include_sensitive:
         raw_sensitive_candidates = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
+        check_matching_budget()
         sensitive_candidates = _sensitive_candidate_paths(raw_sensitive_candidates, file_type)
         sensitive_files_omitted = len(set(sensitive_candidates))
 
@@ -696,6 +706,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
             total_matches = sum(file_counts.values())
     else:
         raw_paths = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
+        check_matching_budget()
         for raw_rel_path in raw_paths:
             rel_path = raw_rel_path.replace("\\", "/")
             if not _matches_file_type(rel_path, file_type):
@@ -715,40 +726,47 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
             files_searched += 1
 
             if multiline_mode:
-                matches = list(regex.finditer(text))
-                if not matches:
-                    continue
-
-                file_match_count = len(matches)
-                total_matches += file_match_count
-                files_with_matches.append(rel_path)
-                file_counts[rel_path] = file_match_count
-
-                if output_mode == "content":
-                    for match in matches:
-                        line_no = text.count("\n", 0, match.start()) + 1
-                        content_rows.append(
-                            {
-                                "path": rel_path,
-                                "line": line_no,
-                                "text": match.group(0),
-                                "is_match": True,
-                            }
-                        )
+                file_match_count = 0
+                try:
+                    for match in budget.finditer(text):
+                        file_match_count += 1
+                        if output_mode == "content":
+                            content_rows.append(
+                                {
+                                    "path": rel_path,
+                                    "line": text.count("\n", 0, match.start()) + 1,
+                                    "text": match.group(0),
+                                    "is_match": True,
+                                }
+                            )
+                except TimeoutError:
+                    regex_timeout = {"path": rel_path, "line": 1, "column": 0}
+                if file_match_count:
+                    total_matches += file_match_count
+                    files_with_matches.append(rel_path)
+                    file_counts[rel_path] = file_match_count
+                if regex_timeout:
+                    break
                 continue
 
             lines = text.splitlines()
             matched_line_numbers: list[int] = []
             file_match_count = 0
-
             for line_number, line in enumerate(lines, start=1):
-                line_matches = list(regex.finditer(line))
-                if not line_matches:
-                    continue
-                file_match_count += len(line_matches)
-                matched_line_numbers.append(line_number)
+                line_matched = False
+                try:
+                    for _match in budget.finditer(line):
+                        file_match_count += 1
+                        if not line_matched:
+                            matched_line_numbers.append(line_number)
+                            line_matched = True
+                except TimeoutError:
+                    regex_timeout = {"path": rel_path, "line": line_number, "column": 0}
+                    break
 
             if file_match_count == 0:
+                if regex_timeout:
+                    break
                 continue
 
             total_matches += file_match_count
@@ -756,6 +774,8 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
             file_counts[rel_path] = file_match_count
 
             if output_mode != "content":
+                if regex_timeout:
+                    break
                 continue
 
             matched_set = set(matched_line_numbers)
@@ -778,6 +798,8 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
                         "is_match": line_number in matched_set,
                     }
                 )
+            if regex_timeout:
+                break
 
     files_with_matches.sort()
 
@@ -872,6 +894,14 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
         result_text = "\n".join(result_lines)
         metadata["matches"] = visible_rows
 
+    if regex_timeout:
+        metadata["regex_timeout"] = regex_timeout
+        result_text = result_text.replace("No matches found.", "Search incomplete; no matches returned before interruption.")
+        notice = (
+            "Regular expression too slow; aborted. "
+            f"Stopped at {regex_timeout['path']}:{regex_timeout['line']}:{regex_timeout['column']}; earlier matches preserved."
+        )
+        result_text = notice + "\n" + result_text
     truncated_text, text_truncated = _truncate_result_text(
         result_text,
         total_matches=total_matches,
@@ -886,7 +916,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
             "head_limited": head_limited,
             "content_truncated": text_truncated,
             "structured_truncated": structured_truncated,
-            "truncated": text_truncated or structured_truncated,
+            "truncated": text_truncated or structured_truncated or regex_timeout is not None,
         }
     )
     if structured_capped:
@@ -901,15 +931,10 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     )
 
 
-_ARTIFACT_SEARCH_PATH = re.compile(
-    r"\.vv-agent/artifacts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
-    r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,58}-[0-9a-f]{64}|"
-    r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[0-9a-f]{32})\.txt"
-)
 _ARTIFACT_LINE_HINT = "Artifact line numbers can be used directly with read_file start_line/end_line."
 _ARTIFACT_SEARCH_LIMIT = (
     "Search truncated; narrow pattern or use offset/head_limit for fewer matches. "
-    "For an oversized line, use read_file start_line/end_line and its cursor."
+    "Use read_file start_line/end_line/start_char or its cursor to recover text."
 )
 
 
@@ -918,9 +943,7 @@ def _artifact_search_error(message: str, code: str) -> ToolExecutionResult:
 
 
 def _search_artifact(context: ToolContext, arguments: dict[str, Any], path: str) -> ToolExecutionResult:
-    matched_path = _ARTIFACT_SEARCH_PATH.fullmatch(path)
-    task_id = str(getattr(context.workspace_backend, "task_id", context.task_id))
-    if matched_path is None or matched_path[1] != _artifact_segment(task_id, "task"):
+    if not context.is_task_artifact_path(path):
         return _artifact_search_error("Artifact search requires one valid file in the current task.", "artifact_search_denied")
     pattern = str(arguments.get("pattern", "")).strip()
     mode = str(arguments.get("output_mode", "files_with_matches"))
@@ -936,8 +959,11 @@ def _search_artifact(context: ToolContext, arguments: dict[str, Any], path: str)
             if "case_sensitive" in arguments
             else _smart_case_defaults_to_case_insensitive(pattern)
         )
-        regex = re.compile(re.escape(pattern) if arguments.get("literal") else pattern, re.IGNORECASE if insensitive else 0)
-    except (ValueError, re.error) as exc:
+        regex = compile_pattern(
+            re.escape(pattern) if arguments.get("literal") else pattern,
+            regex_engine.V0 | (regex_engine.IGNORECASE if insensitive else 0),
+        )
+    except (ValueError, regex_engine.error) as exc:
         return _artifact_search_error(f"Invalid search arguments: {exc}", "invalid_arguments")
 
     page = _ArtifactSearch(regex, path, mode, offset, head_limit)
@@ -953,96 +979,163 @@ def _search_artifact(context: ToolContext, arguments: dict[str, Any], path: str)
     return ToolExecutionResult(
         "",
         page.content(),
-        metadata={
-            "artifact_search": {
-                "path": path,
-                "matched_lines": page.matched_lines,
-                "returned_lines": page.returned_lines,
-                "truncated": page.truncated,
-                "oversized_line": page.oversized_line,
-            }
-        },
+        metadata={"artifact_search": page.details()},
     )
 
 
-class _ArtifactSearch:
-    """Keep one bounded unfinished line and one bounded result page."""
+_ARTIFACT_WINDOW = 30_000
+_ARTIFACT_OVERLAP = 4_096
+_ARTIFACT_STRIDE = _ARTIFACT_WINDOW - _ARTIFACT_OVERLAP
+_ARTIFACT_EXCERPT = 200
 
-    def __init__(self, regex: re.Pattern[str], path: str, mode: str, offset: int, head_limit: int) -> None:
-        self.regex, self.path, self.mode = regex, path, mode
+
+class _ArtifactSearch:
+    """Bounded windows and match-centered excerpts, with original Unicode positions."""
+
+    def __init__(self, regex: regex_engine.Pattern, path: str, mode: str, offset: int, head_limit: int) -> None:
+        self.budget = RegexBudget(regex)
+        self.path, self.mode = path, mode
         self.offset, self.head_limit = offset, head_limit
         self.line = 1
+        self.base = 0
+        self.previous = ""
         self.pending = ""
-        self.dropping_line = False
+        self.first = True
+        self.line_matched = False
+        self.last_end = 0
+        self.last_empty: int | None = None
         self.oversized_line: int | None = None
         self.rows: list[str] = []
+        self.hits: list[dict[str, Any]] = []
         self.matched_lines = self.matches = self.returned_lines = 0
         self.truncated = False
-        # Reserve both notices so the complete rendered result obeys the existing budgets.
-        self.used = len(f"File: {path}\n") + len(_ARTIFACT_LINE_HINT) + len(_ARTIFACT_SEARCH_LIMIT) + 2
+        self.timed_out = False
+        self.stopped_line: int | None = None
+        self.stopped_column: int | None = None
+        # Reserve notices, including timeout and window limitations, in the page budget.
+        self.used = len(path) + 1200
 
     def consume(self, text: str) -> None:
+        if self.timed_out or not text:
+            return
+        if self.first:
+            text = text.removeprefix("\ufeff")
+            self.first = False
         start = 0
-        while start < len(text):
+        while start < len(text) and not self.timed_out:
             end = text.find("\n", start)
             stop = len(text) if end == -1 else end
-            if not self.dropping_line:
-                if len(self.pending) + stop - start > _MAX_RESULT_CHARS:
+            while start < stop and not self.timed_out:
+                size = min(stop - start, _ARTIFACT_WINDOW + 1 - len(self.pending))
+                self.pending += text[start : start + size]
+                start += size
+                if len(self.pending) > _ARTIFACT_WINDOW:
                     self.oversized_line = self.oversized_line or self.line
-                    self.truncated = self.dropping_line = True
-                    self.pending = ""
-                else:
-                    self.pending += text[start:stop]
-            if end == -1:
+                    self.truncated = True
+                    self.match_window(final=False)
+                    self.previous = self.pending[_ARTIFACT_STRIDE - 1]
+                    self.pending = self.pending[_ARTIFACT_STRIDE:]
+                    self.base += _ARTIFACT_STRIDE
+            if end == -1 or self.timed_out:
                 return
-            if not self.dropping_line:
-                self.match_line(self.pending.removesuffix("\r"))
-            self.pending = ""
-            self.dropping_line = False
+            self.match_window(final=True, strip_cr=True)
+            self.pending = self.previous = ""
+            self.base = self.last_end = 0
+            self.last_empty = None
+            self.line_matched = False
             self.line += 1
             start = end + 1
 
-    def match_line(self, text: str) -> None:
-        count = sum(1 for _ in self.regex.finditer(text))
-        if not count:
+    def match_window(self, *, final: bool, strip_cr: bool = False) -> None:
+        if self.timed_out:
             return
-        self.matches += count
-        self.matched_lines += 1
-        if self.mode != "content" or self.matched_lines <= self.offset:
-            return
-        row = f"{self.line}: {text}"
-        if (
-            len(self.rows) + 4 >= _MAX_RESULT_LINES
-            or self.used + len(row) + 1 > _MAX_RESULT_CHARS
-            or (self.head_limit and self.returned_lines >= self.head_limit)
-        ):
-            self.truncated = True
-            return
-        self.rows.append(row)
-        self.used += len(row) + 1
-        self.returned_lines += 1
+        body = self.pending.removesuffix("\r") if strip_cr else self.pending
+        # A preceding real character keeps ^/\A from matching an internal edge.
+        text = self.previous + body
+        prefix = len(self.previous)
+        pos = prefix + max(0, self.last_end - self.base)
+        cutoff = len(text) + 1 if final else prefix + _ARTIFACT_STRIDE
+        try:
+            for match in self.budget.finditer(text, pos):
+                if match.start() >= cutoff:
+                    break
+                if not final and match.end() == len(text):
+                    continue
+                column = self.base + match.start() - prefix
+                end = self.base + match.end() - prefix
+                if column == end and self.last_empty == column:
+                    continue
+                self.last_end = end
+                self.last_empty = column if column == end else None
+                self.matches += 1
+                if not self.line_matched:
+                    self.line_matched = True
+                    self.matched_lines += 1
+                if self.mode != "content" or self.matches <= self.offset:
+                    continue
+                left = max(prefix, match.start() - 80)
+                right = min(len(text), left + _ARTIFACT_EXCERPT)
+                excerpt = ("…" if self.base or left > prefix else "") + text[left:right]
+                if not final or right < len(text):
+                    excerpt += "…"
+                row = f"{self.line}:{column}: {excerpt}"
+                if (
+                    len(self.rows) + 8 >= _MAX_RESULT_LINES
+                    or self.used + len(row) + 1 > _MAX_RESULT_CHARS
+                    or (self.head_limit and self.returned_lines >= self.head_limit)
+                ):
+                    self.truncated = True
+                    continue
+                self.rows.append(row)
+                self.hits.append({"line": self.line, "column": column, "text": excerpt})
+                self.used += len(row) + 1
+                self.returned_lines += 1
+        except TimeoutError:
+            self.timed_out = self.truncated = True
+            self.stopped_line = self.line
+            self.stopped_column = self.base + max(0, pos - prefix)
 
     def finish(self) -> None:
-        if self.pending and not self.dropping_line:
-            self.match_line(self.pending)
+        if self.pending or self.base:
+            self.match_window(final=True)
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "matched_lines": self.matched_lines,
+            "returned_lines": self.returned_lines,
+            "truncated": self.truncated,
+            "oversized_line": self.oversized_line,
+            "matches": self.hits,
+            "timed_out": self.timed_out,
+            "stopped_line": self.stopped_line,
+            "stopped_column": self.stopped_column,
+        }
 
     def content(self) -> str:
         if self.mode == "count":
             body = f"{self.path}: {self.matches} matches on {self.matched_lines} lines"
         elif self.mode == "files_with_matches":
-            body = self.path if self.matches else "No matches found in the searched lines."
+            body = self.path if self.matches else "No matches found in the searched windows."
         else:
-            body = "\n".join(self.rows) if self.rows else "No matching rows returned from the searched lines."
+            body = "\n".join(self.rows) if self.rows else "No matching rows returned from the searched windows."
+        if self.timed_out and not self.matches:
+            body = "No matches returned before interruption; search is incomplete."
         parts = [f"File: {self.path}", body]
         if self.truncated:
             parts.append(_ARTIFACT_SEARCH_LIMIT)
-            if self.oversized_line is not None:
-                parts.append(f"Line {self.oversized_line} exceeds the search character budget and was not matched.")
+        if self.oversized_line is not None:
+            parts.append(
+                f"Line {self.oversized_line} is oversized; scanned in {_ARTIFACT_WINDOW}-character windows "
+                f"with {_ARTIFACT_OVERLAP}-character overlap. Matches spanning more than {_ARTIFACT_OVERLAP} "
+                "characters or boundary-sensitive lookaround may be missed; search is incomplete."
+            )
+        if self.timed_out:
+            parts.append(
+                "Regular expression too slow; aborted. "
+                f"Matching stopped in the window at line {self.stopped_line}, column {self.stopped_column}; "
+                "earlier matches are preserved."
+            )
+        parts.append("Columns are zero-based Unicode characters; use read_file start_char with the same start_line.")
         parts.append(_ARTIFACT_LINE_HINT)
-        result = "\n".join(parts)
-        if len(result) > _MAX_RESULT_CHARS and self.rows:
-            self.rows.pop()
-            self.returned_lines -= 1
-            self.truncated = True
-            return self.content()
-        return result
+        return "\n".join(parts)

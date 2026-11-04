@@ -124,8 +124,8 @@ and never deletes a new file that now uses an old capture path.
 Copying live output and writing artifacts happen outside the session state
 lock, so a slow storage backend cannot stop the watchdog from enforcing the
 deadline. If the capture becomes unavailable while the command finishes, the
-result is an output error. That error does not reset the deadline or allow the
-command to run again.
+result preserves the confirmed process outcome and reports retention unavailable.
+This does not reset the deadline or allow the command to run again.
 
 ## Tests
 
@@ -137,3 +137,21 @@ stdin, and artifact cases.
 ```bash
 uv run --no-sync pytest tests/test_bash_process_management.py tests/test_bash_tools.py tests/test_builtin_tool_behavior_contract.py
 ```
+
+## When complete output cannot be saved
+
+A storage failure does not change what the command did. The result retains the
+command's exit code, success or failure status, directive and bounded output
+preview. The preview states that complete text could not be saved;
+metadata.retention records status unavailable and reason artifact_persist_failed.
+The result contains no artifact recovery pointer. This also applies when the
+first capture read fails or a writer raises after writing complete bytes.
+
+Do not rerun a command because its output is unavailable. The process manager
+keeps its capture after a storage failure. Checking the finished handle can retry
+saving it without executing the command. Each capture attempt allocates a fresh
+UUID path through an exclusive writer; partial objects remain immutable. Failure
+handlers do not reread the capture. Preview construction keeps head, notice and
+tail separate and shrinks only source portions. An unavailable JSON handle,
+including its envelope, fits within 12,000 characters so completion does not
+archive the handle again. Live prefixes and stop/query results use the same rule.

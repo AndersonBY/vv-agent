@@ -203,6 +203,11 @@ _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
                         "required": ["kind", "offset_chars", "path", "sha256"],
                         "type": "object",
                     },
+                    "start_char": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Zero-based Unicode character offset in start_line. Continue with the returned cursor; for manual positioning use both next_line and next_start_char from read_page. Each page reads up to 12,000 characters.",
+                    },
                 },
                 "required": ["path"],
                 "type": "object",

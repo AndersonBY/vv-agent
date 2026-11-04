@@ -178,6 +178,7 @@ from vv_agent.types import (
     ToolResultStatus,
     UsageSource,
 )
+from vv_agent.workspace.artifacts import is_task_artifact_path
 from vv_agent.workspace.resources import OutputRetentionBackend, ToolResultResourceExpectation, ToolResultResourceRef
 
 if TYPE_CHECKING:
@@ -379,6 +380,7 @@ __all__ = [
     "function_tool",
     "handoff",
     "input_guardrail",
+    "is_task_artifact_path",
     "load_llm_settings_from_file",
     "output_guardrail",
     "output_repair",

@@ -8,8 +8,9 @@ from pathlib import Path
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.search import search_files
+from vv_agent.tools.handlers.workspace_io import read_file
 from vv_agent.workspace import MemoryWorkspaceBackend
-from vv_agent.workspace.artifacts import persist_text_artifact, text_artifact_ref
+from vv_agent.workspace.artifacts import _session_artifact_scope, persist_text_artifact, text_artifact_ref
 
 TASK = "artifact-search/turn/initial"
 CASES = {
@@ -24,7 +25,10 @@ CASES = {
     "crlf": {"unit": "first\r\nneedle\r\nlast\r\n", "repeat": 1, "pattern": "^needle$"},
     "line_numbers": {"unit": "head\n", "repeat": 3000, "suffix": "needle\n", "pattern": "needle"},
     "budget_lines": {"unit": "needle\n", "repeat": 700, "pattern": "needle"},
-    "budget_chars": {"unit": "needle" + "x" * 1000 + "\n", "repeat": 100, "pattern": "needle"},
+    "budget_chars": {"unit": "needle" + "x" * 1000 + "\n", "repeat": 200, "pattern": "needle"},
+    "late_keyword": {"unit": "漢", "repeat": 40000, "suffix": "needle end" + "z" * 25000, "pattern": "needle"},
+    "compaction": {"unit": "first\nneedle\n", "repeat": 1, "pattern": "needle", "session": "fixture-session"},
+    "other_session": {"unit": "needle\n", "repeat": 1, "pattern": "needle", "session": "other-session"},
     "invalid_regex": {"unit": "needle\n", "repeat": 1, "pattern": "["},
 }
 
@@ -33,6 +37,8 @@ def produce(case):
     backend = MemoryWorkspaceBackend()
     text = case["unit"] * case["repeat"] + case.get("suffix", "")
     task = case.get("task", TASK)
+    if "session" in case:
+        task = _session_artifact_scope(case["session"], task)
     ref = (
         text_artifact_ref(task, "result", text)
         if case.get("missing")
@@ -47,13 +53,25 @@ def produce(case):
         "glob": "ignored-no-match",
         "type": "ignored-invalid-type",
     }
-    context = ToolContext(Path("/fixture-artifact-search"), {}, 0, backend, task_id=TASK)
+    context = ToolContext(
+        Path("/fixture-artifact-search"), {}, 0, backend, task_id=TASK, metadata={"session_id": "fixture-session"}
+    )
     result = search_files(context, arguments)
     return result, backend, arguments
 
 
 def generate():
+    found, backend, arguments = produce(CASES["late_keyword"])
+    hit = found.metadata["artifact_search"]["matches"][0]
+    read_arguments = {
+        "path": arguments["path"],
+        "start_line": hit["line"],
+        "end_line": hit["line"],
+        "start_char": hit["column"],
+    }
+    page = read_file(ToolContext(Path("/fixture-artifact-search"), {}, 0, backend, task_id=TASK), read_arguments)
     return {
+        "readback": {"arguments": read_arguments, "result": page.to_dict(), "model_message": page.to_tool_message().content},
         "cases": {
             name: {"input": case, "arguments": args, "result": result.to_dict()}
             for name, case in CASES.items()
@@ -61,11 +79,13 @@ def generate():
         },
         "rules": {
             "route": "reserved_path_before_directory_options",
-            "scope": "current_task_segment_only",
+            "scope": "current_task_or_exact_session_task_scope",
             "line_numbers": "original_artifact_read_file_start_line_end_line",
+            "columns": "zero_based_unicode_read_file_start_char",
+            "regex_budget": "250ms_cumulative_matching_cpu_engine_interrupt",
             "max_result_lines": 500,
             "max_result_chars": 30000,
-            "oversized_line": "not_matched_search_explicitly_incomplete_read_file_range_and_cursor",
+            "oversized_line": "30000_character_windows_4096_overlap_explicitly_incomplete",
             "writes_during_search": 0,
             "completion": "ordinary_unified_projection_no_search_exception",
         },

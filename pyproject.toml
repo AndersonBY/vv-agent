@@ -15,6 +15,7 @@ dependencies = [
     "orjson>=3.10.0",
     "pyyaml>=6.0.3",
     "qwen-tokenizer>=0.3.0",
+    "regex>=2026.9.29",
     "ripgrep>=14.1.0,<15; platform_system == 'Windows'",
     "ripgrep>=14.1.0; platform_system != 'Windows'",
     "tiktoken>=0.14.0",
@@ -32,6 +33,7 @@ dev = [
     "pytest-cov>=6.2.1",
     "ruff>=0.12.10",
     "ty>=0.0.1a19",
+    "types-regex>=2026.9.29.20261030",
 ]
 
 [project.scripts]

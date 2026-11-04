@@ -234,8 +234,9 @@ def test_logical_model_drift_still_rejects(tmp_path, field, value):
         rt.resolve_model(request)
 
 
-def test_old_definition_record_bytes_load_and_continue(tmp_path, transport):
-    """Use pre-change canonical producer records, never rewrite their digests."""
+@pytest.mark.parametrize("suspended", [False, True])
+def test_frozen_tool_schema_drift_rejects_old_definition_before_dispatch(tmp_path, transport, suspended):
+    """Old records stay decodable; a changed frozen tool schema cannot resume."""
     from pathlib import Path
 
     source = Path(__file__).with_name("fixtures") / "routing_025_records.jsonl"
@@ -267,9 +268,21 @@ def test_old_definition_record_bytes_load_and_continue(tmp_path, transport):
         store.release(poll)
         calls, replies = transport
         replies.append({"content": "continued"})
+        if suspended:
+            with store.atomic() as tx:
+                tx.push("s", InboxItem("suspend", "control", {"action": "suspend"}, state.active_turn_id))
+            drive(store, "s", runtime=host(tmp_path / "old.sqlite", {"scripted": ["b"]}))
+            assert store.read_state("s")[0].turns[state.active_turn_id].suspended
+            assert not any(record.kind == "turn_ended" for record in rows(store))
+            with store.atomic() as tx:
+                tx.push("s", InboxItem("resume", "control", {"action": "resume"}, state.active_turn_id))
+        before = [record.encode() for record in rows(store)]
         drive(store, "s", runtime=host(tmp_path / "old.sqlite", {"scripted": ["b"]}))
-        assert calls == [("scripted", "b")]
-        assert project_result(store, "s", plans(store)[-1].turn_id).final_output == "continued"
+        assert calls == []
+        assert [record.encode() for record in rows(store)[: len(before)]] == before
+        ended = next(record for record in rows(store) if record.kind == "turn_ended")
+        assert ended.payload["reason"] == "handler_schema_or_capability_mismatch"
+        assert project_result(store, "s", state.active_turn_id).status == "failed"
 
 
 def test_removed_endpoint_does_not_create_missing_budget_usage(store, database, transport):

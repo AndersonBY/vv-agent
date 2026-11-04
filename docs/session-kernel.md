@@ -401,6 +401,16 @@ submit without a valid retained handle records Unknown with dispatch evidence
 and disables automatic retry. Invalid cancellation results also retain the
 original acceptance as an unconfirmed operation. A cancellation receipt means
 requested; only a valid terminal result confirms the operation's outcome.
+Guard closures (schema/handler version mismatch, budget or hook failure) preserve
+the original provider wait when cancellation is unconfirmed and the turn has not
+been marked cancelled. They record the operation in
+`turn_ended.unconfirmed_operations` without adding `op_unknown`. The reducer
+allows unknown only for a started attempt, or a parked attempt that was dispatched
+and whose turn is marked cancelled. User cancel/abort keeps that existing
+transition: non-Definitive replies record `op_unknown` with the closure reason;
+invalid Definitive replies record `op_unknown(provider_result_invalid)`. The
+original acceptance evidence and terminal unconfirmed identity remain retained.
+Later trusted results are audit-only and do not submit work again.
 
 An external service may accept before the kernel commits its handle. Declare
 `ToolMetadata.idempotency="supported"` only when the provider actually dedupes

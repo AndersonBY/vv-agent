@@ -77,6 +77,49 @@ old-version session.
 
 ## Version notes
 
+### Unreleased artifact reread changes (contract 33.0.0 draft)
+
+Record, inbox, SQL and App Server schema versions are unchanged. read_file adds
+start_char and uses a fixed 12,000-character page. Its schema participates in the
+frozen definition digest. An executable turn with the old schema closes as
+`handler_schema_or_capability_mismatch` at its next dispatch, even if its next
+call is another tool. Paused turns and turn-level waits reach this check after
+resumption. Closing the turn can cancel providers and child tasks; outstanding
+external effects still need reconciliation.
+
+Drain running and paused turns on the old runtime before upgrading. If draining
+is impossible, users can continue from the conclusion in a new session. New
+sessions do not inherit model read authorization for the old session's artifacts.
+Do not relax the guard, alter frozen definitions or rewrite old records.
+
+Task and compaction hashes have separate type tags. Only short literal task IDs
+keep their 0.32.0 directory segment: 1–64 ASCII characters, the first an ASCII
+letter or digit, the rest ASCII letters, digits, `.`, `_` or `-`, and no lowercase
+`s-` prefix (exactly `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` without that prefix).
+This includes ordinary UUID-like task IDs; `S-task` also remains literal.
+Task IDs with the lowercase `s-` prefix, either separator (`/` or `\`), more
+than 64 characters, non-ASCII characters or any other nonliteral spelling now
+use a hash directory. For example, `s-task`, `task/a`, 65-character IDs and
+`任务` change directory segments. Their old objects remain in storage but their
+old paths are no longer authorized for model rereads. The lossy sanitizer is
+not an authorization rule.
+
+Old compaction paths produced by the lossy,
+truncated `session-<sid>-<tid>` encoding are no longer authorized. Their original
+text remains in storage, but models cannot reread it through tools. No automatic
+object migration or cross-session artifact grant is provided. Fork preserves
+immutable evidence references without granting model access to another scope.
+
+The portable content matcher now uses regex VERSION0. For `a\u0301b`, \w+
+includes the combining accent, \b finds only the two end boundaries and \W does
+not match that accent. Case-insensitive `i` does not match dotless `ı`. These
+are observable changes from stdlib re. Reverse matching (`(?r)` or REVERSE flags)
+is rejected. Glob and child exclusion patterns share the interruptible request
+budget; timeouts are explicit errors. Native ripgrep retains its engine semantics.
+See [Python mapping](parity-contract.md) for implementation details and the
+[release draft](releases/unreleased-artifact-reread.md) for scope.
+
+
 ### 0.32.0
 
 Requires contract 32.1.1. Long tool results are no longer cut down: the model

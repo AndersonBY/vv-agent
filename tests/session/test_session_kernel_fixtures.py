@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator
+from support.contract import fixture_root
 from support.interactions import displayed_target
 
 from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
@@ -78,7 +79,7 @@ def generated_fixtures(tmp_path_factory):
         assert all(p.stat().st_size <= 512_000 for p in output.iterdir())
     assert set(coverage_runs[0]) == FILES
     first = directories[0]
-    second = Path(__file__).resolve().parents[1] / "fixtures" / "parity"
+    second = fixture_root()
     values = {}
     for name in FILES:
         raw = (first / name).read_text()

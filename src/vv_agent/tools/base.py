@@ -61,6 +61,16 @@ class ToolContext:
     def raw_arguments(self) -> dict[str, Any]:
         return dict(self.arguments)
 
+    def is_task_artifact_path(self, path: str) -> bool:
+        from vv_agent.workspace.artifacts import is_task_artifact_path
+
+        return is_task_artifact_path(
+            path,
+            task_id=str(getattr(self.workspace_backend, "task_id", self.task_id)),
+            session_id=self.metadata.get("session_id"),
+            session_task_id=self.task_id,
+        )
+
     @property
     def app_state(self) -> Any | None:
         return getattr(self.run_context, "context", None)

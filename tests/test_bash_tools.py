@@ -611,8 +611,10 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
     )
     result = require_tool_result(result)
 
-    assert result.status_code is ToolResultStatus.ERROR
-    assert result.error_code == "artifact_persist_failed"
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.error_code is None
+    assert result.metadata["retention"]["status"] == "unavailable"
+    assert "complete text could not be saved" in result.content
     assert output_file.read_text(encoding="utf-8") == "x" * 12_001
 
 
@@ -749,8 +751,10 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
 
     session = background_runtime.background_session_manager._sessions[session_id]
     try:
-        assert probe.status_code is ToolResultStatus.ERROR
-        assert probe.error_code == "artifact_persist_failed"
+        assert probe.status_code is ToolResultStatus.SUCCESS
+        assert probe.error_code is None
+        assert probe.metadata["retention"]["status"] == "unavailable"
+        assert "complete text could not be saved" in probe.content
         assert session.output_path.read_text(encoding="utf-8") == "x" * 12_001
     finally:
         session.output_path.unlink(missing_ok=True)
