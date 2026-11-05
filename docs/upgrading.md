@@ -77,6 +77,84 @@ old-version session.
 
 ## Version notes
 
+### 0.33.2 — 2026-11-06
+
+Requires contract 35.0.0. Provider HTTP 4xx rejection (except 408) is now a
+confirmed failed attempt, rather than an unresolved external operation. Handle
+terminal reason `model_request_rejected` as FAILED; show its safe terminal result
+or the failed event error. Structured status/code/type/message is retained in
+`op_completed.result.rejection` and `ModelCallFailed.metadata.model_rejection`.
+Automatic HTTP rejection requires complete observation of every physical send
+through an SDK-owned HTTP client, including vendor retries. The classifier also
+checks that the final response was produced by that same observation. A real response alone
+is insufficient. Unobservable host adapters must assert rejection explicitly with
+`vv_agent.llm.errors.ModelRequestRejected`. Any timeout, transport failure,
+408/5xx or incomplete send in that invocation or exception graph retains Unknown.
+Arbitrary provider prose is replaced by a generic explanation; status and safe
+code/type remain available, including safe output-repair diagnostics.
+The uncertainty veto also recognizes installed OpenAI/Anthropic native connection
+and timeout exceptions without a low-level cause. A context-length message does
+not override that veto. Host adapters must retain the original exception and its
+graph/observation; remove quota/context-length text rewrites that discard them.
+Apply product wording when mapping the failed result, after SDK classification.
+Content-policy failures must not become empty successful responses merely because
+their raw payload contains an error code. Test that host path separately.
+
+The observed HTTP clients retain vendor connection limits and Anthropic TCP
+keepalive settings. Explicit proxies and per-request timeouts keep their existing
+priority; `httpx2>=2.7,<3` is declared directly. Concurrent failures keep their own
+request indices, and unindexed failures veto the entire invocation. Callback exit
+closes the iterator and retained response streams explicitly.
+Recognized oversized input keeps the existing compaction/retry path, including
+real HTTP 400 context errors and HTTP 413; it is not `model_request_rejected`.
+Content rejection stops without trying the next endpoint. 401/403/404 immediately
+advance the frozen endpoint order when multiple endpoints exist, but call a
+single endpoint only once. 429 retains backoff and can retry once on a single
+endpoint. All retries keep the existing `max(2, frozen endpoint count)` limit;
+exhaustion reports the last safe rejection. Explicit adapter `retryable=True`
+or `False` overrides these defaults, including the single-endpoint rule.
+
+There is no store boundary: record 1, inbox 3, SQL 3, RunEvent v6, App Server v5,
+tool schemas and frozen definitions are unchanged. Existing 0.33.1 turns remain
+readable and can continue. Historical Unknown receipts keep their original
+meaning; upgrading does not settle or replay them. Earlier upgrade boundaries
+still apply. handler_version remains unchanged.
+
+**The .ai upgrade MUST globally stop all workers and API drivers, upgrade both
+machines, then restart.** Stop admission, consumers, recovery scans, scheduled
+and manual drive/advance entries; let in-flight calls and commits exit, and
+prevent old processes from restarting. Start neither new worker until both
+machines run 0.33.2. Do not kill an in-flight model call to force the switch;
+unconfirmed effects retain Unknown recovery.
+
+**Any session driven by 0.33.2 MUST NOT be handed back to 0.33.1. Rollback MUST
+isolate data by version ownership.** Mark ownership in the host at first new
+runtime drive, including children, waits, finished histories, retries and
+recovery/read paths. Keep those sessions on a 0.33.2 pool or paused. A permanent
+rejection receipt committed before turn_ended can be resumed incorrectly as
+success by 0.33.1; a rejection retry op_planned makes its reducer fail even on a
+finished history. A shared queue or lease does not isolate runtime versions.
+Never erase receipts, change attempts, clear Unknown or resubmit to enable rollback.
+
+Before rollback, under the same global driver stop, run the repository's
+read-only precheck with the host's existing store binding:
+
+```python
+from scripts.check_model_rejection_rollback import check_store
+
+findings = check_store(store, page_size=256)
+# Each finding: session_id, turn_id, reasons. No leases or writes are performed.
+```
+
+Run the host wrapper from the SDK repository root with `uv run python ...` so
+`scripts/` is importable; the helper is a repository script, not an installed SDK
+export. It pages all sessions and all history via list_sessions/read without
+folding through a reducer. It flags all rejection history conservatively,
+including rejection_without_turn_ended and rejection_retry_history. Read or
+validation failures propagate and must block rollback. No findings is only
+absence of detectable rejection records; it does NOT prove absence of 0.33.2
+ownership, which the host must check separately. See [release notes](releases/0.33.2.md).
+
 ### 0.33.1 — 2026-11-05
 
 Requires contract 34.0.0. The SDK patch fixes 0.33.0's overly small cumulative

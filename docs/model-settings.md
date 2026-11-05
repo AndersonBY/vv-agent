@@ -78,9 +78,12 @@ the selected model's context and output limits and the selected `max_tokens`.
 See [session-model-selection.md](session-model-selection.md).
 
 For every model request, selected or not, the session kernel overrides
-`ModelSettings.retry` to a single transport attempt. The kernel does its own
-retries as separate logged attempts, so every call the provider sees is
-recorded in the session log.
+`ModelSettings.retry` to a single logical adapter invocation. The kernel logs
+its own retries separately. Vendor SDKs can still retry physical HTTP requests
+inside an invocation. The vv-llm bridge observes every such send through its
+owned httpx2 client; only all-4xx (except 408) observations confirm rejection.
+An attempt limit is not a physical HTTP request limit. See
+[release notes](releases/0.33.2.md).
 
 ## Kimi K3 request profile
 

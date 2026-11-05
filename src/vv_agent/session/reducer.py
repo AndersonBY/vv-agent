@@ -266,9 +266,21 @@ def _plan(state: ExecutionState, record: Record) -> None:
     else:
         require(op.turn_id == tid and op.kind == p["op_kind"], "operation identity changed")
         previous = op.attempts[max(op.attempts)]
-        require(number == max(op.attempts) + 1 and previous.state == "unknown", "retry requires previous unknown")
-        require(previous.unknown is not None and previous.unknown._payload["retry"] == "retry", "retry not authorized")
-        require(op.selected_attempt is None, "retry after adopted result")
+        rejection_retry = (
+            op.kind == "model"
+            and p["purpose"] != "output_repair"
+            and previous.state == "completed"
+            and previous.result is not None
+            and previous.result._payload["result"].get("error_code") == "model_request_rejected"
+            and previous.result._payload["result"].get("rejection", {}).get("retryable") is True
+        )
+        require(number == max(op.attempts) + 1, "retry attempt is not sequential")
+        require(
+            rejection_retry
+            or (previous.state == "unknown" and previous.unknown is not None and previous.unknown._payload["retry"] == "retry"),
+            "retry not authorized",
+        )
+        require(rejection_retry or op.selected_attempt is None, "retry after adopted result")
         require(
             p["request_digest"] == previous.execution_plan._payload["request_digest"]
             and p["provider_binding"] == previous.execution_plan._payload["provider_binding"]
@@ -281,6 +293,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
             require(number <= max(2, len(order)), "model retry limit exceeded")
         due = previous.unknown._payload["retry_at_ms"] if previous.unknown else None
         require(due is None or (p["not_before_ms"] or 0) >= due, "retry before not-before")
+        if rejection_retry:
+            op.selected_attempt = None
     for dependency in p["dependencies"]:
         require(dependency in state.operations and state.operations[dependency].turn_id == tid, "unknown dependency")
         require(dependency != oid, "operation depends on itself")

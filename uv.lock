@@ -1485,10 +1485,11 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.33.1"
+version = "0.33.2"
 source = { editable = "." }
 dependencies = [
     { name = "deepseek-tokenizer" },
+    { name = "httpx2" },
     { name = "jiter" },
     { name = "jsonschema" },
     { name = "openai" },
@@ -1523,6 +1524,7 @@ dev = [
 requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.35" },
     { name = "deepseek-tokenizer", specifier = ">=0.3.0" },
+    { name = "httpx2", specifier = ">=2.7,<3" },
     { name = "jiter", specifier = ">=0.15.0" },
     { name = "jsonschema", specifier = ">=4.25.1" },
     { name = "openai", specifier = ">=3.0" },
