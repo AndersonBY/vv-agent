@@ -124,7 +124,12 @@ def child_summary(driver: _Driver, plan: Record, binding: SummaryChildTool) -> t
         if digest([m.to_dict() for m in source]) != meta["source_digest"]:
             raise ValueError("child summary source mismatch")
         summary_plan = manager.plan_full_summary(source)
-        if summary_plan is not None and attempt.result is not None and attempt.context == "normal":
+        if (
+            summary_plan is not None
+            and attempt.result is not None
+            and not attempt.result._payload["result"].get("error_code")
+            and attempt.context == "normal"
+        ):
             replacement, accepted = manager.accept_summary(
                 summary_plan, attempt.result._payload["result"]["content"], notify=False, require_reduction=False
             )

@@ -634,7 +634,7 @@ pin the local counts, work bounds, decisions and record equality.
 Before a primary request the driver makes at most one archive-backed prune pass
 and commits mode `micro` only after MemoryManager confirms the archive. A
 summary is an ordinary model operation (`purpose=compaction`): bound model,
-tools disabled, text-only prompt, one transport attempt, normal budget checks.
+tools disabled, text-only prompt, one logical adapter invocation (which can include vendor SDK physical retries), normal budget checks.
 Its identity covers turn, source context digest, mode and tail target. On
 restart a saved `op_completed` is validated again rather than rerun, and an
 identical source and tail target reuses its receipt. Invalid output or exhausted

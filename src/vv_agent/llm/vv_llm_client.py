@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack, closing
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,8 @@ from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.base import LLMClient, LlmRequest
+from vv_agent.llm.errors import ModelStreamInterrupted
+from vv_agent.llm.http_observation import HttpObservation, ObservedAnthropicHttpClient, ObservedHttpClient
 from vv_agent.model_settings import ModelSettings, ResponseFormat, ToolChoice
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
 from vv_agent.types import LLMResponse, Message, ToolCall
@@ -132,6 +135,22 @@ class VvLlmClient(LLMClient):
         *,
         stream_callback: StreamCallback | None = None,
     ) -> LLMResponse:
+        observation = HttpObservation()
+        with ExitStack() as clients:
+            try:
+                return self._complete_request(request, stream_callback=stream_callback, observation=observation, clients=clients)
+            except Exception as error:
+                cast(Any, error)._vv_http_observation = observation
+                raise
+
+    def _complete_request(
+        self,
+        request: LlmRequest,
+        *,
+        stream_callback: StreamCallback | None,
+        observation: HttpObservation,
+        clients: ExitStack,
+    ) -> LLMResponse:
         model = request.model
         messages = request.messages
         tools = request.tools
@@ -225,6 +244,11 @@ class VvLlmClient(LLMClient):
 
             for attempt in range(1, request_options.max_attempts + 1):
                 try:
+                    endpoint = settings.get_endpoint(target.endpoint_id)
+                    client_type = ObservedAnthropicHttpClient if backend_type == BackendType.Anthropic else ObservedHttpClient
+                    http_client = clients.enter_context(
+                        client_type(observation, proxy=endpoint.proxy, timeout=self.timeout_seconds, follow_redirects=True)
+                    )
                     chat_client = create_chat_client(
                         backend=backend_type,
                         model=model_name,
@@ -232,6 +256,7 @@ class VvLlmClient(LLMClient):
                         random_endpoint=False,
                         endpoint_id=target.endpoint_id,
                         settings=settings,
+                        http_client=http_client,
                     )
                     if should_stream:
                         response = self._stream_completion(
@@ -857,62 +882,63 @@ class VvLlmClient(LLMClient):
         last_active_tool_call_id: str | None = None
         usage_dump: dict[str, Any] | None = None
 
-        for chunk in stream:
-            usage = self._read_field(chunk, "usage")
-            usage_candidate = self._usage_to_dict(usage)
-            if usage_candidate:
-                usage_dump = usage_candidate
+        with closing(self._guard_stream(stream)) as guarded:
+            for chunk in guarded:
+                usage = self._read_field(chunk, "usage")
+                usage_candidate = self._usage_to_dict(usage)
+                if usage_candidate:
+                    usage_dump = usage_candidate
 
-            chunk_reasoning = self._extract_reasoning_content(self._read_field(chunk, "reasoning_content"))
-            if chunk_reasoning:
-                reasoning_parts.append(chunk_reasoning)
-                reasoning_chars += len(chunk_reasoning)
-                self._emit_stream_event(
-                    stream_callback,
-                    {
-                        "event": "reasoning_delta",
-                        "reasoning_delta": chunk_reasoning,
-                        "reasoning_chars": reasoning_chars,
-                        "estimated_tokens": self._estimate_stream_tokens(reasoning_chars),
-                    },
-                )
+                chunk_reasoning = self._extract_reasoning_content(self._read_field(chunk, "reasoning_content"))
+                if chunk_reasoning:
+                    reasoning_parts.append(chunk_reasoning)
+                    reasoning_chars += len(chunk_reasoning)
+                    self._emit_stream_event(
+                        stream_callback,
+                        {
+                            "event": "reasoning_delta",
+                            "reasoning_delta": chunk_reasoning,
+                            "reasoning_chars": reasoning_chars,
+                            "estimated_tokens": self._estimate_stream_tokens(reasoning_chars),
+                        },
+                    )
 
-            raw_content = self._read_field(chunk, "raw_content")
-            if raw_content is not None:
-                self._collect_raw_content(complete_raw_content, raw_content)
+                raw_content = self._read_field(chunk, "raw_content")
+                if raw_content is not None:
+                    self._collect_raw_content(complete_raw_content, raw_content)
 
-            text = self._extract_content(self._read_field(chunk, "content"))
-            if text:
-                content_parts.append(text)
-                content_chars += len(text)
-                self._emit_stream_event(
-                    stream_callback,
-                    {
-                        "event": "assistant_delta",
-                        "content_delta": text,
-                        "content_chars": content_chars,
-                        "estimated_tokens": self._estimate_stream_tokens(content_chars),
-                    },
-                )
+                text = self._extract_content(self._read_field(chunk, "content"))
+                if text:
+                    content_parts.append(text)
+                    content_chars += len(text)
+                    self._emit_stream_event(
+                        stream_callback,
+                        {
+                            "event": "assistant_delta",
+                            "content_delta": text,
+                            "content_chars": content_chars,
+                            "estimated_tokens": self._estimate_stream_tokens(content_chars),
+                        },
+                    )
 
-            for tool_call_index, tool_delta in enumerate(self._read_field(chunk, "tool_calls") or []):
-                previous_active_tool_call_id = last_active_tool_call_id
-                last_active_tool_call_id = self._accumulate_tool_call_delta(
-                    tool_call_parts=tool_call_parts,
-                    tool_delta=tool_delta,
-                    default_index=tool_call_index,
-                    last_active_tool_call_id=last_active_tool_call_id,
-                    incremental=options.tool_call_incremental,
-                    keep_extra_content=options.is_gemini_3_model,
-                )
-                self._emit_tool_call_stream_events(
-                    stream_callback=stream_callback,
-                    tool_call_parts=tool_call_parts,
-                    tool_delta=tool_delta,
-                    default_index=tool_call_index,
-                    previous_active_tool_call_id=previous_active_tool_call_id,
-                    active_tool_call_id=last_active_tool_call_id,
-                )
+                for tool_call_index, tool_delta in enumerate(self._read_field(chunk, "tool_calls") or []):
+                    previous_active_tool_call_id = last_active_tool_call_id
+                    last_active_tool_call_id = self._accumulate_tool_call_delta(
+                        tool_call_parts=tool_call_parts,
+                        tool_delta=tool_delta,
+                        default_index=tool_call_index,
+                        last_active_tool_call_id=last_active_tool_call_id,
+                        incremental=options.tool_call_incremental,
+                        keep_extra_content=options.is_gemini_3_model,
+                    )
+                    self._emit_tool_call_stream_events(
+                        stream_callback=stream_callback,
+                        tool_call_parts=tool_call_parts,
+                        tool_delta=tool_delta,
+                        default_index=tool_call_index,
+                        previous_active_tool_call_id=previous_active_tool_call_id,
+                        active_tool_call_id=last_active_tool_call_id,
+                    )
 
         parsed_tool_calls: list[ToolCall] = []
         tool_call_extra_content: dict[str, Any] = {}
@@ -958,6 +984,24 @@ class VvLlmClient(LLMClient):
             tool_calls=normalized,
             raw=raw_payload,
         )
+
+    @staticmethod
+    def _guard_stream(stream: Iterable[Any]):
+        observed = False
+        iterator = iter(stream)
+        try:
+            for chunk in iterator:
+                observed = True
+                yield chunk
+        except Exception as exc:
+            if observed:
+                raise ModelStreamInterrupted("provider stream interrupted after a chunk") from exc
+            raise
+        finally:
+            for resource in (iterator,) if iterator is stream else (iterator, stream):
+                close = getattr(resource, "close", None)
+                if close is not None:
+                    close()
 
     @staticmethod
     def _emit_stream_event(stream_callback: StreamCallback | None, event: dict[str, Any]) -> None:

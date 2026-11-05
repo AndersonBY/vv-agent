@@ -7,6 +7,7 @@ import pytest
 
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.session.kernel import drive
+from vv_agent.session.projection import project_records
 from vv_agent.session.records import InboxItem, Record
 from vv_agent.session.reducer import fold
 from vv_agent.session.result import project_result
@@ -28,7 +29,9 @@ def transport(monkeypatch):
             calls.append((payload["model"], endpoint_id))
             response = replies.pop(0)
             if isinstance(response, Exception):
-                raise response
+                from .test_model_rejection import adapter_error
+
+                raise adapter_error(response)
             if callable(response):
                 response = response()
             return [
@@ -177,6 +180,78 @@ def test_unknown_retry_limit_is_unchanged(store, database, transport, ids):
     unknowns = [r for r in rows(store) if r.kind == "op_unknown"]
     assert [r.payload["retry"] for r in unknowns] == ["retry"] * (max(2, len(ids)) - 1) + ["stop"]
     assert all(r.payload["duplicate_cost_risk"] for r in unknowns)
+
+
+@pytest.mark.parametrize("ids", [["a"], ["a", "b", "c"]])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 405, 409, 422, 429, 499, 500])
+def test_rejection_endpoint_policy_is_distinct_from_unknown_retry(store, database, transport, monkeypatch, status, ids):
+    from vv_agent.llm.errors import ModelRequestRejected
+
+    from .test_model_rejection import http_error
+
+    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    calls, replies = transport
+    start(store)
+    error = ModelRequestRejected(409, "Temporary endpoint refusal", retryable=True) if status == 409 else http_error(status)
+    replies.extend([error, {"content": "done"}])
+    drive(store, "s", runtime=host(database, {"scripted": ids}))
+    retry = status in {409, 429, 500} or (status in {401, 403, 404} and len(ids) > 1)
+    assert calls == [("scripted", "a")] + ([("scripted", ids[1 % len(ids)])] if retry else [])
+    unknowns = [r for r in rows(store) if r.kind == "op_unknown"]
+    assert len(unknowns) == int(status == 500)
+    terminal = next(r for r in rows(store) if r.kind == "turn_ended").payload
+    assert terminal["status"] == ("completed" if retry else "failed")
+    if not retry:
+        assert terminal["reason"] == "model_request_rejected"
+    if status != 500:
+        assert not terminal["unconfirmed_operations"]
+        assert not any(e.type == "model_retry_duplicate_risk" for e in project_records(store.read_state("s")[1]))
+
+
+@pytest.mark.parametrize("ids", [["a"], ["a", "b"], ["a", "b", "c"]])
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_endpoint_rejections_exhaust_without_backoff_and_keep_last_safe_error(store, database, transport, status, ids):
+    from .test_model_rejection import http_error
+
+    calls, replies = transport
+    start(store)
+    replies.extend(http_error(status, f"Denied at {endpoint}. Authorization: Bearer sk-secret") for endpoint in ids)
+    drive(store, "s", runtime=host(database, {"scripted": ids}))
+    assert calls == [("scripted", endpoint) for endpoint in ids]
+    assert [p.attempt for p in plans(store)] == list(range(1, len(ids) + 1))
+    assert all(p.payload["not_before_ms"] == 0 for p in plans(store) if p.attempt > 1)
+    assert not any(r.kind == "op_unknown" for r in rows(store))
+    terminal = next(r for r in rows(store) if r.kind == "turn_ended").payload
+    assert terminal["status"] == "failed" and terminal["reason"] == "model_request_rejected"
+    assert terminal["unconfirmed_operations"] == []
+    assert f"HTTP {status}: Model provider request failed." in terminal["result"]
+    assert "sk-secret" not in str(rows(store))
+    assert not any(e.type == "model_retry_duplicate_risk" for e in project_records(store.read_state("s")[1]))
+
+
+@pytest.mark.parametrize(
+    "status,retryable,ids,retry",
+    [
+        (401, False, ["a", "b"], False),
+        (429, False, ["a", "b"], False),
+        (400, True, ["a", "b"], True),
+        (401, True, ["a"], True),
+        (401, None, ["a", "b"], True),
+        (401, None, ["a"], False),
+    ],
+)
+def test_host_rejection_retry_override_wins(store, database, transport, monkeypatch, status, retryable, ids, retry):
+    from vv_agent.llm.errors import ModelRequestRejected
+
+    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    calls, replies = transport
+    start(store)
+    replies.extend([ModelRequestRejected(status, "Rejected", retryable=retryable), {"content": "done"}])
+    drive(store, "s", runtime=host(database, {"scripted": ids}))
+    assert calls == [("scripted", "a")] + ([("scripted", ids[1 % len(ids)])] if retry else [])
+    assert not any(r.kind == "op_unknown" for r in rows(store))
+    terminal = next(r for r in rows(store) if r.kind == "turn_ended").payload
+    assert terminal["status"] == ("completed" if retry else "failed")
 
 
 @pytest.mark.parametrize("cut", ["before_external_call", "after_external_call"])

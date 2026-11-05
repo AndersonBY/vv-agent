@@ -112,8 +112,8 @@ previous model. Internal model purposes use the same hook on their own routes.
 An output repair callback owns its own provider calls; the kernel does not
 redirect it to the selected primary model.
 
-Retries reuse the exact frozen order, with one endpoint and one transport
-attempt per logged attempt. Before dispatch, the runtime prepares the current
+Retries reuse the exact frozen order, with one endpoint and one logical adapter
+invocation (vendor SDK physical retries are separately observed) per logged attempt. Before dispatch, the runtime prepares the current
 client for the frozen endpoint. If that endpoint has disappeared, the kernel
 closes the operation with `endpoint_unavailable`, empty usage and
 `execution_started=false`. It makes no provider call and adds no duplicate-cost

@@ -96,6 +96,38 @@ central gates pass. Passing fixture checks alone is not verification.
 
 ## Python producer map
 
+Model rejection uses `llm/errors.py` for the adapter-owned
+`ModelRequestRejected` type and conservative HTTP response recognition.
+`llm/http_observation.py` observes physical sends across vendor SDK retries;
+unobservable host HTTP exceptions stay Unknown without the explicit assertion.
+An observed 4xx remains pending until its raw body reaches EOF and decoding
+finishes successfully; early close and decoder failure cannot settle a call.
+The complete exception graph vetoes uncertainty before positive classification;
+installed provider-native connection and timeout classes participate even without
+a lower-level HTTP cause. Physical-send failures keep their own indices; an
+unindexed failure permanently vetoes that invocation. Vendor network defaults
+and host proxy/timeout priority remain intact, and callback exit closes iterators
+and response streams explicitly.
+`session/kernel.py` records the definitive receipt and terminal,
+`session/reducer.py` retains failed receipts across retry, and
+`session/projection.py` carries the safe cause to hosts and App Server users.
+The kernel checks prompt-too-long recovery first, including real HTTP 4xx
+context errors, structured provider codes/types and HTTP 413. Content rejections
+stop without endpoint failover. 401/403/404 immediately try the
+next frozen endpoint only when multiple endpoints exist; 429 retains backoff and
+one retry even with a single endpoint. Explicit adapter retryability overrides
+these defaults. Unknown retains its separate retry rules. The normative
+classification order, content string limits and summary failure behavior live in the contract's
+`docs/model-rejection.md`.
+`scripts/model_rejection_fixtures.py` and the matching rejection tests pin this
+behavior. Contract 35.0.0 adds no store or frozen-definition boundary.
+
+During development, `VV_AGENT_CONTRACT_SOURCE=/path/to/vv-agent-contract`
+selects a local canonical checkout for producer tests without rewriting the
+immutable release lock or vendored snapshot. After publication, synchronize
+them with the commands above. A local gate is not release or central adoption
+evidence.
+
 Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |
@@ -284,3 +316,17 @@ Public interaction mappings are `AppServerUserInteraction`,
 `HeartbeatStopped` is the public intentional heartbeat-stop signal. The current
 App Server v5 snapshot adds `state`, and respond uses target plus answer.
 These mappings preserve record 1, inbox 3, SQLite 3 and RunEvent v6.
+
+The model HTTP observer pre-reads every non-408 4xx within a total deadline of
+min(request read timeout, 10 seconds) and 1 MiB for raw and decoded bytes. Either
+exceeded bound stays Unknown even if the vendor later finishes reading. Successful
+content is cached; failures are deferred to body consumption, while bounded
+prefixes and the remaining raw stream are replayed. Status, headers and native
+vendor retry decisions, counts and backoff remain unchanged. See the contract's
+model-rejection rules and `tests/session/test_model_rejection_retry_policy.py`.
+The response hook pre-reads synchronously without creating threads. It copies
+the request timeout extension before raw iteration and caps read at the
+observation deadline. Total extra network wait is at most that deadline plus
+one recv timeout (20 seconds maximum); remaining reads retain the shortened
+per-recv timeout. `tests/test_model_rejection_lifecycle.py` covers real stalled
+HTTP/1.1 sockets, repeated closes, connection-pool recovery and resource counts.

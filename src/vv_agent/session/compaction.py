@@ -119,7 +119,12 @@ def finish_summary(driver: _Driver) -> bool:
         if op.turn_id != tid or op.kind != "model" or op.selected_attempt is None or oid in accepted:
             continue
         a = op.attempts[op.selected_attempt]
-        if a.plan._payload["purpose"] != "compaction" or a.result is None or a.context != "normal":
+        if (
+            a.plan._payload["purpose"] != "compaction"
+            or a.result is None
+            or a.result._payload["result"].get("error_code")
+            or a.context != "normal"
+        ):
             continue
         # The source is an immutable log prefix, not the present transcript after late inputs.
         prefix = tuple(r for r in driver.records if r.seq <= int(a.plan._payload["context_version"]))

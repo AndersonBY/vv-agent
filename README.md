@@ -25,9 +25,9 @@ python -m pip install 'vv-agent[postgres,s3]'
 
 To work from a checkout, run `python -m pip install -e .` or `uv sync --dev`.
 
-vv-agent 0.33.1 requires version 34.0.0 of the language-neutral
-`vv-agent-contract`. See [the release notes](docs/releases/0.33.1.md) and
-[upgrade requirements](docs/upgrading.md#0331--2026-11-05). Python is the maintained
+vv-agent 0.33.2 requires version 35.0.0 of the language-neutral
+`vv-agent-contract`. See [the release notes](docs/releases/0.33.2.md) and
+[upgrade requirements](docs/upgrading.md#0332--2026-11-06). Python is the maintained
 implementation. The Rust port, `vv-agent-rs`, is frozen at contract 23.0.0
 (package series 0.21.x) and only gets maintenance fixes. The Python API keeps
 Python naming; see [the contract workflow](docs/parity-contract.md).

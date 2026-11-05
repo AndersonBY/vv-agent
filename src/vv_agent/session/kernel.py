@@ -15,7 +15,7 @@ from uuid import uuid4
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import _project_provider_stream_payload
-from vv_agent.llm.errors import is_prompt_too_long_error
+from vv_agent.llm.errors import ModelStreamInterrupted, is_prompt_too_long_error, model_request_rejection, safe_model_error
 from vv_agent.memory.microcompact import is_microcompacted_tool_content
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.output_validation import OutputRepairRequest
@@ -60,6 +60,8 @@ from .sql import SQLSessionTx, SQLStore
 from .sqlite import SQLiteStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
+
+MODEL_REJECTION_BACKOFF_SECONDS = 2
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -598,7 +600,35 @@ class _Driver:
             },
             plan,
         )
-        return [result, *self.completion_effects(plan, outcome, context)]
+        records = [result, *self.completion_effects(plan, outcome, context)]
+        rejection = outcome.result.get("rejection", {})
+        order = plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
+        if (
+            op.kind == "model"
+            and context == "normal"
+            and outcome.result.get("error_code") == "model_request_rejected"
+            and rejection.get("retryable") is True
+            and plan._payload["purpose"] != "output_repair"
+            and plan.attempt < max(2, len(order))
+            and not self.scope.token.cancelled
+            and not self.state.cancel_requested
+            and not any(r.kind == "boundary_recorded" and r._payload["data"].get("exhaustion") for r in records[1:])
+        ):
+            delay = (
+                0 if rejection.get("status_code") in {401, 403, 404} else MODEL_REJECTION_BACKOFF_SECONDS * 1000 * plan.attempt
+            )
+            due = self.scope.poll(self.store).db_now_ms + delay if delay else 0
+            records.append(
+                make_record(
+                    "op_planned",
+                    session_id=self.sid,
+                    turn_id=plan.turn_id,
+                    operation_id=plan.operation_id,
+                    attempt=plan.attempt + 1,
+                    payload=plan._payload | {"not_before_ms": due},
+                )
+            )
+        return records
 
     def completion_effects(self, plan: Record, outcome: Definitive, context: str) -> list[Record]:
         assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
@@ -1610,19 +1640,22 @@ class _Driver:
                         )
                     )
                 except Exception as exc:
-                    return Definitive({"content": str(exc), "tool_calls": [], "error_code": "repair_provider_error"})
+                    return Definitive({"content": safe_model_error(exc), "tool_calls": [], "error_code": "repair_provider_error"})
                 if isinstance(repaired, LLMResponse):
                     return Definitive({"content": repaired.content, "tool_calls": []}, usage=repaired.raw.get("usage") or {})
                 return Definitive({"content": serializable_output(repaired), "tool_calls": []})
             if "shared_state" in request.metadata.get("vv_session", {}):
                 context.shared_state.clear()
                 context.shared_state.update(self.runtime.bind_state(request.metadata["vv_session"]["shared_state"], task))
+            stream_observed = False
             try:
                 callback = None
                 stream = self.runtime.config.stream
                 if stream is not None and plan._payload["purpose"] == "primary":
 
                     def callback(payload):
+                        nonlocal stream_observed
+                        stream_observed = True
                         event = _project_provider_stream_payload(
                             payload | {"cycle": context.cycle_index},
                             run_id=plan.turn_id or "",
@@ -1644,8 +1677,21 @@ class _Driver:
                     prepared_client=prepared_client,
                 )
             except Exception as exc:
+                if stream_observed or isinstance(exc, ModelStreamInterrupted) or self.scope.token.cancelled:
+                    raise
                 if is_prompt_too_long_error(exc):
                     return Definitive({"error_code": "prompt_too_long", "content": "", "tool_calls": []})
+                order = plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
+                rejection = model_request_rejection(exc, endpoint_count=len(order))
+                if rejection is not None:
+                    return Definitive(
+                        {
+                            "error_code": "model_request_rejected",
+                            "content": f"HTTP {rejection.status_code}: {rejection.message}",
+                            "tool_calls": [],
+                            "rejection": rejection.to_dict(),
+                        }
+                    )
                 raise
             observed_usage = copy_json(response.raw.get("usage") or {})
             if plan._payload["purpose"] == "primary":
@@ -1856,6 +1902,14 @@ class _Driver:
                         self.commit(repairs, guarded=True)
                         return True
             a = op.attempts[max(op.attempts)]
+            if (
+                op.kind == "model"
+                and a.result
+                and a.result._payload["result"].get("error_code") == "model_request_rejected"
+                and a.plan._payload["purpose"] != "compaction"
+            ):
+                self.close("failed", "model_request_rejected", a.result._payload["result"]["content"])
+                return True
             if a.state == "started":
                 self.commit([self.unknown(a.execution_plan, "worker lost before durable result")], guarded=True)
                 return True

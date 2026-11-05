@@ -119,7 +119,10 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             elif p["status"] in {"cancelled", "aborted"}:
                 event = RunCancelledEvent(**common, reason=p["reason"] or p["status"])
             else:
-                event = RunFailedEvent(**common, error=p["reason"] or "failed", status="failed")
+                error = p["reason"] or "failed"
+                if p["reason"] == "model_request_rejected":
+                    error = f"{error}: {p['result']}"
+                event = RunFailedEvent(**common, error=error, status="failed")
         elif r.kind == "boundary_recorded":
             data, stage = p["data"], p["stage"]
             if stage in {"memory_started", "memory_completed"}:
@@ -304,6 +307,8 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                             error_code=p["result"].get("error_code", "not_executed"),
                         )
                     elif p["result"].get("error_code"):
+                        if p["result"].get("error_code") == "model_request_rejected":
+                            identity["metadata"] = identity["metadata"] | {"model_rejection": p["result"]["rejection"]}
                         event = ModelCallFailedEvent(
                             **identity, outcome="definitive", usage=model_usage(p["usage"]), error_code=p["result"]["error_code"]
                         )

@@ -109,7 +109,8 @@ cycle reported that metric.
 | `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
 | `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes, and validation of definitive results. The session store owns admission and receipts. |
-| `src/vv_agent/llm/errors.py` | Prompt-too-long classification and its retry limit, shared by model calls and compaction. |
+| `src/vv_agent/llm/errors.py` | Whole-exception-graph uncertainty veto, prompt-too-long recovery before definitive provider rejection, and safe error diagnostics. |
+| `src/vv_agent/llm/http_observation.py` | Ephemeral physical HTTP outcomes for one logical model call, including vendor SDK retries; no payloads enter observation evidence or persistence. Retained responses close with the client. |
 | `src/vv_agent/config.py` | Settings-file loading, backend and endpoint lookup, and `vv-llm` settings construction. |
 | `src/vv_agent/cli.py` | Command-line parsing and one-shot runs. |
 | `src/vv_agent/agent.py` | Public `Agent` definition and agent-as-tool helpers. |
