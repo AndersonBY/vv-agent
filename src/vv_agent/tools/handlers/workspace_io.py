@@ -450,8 +450,8 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             result = _find_files(context, arguments)
             check_matching_budget()
             return result
-        except TimeoutError:
-            return _workspace_error("Regular expression too slow; aborted during file enumeration", error_code="regex_timeout")
+        except TimeoutError as exc:
+            return _workspace_error(f"{exc} during file enumeration", error_code="regex_timeout")
 
 
 def _find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:

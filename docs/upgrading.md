@@ -77,6 +77,20 @@ old-version session.
 
 ## Version notes
 
+### 0.33.1 — 2026-11-05
+
+Requires contract 34.0.0. The SDK patch fixes 0.33.0's overly small cumulative
+search budget. Each regex engine invocation is limited to 250 ms; enumeration
+and all matching share 10 s of thread CPU, retaining nested and in-loop checks.
+Earlier content matches and stopping coordinates survive either timeout; the
+message distinguishes a slow engine call from total CPU exhaustion.
+
+No store boundary, wire change, tool schema change or frozen-definition change
+is introduced. Existing 0.33.0 turns can continue on the corrected handlers;
+no old decoder or compatibility branch is needed. When upgrading from 0.32.0
+or earlier, the 0.33.0 transition below still applies. See
+[release notes](releases/0.33.1.md).
+
 ### 0.33.0 — 2026-11-04
 
 Requires contract 33.0.0. Record, inbox, SQL and App Server schema versions are

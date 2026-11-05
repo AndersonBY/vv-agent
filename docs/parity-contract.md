@@ -161,10 +161,15 @@ is excluded from both coordinate systems. The existing digest-bound cursor is
 still the continuation mechanism across lines.
 
 `workspace/matching.py` uses regex VERSION0 with an interruptible operation
-timeout. A request shares a 250 ms thread CPU deadline across enumeration,
-globs, child exclusion filters and portable content matching. Time in storage
-I/O is not charged as thread CPU. The engine's process CPU timer may interrupt
-earlier under contention. Each matcher operation receives the remaining budget.
+timeout of 250 ms per engine invocation (finditer, match or search over one
+line, window or whole text). A finditer timeout covers its iteration rather than
+resetting per match. A request shares a separate 10 s thread CPU deadline across
+enumeration, globs, child exclusion filters and portable content matching. Time
+in storage I/O wait is not charged as thread CPU. The engine's process CPU timer
+may interrupt earlier under contention. Each operation receives the smaller of
+250 ms and the remaining request budget. Total exhaustion reports
+"Search total CPU limit exceeded (10 s); aborted", separately from the single-call
+"Regular expression too slow; aborted" notice.
 S3 checks the same deadline within each page and object iteration, including
 empty pages. Local checks within directory and file iteration, including empty
 directories, before traversal can advance. Ordinary S3 shell globs retain the

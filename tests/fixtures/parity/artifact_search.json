@@ -3725,7 +3725,7 @@
     "max_result_chars": 30000,
     "max_result_lines": 500,
     "oversized_line": "30000_character_windows_4096_overlap_explicitly_incomplete",
-    "regex_budget": "250ms_cumulative_matching_cpu_engine_interrupt",
+    "regex_budget": "250ms_per_engine_call_10s_cumulative_thread_cpu_engine_interrupt",
     "route": "reserved_path_before_directory_options",
     "scope": "current_task_or_exact_session_task_scope",
     "writes_during_search": 0
