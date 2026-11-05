@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.33.1 — 2026-11-05
+
+Fix the 0.33.0 search CPU budget design error that stopped ordinary large-file
+regex/literal scans before late matches. Each engine invocation now has its own
+250 ms ReDoS timeout; enumeration and matching share a 10 s thread CPU limit.
+Earlier hits and stop coordinates survive either limit, with distinct messages.
+Local, Memory, S3, artifacts, globs/find_files and child exclusions use one rule.
+Existing window, page, head and file limits remain unchanged.
+
+Requires contract 34.0.0 under its observable behavior version policy. This is
+handler-only: tool schemas, frozen definitions and all store/wire versions stay
+unchanged; 0.33.0 turns need no special transition. See the
+[release notes](docs/releases/0.33.1.md) and [upgrade guide](docs/upgrading.md).
+
 ## 0.33.0 — 2026-11-04
 
 Requires contract 33.0.0. read_file adds character positioning, removes max_chars

@@ -26,7 +26,7 @@ def test_s3_budget_stops_before_requesting_next_page(monkeypatch, empty_page):
     class Paginator:
         def paginate(self, **kwargs):
             pages.append(1)
-            clock[0] += 0.3
+            clock[0] += 10.0
             yield {"Contents": [] if empty_page else [{"Key": "a.txt"}]}
             pages.append(2)
             yield {"Contents": [{"Key": "b.txt"}]}
@@ -38,7 +38,7 @@ def test_s3_budget_stops_before_requesting_next_page(monkeypatch, empty_page):
 
     backend = object.__new__(S3WorkspaceBackend)
     backend._bucket, backend._prefix, backend._client = "test", "", Client()
-    with pytest.raises(TimeoutError, match="too slow; aborted"):
+    with pytest.raises(TimeoutError, match="total CPU limit"):
         backend.list_files(".", "**/*")
     assert pages == [1]
 
@@ -52,7 +52,7 @@ def test_s3_budget_stops_between_objects(monkeypatch):
     class Objects:
         def __iter__(self):
             visited.append("a")
-            clock[0] += 0.3
+            clock[0] += 10.0
             yield {"Key": "a.txt"}
             visited.append("b")
             yield {"Key": "b.txt"}
@@ -67,7 +67,7 @@ def test_s3_budget_stops_between_objects(monkeypatch):
 
     backend = object.__new__(S3WorkspaceBackend)
     backend._bucket, backend._prefix, backend._client = "test", "", Client()
-    with pytest.raises(TimeoutError, match="too slow; aborted"):
+    with pytest.raises(TimeoutError, match="total CPU limit"):
         backend.list_files(".", "**/*")
     assert visited == ["a"]
 
@@ -80,13 +80,13 @@ def test_local_budget_stops_before_entering_next_empty_directory(tmp_path, monke
 
     def walk(root, **kwargs):
         entered.append("first")
-        clock[0] += 0.3
+        clock[0] += 10.0
         yield str(root), ["second"], []
         entered.append("second")
         yield str(root / "second"), [], []
 
     monkeypatch.setattr(os, "walk", walk)
-    with pytest.raises(TimeoutError, match="too slow; aborted"):
+    with pytest.raises(TimeoutError, match="total CPU limit"):
         LocalWorkspaceBackend(tmp_path).list_files(".", "**/*")
     assert entered == ["first"]
 
@@ -102,22 +102,22 @@ def test_nested_filter_backend_and_content_share_request_budget(tmp_path, monkey
     def initialize(self, pattern):
         original_init(self, pattern)
         deadlines.append(self.deadline)
-        clock[0] += 0.02
+        clock[0] += 0.5
 
     def match(self, text):
         stages.append("builtin glob")
-        clock[0] += 0.07
+        clock[0] += 3.0
         return original_match(self, text)
 
     def search(self, text):
         stages.append("exclude")
-        clock[0] += 0.07
+        clock[0] += 3.0
         return original_search(self, text)
 
     class Backend(MemoryWorkspaceBackend):
         def read_text(self, path):
             stages.append("content")
-            clock[0] += 0.07
+            clock[0] += 3.0
             return super().read_text(path)
 
     monkeypatch.setattr(matching.RegexBudget, "__init__", initialize)
@@ -129,7 +129,7 @@ def test_nested_filter_backend_and_content_share_request_budget(tmp_path, monkey
     result = search_files(ToolContext(tmp_path, {}, 0, filtered), {"pattern": "needle", "include_sensitive": True})
     assert stages == ["builtin glob", "exclude", "content"]
     assert deadlines == [matching.MATCH_CPU_SECONDS] * 3
-    assert "too slow; aborted" in result.content
+    assert "total CPU limit" in result.content
     assert result.metadata["regex_timeout"] == {"path": "a.txt", "line": 1, "column": 0}
     assert result.metadata["summary"]["total_matches"] == 0
 

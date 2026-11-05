@@ -1,4 +1,4 @@
-"""Interruptible matching with one CPU budget across discovery and content."""
+"""Per-call regex interruption and a shared discovery/content CPU budget."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from time import thread_time
 
 import regex
 
-MATCH_CPU_SECONDS = 0.25
+MATCH_CPU_SECONDS = 10.0
+REGEX_CALL_SECONDS = 0.25
+_TOTAL_CPU_TIMEOUT = "Search total CPU limit exceeded (10 s); aborted"
 _request_deadline: ContextVar[float | None] = ContextVar("workspace_match_deadline", default=None)
 
 
@@ -28,7 +30,7 @@ def matching_request() -> Iterator[None]:
 def check_matching_budget() -> None:
     deadline = _request_deadline.get()
     if deadline is not None and thread_time() >= deadline:
-        raise TimeoutError("Regular expression too slow; aborted")
+        raise TimeoutError(_TOTAL_CPU_TIMEOUT)
 
 
 def compile_pattern(pattern: str, flags: int = 0) -> regex.Pattern:
@@ -68,17 +70,33 @@ class RegexBudget:
         deadline = _request_deadline.get()
         self.deadline = thread_time() + MATCH_CPU_SECONDS if deadline is None else deadline
 
-    def _remaining(self) -> float:
-        remaining = self.deadline - thread_time()
-        if remaining <= 0:
-            raise TimeoutError("Regular expression too slow; aborted")
-        return remaining
+    def _check_deadline(self) -> None:
+        if thread_time() >= self.deadline:
+            raise TimeoutError(_TOTAL_CPU_TIMEOUT)
+
+    @contextmanager
+    def _operation(self) -> Iterator[float]:
+        self._check_deadline()
+        timeout = min(REGEX_CALL_SECONDS, self.deadline - thread_time())
+        if timeout <= 0:
+            raise TimeoutError(_TOTAL_CPU_TIMEOUT)
+        try:
+            yield timeout
+            self._check_deadline()
+        except TimeoutError:
+            self._check_deadline()
+            raise TimeoutError("Regular expression too slow; aborted") from None
 
     def finditer(self, text: str, pos: int = 0) -> Iterator[regex.Match]:
-        yield from self.pattern.finditer(text, pos, timeout=self._remaining())
+        with self._operation() as timeout:
+            for match in self.pattern.finditer(text, pos, timeout=timeout):
+                self._check_deadline()
+                yield match
 
     def match(self, text: str) -> regex.Match | None:
-        return self.pattern.match(text, timeout=self._remaining())
+        with self._operation() as timeout:
+            return self.pattern.match(text, timeout=timeout)
 
     def search(self, text: str) -> regex.Match | None:
-        return self.pattern.search(text, timeout=self._remaining())
+        with self._operation() as timeout:
+            return self.pattern.search(text, timeout=timeout)

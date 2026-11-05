@@ -163,7 +163,9 @@ def test_unicode_bom_and_line_local_offsets_round_trip(tmp_path, prefix):
 def test_real_regex_timeout_retains_earlier_hits_and_stop_position(tmp_path):
     started = time.monotonic()
     result, _, _ = _search_text(tmp_path, "needle\nneedle " + "a" * 29_000 + "!", "needle|(a+)+$")
-    assert time.monotonic() - started < 2
+    elapsed = time.monotonic() - started
+    print(f"REDOS wall={elapsed:.6f}s result={result.content!r}")
+    assert elapsed < 2
     details = result.metadata["artifact_search"]
     assert details["timed_out"] and details["truncated"]
     assert details["stopped_line"] == 2 and details["stopped_column"] == 0

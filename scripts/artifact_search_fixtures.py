@@ -82,7 +82,7 @@ def generate():
             "scope": "current_task_or_exact_session_task_scope",
             "line_numbers": "original_artifact_read_file_start_line_end_line",
             "columns": "zero_based_unicode_read_file_start_char",
-            "regex_budget": "250ms_cumulative_matching_cpu_engine_interrupt",
+            "regex_budget": "250ms_per_engine_call_10s_cumulative_thread_cpu_engine_interrupt",
             "max_result_lines": 500,
             "max_result_chars": 30000,
             "oversized_line": "30000_character_windows_4096_overlap_explicitly_incomplete",

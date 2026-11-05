@@ -595,8 +595,8 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     with matching_request():
         try:
             return _search_files(context, arguments)
-        except TimeoutError:
-            return _result_error("Regular expression too slow; aborted during file enumeration")
+        except TimeoutError as exc:
+            return _result_error(f"{exc} during file enumeration")
 
 
 def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -666,6 +666,7 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
     sensitive_candidates: list[str] = []
     budget = RegexBudget(regex)
     regex_timeout: dict[str, Any] | None = None
+    timeout_reason = ""
 
     if not include_sensitive:
         raw_sensitive_candidates = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
@@ -739,7 +740,8 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
                                     "is_match": True,
                                 }
                             )
-                except TimeoutError:
+                except TimeoutError as exc:
+                    timeout_reason = str(exc)
                     regex_timeout = {"path": rel_path, "line": 1, "column": 0}
                 if file_match_count:
                     total_matches += file_match_count
@@ -760,7 +762,8 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
                         if not line_matched:
                             matched_line_numbers.append(line_number)
                             line_matched = True
-                except TimeoutError:
+                except TimeoutError as exc:
+                    timeout_reason = str(exc)
                     regex_timeout = {"path": rel_path, "line": line_number, "column": 0}
                     break
 
@@ -898,7 +901,7 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
         metadata["regex_timeout"] = regex_timeout
         result_text = result_text.replace("No matches found.", "Search incomplete; no matches returned before interruption.")
         notice = (
-            "Regular expression too slow; aborted. "
+            f"{timeout_reason}. "
             f"Stopped at {regex_timeout['path']}:{regex_timeout['line']}:{regex_timeout['column']}; earlier matches preserved."
         )
         result_text = notice + "\n" + result_text
@@ -1010,6 +1013,7 @@ class _ArtifactSearch:
         self.matched_lines = self.matches = self.returned_lines = 0
         self.truncated = False
         self.timed_out = False
+        self.timeout_reason = ""
         self.stopped_line: int | None = None
         self.stopped_column: int | None = None
         # Reserve notices, including timeout and window limitations, in the page budget.
@@ -1090,7 +1094,8 @@ class _ArtifactSearch:
                 self.hits.append({"line": self.line, "column": column, "text": excerpt})
                 self.used += len(row) + 1
                 self.returned_lines += 1
-        except TimeoutError:
+        except TimeoutError as exc:
+            self.timeout_reason = str(exc)
             self.timed_out = self.truncated = True
             self.stopped_line = self.line
             self.stopped_column = self.base + max(0, pos - prefix)
@@ -1132,7 +1137,7 @@ class _ArtifactSearch:
             )
         if self.timed_out:
             parts.append(
-                "Regular expression too slow; aborted. "
+                f"{self.timeout_reason}. "
                 f"Matching stopped in the window at line {self.stopped_line}, column {self.stopped_column}; "
                 "earlier matches are preserved."
             )

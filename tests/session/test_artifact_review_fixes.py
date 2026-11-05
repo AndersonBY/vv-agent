@@ -242,7 +242,7 @@ def test_glob_enumeration_interrupts_pathological_matching(tmp_path, backend_nam
         backend.write_text("a" * 210 + str(i), "")
     started = time.monotonic()
     with pytest.raises(TimeoutError):
-        backend.list_files(".", "*a" * 20 + "Z")
+        backend.list_files(".", "*a" * 180 + "Z")
     assert time.monotonic() - started < 2
 
 
@@ -251,7 +251,7 @@ def test_discovery_timeout_is_an_explicit_tool_error(tmp_path, handler):
     backend = MemoryWorkspaceBackend()
     backend.write_text("a" * 30_000, "")
     started = time.monotonic()
-    arguments = {"glob": "*a" * 20 + "Z"}
+    arguments = {"glob": "*a" * 180 + "Z"}
     if handler is search_files:
         arguments["pattern"] = "needle"
     result = handler(ToolContext(tmp_path, {}, 0, backend), arguments)
@@ -278,7 +278,7 @@ def test_local_find_glob_fallback_interrupts_pathological_matching(tmp_path, mon
     for i in range(40):
         backend.write_text("a" * 210 + str(i), "")
     started = time.monotonic()
-    result = find_files(ToolContext(tmp_path, {}, 0, backend), {"glob": "*a" * 20 + "Z"})
+    result = find_files(ToolContext(tmp_path, {}, 0, backend), {"glob": "*a" * 180 + "Z"})
     assert time.monotonic() - started < 2
     assert result.status_code is ToolResultStatus.ERROR and result.error_code == "regex_timeout"
 
@@ -291,11 +291,11 @@ def test_search_enumeration_cpu_is_charged_before_content_matching(tmp_path, mon
 
     class Enumeration(MemoryWorkspaceBackend):
         def list_files(self, base, glob):
-            clock[0] += 0.3
+            clock[0] += 10.0
             return []
 
     result = search_files(ToolContext(tmp_path, {}, 0, Enumeration()), {"pattern": "needle"})
-    assert result.status_code is ToolResultStatus.ERROR and "too slow; aborted" in result.content
+    assert result.status_code is ToolResultStatus.ERROR and "total CPU limit" in result.content
 
 
 def test_unavailable_handle_does_not_regain_artifact_pointer_in_kernel(monkeypatch):
