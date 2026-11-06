@@ -405,6 +405,37 @@ def test_rejection_does_not_settle_an_earlier_genuinely_unknown_attempt(store, d
 
 
 @pytest.mark.parametrize("child", [False, True])
+@pytest.mark.parametrize("status,message", [(400, "too many tokens per minute"), (429, "too many tokens per day")])
+def test_quota_in_summary_preserves_history_and_child_boundary(store, database, monkeypatch, child, status, message):
+    from .test_summary_requests import call
+    from .test_summary_requests import configured as summary_runtime
+
+    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    rejected = fail(http_error(status, message), [])
+    steps = [rejected] * (2 if status == 429 else 1)
+    rt = (
+        summary_runtime(database, [call("child_task"), *steps, LLMResponse("done")], child=True)
+        if child
+        else configured(database, [*steps, LLMResponse("done")])
+    )
+    start(store)
+    drive(store, "s", runtime=rt)
+    receipts = records_of(store, "op_completed")
+    codes = [r.payload["result"].get("error_code") for r in receipts]
+    assert codes.count("model_request_rejected") == len(steps)
+    assert "prompt_too_long" not in codes
+    assert not records_of(store, "context_compacted")
+    assert not records_of(store, "op_unknown")
+    if child:
+        assert "child_summary_unavailable" in codes
+        assert not records_of(store, "op_parked")
+    else:
+        assert records_of(store, "op_planned")[-1].payload["purpose"] == "primary"
+        assert "old facts" in str(records_of(store, "op_planned")[-1].payload["request"])
+    assert records_of(store, "turn_ended")[-1].payload["status"] == "completed"
+
+
+@pytest.mark.parametrize("child", [False, True])
 def test_http_context_error_in_summary_keeps_existing_failure_semantics(store, database, child):
     from .test_summary_requests import call
     from .test_summary_requests import configured as summary_runtime
