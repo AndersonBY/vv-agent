@@ -77,6 +77,23 @@ old-version session.
 
 ## Version notes
 
+### 0.33.3 — 2026-11-06
+
+A token quota means “wait for more allowance”; shrinking history cannot fix it.
+`too many tokens per day` on 429 now follows the existing rejection backoff and
+ends with `model_request_rejected` after the permitted attempts. `too many
+tokens per minute` on 400 stops after one call. Neither starts compaction.
+Actual context-size errors still compact, including the provider phrases
+`context window exceeded` and `model context window is ...` outside 429.
+
+No dependencies, stored record/inbox/SQL versions or frozen definitions change.
+Stop/drain drivers and API entry points before switching so all workers use the
+same classification. Existing receipts retain their recorded outcomes; upgrading
+does not settle old Unknown calls or replay quota failures. The 0.33.2 restriction
+against handing sessions back to 0.33.1 continues to apply. Contract 36.0.0 is the
+new canonical behavior; the release lock/snapshot must be synchronized after its
+immutable publication. See [release notes](releases/0.33.3.md).
+
 ### 0.33.2 — 2026-11-06
 
 Requires contract 35.0.0. Provider HTTP 4xx rejection (except 408) is now a

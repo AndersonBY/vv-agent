@@ -32,7 +32,7 @@ def test_vendor_retries_are_observed(store, database, provider, case):
 
 
 @contextmanager
-def local_vendor_transport(case):
+def local_vendor_transport(case, *, rejection=None):
     """Inject only local HTTP, leaving vv-llm and vendor construction/retries real."""
     requests, clients = [], []
 
@@ -43,6 +43,9 @@ def local_vendor_transport(case):
             raise httpx2.ReadTimeout("synthetic timeout after submission", request=request)
         status = 500 if case == "500_then_400" and position == 0 else 429 if case == "always_429" else 400
         body = {"error": {"message": "Synthetic rejected", "type": "invalid_request_error"}}
+        if rejection is not None:
+            status, detail = rejection
+            body = {"error": detail}
         return httpx2.Response(status, json=body)
 
     original = httpx2.Client.__init__

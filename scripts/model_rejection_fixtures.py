@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import httpx2
 
+from tests.model_context_cases import CONTEXT_QUOTA_CASES
 from tests.session.test_compaction import SUMMARY, configured
 from tests.session.test_endpoint_routing import host
 from tests.session.test_model_http_observation import local_vendor_transport
@@ -53,6 +54,16 @@ def produce() -> dict:
         ("context_content_string", context_http_error("content_string"), True, False),
     ]
     routes = {}
+    quota_transports = {}
+    quota_expected = {}
+    for label, status, detail, too_long in CONTEXT_QUOTA_CASES:
+        name = f"context_quota_{label}" if too_long else f"quota_rejected_{label}"
+        error = http_error(status, detail.get("message", "Rejected"))
+        error.body = {"error": detail}
+        cases.append((name, error, too_long, False))
+        quota_expected[name] = (status, too_long)
+        if not too_long:
+            quota_transports[name] = (status, detail)
     for status in (400, 401, 403, 404, 429):
         for mode in ("single", "success", "exhausted"):
             name = f"endpoint_{status}_{mode}"
@@ -161,8 +172,11 @@ def produce() -> dict:
                 rt.agent.output_repair = rejected
             http_requests = None
             retry_sleeps = None
-            if name in transport_cases or name in completion_cases or name in retry_cases:
-                if name in transport_cases:
+            if name in transport_cases or name in completion_cases or name in retry_cases or name in quota_transports:
+                if name in quota_transports:
+                    provider = "openai"
+                    transport = local_vendor_transport("quota", rejection=quota_transports[name])
+                elif name in transport_cases:
                     provider, transport_case = transport_cases[name]
                     transport = local_vendor_transport(transport_case)
                 elif name in retry_cases:
@@ -227,6 +241,23 @@ def produce() -> dict:
                 wire["vendor_retry_sleeps"] = [{"status_code": status, "delay_seconds": delay} for status, delay in retry_sleeps]
             if name in routes:
                 wire |= {"endpoint_order": routes[name], "endpoint_calls": endpoint_calls}
+            if name in quota_expected:
+                status, too_long = quota_expected[name]
+                receipts = wire["receipts"]
+                if too_long:
+                    assert receipts[0]["result"]["error_code"] == "prompt_too_long"
+                    assert wire["context_compacted"] == 1
+                    assert [p["purpose"] for p in wire["plans"]] == ["primary", "compaction", "primary"]
+                    assert wire["terminal"]["status"] == "completed"
+                else:
+                    attempts = 2 if status == 429 else 1
+                    assert [r["result"]["error_code"] for r in receipts] == ["model_request_rejected"] * attempts
+                    assert wire["physical_http_requests"] == (6 if status == 429 else 1)
+                    assert wire["context_compacted"] == 0
+                    assert [p["attempt"] for p in wire["plans"]] == list(range(1, attempts + 1))
+                    assert all(p["purpose"] == "primary" for p in wire["plans"])
+                    assert wire["terminal"]["reason"] == "model_request_rejected"
+                assert not wire["unknowns"]
             encoded = canonical_json_bytes(wire)
             vectors.append(
                 {"wire": wire, "bytes_base64": base64.b64encode(encoded).decode(), "sha256": sha256(encoded).hexdigest()}

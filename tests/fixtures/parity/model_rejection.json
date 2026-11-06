@@ -1663,6 +1663,842 @@
     },
     {
       "wire": {
+        "id": "quota_rejected_quota_day",
+        "rejected_calls": 0,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 2,
+            "purpose": "primary",
+            "not_before_ms": 0
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "HTTP 429: Model provider request failed.",
+              "error_code": "model_request_rejected",
+              "rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              },
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 2,
+            "result": {
+              "content": "HTTP 429: Model provider request failed.",
+              "error_code": "model_request_rejected",
+              "rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              },
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 2,
+              "operation_id": "s/turn/initial/model/primary/1"
+            }
+          ],
+          "budget": {},
+          "reason": "model_request_rejected",
+          "result": "HTTP 429: Model provider request failed.",
+          "status": "failed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 0,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary",
+              "model_rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              }
+            },
+            "outcome": "definitive",
+            "error_code": "model_request_rejected"
+          },
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 14,
+              "purpose": "primary",
+              "model_rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              }
+            },
+            "outcome": "definitive",
+            "error_code": "model_request_rejected"
+          },
+          {
+            "type": "run_failed",
+            "metadata": {
+              "session_seq": 17
+            },
+            "error": "model_request_rejected: HTTP 429: Model provider request failed."
+          }
+        ],
+        "physical_http_requests": 6
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MCwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsIm1ldGFkYXRhIjp7Im1vZGVsX3JlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn0seyJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsIm1ldGFkYXRhIjp7Im1vZGVsX3JlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6MTR9LCJvdXRjb21lIjoiZGVmaW5pdGl2ZSIsInR5cGUiOiJtb2RlbF9jYWxsX2ZhaWxlZCJ9LHsiZXJyb3IiOiJtb2RlbF9yZXF1ZXN0X3JlamVjdGVkOiBIVFRQIDQyOTogTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjE3fSwidHlwZSI6InJ1bl9mYWlsZWQifV0sImlkIjoicXVvdGFfcmVqZWN0ZWRfcXVvdGFfZGF5IiwicGh5c2ljYWxfaHR0cF9yZXF1ZXN0cyI6NiwicGxhbnMiOlt7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In0seyJhdHRlbXB0IjoyLCJub3RfYmVmb3JlX21zIjowLCJwdXJwb3NlIjoicHJpbWFyeSJ9XSwicmVjZWlwdHMiOlt7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjIsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwidG9vbF9jYWxscyI6W119fV0sInJlamVjdGVkX2NhbGxzIjowLCJ0ZXJtaW5hbCI6eyJhZG9wdGVkX3Jlc3VsdHMiOlt7ImF0dGVtcHQiOjIsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSJ9XSwiYnVkZ2V0Ijp7fSwicmVhc29uIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlc3VsdCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJzdGF0dXMiOiJmYWlsZWQiLCJ1bmNvbmZpcm1lZF9vcGVyYXRpb25zIjpbXX0sInVua25vd25zIjpbXX0=",
+      "sha256": "269805f2d1c3ea910a71050a6468a20c30c2b9ff051460be499856ae572a56a3"
+    },
+    {
+      "wire": {
+        "id": "quota_rejected_quota_minute",
+        "rejected_calls": 0,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "HTTP 400: Model provider request failed.",
+              "error_code": "model_request_rejected",
+              "rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": false,
+                "status_code": 400
+              },
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            }
+          ],
+          "budget": {},
+          "reason": "model_request_rejected",
+          "result": "HTTP 400: Model provider request failed.",
+          "status": "failed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 0,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary",
+              "model_rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": false,
+                "status_code": 400
+              }
+            },
+            "outcome": "definitive",
+            "error_code": "model_request_rejected"
+          },
+          {
+            "type": "run_failed",
+            "metadata": {
+              "session_seq": 12
+            },
+            "error": "model_request_rejected: HTTP 400: Model provider request failed."
+          }
+        ],
+        "physical_http_requests": 1
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MCwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsIm1ldGFkYXRhIjp7Im1vZGVsX3JlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjpmYWxzZSwic3RhdHVzX2NvZGUiOjQwMH0sInB1cnBvc2UiOiJwcmltYXJ5Iiwic2Vzc2lvbl9zZXEiOjl9LCJvdXRjb21lIjoiZGVmaW5pdGl2ZSIsInR5cGUiOiJtb2RlbF9jYWxsX2ZhaWxlZCJ9LHsiZXJyb3IiOiJtb2RlbF9yZXF1ZXN0X3JlamVjdGVkOiBIVFRQIDQwMDogTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjEyfSwidHlwZSI6InJ1bl9mYWlsZWQifV0sImlkIjoicXVvdGFfcmVqZWN0ZWRfcXVvdGFfbWludXRlIiwicGh5c2ljYWxfaHR0cF9yZXF1ZXN0cyI6MSwicGxhbnMiOlt7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In1dLCJyZWNlaXB0cyI6W3siYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50IjoiSFRUUCA0MDA6IE1vZGVsIHByb3ZpZGVyIHJlcXVlc3QgZmFpbGVkLiIsImVycm9yX2NvZGUiOiJtb2RlbF9yZXF1ZXN0X3JlamVjdGVkIiwicmVqZWN0aW9uIjp7Im1lc3NhZ2UiOiJNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJwcm92aWRlcl9jb2RlIjpudWxsLCJwcm92aWRlcl90eXBlIjpudWxsLCJyZXRyeWFibGUiOmZhbHNlLCJzdGF0dXNfY29kZSI6NDAwfSwidG9vbF9jYWxscyI6W119fV0sInJlamVjdGVkX2NhbGxzIjowLCJ0ZXJtaW5hbCI6eyJhZG9wdGVkX3Jlc3VsdHMiOlt7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSJ9XSwiYnVkZ2V0Ijp7fSwicmVhc29uIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlc3VsdCI6IkhUVFAgNDAwOiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJzdGF0dXMiOiJmYWlsZWQiLCJ1bmNvbmZpcm1lZF9vcGVyYXRpb25zIjpbXX0sInVua25vd25zIjpbXX0=",
+      "sha256": "ab1fc02683041265e8deb15c0914e246d142eb0e90d72fcebd3cb3af6d653a21"
+    },
+    {
+      "wire": {
+        "id": "quota_rejected_quota_tpm",
+        "rejected_calls": 0,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 2,
+            "purpose": "primary",
+            "not_before_ms": 0
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "HTTP 429: Model provider request failed.",
+              "error_code": "model_request_rejected",
+              "rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              },
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 2,
+            "result": {
+              "content": "HTTP 429: Model provider request failed.",
+              "error_code": "model_request_rejected",
+              "rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              },
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 2,
+              "operation_id": "s/turn/initial/model/primary/1"
+            }
+          ],
+          "budget": {},
+          "reason": "model_request_rejected",
+          "result": "HTTP 429: Model provider request failed.",
+          "status": "failed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 0,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary",
+              "model_rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              }
+            },
+            "outcome": "definitive",
+            "error_code": "model_request_rejected"
+          },
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 14,
+              "purpose": "primary",
+              "model_rejection": {
+                "message": "Model provider request failed.",
+                "provider_code": null,
+                "provider_type": null,
+                "retryable": true,
+                "status_code": 429
+              }
+            },
+            "outcome": "definitive",
+            "error_code": "model_request_rejected"
+          },
+          {
+            "type": "run_failed",
+            "metadata": {
+              "session_seq": 17
+            },
+            "error": "model_request_rejected: HTTP 429: Model provider request failed."
+          }
+        ],
+        "physical_http_requests": 6
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MCwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsIm1ldGFkYXRhIjp7Im1vZGVsX3JlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn0seyJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsIm1ldGFkYXRhIjp7Im1vZGVsX3JlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6MTR9LCJvdXRjb21lIjoiZGVmaW5pdGl2ZSIsInR5cGUiOiJtb2RlbF9jYWxsX2ZhaWxlZCJ9LHsiZXJyb3IiOiJtb2RlbF9yZXF1ZXN0X3JlamVjdGVkOiBIVFRQIDQyOTogTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwibWV0YWRhdGEiOnsic2Vzc2lvbl9zZXEiOjE3fSwidHlwZSI6InJ1bl9mYWlsZWQifV0sImlkIjoicXVvdGFfcmVqZWN0ZWRfcXVvdGFfdHBtIiwicGh5c2ljYWxfaHR0cF9yZXF1ZXN0cyI6NiwicGxhbnMiOlt7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In0seyJhdHRlbXB0IjoyLCJub3RfYmVmb3JlX21zIjowLCJwdXJwb3NlIjoicHJpbWFyeSJ9XSwicmVjZWlwdHMiOlt7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjIsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJlcnJvcl9jb2RlIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlamVjdGlvbiI6eyJtZXNzYWdlIjoiTW9kZWwgcHJvdmlkZXIgcmVxdWVzdCBmYWlsZWQuIiwicHJvdmlkZXJfY29kZSI6bnVsbCwicHJvdmlkZXJfdHlwZSI6bnVsbCwicmV0cnlhYmxlIjp0cnVlLCJzdGF0dXNfY29kZSI6NDI5fSwidG9vbF9jYWxscyI6W119fV0sInJlamVjdGVkX2NhbGxzIjowLCJ0ZXJtaW5hbCI6eyJhZG9wdGVkX3Jlc3VsdHMiOlt7ImF0dGVtcHQiOjIsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSJ9XSwiYnVkZ2V0Ijp7fSwicmVhc29uIjoibW9kZWxfcmVxdWVzdF9yZWplY3RlZCIsInJlc3VsdCI6IkhUVFAgNDI5OiBNb2RlbCBwcm92aWRlciByZXF1ZXN0IGZhaWxlZC4iLCJzdGF0dXMiOiJmYWlsZWQiLCJ1bmNvbmZpcm1lZF9vcGVyYXRpb25zIjpbXX0sInVua25vd25zIjpbXX0=",
+      "sha256": "7fd51387daf56ad51aa2d570dab27fe2813dcc7861f282d8b8815a86023631e0"
+    },
+    {
+      "wire": {
+        "id": "context_quota_per_request",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfcGVyX3JlcXVlc3QiLCJwbGFucyI6W3siYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6InByaW1hcnkifSx7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJjb21wYWN0aW9uIn0seyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoicHJpbWFyeSJ9XSwicmVjZWlwdHMiOlt7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IiIsImVycm9yX2NvZGUiOiJwcm9tcHRfdG9vX2xvbmciLCJ0b29sX2NhbGxzIjpbXX19LHsiYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50Ijoie1wib3JpZ2luYWxfdXNlcl9tZXNzYWdlc1wiOiBbXCJvcmlnaW5hbCByZXF1ZXN0XCJdLCBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIkNvbnRpbnVlIHRoZSB0YXNrXCJ9IiwicmF3Ijp7fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfX0seyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiJkb25lIiwicmF3Ijp7fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfX1dLCJyZWplY3RlZF9jYWxscyI6MSwidGVybWluYWwiOnsiYWRvcHRlZF9yZXN1bHRzIjpbeyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEifSx7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL2NvbXBhY3Rpb24vMGZkZDkwMmUxNDYxOTU4NDQ0MTQyODM0N2Y5NzdkYjM5NjZjNjU0NTc0MmVkODAzY2QxZGJiNTI5MDk5ZmVjOS9zdW1tYXJ5LzEifSx7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMiJ9XSwiYnVkZ2V0Ijp7fSwicmVhc29uIjpudWxsLCJyZXN1bHQiOiJkb25lIiwic3RhdHVzIjoiY29tcGxldGVkIiwidW5jb25maXJtZWRfb3BlcmF0aW9ucyI6W119LCJ1bmtub3ducyI6W119",
+      "sha256": "ec27fce23ff60a8ae3f4e52cd86bcf5e541c5eb5adeaa9ce7ea72fc519dd25ce"
+    },
+    {
+      "wire": {
+        "id": "context_quota_context_quota",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfY29udGV4dF9xdW90YSIsInBsYW5zIjpbeyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoicHJpbWFyeSJ9LHsiYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6ImNvbXBhY3Rpb24ifSx7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In1dLCJyZWNlaXB0cyI6W3siYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50IjoiIiwiZXJyb3JfY29kZSI6InByb21wdF90b29fbG9uZyIsInRvb2xfY2FsbHMiOltdfX0seyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiJ7XCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXCI6IFtcIm9yaWdpbmFsIHJlcXVlc3RcIl0sIFwiY3VycmVudF93b3JrX3N0YXRlXCI6IFwiQ29udGludWUgdGhlIHRhc2tcIn0iLCJyYXciOnt9LCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6ImRvbmUiLCJyYXciOnt9LCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W119fV0sInJlamVjdGVkX2NhbGxzIjoxLCJ0ZXJtaW5hbCI6eyJhZG9wdGVkX3Jlc3VsdHMiOlt7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSJ9LHsiYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvY29tcGFjdGlvbi8wZmRkOTAyZTE0NjE5NTg0NDQxNDI4MzQ3Zjk3N2RiMzk2NmM2NTQ1NzQyZWQ4MDNjZDFkYmI1MjkwOTlmZWM5L3N1bW1hcnkvMSJ9LHsiYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8yIn1dLCJidWRnZXQiOnt9LCJyZWFzb24iOm51bGwsInJlc3VsdCI6ImRvbmUiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJ1bmNvbmZpcm1lZF9vcGVyYXRpb25zIjpbXX0sInVua25vd25zIjpbXX0=",
+      "sha256": "4c8bb5c9bfa20976a8d1267cfad122ed1dfc81327b9644d9d4ed58dbf7fcce72"
+    },
+    {
+      "wire": {
+        "id": "context_quota_context_429",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfY29udGV4dF80MjkiLCJwbGFucyI6W3siYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6InByaW1hcnkifSx7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJjb21wYWN0aW9uIn0seyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoicHJpbWFyeSJ9XSwicmVjZWlwdHMiOlt7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IiIsImVycm9yX2NvZGUiOiJwcm9tcHRfdG9vX2xvbmciLCJ0b29sX2NhbGxzIjpbXX19LHsiYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50Ijoie1wib3JpZ2luYWxfdXNlcl9tZXNzYWdlc1wiOiBbXCJvcmlnaW5hbCByZXF1ZXN0XCJdLCBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIkNvbnRpbnVlIHRoZSB0YXNrXCJ9IiwicmF3Ijp7fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfX0seyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiJkb25lIiwicmF3Ijp7fSwicmVhc29uaW5nX2NvbnRlbnQiOm51bGwsInRvb2xfY2FsbHMiOltdfX1dLCJyZWplY3RlZF9jYWxscyI6MSwidGVybWluYWwiOnsiYWRvcHRlZF9yZXN1bHRzIjpbeyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzEifSx7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL2NvbXBhY3Rpb24vMGZkZDkwMmUxNDYxOTU4NDQ0MTQyODM0N2Y5NzdkYjM5NjZjNjU0NTc0MmVkODAzY2QxZGJiNTI5MDk5ZmVjOS9zdW1tYXJ5LzEifSx7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMiJ9XSwiYnVkZ2V0Ijp7fSwicmVhc29uIjpudWxsLCJyZXN1bHQiOiJkb25lIiwic3RhdHVzIjoiY29tcGxldGVkIiwidW5jb25maXJtZWRfb3BlcmF0aW9ucyI6W119LCJ1bmtub3ducyI6W119",
+      "sha256": "c4be20c90afc6c55f06437aaff1069b3b96baa69c057abb6943d179541ca43b1"
+    },
+    {
+      "wire": {
+        "id": "context_quota_model_window",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfbW9kZWxfd2luZG93IiwicGxhbnMiOlt7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In0seyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoiY29tcGFjdGlvbiJ9LHsiYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6InByaW1hcnkifV0sInJlY2VpcHRzIjpbeyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiIiLCJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IntcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIjogW1wib3JpZ2luYWwgcmVxdWVzdFwiXSwgXCJjdXJyZW50X3dvcmtfc3RhdGVcIjogXCJDb250aW51ZSB0aGUgdGFza1wifSIsInJhdyI6e30sInJlYXNvbmluZ19jb250ZW50IjpudWxsLCJ0b29sX2NhbGxzIjpbXX19LHsiYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50IjoiZG9uZSIsInJhdyI6e30sInJlYXNvbmluZ19jb250ZW50IjpudWxsLCJ0b29sX2NhbGxzIjpbXX19XSwicmVqZWN0ZWRfY2FsbHMiOjEsInRlcm1pbmFsIjp7ImFkb3B0ZWRfcmVzdWx0cyI6W3siYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xIn0seyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzBmZGQ5MDJlMTQ2MTk1ODQ0NDE0MjgzNDdmOTc3ZGIzOTY2YzY1NDU3NDJlZDgwM2NkMWRiYjUyOTA5OWZlYzkvc3VtbWFyeS8xIn0seyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzIifV0sImJ1ZGdldCI6e30sInJlYXNvbiI6bnVsbCwicmVzdWx0IjoiZG9uZSIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInVuY29uZmlybWVkX29wZXJhdGlvbnMiOltdfSwidW5rbm93bnMiOltdfQ==",
+      "sha256": "901645595b410f23742298e7502d42c8fdadff4b31a60a969d6e7ddcf1468230"
+    },
+    {
+      "wire": {
+        "id": "context_quota_window_exceeded",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfd2luZG93X2V4Y2VlZGVkIiwicGxhbnMiOlt7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In0seyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoiY29tcGFjdGlvbiJ9LHsiYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6InByaW1hcnkifV0sInJlY2VpcHRzIjpbeyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiIiLCJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6IntcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIjogW1wib3JpZ2luYWwgcmVxdWVzdFwiXSwgXCJjdXJyZW50X3dvcmtfc3RhdGVcIjogXCJDb250aW51ZSB0aGUgdGFza1wifSIsInJhdyI6e30sInJlYXNvbmluZ19jb250ZW50IjpudWxsLCJ0b29sX2NhbGxzIjpbXX19LHsiYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50IjoiZG9uZSIsInJhdyI6e30sInJlYXNvbmluZ19jb250ZW50IjpudWxsLCJ0b29sX2NhbGxzIjpbXX19XSwicmVqZWN0ZWRfY2FsbHMiOjEsInRlcm1pbmFsIjp7ImFkb3B0ZWRfcmVzdWx0cyI6W3siYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8xIn0seyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9jb21wYWN0aW9uLzBmZGQ5MDJlMTQ2MTk1ODQ0NDE0MjgzNDdmOTc3ZGIzOTY2YzY1NDU3NDJlZDgwM2NkMWRiYjUyOTA5OWZlYzkvc3VtbWFyeS8xIn0seyJhdHRlbXB0IjoxLCJvcGVyYXRpb25faWQiOiJzL3R1cm4vaW5pdGlhbC9tb2RlbC9wcmltYXJ5LzIifV0sImJ1ZGdldCI6e30sInJlYXNvbiI6bnVsbCwicmVzdWx0IjoiZG9uZSIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInVuY29uZmlybWVkX29wZXJhdGlvbnMiOltdfSwidW5rbm93bnMiOltdfQ==",
+      "sha256": "58bddb234e2baef7ee68c3da8b2462a63c451c711989f0708215aefc393ed5c8"
+    },
+    {
+      "wire": {
+        "id": "context_quota_model_maximum",
+        "rejected_calls": 1,
+        "plans": [
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "compaction",
+            "not_before_ms": null
+          },
+          {
+            "attempt": 1,
+            "purpose": "primary",
+            "not_before_ms": null
+          }
+        ],
+        "receipts": [
+          {
+            "attempt": 1,
+            "result": {
+              "content": "",
+              "error_code": "prompt_too_long",
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "{\"original_user_messages\": [\"original request\"], \"current_work_state\": \"Continue the task\"}",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          },
+          {
+            "attempt": 1,
+            "result": {
+              "content": "done",
+              "raw": {},
+              "reasoning_content": null,
+              "tool_calls": []
+            },
+            "execution_started": true
+          }
+        ],
+        "unknowns": [],
+        "terminal": {
+          "adopted_results": [
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/compaction/0fdd902e14619584441428347f977db3966c6545742ed803cd1dbb529099fec9/summary/1"
+            },
+            {
+              "attempt": 1,
+              "operation_id": "s/turn/initial/model/primary/2"
+            }
+          ],
+          "budget": {},
+          "reason": null,
+          "result": "done",
+          "status": "completed",
+          "unconfirmed_operations": []
+        },
+        "context_compacted": 1,
+        "events": [
+          {
+            "type": "model_call_failed",
+            "metadata": {
+              "session_seq": 9,
+              "purpose": "primary"
+            },
+            "outcome": "definitive",
+            "error_code": "prompt_too_long"
+          }
+        ]
+      },
+      "bytes_base64": "eyJjb250ZXh0X2NvbXBhY3RlZCI6MSwiZXZlbnRzIjpbeyJlcnJvcl9jb2RlIjoicHJvbXB0X3Rvb19sb25nIiwibWV0YWRhdGEiOnsicHVycG9zZSI6InByaW1hcnkiLCJzZXNzaW9uX3NlcSI6OX0sIm91dGNvbWUiOiJkZWZpbml0aXZlIiwidHlwZSI6Im1vZGVsX2NhbGxfZmFpbGVkIn1dLCJpZCI6ImNvbnRleHRfcXVvdGFfbW9kZWxfbWF4aW11bSIsInBsYW5zIjpbeyJhdHRlbXB0IjoxLCJub3RfYmVmb3JlX21zIjpudWxsLCJwdXJwb3NlIjoicHJpbWFyeSJ9LHsiYXR0ZW1wdCI6MSwibm90X2JlZm9yZV9tcyI6bnVsbCwicHVycG9zZSI6ImNvbXBhY3Rpb24ifSx7ImF0dGVtcHQiOjEsIm5vdF9iZWZvcmVfbXMiOm51bGwsInB1cnBvc2UiOiJwcmltYXJ5In1dLCJyZWNlaXB0cyI6W3siYXR0ZW1wdCI6MSwiZXhlY3V0aW9uX3N0YXJ0ZWQiOnRydWUsInJlc3VsdCI6eyJjb250ZW50IjoiIiwiZXJyb3JfY29kZSI6InByb21wdF90b29fbG9uZyIsInRvb2xfY2FsbHMiOltdfX0seyJhdHRlbXB0IjoxLCJleGVjdXRpb25fc3RhcnRlZCI6dHJ1ZSwicmVzdWx0Ijp7ImNvbnRlbnQiOiJ7XCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXCI6IFtcIm9yaWdpbmFsIHJlcXVlc3RcIl0sIFwiY3VycmVudF93b3JrX3N0YXRlXCI6IFwiQ29udGludWUgdGhlIHRhc2tcIn0iLCJyYXciOnt9LCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W119fSx7ImF0dGVtcHQiOjEsImV4ZWN1dGlvbl9zdGFydGVkIjp0cnVlLCJyZXN1bHQiOnsiY29udGVudCI6ImRvbmUiLCJyYXciOnt9LCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W119fV0sInJlamVjdGVkX2NhbGxzIjoxLCJ0ZXJtaW5hbCI6eyJhZG9wdGVkX3Jlc3VsdHMiOlt7ImF0dGVtcHQiOjEsIm9wZXJhdGlvbl9pZCI6InMvdHVybi9pbml0aWFsL21vZGVsL3ByaW1hcnkvMSJ9LHsiYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvY29tcGFjdGlvbi8wZmRkOTAyZTE0NjE5NTg0NDQxNDI4MzQ3Zjk3N2RiMzk2NmM2NTQ1NzQyZWQ4MDNjZDFkYmI1MjkwOTlmZWM5L3N1bW1hcnkvMSJ9LHsiYXR0ZW1wdCI6MSwib3BlcmF0aW9uX2lkIjoicy90dXJuL2luaXRpYWwvbW9kZWwvcHJpbWFyeS8yIn1dLCJidWRnZXQiOnt9LCJyZWFzb24iOm51bGwsInJlc3VsdCI6ImRvbmUiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJ1bmNvbmZpcm1lZF9vcGVyYXRpb25zIjpbXX0sInVua25vd25zIjpbXX0=",
+      "sha256": "104d71cc3f2822249f3c4aa89f82c3ea07e84f7c3ece02d37e3e8efd5e49989e"
+    },
+    {
+      "wire": {
         "id": "endpoint_400_single",
         "rejected_calls": 1,
         "plans": [

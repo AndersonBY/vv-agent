@@ -1,6 +1,22 @@
 # Changelog
 
 
+## 0.33.3 — 2026-11-06
+
+Fix quota and time-window errors being mistaken for oversized input. Generic
+`too many tokens` / `request too large` wording now checks word-bounded quota
+signals in the same text source. HTTP 429 needs an explicit context marker;
+other 429s retain rejection retry/backoff without compaction. Non-429 explicit
+context markers keep priority over quota; `context window exceeded` and
+`model context window is` now trigger recovery. Adapter rejection flags share
+the same classifier. HTTP 413, content-string param rules, HTTP observations and
+uncertainty vetoes keep their behavior. Dependencies and store schemas are unchanged.
+
+The canonical behavior is contract 36.0.0 (a major under its observable-behavior
+policy). Local verification selects that contract checkout; the published
+35.0.0 lock/snapshot stays until immutable release synchronization. See
+[release notes](docs/releases/0.33.3.md) and [upgrading](docs/upgrading.md).
+
 ## 0.33.2 — 2026-11-06
 
 Provider HTTP 4xx responses other than 408 now fail definitively instead of

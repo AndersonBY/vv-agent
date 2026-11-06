@@ -5,9 +5,134 @@ from typing import Any, cast
 
 import httpx2
 import pytest
-from session.test_model_rejection import context_http_error, observe_error
+from model_context_cases import CONTEXT_QUOTA_CASES
+from session.test_model_rejection import context_http_error, http_error, observe_error
 
 from vv_agent.llm.errors import ModelRequestRejected, ModelStreamInterrupted, is_prompt_too_long_error, model_request_rejection
+
+
+@pytest.mark.parametrize("name,status,detail,expected", CONTEXT_QUOTA_CASES)
+@pytest.mark.parametrize("provider", ["httpx2", "openai", "anthropic"])
+def test_context_quota_rules_on_real_transport(name, status, detail, expected, provider):
+    from importlib import import_module
+
+    from vv_agent.llm.http_observation import HttpObservation, ObservedHttpClient
+
+    observation = HttpObservation()
+    with ObservedHttpClient(
+        observation, transport=httpx2.MockTransport(lambda request: httpx2.Response(status, json={"error": detail}))
+    ) as client:
+        response = client.post("https://provider.invalid")
+        if provider == "httpx2":
+            with pytest.raises(httpx2.HTTPStatusError) as caught:
+                response.raise_for_status()
+            error = caught.value
+        else:
+            error = import_module(provider).APIStatusError("Rejected", response=response, body={"error": detail})
+        cast(Any, error)._vv_http_observation = observation
+        assert observation.all_rejected
+        assert is_prompt_too_long_error(error) is expected
+        explicit = ModelRequestRejected(
+            status, detail.get("message", "Rejected"), provider_code=detail.get("code"), provider_type=detail.get("type")
+        )
+        assert explicit._prompt_too_long is expected
+        assert is_prompt_too_long_error(explicit) is expected
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [
+        "per day",
+        "per hour",
+        "per minute",
+        "per min",
+        "per second",
+        "per sec",
+        "per month",
+        "tokens per min",
+        "TPM",
+        "TPD",
+        "RPM",
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "insufficient_quota",
+    ],
+)
+@pytest.mark.parametrize("pattern", ["too many tokens", "request too large"])
+def test_generic_context_patterns_reject_time_windows_and_quota(signal, pattern):
+    assert not is_prompt_too_long_error(ModelRequestRejected(400, f"{pattern}: {signal}"))
+
+
+@pytest.mark.parametrize("suffix", ["per request", "per minimum", "per monthly", "quotable", "TPMs", "RPMs", "rate limited"])
+def test_quota_signals_require_word_boundaries(suffix):
+    assert is_prompt_too_long_error(ModelRequestRejected(400, f"too many tokens {suffix}"))
+
+
+@pytest.mark.parametrize(
+    "pattern", ["prompt is too long", "prompt_too_long", "context_length_exceeded", "maximum context length"]
+)
+@pytest.mark.parametrize("status", [400, 429])
+def test_explicit_context_patterns_win_over_quota(status, pattern):
+    error = ModelRequestRejected(status, f"{pattern}: quota per day")
+    assert error._prompt_too_long
+    assert is_prompt_too_long_error(error)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "too many tokens",
+        "request too large",
+        "too many tokens per request",
+        "context window exceeded",
+        "model context window is 128k",
+    ],
+)
+def test_429_only_accepts_context_allowlist_even_through_wrappers(pattern):
+    error = http_error(429, pattern)
+    wrapper = RuntimeError(pattern)
+    wrapper.__cause__ = error
+    assert not is_prompt_too_long_error(wrapper)
+
+
+def test_quota_veto_stays_local_to_matching_text():
+    error = RuntimeError("too many tokens per request")
+    error.__cause__ = ModelRequestRejected(400, "quota")
+    assert is_prompt_too_long_error(error)
+
+
+@pytest.mark.parametrize("field", ["message", "code", "type"])
+@pytest.mark.parametrize("status", [400, 429])
+def test_quota_veto_applies_to_provider_fields(field, status):
+    error = http_error(status, "Rejected")
+    error.body = {"error": {field: "request too large: tokens per min (TPM)"}}
+    assert not is_prompt_too_long_error(error)
+
+
+@pytest.mark.parametrize(
+    "param,expected",
+    [
+        ("prompt", True),
+        ("input", True),
+        ("messages[0].content", True),
+        ("input[12].content[0].text", True),
+        ("tools[0].function.name", False),
+        (None, False),
+        ("messages[0].content_extra", False),
+    ],
+)
+def test_429_string_limit_preserves_content_param_rule(param, expected):
+    error = http_error(429, "quota")
+    error.body = {"error": {"code": "string_above_max_length", "param": param, "message": "quota"}}
+    assert is_prompt_too_long_error(error) is expected
+
+
+def test_413_and_bare_text_share_quota_rules():
+    assert ModelRequestRejected(413, "quota per day")._prompt_too_long
+    assert is_prompt_too_long_error(ModelRequestRejected(413, "quota per day"))
+    assert not is_prompt_too_long_error(RuntimeError("too many tokens per day"))
+    assert is_prompt_too_long_error(RuntimeError("context window exceeded: quota"))
 
 
 @pytest.mark.parametrize("transport", ["httpx2", "httpx"])

@@ -37,6 +37,7 @@ class Loopback:
         self.peers = {}
         self.requests = 0
         self.retry = False
+        self.rejection = None
         self.stopping = threading.Event()
         self.thread = threading.Thread(target=self.serve, name="loopback-http-server")
         self.thread.start()
@@ -75,6 +76,18 @@ class Loopback:
                 if len(body) < length:
                     continue
                 self.requests += 1
+                if self.rejection is not None:
+                    status, detail = self.rejection
+                    payload = json.dumps({"error": detail}).encode()
+                    peer.sendall(
+                        (
+                            f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
+                            f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n"
+                        ).encode()
+                        + payload
+                    )
+                    self.close_peer(peer)
+                    continue
                 stalled = self.requests % 3 != 0 if self.retry else b"/stall" in head.split(b"\r\n", 1)[0]
                 status = b"429 Too Many Requests" if stalled or self.retry else b"200 OK"
                 peer.sendall(b"HTTP/1.1 " + status + b"\r\nContent-Length: 2\r\nRetry-After: 7\r\nConnection: close\r\n\r\n")
@@ -111,6 +124,40 @@ def resources():
         with suppress(FileNotFoundError):
             sockets += os.readlink(f"/proc/self/fd/{fd}").startswith("socket:")
     return dict(active_count=threading.active_count(), threads=threads, fds=len(fds), sockets=sockets)
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "status,message,attempts,http_requests",
+    [
+        (429, "too many tokens per day", 2, 6),
+        (400, "too many tokens per minute", 1, 1),
+    ],
+)
+def test_quota_rejection_through_real_http_kernel(loopback, monkeypatch, provider, status, message, attempts, http_requests):
+    from session.test_compaction import configured
+
+    loopback.rejection = (status, {"message": message, "type": "invalid_request_error"})
+    native = importlib.import_module(provider)
+    monkeypatch.setattr(native._base_client.SyncAPIClient, "_sleep_for_retry", lambda *args, **kwargs: None)
+    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    with SQLiteStore.standalone(":memory:") as store:
+        store.install_schema()
+        start(store)
+        rt = configured(store, [])
+        rt.memory_manager.compact_threshold = 999999
+        rt.llm = VvLlmClient([EndpointTarget("a", "synthetic-unused", loopback.url)], backend=provider)
+        drive(store, "s", runtime=rt)
+        plans = records_of(store, "op_planned")
+        receipts = records_of(store, "op_completed")
+        assert [p.attempt for p in plans] == list(range(1, attempts + 1))
+        assert all(p.payload["purpose"] == "primary" for p in plans)
+        assert [r.payload["result"]["error_code"] for r in receipts] == ["model_request_rejected"] * attempts
+        assert records_of(store, "turn_ended")[-1].payload["reason"] == "model_request_rejected"
+        assert not records_of(store, "op_unknown")
+        assert not records_of(store, "context_compacted")
+        assert loopback.requests == http_requests
+        print(f"{provider} HTTP {status}: attempts={len(plans)}, HTTP={loopback.requests}, model_request_rejected, compaction=0")
 
 
 @contextmanager

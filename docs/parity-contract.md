@@ -330,3 +330,20 @@ observation deadline. Total extra network wait is at most that deadline plus
 one recv timeout (20 seconds maximum); remaining reads retain the shortened
 per-recv timeout. `tests/test_model_rejection_lifecycle.py` covers real stalled
 HTTP/1.1 sockets, repeated closes, connection-pool recovery and resource counts.
+
+## Context and quota classification
+
+Contract 36.0.0 corrects generic input-size matching and narrows HTTP 429 to an
+explicit context allowlist. `llm/errors.py` owns the shared rule used by
+`is_prompt_too_long_error` and the original-message flag on ModelRequestRejected.
+Kernel primary, compaction, session-memory and summary requests consume that
+classification through the existing model boundary; no separate caller heuristic
+is added. Provider-field and exception-text sources apply quota vetoes locally,
+while uncertainty still vetoes the whole graph. The window phrases are explicit
+outside 429; `maximum context length` already covers the numeric model-limit form.
+
+`tests/test_model_rejection.py`, `tests/test_model_rejection_lifecycle.py` and
+`scripts/model_rejection_fixtures.py` cover the rules and real provider transports.
+Until the immutable contract release exists, use VV_AGENT_CONTRACT_SOURCE for
+producer gates and leave the published 35.0.0 lock/snapshot intact. This local
+selection does not assert central adoption or a verified 36.0.0 release.

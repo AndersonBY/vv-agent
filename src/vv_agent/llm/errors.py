@@ -77,7 +77,9 @@ class ModelRequestRejected(LlmRequestError):
         if retryable is not None and type(retryable) is not bool:
             raise ValueError("retryable must be a boolean")
         self.status_code = status_code
-        self._prompt_too_long = any(pattern in message.lower() for pattern in _PTL_ERROR_PATTERNS)
+        self._prompt_too_long = _matches_prompt_too_long(
+            status_code, (" ".join(str(value or "") for value in (message, provider_code, provider_type)),)
+        )
         self.message = _safe_message(message)
         self.provider_code = _safe_code(provider_code)
         self.provider_type = _safe_code(provider_type)
@@ -229,14 +231,39 @@ def model_request_rejection(error: Exception, *, endpoint_count: int = 1) -> Mod
     return None
 
 
-_PTL_ERROR_PATTERNS = (
+_PTL_429_PATTERNS = (
     "prompt is too long",
     "prompt_too_long",
     "context_length_exceeded",
     "maximum context length",
-    "request too large",
-    "too many tokens",
 )
+_PTL_EXPLICIT_PATTERNS = (*_PTL_429_PATTERNS, "context window exceeded", "model context window is")
+_PTL_GENERIC_PATTERNS = ("request too large", "too many tokens")
+_PTL_QUOTA_SIGNAL = re.compile(
+    r"\b(?:per\s+(?:day|hour|minute|min|second|sec|month)|tokens\s+per\s+min|"
+    r"tpm|tpd|rpm|quota|rate\s+limit|rate_limit|insufficient_quota)\b",
+    re.IGNORECASE,
+)
+
+
+def _matches_prompt_too_long(status: int | None, texts: tuple[str, ...], *, code: object = None, param: object = None) -> bool:
+    if status == 413:
+        return True
+    # Other string limits (tool names, ids, etc.) cannot be fixed by compaction.
+    if (
+        code == "string_above_max_length"
+        and isinstance(param, str)
+        and (param in {"prompt", "input"} or re.fullmatch(r"(?:messages|input)\[\d+\]\.content(?:\[\d+\]\.text)?", param))
+    ):
+        return True
+    patterns = _PTL_429_PATTERNS if status == 429 else _PTL_EXPLICIT_PATTERNS
+    for text in texts:
+        text = text.lower()
+        if any(pattern in text for pattern in patterns):
+            return True
+        if status != 429 and not _PTL_QUOTA_SIGNAL.search(text) and any(pattern in text for pattern in _PTL_GENERIC_PATTERNS):
+            return True
+    return False
 
 
 def is_prompt_too_long_error(error: Exception) -> bool:
@@ -253,28 +280,36 @@ def is_prompt_too_long_error(error: Exception) -> bool:
                     return False
     matched = False
     responses, _, _ = _http_types()
+    # Text-only wrappers must not turn a 429's generic wording into input-size evidence.
+    wrapper_status = (
+        429
+        if any(
+            (isinstance(current, ModelRequestRejected) and current.status_code == 429)
+            or (
+                isinstance(response := getattr(current, "response", None), responses)
+                and getattr(response, "status_code", None) == 429
+            )
+            for current in graph
+        )
+        else None
+    )
     for current in graph:
         response = getattr(current, "response", None)
         detail = {}
+        status = wrapper_status
         if response is not None and isinstance(response, responses):
             status = response.status_code
-            # At the model boundary 413 means the input payload must shrink.
-            matched |= status == 413
             detail = _provider_error_detail(current, response)
         elif isinstance(current, ModelRequestRejected):
+            status = current.status_code
             detail = {"code": current.provider_code, "type": current.provider_type, "message": current.message}
-            matched |= current.status_code == 413 or current._prompt_too_long
+            matched |= current._prompt_too_long
 
-        code = detail.get("code")
-        param = detail.get("param")
-        if code == "string_above_max_length" and isinstance(param, str):
-            # Other string limits (tool names, ids, etc.) cannot be fixed by compaction.
-            matched |= (
-                param in {"prompt", "input"}
-                or re.fullmatch(r"(?:messages|input)\[\d+\]\.content(?:\[\d+\]\.text)?", param) is not None
-            )
-        current_text = " ".join([str(current), *(str(detail.get(key, "")) for key in ("code", "type", "message"))]).lower()
-        if any(pattern in current_text for pattern in _PTL_ERROR_PATTERNS):
-            matched = True
+        matched |= _matches_prompt_too_long(
+            status,
+            (str(current), " ".join(str(detail.get(key, "")) for key in ("code", "type", "message"))),
+            code=detail.get("code"),
+            param=detail.get("param"),
+        )
 
     return matched
