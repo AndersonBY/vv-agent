@@ -271,23 +271,140 @@
                   "type": "object"
                 },
                 "seed": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "messages": {
-                      "items": {
-                        "type": "object"
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "unseen_input_protection": {
+                          "type": "boolean"
+                        }
                       },
-                      "type": "array"
+                      "required": [
+                        "unseen_input_protection"
+                      ],
+                      "type": "object"
                     },
-                    "shared_state": {
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "response_rejection": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "response_rejection"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "response_rejection": {
+                          "type": "boolean"
+                        },
+                        "unseen_input_protection": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "unseen_input_protection",
+                        "response_rejection"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "messages": {
+                          "items": {
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "shared_state": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "messages",
+                        "shared_state"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "messages": {
+                          "items": {
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "shared_state": {
+                          "type": "object"
+                        },
+                        "unseen_input_protection": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "messages",
+                        "shared_state",
+                        "unseen_input_protection"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "messages": {
+                          "items": {
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "response_rejection": {
+                          "type": "boolean"
+                        },
+                        "shared_state": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "messages",
+                        "shared_state",
+                        "response_rejection"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "messages": {
+                          "items": {
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "response_rejection": {
+                          "type": "boolean"
+                        },
+                        "shared_state": {
+                          "type": "object"
+                        },
+                        "unseen_input_protection": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "messages",
+                        "shared_state",
+                        "unseen_input_protection",
+                        "response_rejection"
+                      ],
                       "type": "object"
                     }
-                  },
-                  "required": [
-                    "messages",
-                    "shared_state"
-                  ],
-                  "type": "object"
+                  ]
                 }
               },
               "type": "object"

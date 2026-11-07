@@ -530,6 +530,14 @@
 {
 "id": "memory.compaction_exhausted",
 "python": "vv_agent.memory.CompactionExhaustedError"
+},
+{
+"id": "memory.UnseenInputError",
+"python": "vv_agent.UnseenInputError"
+},
+{
+"id": "memory.UnseenInputCapacityError",
+"python": "vv_agent.UnseenInputCapacityError"
 }
 ],
 "id": "memory"

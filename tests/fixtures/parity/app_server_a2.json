@@ -199,7 +199,9 @@
           "role": "assistant"
         }
       ],
-      "shared_state": {}
+      "response_rejection": true,
+      "shared_state": {},
+      "unseen_input_protection": true
     }
   },
   "lifecycle": [
