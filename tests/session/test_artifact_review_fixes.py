@@ -238,11 +238,13 @@ def test_glob_enumeration_interrupts_pathological_matching(tmp_path, backend_nam
         backend._bucket, backend._prefix, backend._client = "test", "", _FakeS3Client()
     else:
         backend = MemoryWorkspaceBackend()
+    # ** spans a long path while each filename stays below the 255-byte limit.
+    prefix = ("a" * 240 + "/") * 3 + "a" * 240
     for i in range(40):
-        backend.write_text("a" * 210 + str(i), "")
+        backend.write_text(prefix + str(i), "")
     started = time.monotonic()
     with pytest.raises(TimeoutError):
-        backend.list_files(".", "*a" * 180 + "Z")
+        backend.list_files(".", "**a" * 180 + "Z")
     assert time.monotonic() - started < 2
 
 
@@ -275,10 +277,12 @@ def test_local_find_glob_fallback_interrupts_pathological_matching(tmp_path, mon
 
     monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: None)
     backend = LocalWorkspaceBackend(tmp_path)
+    # ** spans a long path while each filename stays below the 255-byte limit.
+    prefix = ("a" * 240 + "/") * 3 + "a" * 240
     for i in range(40):
-        backend.write_text("a" * 210 + str(i), "")
+        backend.write_text(prefix + str(i), "")
     started = time.monotonic()
-    result = find_files(ToolContext(tmp_path, {}, 0, backend), {"glob": "*a" * 180 + "Z"})
+    result = find_files(ToolContext(tmp_path, {}, 0, backend), {"glob": "**a" * 180 + "Z"})
     assert time.monotonic() - started < 2
     assert result.status_code is ToolResultStatus.ERROR and result.error_code == "regex_timeout"
 

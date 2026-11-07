@@ -42,8 +42,8 @@ place to start if you are new.
 
 ## Releases
 
-The current release is [0.34.0](releases/0.34.0.md).
-Release notes live in [releases/](releases/): [0.33.2](releases/0.33.2.md), [0.33.1](releases/0.33.1.md), [0.33.0](releases/0.33.0.md), [0.32.0](releases/0.32.0.md), [0.31.3](releases/0.31.3.md), [0.31.2](releases/0.31.2.md), [0.31.1](releases/0.31.1.md), [0.31.0](releases/0.31.0.md), [0.30.5](releases/0.30.5.md), [0.30.4](releases/0.30.4.md), [0.30.3](releases/0.30.3.md), [0.30.2](releases/0.30.2.md), [0.30.1](releases/0.30.1.md), [0.30.0](releases/0.30.0.md), [0.29.0](releases/0.29.0.md), [0.28.0](releases/0.28.0.md), [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
+The current release is [0.34.1](releases/0.34.1.md).
+Release notes live in [releases/](releases/): [0.34.0](releases/0.34.0.md), [0.33.3](releases/0.33.3.md), [0.33.2](releases/0.33.2.md), [0.33.1](releases/0.33.1.md), [0.33.0](releases/0.33.0.md), [0.32.0](releases/0.32.0.md), [0.31.3](releases/0.31.3.md), [0.31.2](releases/0.31.2.md), [0.31.1](releases/0.31.1.md), [0.31.0](releases/0.31.0.md), [0.30.5](releases/0.30.5.md), [0.30.4](releases/0.30.4.md), [0.30.3](releases/0.30.3.md), [0.30.2](releases/0.30.2.md), [0.30.1](releases/0.30.1.md), [0.30.0](releases/0.30.0.md), [0.29.0](releases/0.29.0.md), [0.28.0](releases/0.28.0.md), [0.27.1](releases/0.27.1.md), [0.27.0](releases/0.27.0.md), [0.26.0](releases/0.26.0.md), [0.25.0](releases/0.25.0.md), [0.24.0](releases/0.24.0.md),
 [0.23.1](releases/0.23.1.md), [0.23.0](releases/0.23.0.md),
 [0.22.0](releases/0.22.0.md). Store and API changes that hosts must act on are
 collected in [upgrading.md](upgrading.md#version-notes).

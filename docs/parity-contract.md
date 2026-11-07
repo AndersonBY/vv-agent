@@ -202,6 +202,9 @@ may interrupt earlier under contention. Each operation receives the smaller of
 250 ms and the remaining request budget. Total exhaustion reports
 "Search total CPU limit exceeded (10 s); aborted", separately from the single-call
 "Regular expression too slow; aborted" notice.
+These limits count CPU time. If the host starves the search of CPU, a single
+call can take more than 250 ms of wall time; vv-agent does not promise a wall-time
+limit for searches.
 S3 checks the same deadline within each page and object iteration, including
 empty pages. Local checks within directory and file iteration, including empty
 directories, before traversal can advance. Ordinary S3 shell globs retain the

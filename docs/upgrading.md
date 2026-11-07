@@ -77,6 +77,12 @@ old-version session.
 
 ## Version notes
 
+### 0.34.1 — 2026-11-07
+
+0.34.1 includes 0.34.0, which was not published to PyPI, plus two test
+corrections. It adds no product behavior or store boundary. Follow the
+[0.34.0 upgrade notes](#0340--2026-11-07) below.
+
 ### 0.34.0 — 2026-11-07
 
 New sessions declare input protection inside the closed creation seed. Python

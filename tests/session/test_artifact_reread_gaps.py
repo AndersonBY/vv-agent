@@ -282,7 +282,7 @@ def test_character_offset_read_memory_is_independent_of_line_length(tmp_path, re
     assert result.content == "needle"
 
 
-def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_path):
+def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_path, monkeypatch):
     import shlex
     from contextlib import nullcontext
 
@@ -293,7 +293,19 @@ def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_
     from vv_agent.session.records import InboxItem, SessionSpec
     from vv_agent.session.runtime import Runtime
     from vv_agent.session.sqlite import SQLiteStore
+    from vv_agent.tools.handlers import bash as bash_handler
     from vv_agent.types import LLMResponse
+
+    start_process = bash_handler.start_captured_process
+
+    def completed_process(*args, **kwargs):
+        started = start_process(*args, **kwargs)
+        # This case exercises retention of a completed effect. Initial-yield
+        # expiry is a successful background observation without an exit code.
+        started.process.wait(timeout=10)
+        return started
+
+    monkeypatch.setattr(bash_handler, "start_captured_process", completed_process)
 
     class FailingBackend(MemoryWorkspaceBackend):
         task_id = "host-task"
