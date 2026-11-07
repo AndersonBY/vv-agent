@@ -53,7 +53,7 @@ def test_two_session_prefixes_reuse_validated_bytes_with_bounded_eviction(store,
 def test_displaced_parent_prefix_still_checks_rollback_and_database_bytes(store, change):
     with store.atomic() as tx:
         for sid in ("s", "child"):
-            tx.create(SessionSpec(sid, "p", "w"), consumers=())
+            tx.create(SessionSpec(sid, "p", "w", attributes={"seed": {"unseen_input_protection": False}}), consumers=())
     lease = store.acquire("s", owner="parent", ttl_ms=15000)
     assert lease is not None
     with store.atomic() as tx:
@@ -108,7 +108,10 @@ def test_retained_json_is_not_parsed_again_and_nested_outputs_are_detached(sourc
     attributes["nested"][0]["values"].clear()
     rec.payload["attributes"]["nested"][0]["values"].append(3)
     rec.to_dict()["payload"]["attributes"]["nested"].clear()
-    assert rec.payload["attributes"] == {"nested": [{"values": [1, 2]}]}
+    assert rec.payload["attributes"] == {
+        "nested": [{"values": [1, 2]}],
+        "seed": {"unseen_input_protection": True, "response_rejection": True},
+    }
     assert rec.encode() == body
 
 
@@ -354,7 +357,7 @@ def test_recovered_model_receipt_is_detached_before_tool_hooks(store, database):
     request = {"messages": [], "tools": definition["tools"]}
     result = {"content": "", "tool_calls": [ToolCall("call", "nested", {"values": ["original"]}).to_dict()]}
     with store.atomic() as tx:
-        tx.create(SessionSpec("s", "p", "w"), consumers=())
+        tx.create(SessionSpec("s", "p", "w", attributes={"seed": {"unseen_input_protection": False}}), consumers=())
     lease = store.acquire("s", owner="seed", ttl_ms=15000)
     assert lease is not None
     try:

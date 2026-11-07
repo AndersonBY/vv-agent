@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from vv_agent.canonical_json import MAX_WIRE_INTEGER, _jcs_encode, _stdlib_compatible, canonical_json_bytes
+from vv_agent.session.records import _json_bytes
 
 FIXTURES = Path(__file__).parent / "fixtures" / "parity"
 
@@ -53,6 +54,7 @@ def golden_vectors():
 def test_all_vendored_jcs_golden_vectors(value, vector):
     reference = _jcs_encode(value).encode("utf-8")
     assert canonical_json_bytes(value) == reference
+    assert _json_bytes(value) == reference
     if "canonical_json_base64" in vector:
         assert reference == base64.b64decode(vector["canonical_json_base64"])
         assert len(reference) == vector["canonical_json_utf8_bytes"]
@@ -74,6 +76,7 @@ def test_every_control_escape_del_separators_and_astral_values():
     value = {"controls": text, '/"\\\x1f': text}
     assert _stdlib_compatible(value)
     assert canonical_json_bytes(value) == _jcs_encode(value).encode()
+    assert _json_bytes(value) == _jcs_encode(value).encode()
     assert b"\\u007f" not in canonical_json_bytes(value)
     assert "\u2028\u2029😀".encode() in canonical_json_bytes(value)
 
@@ -86,8 +89,11 @@ def test_ineligible_values_use_reference_encoding_or_rejection(value):
     except (ValueError, TypeError, UnicodeError):
         with pytest.raises(ValueError, match="RFC 8785 I-JSON"):
             canonical_json_bytes(value)
+        with pytest.raises(ValueError, match="RFC 8785 I-JSON"):
+            _json_bytes(value)
     else:
         assert canonical_json_bytes(value) == reference
+        assert _json_bytes(value) == reference
 
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff", "\ud800\udfff"])
@@ -97,6 +103,8 @@ def test_fast_path_rejects_all_surrogates(surrogate, location):
     assert not _stdlib_compatible(value)
     with pytest.raises(ValueError, match="RFC 8785 I-JSON"):
         canonical_json_bytes(value)
+    with pytest.raises(ValueError, match="RFC 8785 I-JSON"):
+        _json_bytes(value)
 
 
 @pytest.mark.parametrize("eligible_only", [True, False])
@@ -132,5 +140,15 @@ def test_generated_nested_values_match_full_encoder(eligible_only):
         except (ValueError, TypeError, UnicodeError):
             with pytest.raises(ValueError):
                 canonical_json_bytes(value)
+            with pytest.raises(ValueError):
+                _json_bytes(value)
         else:
             assert canonical_json_bytes(value) == reference, value
+            assert _json_bytes(value) == reference, value
+
+
+def test_record_byte_encoder_preserves_deep_json_support():
+    value = None
+    for _ in range(260):
+        value = [value]
+    assert _json_bytes(value) == canonical_json_bytes(value)

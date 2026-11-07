@@ -8,13 +8,22 @@ import pytest
 
 from vv_agent.memory import MemoryManager
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import InboxItem, digest
+from vv_agent.session.records import InboxItem, SessionSpec, digest
 from vv_agent.types import LLMResponse, Message
 
 from .conftest import open_store
-from .test_recovery_matrix import kill, receive, records_of, runtime, start
+from .test_recovery_matrix import kill, receive, records_of, runtime
 
 SUMMARY = json.dumps({"original_user_messages": ["original request"], "current_work_state": "Continue the task"})
+
+
+def start(store, sid="s"):
+    # These fixtures exercise the previously frozen policy on imported history.
+    with store.atomic() as tx:
+        tx.create(
+            SessionSpec(sid, "test", "/tmp", attributes={"seed": {"unseen_input_protection": False}}), consumers=("events",)
+        )
+        tx.push(sid, InboxItem("initial", "user", {"content": "go"}))
 
 
 def history():

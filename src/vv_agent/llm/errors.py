@@ -97,8 +97,22 @@ class ModelRequestRejected(LlmRequestError):
         }
 
 
+def model_response_rejection(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    """Only completed provider conclusions qualify; never retain response prose."""
+    reason = metadata.get("finish_reason_normalized")
+    if reason != "content_filter" and not (reason == "refusal" and not metadata.get("refusal")):
+        return None
+    return {
+        "status_code": 200,
+        "provider_code": reason,
+        "provider_type": _safe_code(metadata.get("finish_reason")),
+        "message": "Model provider response was rejected.",
+        "retryable": False,
+    }
+
+
 class ModelStreamInterrupted(LlmRequestError):
-    """The provider stream already yielded a chunk; execution is ambiguous."""
+    """The provider stream has no confirmed complete result; execution is ambiguous."""
 
 
 def _provider_error_detail(error: BaseException, response: Any) -> dict[str, Any]:

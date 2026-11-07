@@ -1485,7 +1485,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.33.3"
+version = "0.34.0"
 source = { editable = "." }
 dependencies = [
     { name = "deepseek-tokenizer" },
@@ -1536,7 +1536,7 @@ requires-dist = [
     { name = "ripgrep", marker = "sys_platform != 'win32'", specifier = ">=14.1.0" },
     { name = "ripgrep", marker = "sys_platform == 'win32'", specifier = ">=14.1.0,<15" },
     { name = "tiktoken", specifier = ">=0.14.0" },
-    { name = "vv-llm", specifier = ">=0.8.5" },
+    { name = "vv-llm", specifier = ">=0.10.1" },
 ]
 provides-extras = ["postgres", "s3"]
 
@@ -1552,7 +1552,7 @@ dev = [
 
 [[package]]
 name = "vv-llm"
-version = "0.8.5"
+version = "0.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1564,7 +1564,7 @@ dependencies = [
     { name = "qwen-tokenizer" },
     { name = "tiktoken" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/18/1a0171ede9ed1a7ddaafa8d31296f2655814cc731bc4b8173d330d1f3187/vv_llm-0.8.5.tar.gz", hash = "sha256:dea064a71dd4d07bc8ea3d59e68e4456c9700b7f3ef6930ed4118557997776db", size = 127652, upload-time = "2026-11-01T06:15:12.977Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/1c/4846ebdec1989cd24f9d4d5a1905928a6e5647276303045e7ee34907dd78/vv_llm-0.10.1.tar.gz", hash = "sha256:1888ff2107aa9660570007be9429e24bc8da399bcd5cb9ec76ddf0138545e86e", size = 134796, upload-time = "2026-11-07T02:40:00.341Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/15/9632004452fe9ab12eb702d3c0a5ce127c51b6cfcdc458b5e02830d6285b/vv_llm-0.8.5-py3-none-any.whl", hash = "sha256:87ece58d188fde7b592ffd3a5d3f9c2252537bc3de88814d4c78d3b5d0398bc8", size = 155666, upload-time = "2026-11-01T06:15:11.591Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/ee/fdff84f1de10c48d93a010450952e9e11979fa9499d4a99c3140e1ac5538/vv_llm-0.10.1-py3-none-any.whl", hash = "sha256:5a98e1f9966da9f5c1865a7e9691d7f17389baea00632b2a07203d9387ccd635", size = 161513, upload-time = "2026-11-07T02:39:58.651Z" },
 ]

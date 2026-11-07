@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.34.0 — 2026-11-07
+
+New sessions protect inputs until a primary model response commits to history.
+Compaction and host hooks retain the same suffix through replay and recovery.
+Legacy sessions without the creation declaration retain their frozen behavior.
+New declarations are rejected by 0.33.3; children and App Server forks inherit
+the choice. Oversized protected inputs fail with an explicit capacity reason.
+The vv-llm dependency is now >=0.10.1. See [release notes](docs/releases/0.34.0.md).
+
+Model completion now uses vv-llm >=0.10.1. New sessions declare
+`attributes.seed.response_rejection=true`. A content-filter result, or refusal
+finish reason without answer text, now ends as `model_request_rejected` with
+HTTP 200, safe provider code/type and `retryable=false`. A streamed answer may
+already be visible: finish or replace that temporary text when ModelCallFailed
+or RunFailed arrives. Rejected partial text is not retained in model history.
+
+OpenAI refusal text is an ordinary answer when the reason is not content_filter.
+If content is empty, that text becomes the assistant body, so hosts should render
+it as they render any assistant answer. Final evidence is available in ordinary
+model receipts at `raw.completion_metadata`. Missing-termination EOF follows
+existing Unknown/retry behavior; degraded observation is recorded as unknown
+termination and keeps existing completion behavior.
+
+No record, inbox or SQL schema changes. Existing sessions without the response
+policy retain 0.33.3 filtering behavior; EOF and refusal-text improvements use
+representations 0.33.3 can read and continue. Both seed policies independently
+default on only at first creation, inherit on child/fork (absence becomes false),
+and preserve creation bytes on transaction replay. 0.33.3 rejects either declared
+field, including false. Keep declared sessions and dependent parent/child work on
+the new runtime when rolling back; do not strip creation fields to bypass this gate.
+
+
 
 ## 0.33.3 — 2026-11-06
 

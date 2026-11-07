@@ -6,15 +6,15 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.llm.errors import MAX_PTL_RETRIES
+from vv_agent.memory.input_protection import UnseenInputCapacityError, retained_start
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
 from vv_agent.workspace.artifacts import _session_artifact_scope
 
-from .context import message_ids, project_context
+from .context import message_ids, protected_start
 from .memory import extract_memory, finish_compact, start_compact
-from .records import InboxItem, Record, digest
-from .reducer import fold
+from .records import Record, digest
 
 if TYPE_CHECKING:
     from .kernel import _Driver
@@ -57,6 +57,7 @@ def manager_for(driver: _Driver) -> MemoryManager:
     settings["artifact_scope"] = _session_artifact_scope(driver.sid, task.task_id)
     return MemoryManager(
         **settings,
+        protected_start=protected_start(driver.records, driver.state),
         workspace_backend=(
             driver.runtime.memory_manager.workspace_backend
             or driver.runtime.config.workspace_backend
@@ -82,6 +83,7 @@ def replacement_record(
     summary: Record | None = None,
     plan: SummaryPlan | None = None,
 ) -> Record:
+    retained_start(source, replacement, manager.protected_start)
     ids = message_ids(source)
     if plan is None:
         removed = {i for i, (a, b) in enumerate(zip(source, replacement, strict=True)) if a != b}
@@ -126,15 +128,11 @@ def finish_summary(driver: _Driver) -> bool:
             or a.context != "normal"
         ):
             continue
-        # The source is an immutable log prefix, not the present transcript after late inputs.
-        prefix = tuple(r for r in driver.records if r.seq <= int(a.plan._payload["context_version"]))
-        logical = [r.record for r in prefix]
-        consumed = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
-        source = project_context(prefix, fold(logical, consumed_inputs=consumed))
         meta = a.plan._payload["request"]["metadata"]
         if meta.get("mode") == "child_summary":
             continue
-        if digest([m.to_dict() for m in driver.transcript()]) != meta["source_digest"]:
+        source = driver.transcript()
+        if digest([m.to_dict() for m in source]) != meta["source_digest"]:
             continue
         manager = manager_for(driver)
         plan = manager.plan_summary(source, keep_recent=meta["keep_recent"])
@@ -152,6 +150,11 @@ def compact_context(driver: _Driver, *, requested_by: list[str] | None = None) -
     """One prune pass, then one ordinary logged summary operation for the exact source."""
     manager = manager_for(driver)
     source = driver.transcript()
+    if manager.protected_start is not None:
+        required = [m for m in source[: manager.protected_start] if m.role == "system"] + source[manager.protected_start :]
+        if tokens(manager, required) > manager.effective_context_window:
+            driver.close("failed", UnseenInputCapacityError.code)
+            return True
     primary = [
         op
         for op in driver.state.operations.values()
@@ -266,6 +269,9 @@ def compact_context(driver: _Driver, *, requested_by: list[str] | None = None) -
     ):
         return finish_compact(driver, manager, source, mode="none", changed=False)
     plan = manager.plan_summary(source, drop_ratio=min(0.2 * failures, 0.95) if failures > 1 else 0)
+    if plan is None and failures and manager.protected_start is not None:
+        driver.close("failed", UnseenInputCapacityError.code)
+        return True
     if plan is None or (requested_by and not plan.previous and not any(m.role in {"assistant", "tool"} for m in plan.prefix)):
         return finish_compact(driver, manager, source, mode="none", changed=False)
     # Equal source and tail targets reuse even rejected receipts across PTL retries.

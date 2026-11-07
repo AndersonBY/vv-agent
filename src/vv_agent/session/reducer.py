@@ -8,7 +8,9 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from typing import Any
 
+from vv_agent.memory.input_protection import retained_start
 from vv_agent.memory.manager import MemoryManager
+from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
     EXCERPT_METADATA_KEY,
     build_compacted_tool_content,
@@ -18,7 +20,7 @@ from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
 
 from .children import child_handles
-from .context import message_ids, project_context
+from .context import InputProtection, message_ids, project_context, protected_start
 from .records import InboxItem, Record, _MessageCache, copy_json, digest
 from .store import StoredRecord
 
@@ -92,6 +94,8 @@ class Turn:
 
 @dataclass
 class ExecutionState:
+    _protection: InputProtection | None = field(default=None, init=False, repr=False, compare=False)
+
     session_id: str | None = None
     operations: dict[str, Operation] = field(default_factory=dict)
     turns: dict[str, Turn] = field(default_factory=dict)
@@ -549,12 +553,13 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
     require(tid == state.active_turn_id and tid in state.turns, "compaction outside active turn")
     assert tid is not None
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
-    source = project_context(history, state)
+    source = state._protection.messages if state._protection is not None else project_context(history, state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
     replacement = [Message.from_dict(m) for m in p["replacement"]]
     ids = message_ids(source)
     definition = state.turns[tid].start._payload["definition"]
-    manager = MemoryManager(**definition["memory_settings"])
+    manager = MemoryManager(**definition["memory_settings"], protected_start=protected_start(history, state))
+    retained_start(source, replacement, manager.protected_start)
     manager.recovery_tool_available = any(t["function"]["name"] == "read_file" for t in definition["tools"])
     if p["mode"] == "micro":
         require(p["summary_operation_id"] is None and len(source) == len(replacement), "invalid micro replacement")
@@ -622,6 +627,8 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
         "compaction identities mismatch",
     )
     require(p["evidence_manifest"] == manager.compaction_evidence(replacement), "compaction evidence mismatch")
+    if state._protection is not None:
+        state._protection.replace(filter_empty_assistant_messages(replacement))
     state.compactions.append(record)
 
 
@@ -640,6 +647,7 @@ class Fold:
     def fork(self) -> Fold:
         result = Fold()
         result.state = copy(self.state)
+        result.state._protection = self.state._protection.fork() if self.state._protection is not None else None
         result.state.operations = self.state.operations.copy()
         result.state.turns = self.state.turns.copy()
         result._shared_operations = set(self.state.operations)
@@ -671,7 +679,7 @@ class Fold:
 
     def snapshot(self) -> ExecutionState:
         # Detach state only; a snapshot does not need the fold's history or identity indexes.
-        return replace(
+        result = replace(
             self.state,
             operations={
                 oid: replace(
@@ -692,6 +700,9 @@ class Fold:
             compactions=self.state.compactions.copy(),
             boundaries=self.state.boundaries.copy(),
         )
+
+        result._protection = self.state._protection.fork() if self.state._protection is not None else None
+        return result
 
     def extend(
         self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
@@ -715,6 +726,9 @@ class Fold:
             if kind == "session_created":
                 require(seq == 1, "session already created")
                 state.session_id = record.session_id
+                if p["attributes"].get("seed", {}).get("unseen_input_protection", False):
+                    state._protection = InputProtection()
+                    state._protection.advance(StoredRecord(record, seq, "", 0, 0), state, self._messages)
                 history.append(StoredRecord(record, seq, "", 0, 0))
                 continue
             require(state.session_id == record.session_id, "missing creation or wrong session")
@@ -746,6 +760,23 @@ class Fold:
                 self._own_operation(incoming["payload"].get("operation_id"))
                 _input(state, record, consumed)
             elif kind == "op_planned":
+                # Retries keep their original request; later inputs remain unseen by that retry.
+                if p["op_kind"] == "model" and p["purpose"] == "primary" and record.attempt == 1:
+                    if history[0].record._payload["attributes"].get("seed", {}).get("unseen_input_protection", False):
+                        version = p["context_version"]
+                        require(
+                            version.isascii()
+                            and version.isdecimal()
+                            and str(int(version)) == version
+                            and 0 < int(version) <= history[-1].seq,
+                            "invalid input-protection context version",
+                        )
+                    protection = protected_start(history, state)
+                    if protection is not None:
+                        assert state._protection is not None
+                        retained_start(
+                            state._protection.messages, [self._messages.parse(m) for m in p["request"]["messages"]], protection
+                        )
                 self._own_operation(record.operation_id)
                 for ref in p["consumed_unknowns"]:
                     self._own_operation(ref["operation_id"])
@@ -841,21 +872,30 @@ class Fold:
                 state.usage_observations[p["meter_id"]] = p["observation"]
                 state.usage_values[p["meter_id"]] = record
             elif kind == "boundary_recorded":
+                context_source = None
                 require(tid == state.active_turn_id and tid in state.turns, "boundary outside active turn")
                 assert tid is not None
                 require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "boundary after cancel/suspend")
                 key = (tid, p["stage"], p["boundary_id"])
                 require(key not in state.boundaries, "boundary recorded twice")
                 if p["source_digest"] is not None:
-                    source = project_context(history, state, _message_cache=self._messages)
-                    require(self._messages.source_digest(source) == p["source_digest"], "boundary source mismatch")
+                    context_source = (
+                        state._protection.messages
+                        if state._protection is not None
+                        else project_context(history, state, _message_cache=self._messages)
+                    )
+                    require(self._messages.source_digest(context_source) == p["source_digest"], "boundary source mismatch")
                 oid = p["source_operation_id"]
                 if oid is not None:
                     require(oid in state.operations and state.operations[oid].turn_id == tid, "boundary operation mismatch")
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
-                    for message in p["data"]["messages"]:
-                        self._messages.parse(message)
+                    if state._protection is not None:
+                        replacement = [self._messages.parse(m) for m in p["data"]["messages"]]
+                        state._protection.replace(filter_empty_assistant_messages(replacement))
+                    else:
+                        for message in p["data"]["messages"]:
+                            self._messages.parse(message)
                 elif p["stage"] == "session_memory_saved" and oid is not None:
                     require(
                         state.operations[oid].kind == "model"
@@ -917,6 +957,8 @@ class Fold:
             elif kind == "context_compacted":
                 _compacted(state, record, history)
             history.append(StoredRecord(record, seq, "", 0, 0))
+            if state._protection is not None:
+                state._protection.advance(history[-1], state, self._messages)
         require(set(consumed) == set(state.applied_inputs), "consumed input without input_applied")
         _schedule(state)
         return state

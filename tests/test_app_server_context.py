@@ -349,9 +349,11 @@ def test_canonical_a2_fixture_matches_real_producer(monkeypatch):
     from pathlib import Path
 
     monkeypatch.syspath_prepend(str(Path(__file__).parents[1]))
+    from support.contract import fixture_root
+
     from scripts.app_server_a2_fixtures import produce
 
-    fixture = Path(__file__).parent / "fixtures/parity/app_server_a2.json"
+    fixture = fixture_root() / "app_server_a2.json"
     assert produce() == json.loads(fixture.read_text())
 
 
@@ -421,6 +423,57 @@ def test_concurrent_creation_freezes_one_baseline_across_different_nodes(tmp_pat
         assert all("result" in response for response in responses), responses
         assert sorted(response["result"]["replayed"] for response in responses) == [False, True]
         assert a.run_adapter.read_context("thread") == b.run_adapter.read_context("thread")
+
+
+def test_creation_replay_uses_frozen_baseline_after_node_config_changes(tmp_path):
+    with ExitStack() as stack:
+        provider = ScriptedModelProvider.new("test", "m", [])
+        a = node(stack, tmp_path / "store", "A", provider, agent=Agent("test", "Original"))
+        b = node(stack, tmp_path / "store", "B", provider, agent=Agent("test", "Changed"))
+        params = {"inputId": "thread", "metadata": {"client": "same"}}
+        assert request(a, "create", "thread/start", params)["result"]["replayed"] is False
+        original = a.kernel.store.read("thread", limit=1).records[0].record.encode()
+        assert request(b, "replay", "thread/start", params)["result"]["replayed"] is True
+        assert a.kernel.store.read("thread", limit=1).records[0].record.encode() == original
+        assert "error" in request(b, "conflict", "thread/start", params | {"metadata": {"client": "different"}})
+        assert a.kernel.store.read("thread", limit=1).records[0].record.encode() == original
+
+
+@pytest.mark.parametrize("baseline", [False, True])
+@pytest.mark.parametrize("seed", [{}, {"response_rejection": False}, {"unseen_input_protection": False}])
+def test_creation_conflict_retry_delegates_policy_and_consumers_to_transaction(tmp_path, baseline, seed):
+    from unittest.mock import patch
+
+    from vv_agent.session.records import SessionSpec
+    from vv_agent.session.store import Conflict
+
+    with ExitStack() as stack:
+        server = node(stack, tmp_path / "store", "A", ScriptedModelProvider.new("test", "m", []))
+        attributes = {"app_server": {"agent_key": "default", "cwd": None, "metadata": {"client": "same"}}}
+        if baseline:
+            runtime = server.kernel.runtime(server.run_adapter._host._agent, server.run_adapter._host._run_config)
+            attributes["app_server_context"] = runtime._definition(runtime.compile("", "thread/context", control=True))
+        if seed:
+            attributes["seed"] = seed
+        creation = SessionSpec("thread", "local", ".", attributes=attributes).record()
+        # An actual pre-declaration creation must stay undeclared on retry.
+        payload = creation.payload
+        payload["attributes"]["seed"] = seed
+        if not seed:
+            payload["attributes"].pop("seed")
+        creation = replace(creation, payload=payload)
+        with patch.object(SessionSpec, "record", return_value=creation), server.kernel.store.atomic() as tx:
+            tx.create(SessionSpec("thread", "local", "."), consumers=("events", "app_server", "traces"))
+        args = {
+            "input_id": "thread",
+            "agent_key": "default",
+            "metadata": {"client": "same"},
+            "context": {"different": "node config"},
+        }
+        assert server.store.create_thread_receipt(**args)["replayed"] is True
+        assert server.kernel.store.read("thread", limit=1).records[0].record.encode() == creation.encode()
+        with pytest.raises(Conflict):
+            server.store.create_thread_receipt(**(args | {"metadata": {"client": "different"}}))
 
 
 def test_baseline_and_maintenance_do_not_run_prompt_or_output_guardrails(tmp_path):

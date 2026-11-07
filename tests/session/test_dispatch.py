@@ -13,7 +13,7 @@ from vv_agent.events import RunStateChangedEvent
 from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.session.kernel import _Driver, drive, read_state
-from vv_agent.session.records import InboxItem
+from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
@@ -703,8 +703,9 @@ def test_any_idle_drive_defers_a_stale_due_without_records(transport, clock, mon
 
 @pytest.mark.parametrize("due_source", ["deadline", "poll", "not_before", "retry", "inbox"])
 def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_source):
-    transport.create()
     store = transport.store
+    with store.atomic() as tx:
+        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": False}}), consumers=("host",))
     lease = store.acquire("s", owner="holder", ttl_ms=1000)
     assert lease is not None
     future = 1_000_250
@@ -732,8 +733,9 @@ def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_sourc
 
 
 def test_idle_deferral_does_not_overwrite_new_commit_schedule(transport, clock, monkeypatch):
-    transport.create()
     store = transport.store
+    with store.atomic() as tx:
+        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": False}}), consumers=("host",))
     lease = store.acquire("s", owner="holder", ttl_ms=1000)
     assert lease is not None
     with store.atomic():

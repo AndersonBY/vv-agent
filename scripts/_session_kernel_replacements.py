@@ -731,6 +731,8 @@ class Author:
                 if domain["id"] == "exports"
                 else ("Provider",)
                 if domain["id"] == "session"
+                else ("UnseenInputError", "UnseenInputCapacityError")
+                if domain["id"] == "memory"
                 else ()
             )
             for name in names:
@@ -2136,7 +2138,9 @@ class Author:
             if purpose == "compaction":
                 rt.memory_manager = MemoryManager(compact_threshold=1000, keep_recent_messages=1)
             self.f.runtimes[sid] = rt
-            self.f.kernel.create(sid, "/fixture")
+            self.f.kernel.create(
+                sid, "/fixture", {"seed": {"unseen_input_protection": False}} if config.initial_messages else None
+            )
             self.f.push(sid, InboxItem("initial", "user", {"content": "go"}))
             self.f.run(sid)
             result = self.f.result(sid)

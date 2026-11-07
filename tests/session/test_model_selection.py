@@ -391,8 +391,9 @@ def test_selection_is_local_to_one_session_and_default_rejects(store, database):
 
 def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, database):
     from .test_compaction import SUMMARY, history
+    from .test_compaction import start as start_imported
 
-    start(store)
+    start_imported(store)
     requests = []
 
     def too_long(request):

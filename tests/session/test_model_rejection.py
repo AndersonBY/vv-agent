@@ -13,8 +13,8 @@ from vv_agent.session.projection import project_records
 from vv_agent.session.result import project_result
 from vv_agent.types import LLMResponse, Message
 
-from .test_compaction import SUMMARY, compiled_system, configured, history
-from .test_recovery_matrix import records_of, runtime, start
+from .test_compaction import SUMMARY, compiled_system, configured, history, start
+from .test_recovery_matrix import records_of, runtime
 
 
 def http_error(status, message="Invalid user message", *, observed=True):

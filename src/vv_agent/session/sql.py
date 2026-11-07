@@ -602,13 +602,10 @@ class SQLSessionTx:
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         self._active()
-        record = spec.record()
         for consumer in consumers:
             _identity(consumer)
         if len(consumers) != len(set(consumers)):
             raise Conflict("duplicate consumer")
-        body = canonical_json_bytes({"create": record.to_dict(), "consumers": sorted(consumers)})
-        manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
         commit_id = "session/create"
         s = self.store
         with s._transaction():
@@ -618,12 +615,19 @@ class SQLSessionTx:
                 (spec.session_id, spec.parent_session_id, spec.parent_operation_id),
             )
             s._lock(spec.session_id)
+            existing = (
+                s._one("SELECT body FROM sk_record WHERE session_id=%s AND seq=1", (spec.session_id,))[0]
+                if not inserted
+                else None
+            )
+            record = spec.record(_existing=Record.parse(existing)) if existing is not None else spec.record()
+            body = canonical_json_bytes({"create": record.to_dict(), "consumers": sorted(consumers)})
+            manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
             if not inserted:
                 old = s._one(
                     "SELECT body,created_ms FROM sk_commit WHERE session_id=%s AND commit_id=%s", (spec.session_id, commit_id)
                 )
-                stored = s._one("SELECT body FROM sk_record WHERE session_id=%s AND seq=1", (spec.session_id,))[0]
-                if old[0] != manifest or stored != record.encode():
+                if old[0] != manifest or existing != record.encode():
                     raise Conflict("create identity has different bytes")
                 return CreateReceipt(spec.session_id, 1, old[1], True)
             now = s._now()

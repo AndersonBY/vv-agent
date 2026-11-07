@@ -249,7 +249,8 @@ def test_compaction_accounting_real_producer(case):
         settings = dict(definition["memory_settings"])
         settings["microcompaction_policy"] = MicrocompactionPolicy.from_dict(settings["microcompaction_policy"])
         runtime.memory_manager = MemoryManager(**settings, workspace_backend=MemoryWorkspaceBackend())
-        driver.create(sid, "/fixture")
+        # Reproduce the source fixture's imported-history creation policy.
+        driver.create(sid, "/fixture", {"seed": {"unseen_input_protection": False}} if task.initial_messages else None)
         driver.push(sid, InboxItem("initial", "user", {"content": "go"}))
         if sid == "second_summary":
 

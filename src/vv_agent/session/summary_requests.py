@@ -84,6 +84,8 @@ def child_summary(driver: _Driver, plan: Record, binding: SummaryChildTool) -> t
     oid = f"{plan.operation_id}/summary"
     op = driver.state.operations.get(oid)
     manager = manager_for(driver)
+    # This summary is read-only input for a child, never a parent replacement.
+    manager.protected_start = None
     if op is None and not binding.requires_summary(plan):
         return True, None
     if op is None:

@@ -13,7 +13,7 @@ from vv_agent.session.store import LeaseLost, SequenceConflict
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
-from .helpers import record
+from .helpers import record, runtime_turn_record
 from .test_recovery_matrix import runtime, start
 
 
@@ -187,7 +187,7 @@ def test_slow_fold_allows_renew_and_returns_captured_prefix(store, database, clo
     assert lease is not None
     store._fold_cache = None
     with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(runtime_turn_record(),))
     entered, finish = threading.Event(), threading.Event()
     owner = type(store) if phase == "prefix" else Fold
     method = {"prefix": "_prefix", "fold": "extend", "snapshot": "snapshot"}[phase]
@@ -245,7 +245,7 @@ def test_schedule_preparation_does_not_hold_session_row(store, database, clock, 
     lease = store.acquire("s", owner="writer", ttl_ms=15000)
     assert lease is not None
     with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(runtime_turn_record(),))
     entered, finish = threading.Event(), threading.Event()
     extend = Fold.extend
     thread_ids = []
@@ -305,7 +305,7 @@ def test_append_prepares_cold_history_before_session_row_lock(store, database, c
     def append():
         thread_ids.append(threading.get_ident())
         with open_store(database) as writer, writer.atomic() as tx:
-            return tx.append("s", lease=current[0], expected_seq=1, commit_id="turn", records=(record("turn_started"),))
+            return tx.append("s", lease=current[0], expected_seq=1, commit_id="turn", records=(runtime_turn_record(),))
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(append)

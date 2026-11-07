@@ -16,6 +16,7 @@ from vv_agent.session.sql import SQLSessionTx
 from vv_agent.session.store import LeaseLost
 from vv_agent.types import LLMResponse
 
+from .helpers import runtime_turn_record
 from .test_batch_children import rows
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime, start
@@ -433,10 +434,9 @@ def test_transaction_logs_follow_rollback_and_hide_exception_contents(store, dat
 
 def test_locked_append_still_checks_ttl_after_writing(store, database, monkeypatch):
     start(store)
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="old", ttl_ms=TTL)
     assert lease is not None
-    from .helpers import record
-
     commit = SQLSessionTx._commit
 
     def slow_commit(self, *args):
@@ -446,7 +446,7 @@ def test_locked_append_still_checks_ttl_after_writing(store, database, monkeypat
 
     monkeypatch.setattr(SQLSessionTx, "_commit", slow_commit)
     with pytest.raises(LeaseLost), store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="late", records=(record("turn_started"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="late", records=(turn,))
     assert len(rows(store)) == 1
 
 
@@ -468,9 +468,8 @@ def test_append_timeouts_use_store_clock_and_reset_after_transaction(store, monk
 def test_append_restores_timeouts_inside_outer_host_transaction(store, monkeypatch, failure):
     from psycopg.errors import QueryCanceled
 
-    from .helpers import record
-
     start(store)
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="host", ttl_ms=200 if failure == "timeout" else 4000)
     assert lease is not None
     settings = "SELECT current_setting('lock_timeout'),current_setting('statement_timeout')"
@@ -492,7 +491,7 @@ def test_append_restores_timeouts_inside_outer_host_transaction(store, monkeypat
         with store.atomic() as tx:
             tx._lease_guard = lambda: lease
             try:
-                tx.append("s", lease=lease, expected_seq=1, commit_id="host", records=(record("turn_started"),))
+                tx.append("s", lease=lease, expected_seq=1, commit_id="host", records=(turn,))
             except (RuntimeError, QueryCanceled) as exc:
                 assert failure is not None
                 assert isinstance(exc, QueryCanceled if failure == "timeout" else RuntimeError)
@@ -507,9 +506,8 @@ def test_append_restores_timeouts_inside_outer_host_transaction(store, monkeypat
 
 
 def test_slow_append_within_lease_has_no_fixed_one_second_cap(store, monkeypatch):
-    from .helpers import record
-
     start(store)
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="host", ttl_ms=4000)
     assert lease is not None
     commit = SQLSessionTx._commit
@@ -522,7 +520,7 @@ def test_slow_append_within_lease_has_no_fixed_one_second_cap(store, monkeypatch
     begin = monotonic()
     with store.atomic() as tx:
         tx._lease_guard = lambda: lease
-        tx.append("s", lease=lease, expected_seq=1, commit_id="slow", records=(record("turn_started"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="slow", records=(turn,))
     assert monotonic() - begin >= 1.2
     assert len(rows(store)) == 2
 
@@ -683,9 +681,8 @@ def test_host_heartbeat_retries_two_real_lock_timeouts_then_renews(store, databa
 
 
 def test_append_lock_wait_over_250ms_succeeds_within_lease(store, database):
-    from .helpers import record
-
     start(store)
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="host", ttl_ms=4000)
     assert lease is not None
     entered = threading.Event()
@@ -694,7 +691,7 @@ def test_append_lock_wait_over_250ms_succeeds_within_lease(store, database):
         with PostgresStore.standalone(database) as worker, worker.atomic() as tx:
             tx._lease_guard = lambda: lease
             entered.set()
-            tx.append("s", lease=lease, expected_seq=1, commit_id="waiting", records=(record("turn_started"),))
+            tx.append("s", lease=lease, expected_seq=1, commit_id="waiting", records=(turn,))
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store.atomic() as tx:

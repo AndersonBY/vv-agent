@@ -770,7 +770,8 @@ class InteractiveAgentClient:
         seed = session if session is not None else {"messages": [], "shared_state": shared_state or {}}
         if session is None and shared_state is None and session_id is not None:
             with suppress(KeyError, Conflict):
-                seed = self.driver.store.read(session_id, limit=1).records[0].record.payload["attributes"]["seed"]
+                retained_seed = self.driver.store.read(session_id, limit=1).records[0].record.payload["attributes"]["seed"]
+                seed = {"messages": retained_seed.get("messages", []), "shared_state": retained_seed.get("shared_state", {})}
         if not isinstance(seed, dict) or set(seed) != {"messages", "shared_state"}:
             raise ValueError("session seed requires exactly messages and shared_state")
         if not isinstance(seed["messages"], list):

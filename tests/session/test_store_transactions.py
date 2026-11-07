@@ -16,7 +16,7 @@ from .helpers import item, record
 
 def create(store, sid="s", consumers=()):
     with store.atomic() as tx:
-        return tx.create(SessionSpec(sid, "p", "w"), consumers=consumers)
+        return tx.create(SessionSpec(sid, "p", "w", attributes={"seed": {"unseen_input_protection": False}}), consumers=consumers)
 
 
 def lease_for(store, sid="s"):

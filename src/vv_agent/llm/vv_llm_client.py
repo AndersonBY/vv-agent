@@ -847,10 +847,8 @@ class VvLlmClient(LLMClient):
         if raw_content is not None:
             raw_payload["raw_content"] = raw_content
 
-        return LLMResponse(
-            content=content,
-            tool_calls=parsed_tool_calls,
-            raw=raw_payload,
+        return self._with_completion_metadata(
+            LLMResponse(content=content, tool_calls=parsed_tool_calls, raw=raw_payload), response
         )
 
     def _stream_completion(
@@ -979,11 +977,39 @@ class VvLlmClient(LLMClient):
         if tool_call_extra_content:
             raw_payload["tool_call_extra_content"] = tool_call_extra_content
 
-        return LLMResponse(
-            content="".join(content_parts),
-            tool_calls=normalized,
-            raw=raw_payload,
+        return self._with_completion_metadata(
+            LLMResponse(content="".join(content_parts), tool_calls=normalized, raw=raw_payload), stream
         )
+
+    @classmethod
+    def _with_completion_metadata(cls, response: LLMResponse, source: Any) -> LLMResponse:
+        # CompletionStream metadata is mutable until normal exhaustion. This method
+        # runs only after consumption, or after a non-streaming response returns.
+        metadata = cls._read_field(source, "metadata")
+        if metadata is None:
+            return response
+        evidence = {
+            name: deepcopy(cls._read_field(metadata, name))
+            for name in (
+                "finish_reason",
+                "finish_reason_normalized",
+                "refusal",
+                "stream_terminated",
+                "stream_exhausted",
+                "termination_signals",
+            )
+        }
+        attributes = cls._read_field(metadata, "attributes") or {}
+        evidence["attributes"] = (
+            {"openai_done_observer": attributes["openai_done_observer"]} if "openai_done_observer" in attributes else {}
+        )
+        if evidence["stream_exhausted"] is True and evidence["stream_terminated"] is False:
+            raise ModelStreamInterrupted("provider stream exhausted without a termination signal")
+        refusal = evidence["refusal"]
+        if refusal and evidence["finish_reason_normalized"] != "content_filter" and not response.content:
+            response.content = refusal
+        response.raw["completion_metadata"] = evidence
+        return response
 
     @staticmethod
     def _guard_stream(stream: Iterable[Any]):

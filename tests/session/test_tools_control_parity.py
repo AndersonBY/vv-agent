@@ -43,6 +43,7 @@ def admit(store, config, sid="control"):
                     "seed": {
                         "messages": [m.to_dict() for m in config.initial_messages or []],
                         "shared_state": config.shared_state or {},
+                        "unseen_input_protection": not bool(config.initial_messages),
                     }
                 },
             ),

@@ -1,13 +1,13 @@
 """Growing full-message snapshots through the normal record and append validators."""
 
-from vv_agent.session.records import SessionSpec, digest, make_record
+from vv_agent.session.records import InboxItem, SessionSpec, digest, make_record
 from vv_agent.types import Message, ToolCall, ToolExecutionResult
 
 from .helpers import record
 from .test_recovery_matrix import runtime
 
 
-def growing_history(steps: int, *, initial_bytes: int = 128 * 1024):
+def growing_history(steps: int, *, initial_bytes: int = 128 * 1024, steer: bool = False, usage: int = 0):
     rt = runtime(None, [])
     task = rt.compile("x" * initial_bytes, "t")
     definition = rt.definition(task)
@@ -15,6 +15,12 @@ def growing_history(steps: int, *, initial_bytes: int = 128 * 1024):
     messages = [Message("system", task.prompt_bundle.flatten(), metadata=task.metadata), Message("user", task.user_prompt)]
     for cycle in range(1, steps + 1):
         oid = f"t/model/{cycle}"
+        if steer:
+            item = InboxItem(f"steer-{cycle}", "steer", {"content": f"UNSEEN-{cycle}"})
+            rows.append(record("input_applied", input=item.to_dict(), input_digest=item.digest))
+            messages.append(Message("user", item.payload["content"]))
+        for _ in range(usage):
+            rows.append(record("usage_observed", meter_id="padding", observation=len(rows)))
         snapshot = [m.to_dict() for m in messages]
         rows.append(
             make_record(
@@ -39,7 +45,7 @@ def growing_history(steps: int, *, initial_bytes: int = 128 * 1024):
         tool_request = call.to_dict()
         rows.extend(
             [
-                record("op_planned", oid=oid, request=request, request_digest=checksum),
+                record("op_planned", oid=oid, request=request, request_digest=checksum, context_version=str(len(rows) + 1)),
                 record("op_started", oid=oid),
                 record("op_completed", oid=oid, request_digest=checksum, result=response, result_digest=digest(response)),
                 record(
@@ -78,10 +84,10 @@ def growing_history(steps: int, *, initial_bytes: int = 128 * 1024):
     return tuple(rows), messages
 
 
-def persist_history(store, steps: int, *, initial_bytes: int = 128 * 1024):
+def persist_history(store, steps: int, *, initial_bytes: int = 128 * 1024, enabled: bool):
     rows, messages = growing_history(steps, initial_bytes=initial_bytes)
     with store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp"), consumers=())
+        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}), consumers=())
     lease = store.acquire("s", owner="profile", ttl_ms=3_600_000)
     assert lease is not None
     with store.atomic() as tx:

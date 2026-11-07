@@ -4,6 +4,7 @@ import json
 from contextlib import suppress
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +23,7 @@ def snapshot_value(obj):
     if isinstance(obj, Record):
         return {"record_id": obj.record_id, "digest": obj.digest}
     if is_dataclass(obj):
-        return {f.name: snapshot_value(getattr(obj, f.name)) for f in fields(obj)}
+        return {f.name: snapshot_value(getattr(obj, f.name)) for f in fields(obj) if f.name != "_protection"}
     if isinstance(obj, dict):
         return [[snapshot_value(k), snapshot_value(v)] for k, v in obj.items()]
     if isinstance(obj, list | tuple):
@@ -38,7 +39,7 @@ def test_cold_snapshot_matches_030_field_by_field(store, steps):
     expected = json.loads((fixtures / "fold_030_state.json").read_text())[str(steps)]
     bodies = (fixtures / "fold_030_records.jsonl").read_bytes().splitlines()[: 2 + steps * 7]
     saved = tuple(Record.parse(body) for body in bodies)
-    with store.atomic() as tx:
+    with patch.object(SessionSpec, "record", return_value=saved[0]), store.atomic() as tx:
         tx.create(SessionSpec("s", "test", "/tmp"), consumers=())
     lease = store.acquire("s", owner="compatibility", ttl_ms=15000)
     assert lease is not None
@@ -47,12 +48,15 @@ def test_cold_snapshot_matches_030_field_by_field(store, steps):
     store._fold_cache = None
     state, rows, _ = store.read_state("s")
     for f in fields(state):
+        if f.name == "_protection":
+            continue
         assert snapshot_value(getattr(state, f.name)) == expected[f.name], f.name
     assert [r.record.encode() for r in rows] == bodies
     assert [m.to_dict() for m in project_context(rows, state)] == expected["messages"]
 
 
-def test_fold_message_decodes_grow_with_stored_snapshots(monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_fold_message_decodes_grow_with_stored_snapshots(monkeypatch, enabled):
     counts = []
     decode = Message.from_dict
     for steps in (32, 64):
@@ -66,7 +70,9 @@ def test_fold_message_decodes_grow_with_stored_snapshots(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(Message, "from_dict", counted)
             fold = Fold()
-            fold.extend((SessionSpec("s", "test", "/tmp").record(), *rows))
+            fold.extend(
+                (SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(), *rows)
+            )
         counts.append(len(calls))
     # Stored full conversations grow quadratically; replaying every obsolete snapshot is cubic.
     assert counts[1] <= 5 * counts[0]
@@ -89,8 +95,9 @@ def test_earlier_snapshots_still_validate_their_source():
         fold.extend((SessionSpec("s", "test", "/tmp").record(), rows[0], bad, *rows[2:]))
 
 
-def test_projected_events_remain_detached_from_records(store):
-    persist_history(store, 2, initial_bytes=256)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_projected_events_remain_detached_from_records(store, enabled):
+    persist_history(store, 2, initial_bytes=256, enabled=enabled)
     _, rows, _ = store.read_state("s")
     before = [r.record.encode() for r in rows]
     projected = project_records(rows)
@@ -102,8 +109,9 @@ def test_projected_events_remain_detached_from_records(store):
     assert project_result(store, "s", "t").raw_result.shared_state == {}
 
 
-def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monkeypatch):
-    persist_history(store, 40, initial_bytes=256)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monkeypatch, enabled):
+    persist_history(store, 40, initial_bytes=256, enabled=enabled)
     store._fold_cache = None
     fetch = store._rows
     sizes = []
@@ -123,10 +131,11 @@ def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monk
     assert plans[0].payload["request"]["messages"][1]["content"] == "x" * 256
 
 
-def test_cold_prefix_rejects_a_gap_across_fetch_pages(store):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cold_prefix_rejects_a_gap_across_fetch_pages(store, enabled):
     from vv_agent.session.store import Conflict
 
-    persist_history(store, 40, initial_bytes=256)
+    persist_history(store, 40, initial_bytes=256, enabled=enabled)
     store._fold_cache = None
     with store.atomic():
         store._rows("DELETE FROM sk_record WHERE session_id=%s AND seq=257", ("s",))
@@ -134,8 +143,9 @@ def test_cold_prefix_rejects_a_gap_across_fetch_pages(store):
         store.read_state("s")
 
 
-def test_result_projection_does_not_scan_all_tools_for_each_model(store):
-    persist_history(store, 24, initial_bytes=256)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_result_projection_does_not_scan_all_tools_for_each_model(store, enabled):
+    persist_history(store, 24, initial_bytes=256, enabled=enabled)
     state, rows, watermark = store.read_state("s")
     visits = []
 
@@ -152,13 +162,15 @@ def test_result_projection_does_not_scan_all_tools_for_each_model(store):
     assert len(visits) <= 8 * len(state.operations)
 
 
-def test_raw_context_still_includes_the_full_history(store):
-    messages = persist_history(store, 4, initial_bytes=256)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_raw_context_still_includes_the_full_history(store, enabled):
+    messages = persist_history(store, 4, initial_bytes=256, enabled=enabled)
     state, rows, _ = store.read_state("s")
     assert [m.to_dict() for m in project_context(rows, state, compacted=False)] == [m.to_dict() for m in messages]
 
 
-def test_fold_does_not_visit_or_copy_the_obsolete_record_prefix():
+@pytest.mark.parametrize("enabled", [False, True])
+def test_fold_does_not_visit_or_copy_the_obsolete_record_prefix(enabled):
     class CountedHistory(list):
         visits = 0
 
@@ -178,7 +190,7 @@ def test_fold_does_not_visit_or_copy_the_obsolete_record_prefix():
     fold = Fold()
     history = CountedHistory()
     fold.history = history
-    fold.extend((SessionSpec("s", "test", "/tmp").record(), *rows))
+    fold.extend((SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(), *rows))
     assert history.visits <= 20 * 64
 
 
@@ -246,7 +258,8 @@ def test_fast_record_parser_keeps_jcs_numbers_unicode_and_legacy_errors():
         Record.parse(body.replace(b'"schema_version":1', b'"schema_version":1,"schema_version":1'))
 
 
-def test_message_cache_does_not_encode_a_future_source_early():
+@pytest.mark.parametrize("enabled", [False, True])
+def test_message_cache_does_not_encode_a_future_source_early(enabled):
     from vv_agent.session.records import make_record
 
     rows, _ = growing_history(1, initial_bytes=256)
@@ -263,7 +276,19 @@ def test_message_cache_does_not_encode_a_future_source_early():
         payload=boundary.payload | {"data": {"messages": [wire], "shared_state": {}}},
     )
     fold = Fold()
-    fold.extend((SessionSpec("s", "test", "/tmp").record(), rows[0], replacement))
+    if enabled:
+        from vv_agent.memory.input_protection import UnseenInputError
+
+        with pytest.raises(UnseenInputError):
+            fold.extend((SessionSpec("s", "test", "/tmp").record(), rows[0], replacement))
+        return
+    fold.extend(
+        (
+            SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(),
+            rows[0],
+            replacement,
+        )
+    )
     assert fold.state.boundaries[("t", "before_memory", "1")].payload["data"]["messages"] == [wire]
 
 
@@ -330,10 +355,11 @@ def test_parse_only_shares_plain_immutable_bytes():
     assert parsed.encode() == body
 
 
-def test_completed_result_does_not_compare_entire_record_payloads(store, monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_completed_result_does_not_compare_entire_record_payloads(store, monkeypatch, enabled):
     from .helpers import record
 
-    persist_history(store, 2, initial_bytes=256)
+    persist_history(store, 2, initial_bytes=256, enabled=enabled)
     _, rows, _ = store.read_state("s")
     lease = store.acquire("s", owner="finish", ttl_ms=15000)
     assert lease is not None
@@ -435,3 +461,35 @@ def test_fast_json_decoder_matches_the_original_reader(monkeypatch):
             patch.setattr(records.jiter, "from_json", unsupported)
             expected = outcome(body)
         assert actual == expected
+
+
+def test_192_batch_protection_decodes_at_most_twice_undeclared(monkeypatch):
+    from dataclasses import replace
+
+    from vv_agent.session.records import InboxItem
+
+    rows, expected = growing_history(192, initial_bytes=1024, steer=True, usage=8)
+    bodies = [row.encode() for row in rows]
+    inputs = [InboxItem(**row.payload["input"]) for row in rows if row.kind == "input_applied"]
+    counts = []
+    decode = Message.from_dict
+    for enabled in (False, True):
+        creation = SessionSpec("s", "test", "/tmp").record()
+        if not enabled:
+            creation = replace(creation, payload=creation.payload | {"attributes": {}})
+        incoming = [Record.parse(body) for body in bodies]
+        calls = []
+
+        def counted(value, calls=calls):
+            calls.append(1)
+            return decode(value)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Message, "from_dict", counted)
+            fold = Fold()
+            fold.extend((creation, *incoming), consumed_inputs=inputs)
+        counts.append(len(calls))
+        assert project_context(fold.history, fold.state) == expected
+    assert counts[1] <= 2 * counts[0], counts
+    assert fold.state._protection is not None
+    assert fold.state._protection.messages == expected

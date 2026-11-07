@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from support import FixedModelProvider
@@ -33,6 +34,21 @@ SUMMARY = json.dumps({"original_user_messages": ["request"], "current_work_state
 
 
 def old_run(agent, config, steps):
+    from vv_agent.session.surfaces import SessionDriver
+
+    create = SessionDriver.create
+
+    def imported_history(self, sid, workspace, attributes=None):
+        attributes = deepcopy(attributes or {})
+        attributes.setdefault("seed", {})["unseen_input_protection"] = False
+        return create(self, sid, workspace, attributes)
+
+    if config.initial_messages:
+        # These paired fixtures compare the previously frozen imported-history policy.
+        with patch.object(SessionDriver, "create", imported_history):
+            return Runner.run_sync(
+                agent, "go", run_config=replace(config, model_provider=FixedModelProvider(ScriptedLLM(deepcopy(steps)), RESOLVED))
+            )
     return Runner.run_sync(
         agent, "go", run_config=replace(config, model_provider=FixedModelProvider(ScriptedLLM(deepcopy(steps)), RESOLVED))
     )

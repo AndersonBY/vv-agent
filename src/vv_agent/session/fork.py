@@ -12,7 +12,7 @@ from vv_agent.workspace.streaming import scan_text
 
 from .compaction import memory_settings
 from .context_view import context_messages, project_view
-from .records import InboxItem, SessionSpec, copy_json, digest
+from .records import InboxItem, SessionSpec, copy_json, digest, inherited_seed_policies
 from .reducer import fold
 from .store import Conflict
 
@@ -164,7 +164,11 @@ def fork_thread(kernel, host, params):
         attributes={
             "app_server": binding,
             "app_server_context": definition,
-            "seed": {"messages": copied, "shared_state": {}},
+            "seed": {
+                "messages": copied,
+                "shared_state": {},
+                **inherited_seed_policies(attributes),
+            },
             "app_server_fork": fork,
         },
     )

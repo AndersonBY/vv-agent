@@ -93,8 +93,10 @@ class _MessageCache:
         return _RetainedMessages(private, self.wire_array(private))
 
     def wire_array(self, values: list[Any]) -> bytes:
-        parts = []
+        parts = [b"["]
         for index, value in enumerate(values):
+            if index:
+                parts.append(b",")
             if isinstance(value, dict):
                 value = values[index] = self.share(value, strict=True)
                 body = self._wire_bodies.get(id(value))
@@ -104,7 +106,8 @@ class _MessageCache:
             else:
                 body = canonical_json_bytes(value)
             parts.append(body)
-        return b"[" + b",".join(parts) + b"]"
+        parts.append(b"]")
+        return b"".join(parts)
 
     def parse(self, value: dict[str, Any]) -> Message:
         from vv_agent.types import Message
@@ -223,7 +226,23 @@ CHILD_ADMISSION = closed(
     handoff_metadata=JSON_OBJECT,
 )
 
-SEED = closed(messages=array(JSON_OBJECT), shared_state=JSON_OBJECT)
+SEED_POLICIES = ("unseen_input_protection", "response_rejection")
+SEED = {
+    "oneOf": [
+        closed(**bootstrap, **{name: BOOL for index, name in enumerate(SEED_POLICIES) if mask & (1 << index)})
+        for bootstrap in ({}, {"messages": array(JSON_OBJECT), "shared_state": JSON_OBJECT})
+        for mask in range(1 << len(SEED_POLICIES))
+        if bootstrap or mask
+    ]
+}
+
+
+def inherited_seed_policies(attributes: dict[str, Any]) -> dict[str, bool]:
+    """Derivation freezes each source choice, including an undeclared source's false."""
+    seed = attributes.get("seed", {})
+    return {name: seed.get(name, False) for name in SEED_POLICIES}
+
+
 TASK_SESSION_METADATA = closed(
     host_binding_names=STRINGS,
     max_handoffs=NAT,
@@ -635,31 +654,46 @@ def _json_bytes(value: Any) -> bytes:
         retained = {key: item.encode() for key, item in value.items() if isinstance(item, _RetainedTools | _RetainedMessages)}
         if retained:
             return _object_bytes(value, retained)
+    # The checked subset has identical stdlib/JCS and orjson encodings. Emit
+    # bytes directly instead of allocating a full Unicode encoding first.
+    if _stdlib_compatible(value):
+        try:
+            return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
+        except orjson.JSONEncodeError:
+            # orjson has a lower nesting limit than the canonical encoder.
+            pass
     return canonical_json_bytes(value)
 
 
 def _object_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
-    parts = []
+    parts = [b"{"]
     pending = {}
     keys = sorted(value) if all(type(key) is str and key.isascii() for key in value) else sorted(value, key=utf16_sort_key)
     for key in keys:
         if key in encoded_fields:
             if pending:
-                parts.append(canonical_json_bytes(pending)[1:-1])
+                if len(parts) > 1:
+                    parts.append(b",")
+                parts.append(_json_bytes(pending)[1:-1])
                 pending.clear()
-            parts.append(canonical_json_bytes(key) + b":" + encoded_fields[key])
+            if len(parts) > 1:
+                parts.append(b",")
+            parts.extend((canonical_json_bytes(key), b":", encoded_fields[key]))
         else:
             pending[key] = value[key]
     if pending:
-        parts.append(canonical_json_bytes(pending)[1:-1])
-    return b"{" + b",".join(parts) + b"}"
+        if len(parts) > 1:
+            parts.append(b",")
+        parts.append(_json_bytes(pending)[1:-1])
+    parts.append(b"}")
+    return b"".join(parts)
 
 
 def _record_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
     if not encoded_fields:
-        return canonical_json_bytes(value)
+        return _json_bytes(value)
     payload = _object_bytes(value["payload"], encoded_fields)
-    envelope = canonical_json_bytes(value | {"payload": None})
+    envelope = _json_bytes(value | {"payload": None})
     return envelope.replace(b'"payload":null', b'"payload":' + payload, 1)
 
 
@@ -856,7 +890,7 @@ class Record:
             validate(self.payload["attributes"]["seed"], SEED, canonical=False)
             from vv_agent.types import Message
 
-            for message in self.payload["attributes"]["seed"]["messages"]:
+            for message in self.payload["attributes"]["seed"].get("messages", []):
                 try:
                     Message.from_dict(message)
                 except (ValueError, TypeError, KeyError) as exc:
@@ -1000,7 +1034,23 @@ class SessionSpec:
     parent_operation_id: str | None = None
     attributes: dict[str, Any] | None = None
 
-    def record(self) -> Record:
+    def record(self, *, _existing: Record | None = None) -> Record:
+        attributes = copy_json(self.attributes) if self.attributes is not None else {}
+        if not isinstance(attributes, dict):
+            raise RecordError("attributes must be an object")
+        if "seed" in attributes and not isinstance(attributes["seed"], dict):
+            raise RecordError("seed must be an object")
+        if _existing is None:
+            for name in SEED_POLICIES:
+                attributes.setdefault("seed", {}).setdefault(name, True)
+        else:
+            original = _existing._payload["attributes"].get("seed", {})
+            declarations = {name: original[name] for name in SEED_POLICIES if name in original}
+            if "seed" in attributes:
+                for name, value in declarations.items():
+                    attributes["seed"].setdefault(name, value)
+            elif original and set(original) <= set(SEED_POLICIES):
+                attributes["seed"] = copy_json(original)
         return make_record(
             "session_created",
             session_id=self.session_id,
@@ -1009,6 +1059,6 @@ class SessionSpec:
                 "workspace": self.workspace,
                 "parent_session_id": self.parent_session_id,
                 "parent_operation_id": self.parent_operation_id,
-                "attributes": self.attributes if self.attributes is not None else {},
+                "attributes": attributes,
             },
         )

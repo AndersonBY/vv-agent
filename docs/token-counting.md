@@ -41,7 +41,7 @@ with a trailing newline. The cache holds at most 4096 entries per process.
 Keys hold digests and counting identities; values hold integers. The cache
 retains no message bodies.
 
-The verified pairs are vv-llm `0.8.3`, `0.8.4` or `0.8.5` with DeepSeek tokenizer
+The verified pairs are vv-llm `0.8.3`, `0.8.4`, `0.8.5` or `0.10.1` with DeepSeek tokenizer
 `0.3.0`, or with tiktoken `0.14.0`. Versions are listed individually in
 `memory/token_utils.py`. A newer dependency version counts the whole text
 locally and logs one warning per encoding per process.

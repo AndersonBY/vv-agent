@@ -703,7 +703,7 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
         rt = kernel.runtime(Agent("route", "Be precise.", model="main-model"), config)
         if purpose == "compaction":
             rt.memory_manager = MemoryManager(compact_threshold=1000, keep_recent_messages=1)
-        kernel.create("route", "/fixture")
+        kernel.create("route", "/fixture", {"seed": {"unseen_input_protection": False}} if purpose == "compaction" else None)
         kernel.push("route", InboxItem("initial", "user", {"content": "go"}))
         with patch.object(VvLlmClient, "complete", side_effect=response):
             drive(kernel.store, "route", runtime=rt, _one_turn=True)

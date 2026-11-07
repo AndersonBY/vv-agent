@@ -344,6 +344,50 @@ outside 429; `maximum context length` already covers the numeric model-limit for
 
 `tests/test_model_rejection.py`, `tests/test_model_rejection_lifecycle.py` and
 `scripts/model_rejection_fixtures.py` cover the rules and real provider transports.
-Until the immutable contract release exists, use VV_AGENT_CONTRACT_SOURCE for
-producer gates and leave the published 35.0.0 lock/snapshot intact. This local
-selection does not assert central adoption or a verified 36.0.0 release.
+The lock now selects 37.0.0 (below).
+
+## Contract 37.0.0 input protection
+
+The lock and vendored snapshot pin the v37.0.0 release (`17d26dd`); local
+producer validation can still select a contract checkout with
+`VV_AGENT_CONTRACT_SOURCE`. Fold incrementally maintains coverage and protected source
+positions in its disposable prefix projection, sharing the message cache;
+`session.context.protected_start` reads that same state for execution and replay.
+No coverage ledger is persisted. `UnseenInputError.code` maps to
+`unseen_input_removed`, and the capacity terminal reason is
+`unseen_input_capacity_exceeded` (`UnseenInputCapacityError.code`).
+Only first creation defaults on; transaction creation replay with an omitted
+choice preserves the original bytes and rule. Children and forks inherit the
+source choice. External tool provider callbacks protect their original assistant
+group, like blocking child results. The complete inbox classification is in the
+canonical input-protection document.
+
+Declared sessions use that same committed-prefix message projection for actual
+requests and cold replay, including normal tool callbacks after a before-memory
+snapshot. Replacement remaps all verbatim retained operation groups, including
+currently covered groups. Native child correction is governed by the generic
+non-model receipt branch; normal native-child execution cannot currently reach
+it, and provider correction tests do not prove a native-child scenario.
+
+`scripts/unseen_input_fixtures.py` includes local HTTP through the real
+`VvLlmClient` and kernel for normal primary, PTL recovery, endpoint retry and
+Unknown. Port and clocks are frozen before producing deterministic bytes.
+Rust is unsupported for this feature and retains its frozen 23.0.0 baseline.
+
+
+## Contract 37.0.0 completion evidence
+
+`VvLlmClient._with_completion_metadata` reads final CompletionStream metadata
+only after consumption (and metadata on non-stream responses). It maps missing
+termination to ModelStreamInterrupted, and fills empty assistant content from
+refusal text unless content_filter. `llm.errors.model_response_rejection` creates
+the safe HTTP 200 descriptor; the kernel gates it on the independent
+`response_rejection` creation seed, before after-LLM hooks. Fully consumed
+response rejection is definitive despite earlier deltas; exception-based request
+rejection retains the observed-output uncertainty veto. Safe result/event/terminal
+projections and bounded Unknown retries use existing paths.
+`scripts/model_completion_fixtures.py` and
+`tests/session/test_model_completion_evidence.py` prove local HTTP through the
+real vv-llm adapter/kernel, independent seed replay and real 0.33.3 SQLite and
+PostgreSQL rollback. The closed seed policies share default/replay/inheritance
+logic in `session.records`; no record, inbox or SQL version changes.

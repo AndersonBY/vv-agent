@@ -70,8 +70,9 @@ class SessionDriver:
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
         _DRIVERS[sid] = self
+        spec = SessionSpec(sid, "local", workspace, attributes=attributes)
         with self.store.atomic() as tx:
-            tx.create(SessionSpec(sid, "local", workspace, attributes=attributes), consumers=("events", "app_server", "traces"))
+            tx.create(spec, consumers=("events", "app_server", "traces"))
 
     def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
 
