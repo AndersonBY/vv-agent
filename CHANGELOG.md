@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.34.1 — 2026-11-07
+
+0.34.0 was tagged but its release workflow failed before publication to PyPI.
+0.34.1 includes all of 0.34.0, plus two test corrections: the retention test
+waits for the real command to finish, and pathological glob tests use inputs
+that exceed the per-call regex CPU budget. Product behavior is unchanged.
+See [release notes](docs/releases/0.34.1.md) and the
+[0.34.0 upgrade notes](docs/upgrading.md#0340--2026-11-07).
+
 ## 0.34.0 — 2026-11-07
 
 New sessions protect inputs until a primary model response commits to history.
