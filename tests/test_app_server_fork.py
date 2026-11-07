@@ -234,4 +234,6 @@ def test_canonical_fork_fixture_is_produced_by_real_processor(tmp_path):
         timeout=60,
     )
     assert produced.returncode == 0, produced.stderr
-    assert (tmp_path / "app_server_a2.json").read_bytes() == (root / "tests/fixtures/parity/app_server_a2.json").read_bytes()
+    from support.contract import fixture_root
+
+    assert (tmp_path / "app_server_a2.json").read_bytes() == (fixture_root() / "app_server_a2.json").read_bytes()

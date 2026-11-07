@@ -105,7 +105,7 @@ class KernelRuntime:
                 memory = session_memory(task, workspace if task.use_workspace else None)
                 memory.load()
                 task.metadata.setdefault("vv_session", {})["memory_initial_state"] = memory.state.to_dict()
-            driver.create(sid, str(workspace), {"seed": seed})
+            driver.create(sid, str(workspace), {"seed": seed | {"unseen_input_protection": False}})
             handle = driver.start(sid, agent, config, kwargs.get("user_message") or task.user_prompt, task=task, autostart=False)
             handle.runtime.memory_manager = build_memory_manager(
                 tool_registry=self.tool_registry,

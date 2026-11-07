@@ -262,6 +262,9 @@ class Fixtures:
         if memory is not None:
             rt.memory_manager = memory
         self.runtimes[sid] = rt
+        if config.initial_messages and attributes is None:
+            # Retain the imported-history fixtures' original creation policy.
+            attributes = {"seed": {"unseen_input_protection": False}}
         self.kernel.create(sid, "/fixture", attributes)
         self.push(sid, InboxItem("initial", "user", {"content": content}))
         return rt

@@ -121,3 +121,12 @@ def record(kind: str, *, sid: str = "s", tid: str = "t", oid: str = "o", attempt
 
 def base() -> list[Record]:
     return [record("session_created"), record("turn_started"), record("op_planned"), record("op_started")]
+
+
+def runtime_turn_record(tid: str = "t") -> Record:
+    """Transaction probes under the new default still need a real frozen task."""
+    from .test_recovery_matrix import runtime
+
+    rt = runtime(None, [])
+    definition = rt.definition(rt.compile("go", tid))
+    return record("turn_started", tid=tid, definition=definition, definition_digest=digest(definition))

@@ -101,6 +101,7 @@ from vv_agent.interactive import (
     InteractiveAgentDefinition,
     create_agent_session,
 )
+from vv_agent.memory.input_protection import UnseenInputCapacityError, UnseenInputError
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ModelError, ModelProvider, ModelRef, ScriptedModelProvider, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings, ResponseFormat, RetrySettings, ToolChoice
@@ -368,6 +369,8 @@ __all__ = [
     "TraceSink",
     "UnavailableMetricPolicy",
     "Unknown",
+    "UnseenInputCapacityError",
+    "UnseenInputError",
     "UsageSource",
     "VvLlmClient",
     "VvLlmModelProvider",

@@ -13,7 +13,7 @@ from vv_agent.session.records import RecordError, SessionSpec
 from vv_agent.session.store import Conflict
 
 from .conftest import open_store
-from .helpers import record
+from .helpers import record, runtime_turn_record
 
 
 def test_record_bytes_and_digest_are_retained_without_payload_aliases(monkeypatch):
@@ -40,13 +40,14 @@ def test_record_bytes_and_digest_are_retained_without_payload_aliases(monkeypatc
 def test_external_record_bytes_require_full_validation(store, database, reader, tamper):
     with store.atomic() as tx:
         tx.create(SessionSpec("s", "p", "w"), consumers=("events",))
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="writer", ttl_ms=15000)
     assert lease is not None
     read_state(store, "s")  # Keep a warm prefix in the reader before the external append.
     with open_store(database) as other:
         with other.atomic() as tx:
-            tx.append("s", lease=lease, expected_seq=1, commit_id="external", records=(record("turn_started"),))
-        value = record("turn_started").to_dict()
+            tx.append("s", lease=lease, expected_seq=1, commit_id="external", records=(turn,))
+        value = turn.to_dict()
         if tamper == "schema":
             value["payload"]["unexpected"] = 1
         elif tamper == "embedded_digest":
@@ -67,13 +68,14 @@ def test_external_record_bytes_require_full_validation(store, database, reader, 
 def test_changed_own_record_bytes_do_not_hit_cache(store, warm):
     with store.atomic() as tx:
         tx.create(SessionSpec("s", "p", "w"), consumers=())
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="writer", ttl_ms=15000)
     assert lease is not None
     with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(record("turn_started"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(turn,))
     if not warm:
         store._fold_cache = None
-    value = record("turn_started").to_dict()
+    value = turn.to_dict()
     value["payload"]["unexpected"] = True
     body = json.dumps(value).encode()
     with store.atomic():
@@ -145,10 +147,11 @@ def test_compiled_checks_match_all_nested_handles(variant):
 def test_committed_records_remain_isolated_across_receipt_read_and_new_lease(store, monkeypatch):
     with store.atomic() as tx:
         tx.create(SessionSpec("s", "p", "w"), consumers=())
+    turn = runtime_turn_record()
     lease = store.acquire("s", owner="first", ttl_ms=15000)
     assert lease is not None
     with store.atomic() as tx:
-        receipt = tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(record("turn_started"),))
+        receipt = tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(turn,))
     receipt.records[0].record.payload["definition"]["changed"] = True
     store.release(lease)
     replacement = store.acquire("s", owner="second", ttl_ms=15000)
@@ -159,7 +162,7 @@ def test_committed_records_remain_isolated_across_receipt_read_and_new_lease(sto
 
     monkeypatch.setattr(records.Record, "parse", unexpected)
     state, rows, _ = read_state(store, "s")
-    assert state.turns["t"].start.payload["definition"] == {}
+    assert state.turns["t"].start.payload["definition"] == turn.payload["definition"]
     assert rows[-1].record is receipt.records[0].record
 
 

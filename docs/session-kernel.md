@@ -11,8 +11,9 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 [cloud host integration](host-integration.md). This page is the reference for
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
-The kernel follows contract 32.0.0, pinned in `contract.lock.json`. Current
-versions: public API v15, inbox schema 3, record schema 1, RunEvent v6,
+`contract.lock.json` records the immutable baseline. Input protection in 0.34.0
+targets contract 37.0.0 and uses local contract selection until release sync.
+Current versions: public API v15, inbox schema 3, record schema 1, RunEvent v6,
 model-call v2, task-token-usage v3, strict Message, App Server protocol v5 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.
 
@@ -185,6 +186,11 @@ Model request producers also reuse these private canonical message fragments.
 The request digest still hashes the complete canonical bytes; public payloads
 and callbacks still detach mutable values. This does not remove either full
 message snapshot.
+
+Record encoding writes UTF-8 bytes directly with orjson for values whose integer,
+string and key ordering rules match JCS. Other values and nesting beyond that
+encoder's limit use the canonical encoder. Both paths retain the same bytes,
+digests and rejection rules; the byte path avoids an intermediate Unicode copy.
 
 `read_state` captures head sequence, inbox watermark and epoch with one statement, then loads and folds records up to
 that head without a session row lock. Consumed inputs are bounded by both the
@@ -773,3 +779,24 @@ and answer rules. See [user interactions](app-server-interactions.md).
 `HeartbeatStopped`, exported from `vv_agent`, reports intentional renewal-worker
 shutdown. Catch it before `LeaseLost` when a host must distinguish normal stop
 from ownership failure. It does not permit another execution or commit.
+
+## Inputs awaiting a primary response
+
+New session creation freezes `attributes.seed.unseen_input_protection=true`.
+A declaration-only seed leaves host bootstrap history and state intact. Existing
+undeclared sessions keep their previous behavior. Children and App Server forks
+inherit the source choice; there is no generic clone API.
+
+Fold maintains coverage and source message positions incrementally as committed
+records arrive, reusing its message cache. `context.protected_start` reads that
+same disposable state for execution and replay; it does not reproject old
+snapshots or persist a separate coverage ledger. Coverage comes from normal
+primary responses and their plans' `context_version`. Rejections, endpoint retry,
+Unknown and internal summaries do not advance it. Inputs arriving after that
+captured prefix stay verbatim in the tail, with complete tool batches. Hooks
+that remove them raise `UnseenInputError` (`unseen_input_removed`) before commit;
+inputs that cannot fit fail with `unseen_input_capacity_exceeded`. This also
+applies to summary acceptance and reducer replay. Authenticated external tool
+callbacks protect their original assistant group, like blocking child results.
+Transaction creation replay with an omitted choice keeps the original creation
+bytes and rule; only first creation defaults on. Provider conversion is unchanged.

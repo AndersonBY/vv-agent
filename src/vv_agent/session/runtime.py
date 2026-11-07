@@ -559,6 +559,7 @@ class Runtime:
             for f in fields(self.memory_manager)
             if f.name
             not in {
+                "protected_start",
                 "workspace_backend",
                 "summary_callback",
                 "session_memory",

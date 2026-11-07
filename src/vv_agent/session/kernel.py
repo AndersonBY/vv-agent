@@ -15,7 +15,13 @@ from uuid import uuid4
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import _project_provider_stream_payload
-from vv_agent.llm.errors import ModelStreamInterrupted, is_prompt_too_long_error, model_request_rejection, safe_model_error
+from vv_agent.llm.errors import (
+    ModelStreamInterrupted,
+    is_prompt_too_long_error,
+    model_request_rejection,
+    model_response_rejection,
+    safe_model_error,
+)
 from vv_agent.memory.microcompact import is_microcompacted_tool_content
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.output_validation import OutputRepairRequest
@@ -53,7 +59,7 @@ from .providers import (
     validate_provider_handle,
     validate_provider_result,
 )
-from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
+from .records import InboxItem, Record, _RetainedTools, copy_json, digest, inherited_seed_policies, make_record
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .sql import SQLSessionTx, SQLStore
@@ -1095,7 +1101,11 @@ class _Driver:
             task = self.runtime.compile(
                 content["text"] if isinstance(content, dict) and "messages" in content else str(content),
                 tid,
-                seed=self.records[0].record._payload["attributes"].get("seed") if not self.state.turns else None,
+                seed=(
+                    self.records[0].record._payload["attributes"].get("seed")
+                    if not self.state.turns and "messages" in self.records[0].record._payload["attributes"].get("seed", {})
+                    else None
+                ),
                 control=compaction_request(InboxItem(**item)) is not None,
             )
             task.metadata.pop("_vv_agent_app_server_compaction_only", None)
@@ -1108,7 +1118,7 @@ class _Driver:
             task.task_id = tid
             if not self.state.turns:
                 seed = self.records[0].record._payload["attributes"].get("seed")
-                if seed is not None:
+                if seed is not None and "messages" in seed:
                     task.initial_messages = [Message.from_dict(copy_json(m)) for m in seed["messages"]]
                     task.initial_shared_state = copy_json(seed["shared_state"])
             definition = self.runtime._definition(task)
@@ -1173,6 +1183,12 @@ class _Driver:
 
     def model_plan(self) -> Record | None:
         messages = self.transcript()
+        from vv_agent.memory.input_protection import retained_start
+
+        from .context import protected_start
+
+        protection = protected_start(self.records, self.state)
+        protected_source = [Message.from_dict(copy_json(m.to_dict())) for m in messages] if protection is not None else []
         tid = self.state.active_turn_id
         assert tid is not None
         start = self.state.turns[tid].start
@@ -1201,6 +1217,7 @@ class _Driver:
             tool_schemas=copy_json(definition["tools"]) if self.runtime.hooks.has_hooks() else definition["tools"],
             shared_state=shared,
         )
+        retained_start(protected_source, messages, protection)
         denied = read_after_cycle_disallowed_tools(shared)
         if denied:
             schemas = [schema for schema in schemas if schema["function"]["name"] not in denied]
@@ -1583,7 +1600,13 @@ class _Driver:
                         raise InvalidChildBatch("All children in a batch must have the same background flag")
                     assert specs is not None
                     generation = self.state.turns[plan.turn_id or ""].start._payload["generation"]
-                    handles = [create_child(tx, child, plan, generation) for child in specs]
+                    inherited = inherited_seed_policies(self.records[0].record._payload["attributes"])
+                    inherited_specs = []
+                    for child in specs:
+                        attributes = copy_json(child.spec.attributes or {})
+                        attributes.setdefault("seed", {}).update(inherited)
+                        inherited_specs.append(replace(child, spec=replace(child.spec, attributes=attributes)))
+                    handles = [create_child(tx, child, plan, generation) for child in inherited_specs]
                     handle = handles[0]
                     if len(handles) > 1:
                         handle = handle | {
@@ -1624,6 +1647,7 @@ class _Driver:
                 {"operation_id": plan.operation_id, "attempt": plan.attempt, "call_id": f"{plan.operation_id}/{plan.attempt}"}
             )
             request.metadata["purpose"] = plan._payload["purpose"]
+            response_policy = self.records[0].record._payload["attributes"].get("seed", {}).get("response_rejection", False)
             if started._payload.get("endpoint_id"):
                 request.metadata.setdefault("vv_session", {})["endpoint_id"] = started._payload["endpoint_id"]
             if plan._payload["purpose"] == "output_repair":
@@ -1642,6 +1666,16 @@ class _Driver:
                 except Exception as exc:
                     return Definitive({"content": safe_model_error(exc), "tool_calls": [], "error_code": "repair_provider_error"})
                 if isinstance(repaired, LLMResponse):
+                    rejection = model_response_rejection(repaired.raw.get("completion_metadata", {})) if response_policy else None
+                    if rejection is not None:
+                        return Definitive(
+                            {
+                                "content": f"HTTP 200: {rejection['message']}",
+                                "tool_calls": [],
+                                "error_code": "repair_provider_error",
+                            },
+                            usage=repaired.raw.get("usage") or {},
+                        )
                     return Definitive({"content": repaired.content, "tool_calls": []}, usage=repaired.raw.get("usage") or {})
                 return Definitive({"content": serializable_output(repaired), "tool_calls": []})
             if "shared_state" in request.metadata.get("vv_session", {}):
@@ -1693,6 +1727,20 @@ class _Driver:
                         }
                     )
                 raise
+            # A fully observed response-level conclusion is definitive even after deltas.
+            # Exception-based request rejection above still yields to observed stream output.
+            if response_policy:
+                rejection = model_response_rejection(response.raw.get("completion_metadata", {}))
+                if rejection is not None:
+                    return Definitive(
+                        {
+                            "error_code": "model_request_rejected",
+                            "content": f"HTTP 200: {rejection['message']}",
+                            "tool_calls": [],
+                            "rejection": rejection,
+                        },
+                        usage=copy_json(response.raw.get("usage") or {}),
+                    )
             observed_usage = copy_json(response.raw.get("usage") or {})
             if plan._payload["purpose"] == "primary":
                 response = self.runtime.hooks.apply_after_llm(
@@ -2034,16 +2082,24 @@ class _Driver:
         if self.runtime.hooks.has_hooks() and self.boundary("before_memory", hook_id) is None:
             shared = self.shared_state()
             source = self.transcript()
+            from vv_agent.memory.input_protection import retained_start
+
+            from .context import protected_start
+
+            protection = protected_start(self.records, self.state)
+            source_digest = digest([m.to_dict() for m in source])
+            protected_source = [Message.from_dict(copy_json(m.to_dict())) for m in source] if protection is not None else []
             replacement = self.runtime.hooks.apply_before_memory_compact(
                 task=self.task(), cycle_index=cycles + 1, messages=source, shared_state=shared
             )
+            retained_start(protected_source, replacement, protection)
             self.commit(
                 [
                     self.boundary_record(
                         "before_memory",
                         hook_id,
                         {"messages": [m.to_dict() for m in replacement], "shared_state": self.runtime.durable_state(shared)},
-                        source_digest=digest([m.to_dict() for m in source]),
+                        source_digest=source_digest,
                     )
                 ],
                 guarded=True,

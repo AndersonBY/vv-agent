@@ -14,13 +14,13 @@ from unittest.mock import patch
 import httpx2
 
 from tests.model_context_cases import CONTEXT_QUOTA_CASES
-from tests.session.test_compaction import SUMMARY, configured
+from tests.session.test_compaction import SUMMARY, configured, start
 from tests.session.test_endpoint_routing import host
 from tests.session.test_model_http_observation import local_vendor_transport
 from tests.session.test_model_rejection import adapter_error, context_http_error, fail, http_error
 from tests.session.test_model_rejection_retry_policy import retry_transport
 from tests.session.test_model_response_completion import local_response_transport
-from tests.session.test_recovery_matrix import records_of, runtime, start
+from tests.session.test_recovery_matrix import records_of, runtime
 from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.llm.errors import ModelRequestRejected, ModelStreamInterrupted
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient

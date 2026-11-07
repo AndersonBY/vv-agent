@@ -77,6 +77,67 @@ old-version session.
 
 ## Version notes
 
+### 0.34.0 — 2026-11-07
+
+New sessions declare input protection inside the closed creation seed. Python
+0.33.3 rejects that declaration when it decodes the creation record, reads from
+the beginning, or restores a session. This includes finished sessions. Paged
+record reads, inbox reads and raw JSON reads can skip the creation decoder;
+check the supported version at each host entry point before using these paths.
+
+Existing sessions without the declaration keep their original compression and
+continuation rules. Do not edit their creation records. Repeating transaction
+`tx.create` with an omitted choice preserves the existing creation bytes and
+rule; only the first creation defaults to true. Explicitly different choices,
+other creation fields and consumer sets still conflict.
+
+Children and App Server forks inherit the source choice. New descendants carry
+an explicit Boolean, including false inherited from an undeclared parent;
+0.33.3 rejects either value. Once an old session creates a child in this new
+format, keep the parent's and child's execution, cancellation and result delivery
+on the new runtime. An old parent can need to read its new child to cancel it or
+receive its result. Checking only the parent's original creation record is not
+enough to decide whether rollback is safe.
+
+Host hooks must keep protected messages unchanged and in order. To add product
+IDs or other information, include it when producing the tool result, or keep the
+original messages and append a separate message. Do not rewrite a protected tool
+message in before-memory or before-LLM hooks. `unseen_input_removed` identifies
+such a hook/replacement violation; fix the hook instead of blindly retrying.
+`unseen_input_capacity_exceeded` means the original protected input cannot fit;
+choose a suitable model or explicitly start a new session with host-selected
+input. Do not silently summarize the protected text.
+
+A declaration-only seed is not bootstrap history. Hosts that inspect seed before
+calling the runtime must distinguish it from the `messages`/`shared_state` pair;
+do not clear their configured history when that pair is absent.
+
+There is no SQL or global record-schema migration. The contract is 37.0.0;
+publication and immutable lock/snapshot selection are separate release gates.
+
+Model completion now uses vv-llm >=0.10.1. New sessions declare
+`attributes.seed.response_rejection=true`. A content-filter result, or refusal
+finish reason without answer text, now ends as `model_request_rejected` with
+HTTP 200, safe provider code/type and `retryable=false`. A streamed answer may
+already be visible: finish or replace that temporary text when ModelCallFailed
+or RunFailed arrives. Rejected partial text is not retained in model history.
+
+OpenAI refusal text is an ordinary answer when the reason is not content_filter.
+If content is empty, that text becomes the assistant body, so hosts should render
+it as they render any assistant answer. Final evidence is available in ordinary
+model receipts at `raw.completion_metadata`. Missing-termination EOF follows
+existing Unknown/retry behavior; degraded observation is recorded as unknown
+termination and keeps existing completion behavior.
+
+No record, inbox or SQL schema changes. Existing sessions without the response
+policy retain 0.33.3 filtering behavior; EOF and refusal-text improvements use
+representations 0.33.3 can read and continue. Both seed policies independently
+default on only at first creation, inherit on child/fork (absence becomes false),
+and preserve creation bytes on transaction replay. 0.33.3 rejects either declared
+field, including false. Keep declared sessions and dependent parent/child work on
+the new runtime when rolling back; do not strip creation fields to bypass this gate.
+
+
 ### 0.33.3 — 2026-11-06
 
 A token quota means “wait for more allowance”; shrinking history cannot fix it.

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.memory.input_protection import atomic_start, retained_start
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
     EXCERPT_METADATA_KEY,
@@ -232,6 +233,7 @@ class MemoryManager:
     summary_callback: SummaryCallback | None = None
     base_system_prompt: str = ""
     session_memory: SessionMemory | None = None
+    protected_start: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.microcompaction_policy, MicrocompactionPolicy):
@@ -420,8 +422,8 @@ class MemoryManager:
     ) -> tuple[list[Message], bool]:
         return self._summarize_prefix(messages, keep_recent=self.keep_recent_messages)
 
-    @staticmethod
     def _summary_parts(
+        self,
         messages: list[Message],
         keep_recent: int,
     ) -> tuple[list[Message], list[Message], list[Message], list[Message]] | None:
@@ -451,16 +453,23 @@ class MemoryManager:
             blocks.append((index, end))
             index = end
         retained_ids = {id(message) for message in filter_empty_assistant_messages(messages)}
+        protected_from = atomic_start(messages, self.protected_start) if self.protected_start is not None else len(messages)
         raw_indices = [
-            i for i, m in enumerate(messages) if id(m) in retained_ids and m.role != "system" and m.name != _MEMORY_SUMMARY_NAME
+            i
+            for i, m in enumerate(messages)
+            if i >= protected_from or (id(m) in retained_ids and m.role != "system" and m.name != _MEMORY_SUMMARY_NAME)
         ]
         tail_count = max(keep_recent, 1)
         cut = raw_indices[-tail_count] if len(raw_indices) > tail_count else (raw_indices[0] if raw_indices else 0)
+        if self.protected_start is not None:
+            cut = min(cut, atomic_start(messages, self.protected_start))
         for start, end in blocks:
             if start < cut < end:
                 cut = start
-        systems = [m for m in messages if m.role == "system" and m.name != _MEMORY_SUMMARY_NAME]
-        previous = [m for m in messages if m.name == _MEMORY_SUMMARY_NAME]
+        systems = [
+            m for i, m in enumerate(messages) if i < protected_from and m.role == "system" and m.name != _MEMORY_SUMMARY_NAME
+        ]
+        previous = [m for i, m in enumerate(messages) if i < protected_from and m.name == _MEMORY_SUMMARY_NAME]
         prefix = [messages[i] for i in raw_indices if i < cut]
         tail = [messages[i] for i in raw_indices if i >= cut]
         return systems, previous, prefix, tail
@@ -546,6 +555,7 @@ class MemoryManager:
             Message(role="user", name=_MEMORY_SUMMARY_NAME, content=content, metadata={COMPACTION_METADATA_KEY: evidence}),
             *tail,
         ]
+        retained_start(messages, candidate, self.protected_start)
         tokens = self._calculate_message_length(candidate)
         if (require_reduction and tokens >= self._calculate_message_length(messages)) or tokens > self.effective_context_window:
             return list(messages), False
@@ -816,6 +826,9 @@ class MemoryManager:
             excerpt_head_chars=self.tool_result_excerpt_head,
             excerpt_tail_chars=self.tool_result_excerpt_tail,
         )
+        if self.protected_start is not None:
+            start = atomic_start(messages, self.protected_start)
+            plan = replace(plan, candidates=tuple(c for c in plan.candidates if c.message_index < start))
         if current_tokens > self.autocompact_threshold:
             parts = self._summary_parts(messages, self.keep_recent_messages)
             if parts is None:
@@ -835,7 +848,10 @@ class MemoryManager:
         archived_count = 0
         reclaimed_tokens = 0
         artifact_failure_count = 0
+        protected = atomic_start(messages, self.protected_start) if self.protected_start is not None else len(messages)
         for candidate in plan.candidates:
+            if candidate.message_index >= protected:
+                continue
             if remaining_tokens <= plan.target_tokens:
                 break
             message = updated_messages[candidate.message_index]

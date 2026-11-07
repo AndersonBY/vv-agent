@@ -11,7 +11,7 @@ from vv_agent.types import LLMResponse, ToolExecutionResult
 
 from . import test_recovery_matrix as recovery
 from .conftest import open_store
-from .helpers import record
+from .helpers import record, runtime_turn_record
 
 
 def seed_history(store, database, size):
@@ -160,12 +160,12 @@ def test_prefix_cache_rollback_conflict_epoch_and_disposal(store, database):
 
     with pytest.raises(Rollback), store._transaction():
         with store.atomic() as tx:
-            tx.append("s", lease=lease, expected_seq=1, commit_id="rolled-back", records=(record("turn_started"),))
+            tx.append("s", lease=lease, expected_seq=1, commit_id="rolled-back", records=(runtime_turn_record(),))
         assert read_state(store, "s")[0].active_turn_id == "t"
         raise Rollback
     assert read_state(store, "s")[0].active_turn_id is None
     with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="actual", records=(record("turn_started", tid="actual"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="actual", records=(runtime_turn_record("actual"),))
     with pytest.raises(TransitionError), store.atomic() as tx:
         tx.append("s", lease=lease, expected_seq=2, commit_id="bad", records=(record("op_started", tid="actual"),))
     state, rows, _ = read_state(store, "s")
@@ -200,11 +200,11 @@ def test_prefix_cache_external_rollback_and_same_head_replacement(store, databas
 
     with pytest.raises(Rollback), store.connection.transaction():
         with store.atomic() as tx:
-            tx.append("s", lease=lease, expected_seq=1, commit_id="provisional", records=(record("turn_started"),))
+            tx.append("s", lease=lease, expected_seq=1, commit_id="provisional", records=(runtime_turn_record(),))
         raise Rollback
     assert store._fold_cache is not None and len(store._fold_cache.records) == 2
     with open_store(database) as other, other.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="different", records=(record("turn_started", tid="different"),))
+        tx.append("s", lease=lease, expected_seq=1, commit_id="different", records=(runtime_turn_record("different"),))
     assert read_state(store, "s")[0].active_turn_id == "different"
 
 
@@ -215,7 +215,7 @@ def test_read_state_and_append_payloads_cannot_poison_prefix(store):
         tx.create(SessionSpec("s", "p", "w"), consumers=())
     lease = store.acquire("s", owner="test", ttl_ms=15000)
     assert lease is not None
-    start = record("turn_started")
+    start = runtime_turn_record()
     with store.atomic() as tx:
         tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(start,))
     start.payload["handler_version"] = "caller mutation"

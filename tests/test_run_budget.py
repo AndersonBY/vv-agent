@@ -654,10 +654,21 @@ def test_per_run_budget_replaces_configured_runner_default_as_a_whole(tmp_path: 
 
 @pytest.mark.parametrize("dimension", ["total_tokens", "uncached_input_tokens", "host_cost"])
 @pytest.mark.parametrize("summary_usage", [9, 10, 11])
-def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str, summary_usage: int) -> None:
+def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str, summary_usage: int, monkeypatch) -> None:
+    from vv_agent.session.surfaces import SessionDriver
     from vv_agent.types import Message
     from vv_agent.workspace import MemoryWorkspaceBackend
 
+    create = SessionDriver.create
+
+    def create_imported_history(self, sid, workspace, attributes=None):
+        # This budget scenario summarizes imported history, matching the
+        # canonical compaction fixtures' explicit legacy protection choice.
+        attributes = dict(attributes or {})
+        attributes["seed"] = dict(attributes.get("seed", {}), unseen_input_protection=False)
+        return create(self, sid, workspace, attributes)
+
+    monkeypatch.setattr(SessionDriver, "create", create_imported_history)
     meter = _Meter([HostCost(unit="credits", amount_microunits=0)])
 
     def summary(_request: LlmRequest) -> LLMResponse:

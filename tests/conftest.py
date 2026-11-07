@@ -57,7 +57,7 @@ def repository_artifact_guard():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    excluded = {".git", ".venv", ".pytest_cache", ".ruff_cache", "__pycache__"}
+    excluded = {".git", ".venv", ".pytest_cache", ".ruff_cache", ".aws", ".codex", ".agents", "__pycache__"}
 
     def files():
         import os

@@ -185,21 +185,21 @@ class _KernelThreadStore:
                 )
             replayed = receipt.replayed
         except Conflict:
-            # Only client creation bytes decide replay; the first node freezes the baseline.
+            # Retry with the winning node's frozen context; tx.create owns replay.
             creation = self.kernel.store.read(input_id, limit=1).records[0].record._payload
             prior = creation["attributes"]
-            if (creation["principal"], creation["workspace"], creation["parent_session_id"], creation["parent_operation_id"]) != (
-                "local",
-                cwd or ".",
-                None,
-                None,
-            ):
-                raise
-            if canonical_json_bytes({k: v for k, v in prior.items() if k != "app_server_context"}) != canonical_json_bytes(
-                attributes
-            ):
-                raise
-            replayed = True
+            with self.kernel.store.atomic() as tx:
+                receipt = tx.create(
+                    SessionSpec(
+                        input_id,
+                        "local",
+                        cwd or ".",
+                        attributes=attributes
+                        | ({"app_server_context": prior["app_server_context"]} if "app_server_context" in prior else {}),
+                    ),
+                    consumers=("events", "app_server", "traces"),
+                )
+            replayed = receipt.replayed
         return {
             "threadId": input_id,
             "agentKey": agent_key,
