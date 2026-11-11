@@ -1,6 +1,7 @@
 """Local entries accept declarations but wait for normal child/provider results."""
 
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
@@ -17,8 +18,9 @@ from vv_agent import (
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 from vv_agent.session import kernel
-from vv_agent.session.children import ChildTool, child_delivery
+from vv_agent.session.children import ChildSession, ChildTool, child_delivery
 from vv_agent.session.records import InboxItem
+from vv_agent.session.runtime import Runtime
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
@@ -60,7 +62,8 @@ def test_local_declaration_keeps_steer_pending_until_normal_result(store, tmp_pa
         assemble = kernel.assemble
 
         def declared_children(*args, **kwargs):
-            return [replace(child, yield_on_steer=True) for child in assemble(*args, **kwargs)]
+            children = cast(list[ChildSession], assemble(*args, **kwargs))
+            return [replace(child, yield_on_steer=True) for child in children]
 
         monkeypatch.setattr(kernel, "assemble", declared_children)
         child = Agent("worker", "Work.", model="m", tools=[wait_child])
@@ -79,7 +82,7 @@ def test_local_declaration_keeps_steer_pending_until_normal_result(store, tmp_pa
         observed.append(request)
         return LLMResponse("parent done")
 
-    provider = ScriptedModelProvider.new("test", "m", [*steps, finish])
+    provider = ScriptedModelProvider.from_steps("test", "m", [*steps, finish])
     server = None
     try:
         if entry == "runner":
@@ -220,7 +223,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                 state, _, _ = store.read_state(plan.session_id)
                 task = state.turns[plan.turn_id].start.task()
                 context = value.context(task, plan, kernel.CancellationToken(), store=store, session_id=plan.session_id)
-                specs = assemble(value, plan, context, task, store)
+                specs = cast(list[ChildSession], assemble(value, plan, context, task, store))
                 admitted.extend(replace(child, yield_on_steer=declared) for child in specs)
                 return admitted
 
@@ -237,7 +240,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
 
         child = Agent("worker", "Work.", model="m", tools=[wait_child])
         agent = Agent("parent", "Delegate.", model="m", tools=[child.as_tool()])
-        provider = ScriptedModelProvider.new(
+        provider = ScriptedModelProvider.from_steps(
             "test",
             "m",
             [
@@ -279,7 +282,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                     }
                 )
                 driver.answer(sid, driver.handles[-1].runtime, target, InteractionAnswer("text", text="answer"), "answer")
-                child_handle = RunHandle(driver, child_sid, target.turn_id, child_runtime, None)
+                child_handle = RunHandle(driver, child_sid, target.turn_id, cast(Runtime, child_runtime), None)
                 driver.handles.append(child_handle)
                 child_handle.start()
                 assert child_handle.result(timeout=10).status == AgentStatus.COMPLETED
