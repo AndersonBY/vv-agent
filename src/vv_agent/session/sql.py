@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+from threading import get_ident, local
 from typing import Any
 
 from vv_agent.canonical_json import canonical_json_bytes
@@ -66,10 +67,52 @@ class _Prefix:
 class SQLStore:
     """One connection per thread. atomic() nests as a savepoint in host transactions."""
 
+    connection: Any
     lock_clause = ""
     clock_sql = ""
-    _fold_cache: _Prefix | None = None
-    _previous_prefix: _Prefix | None = None
+
+    @property
+    def _fold_cache(self) -> _Prefix | None:
+        return self._connection_prefix
+
+    @_fold_cache.setter
+    def _fold_cache(self, value: _Prefix | None):
+        self._connection_prefix = value
+
+    @property
+    def _previous_prefix(self) -> _Prefix | None:
+        return self._connection_previous_prefix
+
+    @_previous_prefix.setter
+    def _previous_prefix(self, value: _Prefix | None):
+        self._connection_previous_prefix = value
+
+    def __init__(self):
+        self._connection_local = local()
+        self._atomic_stack: list[SQLSessionTx] = []
+        self._connection_prefix: _Prefix | None = None
+        self._connection_previous_prefix: _Prefix | None = None
+
+    @contextmanager
+    def _connection_scope(self):
+        if getattr(self._connection_local, "store", None) is not None:
+            yield
+            return
+        with self.heartbeat_store() as store:
+            if store is self:
+                yield
+                return
+            self._connection_local.store = store
+            try:
+                yield
+            finally:
+                del self._connection_local.store
+
+    def _scoped_store(self) -> SQLStore | None:
+        return getattr(self._connection_local, "store", None)
+
+    def heartbeat_store(self) -> AbstractContextManager[SQLStore]:
+        raise NotImplementedError
 
     def _cached_prefix(self, session_id: str) -> _Prefix | None:
         cached = self._fold_cache
@@ -128,8 +171,44 @@ class SQLStore:
 
     @contextmanager
     def atomic(self) -> Iterator[SQLSessionTx]:
-        with self._transaction():
-            yield SQLSessionTx(self)
+        import sys
+
+        tx = None
+        outer = False
+        committed = False
+        try:
+            with self._transaction():
+                tx = SQLSessionTx(self)
+                outer = not self._atomic_stack
+                self._atomic_stack.append(tx)
+                succeeded = False
+                try:
+                    yield tx
+                    succeeded = True
+                finally:
+                    tx._scope_active = False
+                    self._atomic_stack.pop()
+                    if self._atomic_stack:
+                        if succeeded:
+                            self._atomic_stack[-1].touched.update(tx.touched)
+                            self._atomic_stack[-1]._commit_callbacks.update(tx._commit_callbacks)
+                        self._atomic_stack[-1]._wake_callbacks.update(tx._wake_callbacks)
+            committed = True
+        finally:
+            # Explicit memory wake can become one harmless empty pass on rollback.
+            # It never runs under the connection lock or while tx is still valid.
+            if outer and tx is not None:
+                primary = sys.exception()
+                callbacks = dict(tx._wake_callbacks)
+                if committed:
+                    callbacks.update(tx._commit_callbacks)
+                for callback in callbacks.values():
+                    try:
+                        callback()
+                    except BaseException as error:
+                        if primary is None:
+                            raise
+                        primary.add_note(f"deferred wake failed: {type(error).__name__}")
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
@@ -540,13 +619,35 @@ class SQLStore:
 class SQLSessionTx:
     def __init__(self, store: SQLStore):
         self.store = store
+        self._thread = get_ident()
+        self._scope_active = True
+        self._connection = store.connection
+        self.touched: set[str] = set()
+        self._admitted_children: set[str] = set()
+        self._wake_callbacks: dict[str, Callable[[], None]] = {}
+        self._commit_callbacks: dict[object, Callable[[], None]] = {}
         self.transaction_id = store._transaction_id()
         self.batches: dict[tuple[str, str], ConsumerBatch] = {}
         self._lease_guard: Callable[[], Lease] | None = None
 
+    @property
+    def connection(self) -> object:
+        self._active()
+        return self._connection
+
     def _active(self) -> None:
-        if self.store._transaction_id() != self.transaction_id:
-            raise RuntimeError("SessionTx must be used within its original caller transaction")
+        from .ownership import OwnershipError
+
+        if get_ident() != self._thread:
+            raise OwnershipError("transaction_thread")
+        if not self._scope_active or self.store.connection is not self._connection:
+            raise OwnershipError("transaction_scope")
+        try:
+            active = self.store._transaction_id() == self.transaction_id
+        except RuntimeError:
+            active = False
+        if not active:
+            raise OwnershipError("transaction_scope")
 
     def _commit(
         self,
@@ -642,6 +743,7 @@ class SQLSessionTx:
 
     def push(self, session_id: str, item: InboxItem) -> InputReceipt:
         self._active()
+        self.touched.add(session_id)
         body = item.encode()
         s = self.store
         with s._transaction():
@@ -679,6 +781,23 @@ class SQLSessionTx:
             _natural(expected_inbox_seq, "expected_inbox_seq")
         if len(set(consume_input_ids)) != len(consume_input_ids):
             raise Conflict("duplicate consume_input_ids")
+        for record in records:
+            if (
+                record.kind == "op_completed"
+                and (input_id := record._payload.get("yielded_by")) is not None
+                and (
+                    input_id not in consume_input_ids
+                    or not any(
+                        r.kind == "input_applied"
+                        and r.turn_id == record.turn_id
+                        and r._payload["input"]["input_id"] == input_id
+                        and r._payload["input"]["kind"] == "steer"
+                        and r._payload["disposition"] == "applied"
+                        for r in records
+                    )
+                )
+            ):
+                raise Conflict("yield completion and steering must commit together")
         encoded = []
         for record in records:
             encoded.append(record.encode())

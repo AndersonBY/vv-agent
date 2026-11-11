@@ -31,7 +31,13 @@ from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
-from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
+from vv_agent.session.app_server import (
+    SubmissionConflict,
+    TurnMismatch,
+    _AfterResponseError,
+    _KernelRunAdapter,
+    _KernelThreadStore,
+)
 from vv_agent.session.interactions import InteractionError
 from vv_agent.session.store import Conflict
 
@@ -149,7 +155,13 @@ class MessageProcessor:
         if isinstance(message, JsonRpcNotification):
             self._handle_notification(connection_id, message)
             return
-        self._handle_request(connection_id, message)
+        callback_error = None
+        try:
+            self._handle_request(connection_id, message)
+        except _AfterResponseError as exc:
+            callback_error = exc.error
+        if callback_error is not None:
+            raise callback_error
 
     def _handle_notification(self, connection_id: str, notification: JsonRpcNotification) -> None:
         if notification.method == "initialized":

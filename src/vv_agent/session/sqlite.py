@@ -6,7 +6,8 @@ import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
-from threading import RLock
+from pathlib import Path
+from threading import RLock, get_ident
 
 from .sql import SQLStore
 
@@ -73,11 +74,92 @@ class SQLiteStore(SQLStore):
     clock_sql = "session_now_ms()"
 
     def heartbeat_store(self):
-        return nullcontext(self) if self.path == ":memory:" else SQLiteStore.standalone(self.path)
+        return self.execution_store()
+
+    def execution_store(self):
+        from .ownership import OwnershipError
+
+        if self._target is None:
+            raise OwnershipError(stage="setup-only")
+        return nullcontext(self) if self.path == ":memory:" else self._checkout()
+
+    @contextmanager
+    def _checkout(self):
+        store = SQLiteStore(self.path)
+        from .ownership import forget_host
+
+        try:
+            yield store
+        finally:
+            with store._connection_lock:
+                store.connection.close()
+                store._checkout_closed = True
+                forget_host(store)
+
+    def _defer_memory_wake(self, sid, callback=None):
+        if self.path == ":memory:" and self._depth and self._transaction_thread == get_ident():
+            if self._atomic_stack:
+                self._atomic_stack[-1].touched.add(sid)
+                if callback is not None:
+                    self._atomic_stack[-1]._wake_callbacks[sid] = callback
+            return True
+        return False
+
+    def _committed_guard(self):
+        from .ownership import OwnershipError
+
+        if self.path == ":memory:" and self._depth and self._transaction_thread == get_ident():
+            raise OwnershipError("committed_read_in_transaction")
+
+    def _freeze_target(self):
+        from .ownership import OwnershipError
+
+        tables = ("sk_session", "sk_record", "sk_inbox", "sk_consumer", "sk_commit")
+        found = tuple(
+            r[0]
+            for r in self._rows(
+                "SELECT name FROM main.sqlite_master WHERE type='table' AND name IN (%s,%s,%s,%s,%s) ORDER BY name", tables
+            )
+        )
+        if not found:
+            return None
+        if set(found) != set(tables):
+            raise OwnershipError(stage="initialization-tables")
+        if self._one("PRAGMA read_uncommitted")[0] != 0:
+            raise OwnershipError(stage="read-uncommitted")
+        if self._rows("SELECT name FROM sqlite_temp_master WHERE name IN (%s,%s,%s,%s,%s)", tables):
+            raise OwnershipError(stage="temp-shadow")
+        databases = self._rows("PRAGMA database_list")
+        for _, name, _ in databases:
+            if name not in {"main", "temp"}:
+                quoted = name.replace('"', '""')
+                if self._rows('SELECT name FROM "' + quoted + '".sqlite_master WHERE name IN (%s,%s,%s,%s,%s)', tables):
+                    raise OwnershipError(stage="attached-shadow")
+        if self.path == ":memory:":
+            return (id(self.connection),)
+        path = Path(next(r[2] for r in databases if r[1] == "main")).resolve()
+        stat = path.stat()
+        return (str(path), stat.st_dev, stat.st_ino, self._one("PRAGMA user_version")[0], found)
+
+    def _validate_checkout(self, source):
+        from .ownership import OwnershipError
+
+        try:
+            invalid = self.connection.in_transaction or self.connection.isolation_level is not None
+        except sqlite3.ProgrammingError as error:
+            raise OwnershipError(stage="closed") from error
+        if invalid:
+            raise OwnershipError(stage="idle")
+        if source._target is None or self._freeze_target() != source._target:
+            raise OwnershipError(stage="target")
 
     def __init__(self, path: str):
+        super().__init__()
         self.path = path
-        self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
+        self._target = None
+        self._checkout_closed = False
+        connect_path = ":memory:" if path == ":memory:" else Path(path).resolve().as_uri() + "?cache=private"
+        self.connection = sqlite3.connect(connect_path, uri=True, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()
         if version != 3 and (version != 0 or existing):
@@ -91,6 +173,16 @@ class SQLiteStore(SQLStore):
         self._connection_lock = RLock()
         self._epoch = 0
         self._depth = 0
+        self._transaction_thread = None
+        from .ownership import register_host
+
+        register_host(self)
+        try:
+            self._target = self._freeze_target()
+        except BaseException:
+            self.connection.close()
+            self._checkout_closed = True
+            raise
 
     @classmethod
     @contextmanager
@@ -101,6 +193,10 @@ class SQLiteStore(SQLStore):
         finally:
             with store._connection_lock:
                 store.connection.close()
+                store._checkout_closed = True
+                from .ownership import forget_host
+
+                forget_host(store)
 
     def _rows(self, query: str, params: tuple = ()) -> list[tuple]:
         with self._connection_lock:
@@ -114,6 +210,7 @@ class SQLiteStore(SQLStore):
             if outer:
                 self.connection.execute("BEGIN IMMEDIATE")
                 self._epoch += 1
+                self._transaction_thread = get_ident()
             else:
                 self.connection.execute(f"SAVEPOINT {savepoint}")
             self._depth += 1
@@ -129,6 +226,8 @@ class SQLiteStore(SQLStore):
                 raise
             finally:
                 self._depth -= 1
+                if outer:
+                    self._transaction_thread = None
 
     def _transaction_id(self) -> object:
         with self._connection_lock:
@@ -142,3 +241,5 @@ class SQLiteStore(SQLStore):
                 if statement.strip():
                     self.connection.execute(statement)
             self.connection.execute("PRAGMA user_version=3")
+        if not self._depth:
+            self._target = self._freeze_target()

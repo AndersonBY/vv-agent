@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from vv_agent.session import children
+from vv_agent.session.callbacks import noop_hook
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.store import Conflict
@@ -22,13 +23,13 @@ def child_task() -> str:
     raise AssertionError("child must use the session kernel")
 
 
-def parent_runtime(database, *, background=False, steps=None, hook=lambda *_: None):
+def parent_runtime(database, *, background=False, steps=None, hook=noop_hook):
     return runtime(
         database,
         steps if steps is not None else [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent done")],
         [child_task],
         children={
-            "child_task": lambda plan: children.ChildSession(
+            "child_task": lambda plan, *, tx: children.ChildSession(
                 SessionSpec("child", "test", "/tmp"), "do child", background=background
             )
         },
@@ -168,7 +169,7 @@ def test_background_child_notification_at_safe_point(store, database):
         captured.append(request)
         return LLMResponse("parent done")
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         if point == "after_commit" and record and record.kind == "op_completed" and "/tool/" in (record.operation_id or ""):
             complete_child(store, database)
             delivered(store)
@@ -238,7 +239,7 @@ def test_store_rejects_success_with_waiting_live_child(store, database):
 def test_child_creation_rolls_back_with_parent_park(store, database):
     start(store)
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         if point == "before_commit" and record and record.kind == "op_parked":
             raise RuntimeError("crash before parent park")
 
@@ -356,7 +357,7 @@ def test_cancel_live_child_recursively_reaches_grandchild(store, database):
     parent_rt, _, handle = parked(store, database)
     child_rt = parent_runtime(database)
     child_rt.children = {
-        "child_task": lambda plan: children.ChildSession(SessionSpec("grandchild", "test", "/tmp"), "nested child")
+        "child_task": lambda plan, *, tx: children.ChildSession(SessionSpec("grandchild", "test", "/tmp"), "nested child")
     }
     drive(store, "child", runtime=child_rt)
     assert read_state(store, "child")[0].phase == "parked"
@@ -377,7 +378,7 @@ def test_child_input_and_parent_result_rollback_together(store, database):
     delivered(store)
     item = child_result(store)
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         if point == "before_commit" and record and record.kind == "op_completed":
             raise RuntimeError("parent result transaction lost")
 
@@ -386,7 +387,7 @@ def test_child_input_and_parent_result_rollback_together(store, database):
         drive(store, "s", runtime=rt)
     assert item.input_id not in read_state(store, "s")[0].applied_inputs
     assert len(store.peek_inbox("s")) == 1
-    rt.hook = lambda *_: None
+    rt.hook = noop_hook
     drive(store, "s", runtime=rt)
     assert read_state(store, "s")[0].active_turn_id is None
 

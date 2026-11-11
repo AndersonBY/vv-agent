@@ -8,6 +8,7 @@ from vv_agent.event_store import RunEventReplayQuery, _resolve_replay_query
 from vv_agent.events import RunEvent
 
 from .children import child_handles
+from .ownership import committed_guard
 from .projection import project_records
 from .store import ConsumerBatch, SessionStore, SessionTx
 
@@ -23,6 +24,7 @@ class SessionRunEventStore:
             raise ValueError("events must be projected from committed session records")
 
     def replay(self, query: RunEventReplayQuery | None = None, *, run_id: str | None = None) -> Iterator[RunEvent]:
+        committed_guard(self.store)
         resolved = _resolve_replay_query(query, run_id=run_id)
         _, records, _ = self.store.read_state(self.session_id)
         for event in project_records(records):
@@ -51,6 +53,7 @@ class SessionRunEventStore:
         return batch, [e for e in events if batch.from_seq <= e.metadata["session_seq"] <= batch.through_seq]
 
     def consume(self, sink: Callable[[RunEvent], None], *, limit: int = 256) -> int:
+        committed_guard(self.store)
         with self.store.atomic() as tx:
             result = self.batch(tx, limit=limit)
             if result is None:

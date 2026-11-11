@@ -118,6 +118,12 @@ class LeasePoll:
 
 
 class SessionTx(Protocol):
+    @property
+    def connection(self) -> object:
+        from .ownership import OwnershipError
+
+        raise OwnershipError("unsupported_transaction_handle")
+
     def lock_session(self, session_id: str) -> None: ...
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt: ...
@@ -138,6 +144,10 @@ class SessionTx(Protocol):
 
 
 class SessionStore(Protocol):
+    def execution_store(self) -> AbstractContextManager[SessionStore]:
+        """Checkout an exclusive execution or committed projection connection."""
+        ...
+
     def heartbeat_store(self) -> AbstractContextManager[SessionStore]:
         """Open a runtime-independent renewal connection; memory stores may share their lock."""
         ...

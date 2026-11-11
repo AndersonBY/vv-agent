@@ -46,6 +46,101 @@ Initial messages and JSON state go in the
 [creation-time seed](#reserved-metadata-and-seed). A closed session cannot
 reopen.
 
+Local handles clear their rerun marker under scheduling lock B, release B and
+perform a full idempotent tree drive. They stop only when that pass made no
+progress and the marker remained clear. The kernel's internal driver-step signal
+reports progress; incoming committed input and child delivery changes also cause
+another pass. A due provider poll runs once and Accepted parks at the store's
+next deadline. Retained yielded/background children remain part of recovery,
+including terminal children whose delivery was interrupted.
+An exit pass bound to an ended turn leaves any queued successor immediately
+schedulable; it neither admits that turn nor applies an idle poll deferral to it.
+Independent new-turn inputs stay with their next owner; late receipts and controls
+can still be consumed for the ended turn.
+
+`SessionDriver.push()` only marks an active handle; it never creates a root
+successor. Interactive sessions, App Server pumps and SQL hosts own new runs.
+Host wake takes the App Server turn lock and either marks active execution or
+uses ordinary recovery. A finished handle whose pump still owns completion hands
+the wake to that pump. Empty pumps are allowed; unchanged deferred inputs cannot
+repeat model, tool or receipt effects. No predictive watermark or descendant
+filter decides whether recovery or an exit pass runs. Wake errors are reported
+with the session identity, including corrupt stored data.
+An accepted wake also survives active execution until its completion pump can
+hand remaining input to a new owner. Without a wake, completion automatically
+continues follow-ups; an independent user submission retains its own host owner.
+
+B protects marker/worker registration, visited-session wake routing and done notification. No B holder
+reads the store, invokes host bindings or scans delivery. Child scheduling reads
+and assembles its runtime outside B and revalidates worker identity under B.
+Result projection shares one captured root prefix with its root wait projection.
+The snapshot lives only for that read call; descendants are read normally.
+App Server setup reads metadata, turn identities and the target admitted/pending
+turn directly instead of building unrelated event/interaction views. Completion
+rereads state after publication callbacks before deciding owner handoff. No
+projection snapshot gates a tree pass, survives a lease/transaction boundary for
+execution, or substitutes for child delivery.
+
+Wait projection checks the current ownership path before reading a descendant or
+resolving its runtime. A cycle raises `Conflict` with the session ID; repeated
+acyclic paths are traversed independently. This path set diagnoses projection
+corruption and never filters execution, recovery or child delivery.
+
+An active handle registers descendant SIDs under B before actually reading/driving
+them. Local child push can mark that observer when no direct child worker exists;
+this set routes wake and never filters work or exit. App Server admission wakes
+occur after the outermost transaction commits.
+
+When an admission is inside a host transaction, the App Server coalesces its root
+and target SID into the existing observer's recovery queue. Native PostgreSQL
+transaction status includes external transactions joined through
+`join_transaction`; SQLite includes the actual outer transaction, not an inner
+savepoint return. Each hint retains its actual admission connections, including
+a scoped connection used by a host callback. Switching the recovery connection
+does not bypass those source transactions. Recovery checks committed state
+after transaction exit.
+Rollback, savepoint rollback or commit failure may leave an empty pump, which
+cannot repeat model, tool or receipt effects. The observer handles at most 32
+queued roots per existing 50 ms pass and needs no subscriber. Closing a node
+clears local hints and lease timers; committed inbox inputs remain recoverable
+on another node.
+
+The M1 low-level driver and RunHandle worker use an explicit owned E from
+`execution_store()`. SQL/tx/cache operations refer to their actual store;
+`store.connection` remains stable. Transactions bind the actual raw handle,
+owner thread, lexical scope and outer identity. Inner exit invalidates only
+that inner tx. Native join is input-only; raw savepoint lexical lifetime remains
+a host obligation. See [connection ownership](host-integration.md#connection-ownership-0350-development-m1).
+
+This intermediate implementation has not migrated all App Server P/startup,
+recovery, pump/completion, controls and notification-lock paths. Remaining
+legacy scope/independent callers are an explicit M2 gap, not an alternate
+supported mode. Full-surface ownership and the complete A9 matrix are not
+established by this milestone. No wire, record/inbox or SQLite schema changes
+are part of the ownership API replacement.
+
+Startup cleanup covers handle registration, preparation transaction exit, target
+and status projection, active publication, response/status callbacks and thread
+startup. Unstarted handles keep the original error and become done under
+B/condition; cleanup compares the published handle identity. The event pump
+starts before the worker and waits on its normal condition. A started worker
+keeps completion ownership; a pump connection failure drains normal worker
+completion before reporting one error. These failures do not create a durable
+failed terminal. Callback exceptions escape once; no warning callback is retried.
+An admission ACK already sent by the request handler is not replaced by another
+RPC response when a later startup callback fails; the original callback error
+escapes to the host. Joining waits for started pumps; commit-deferred work may
+still need observation through status or durable records.
+
+`AgentSession.steer()` owns idle retained-turn execution, including running state,
+active handle and cancellation. Its owner remembers steer wakes across handle
+publication and exit. Cancellation intent identifies the target turn; before
+first admission it binds only the reserved run generation. Publication discards
+an intent whose target ended, never passes it to another turn/token, and applies
+valid intent through ordinary targeted cancellation outside the session lock/B.
+Pending cancellation is owner work while that target remains active; ending or
+failed setup clears it when ownership is released.
+
 When a worker loses its lease (`LeaseLost`), the runtime retries with bounded
 exponential backoff. `Runtime` defaults allow 5 losses (`lease_retry_attempts`),
 starting at 10 ms (`lease_retry_base_seconds`) and capped at 500 ms
@@ -268,11 +363,21 @@ The final PostgreSQL append also limits lock waits to 250 ms and statements to
 1 second, each capped by the remaining Lease lifetime. These transaction-local
 limits begin after encoding and history preparation.
 
-State locking covers only short reads and updates. A separate latch serializes
-renewal and its publication with the final append. Encoding and history reads
-finish before append takes that latch and reads the current Lease, then locks
-the parent row. The latch stays held through the transaction exit. Owner,
-epoch, both lease expiry checks, head and inbox checks remain in force.
+State locking covers only short reads and updates, never store calls. Polls
+serialize renewal and publication with a separate poll latch. Renewal does not
+take the commit latch, so it can continue while a final append holds that latch.
+Encoding and history reads finish before append takes the commit latch and
+reads an immutable Lease snapshot, then locks the parent row. The commit latch
+stays held through the transaction exit. A renewal cannot refresh that captured
+snapshot: owner, epoch, both lease expiry checks, head and inbox checks remain
+in force. Each Scope has thread-local entry marks for its commit and poll
+latches. A mark is set before waiting for the latch and cleared in `finally`
+after release. Polling on that same thread while either mark is set raises
+immediately, including synchronous trace callbacks at latch entry or release.
+Other threads and other Scopes have separate marks. This does not promise
+recovery from arbitrary asynchronous exceptions at any bytecode.
+Hosts must not drive or poll while holding a write
+transaction; an opaque adapter's hidden transaction cannot be detected here.
 PostgreSQL uses `FOR NO KEY UPDATE` because session keys never change; it
 serializes writers while allowing child foreign-key checks to retain their
 parent references. For callback requirements and transaction timing logs, see
@@ -443,7 +548,9 @@ control, not token timing, decides whether a terminal is aborted.
 Ready receipts and controls apply before repair.
 
 - **Steering** waits until the current model and tool batch, including retries,
-  closes, and reaches the next model request.
+  closes, and reaches the next model request. Declared observations may close
+  early by [yielding the wait](#yielding-a-wait-to-new-input); other work still
+  holds the steer.
 - **Follow-up** is recorded as queued and opens a new turn after this one ends.
 - A normal end commits against the inbox watermark; an input arriving in that
   window forces a recompute.
@@ -558,10 +665,12 @@ the callback's host writes. See
 The closed child handle holds the child's session, turn and generation, the
 background flag, and the parent's session, turn, generation, operation and
 attempt. It stays in the fold after completion so late receipts can be checked.
-A batch adds `handle.siblings`. A blocking batch completes only when every
-member has an authenticated terminal input, and results always project the
-terminal turn named in the handle. `Runtime.child_tasks(store, parent_id)`
-returns owner-scoped status and handles; `handle.poll`, `snapshot`, `wait` and
+A batch adds `handle.siblings`. A blocking batch returns real completion only
+when every member has an authenticated terminal input, projecting the terminal
+turn named in the handle. A [declared observation](#yielding-a-wait-to-new-input)
+may instead end with a yielded result while those children continue.
+`Runtime.child_tasks(store, parent_id)` returns owner-scoped status and handles;
+`handle.poll`, `snapshot`, `wait` and
 `cancel` survive a Runtime rebuild.
 
 ### Delivery
@@ -581,11 +690,13 @@ consumes the input and completes the operation in one commit.
 - Forged or mismatched inputs are rejected and kept for audit.
 - Cancelled, ended or replaced turns never revive; late results and stale generations are
   recorded as audit.
-- A blocking operation cannot complete without its terminal input, and a
-  successful terminal cannot leave a child wait open (`HasLiveDescendants`).
+- An undeclared blocking operation cannot complete without its terminal input.
+  A declared observation may yield to steer; a successful parent terminal still
+  cannot leave an operation waiting on a child (`HasLiveDescendants`).
 
-A blocking child waiting for a user keeps the parent operation parked until the
-child reaches a terminal result.
+A blocking child waiting for a user keeps the parent observation parked until
+the child reaches a terminal result or the declared observation yields. Yielding
+does not answer the child's question.
 
 ### Cancellation and background children
 
@@ -800,3 +911,104 @@ applies to summary acceptance and reducer replay. Authenticated external tool
 callbacks protect their original assistant group, like blocking child results.
 Transaction creation replay with an omitted choice keeps the original creation
 bytes and rule; only first creation defaults on. Provider conversion is unchanged.
+
+## Yielding a wait to new input
+
+A foreground wait can end when a new user steer arrives while its children keep
+working. The host chooses this when admitting each child:
+
+```python
+from vv_agent.session.children import ChildSession, ChildTool
+from vv_agent.session.records import SessionSpec
+from vv_agent.types import ToolExecutionResult
+
+def admit(plan, *, tx):
+    return ChildSession(
+        SessionSpec("child-001", "account-001", "/workspace"),
+        "Check the data",
+        yield_on_steer=True,
+    )
+
+def interrupted(plan, handles, reason):
+    # Read-only observation: no writes, file transfer or other side effects.
+    running = [h["session_id"] for h in handles if h["status"] == "running"]
+    return ToolExecutionResult(
+        plan.payload["request"]["id"],
+        f"New input interrupted this wait. Children continue: {running}",
+    )
+
+runtime.children["check_data"] = ChildTool(admit, on_yield=interrupted)
+```
+
+A plain admission callable still works. Without `ChildTool.on_yield`, the SDK
+returns a short default message with each child's last verified status and the
+IDs still running. A callback receives the original execution plan, copied child
+handles with `status`, and the reason `"steer"`. Verified terminal members also
+carry `result`, `terminal_seq` and `terminal_digest` from the terminal input used
+by normal child-result assembly. Unverified members omit these fields. Here `running` means no verified
+terminal input at this inbox boundary; it is not a fresh query of the child.
+`SummaryChildTool` accepts the same optional `on_yield` callback. Each member of
+a foreground batch chooses independently. Background children cannot opt in.
+
+A tool provider can return `Accepted(handle, yield_on_steer=True)`. Its optional
+`on_yield(plan, handle, reason)` method renders the result; it receives a copy of
+the provider handle. The provider need not implement this method. Its absence
+uses the default message. This applies to tool observations, not model calls.
+
+Callbacks return `ToolExecutionResult` with the original call ID, SUCCESS or a
+definitive ERROR, and the continue directive. The result content goes to the
+model through the usual tool-result projection. If rendering throws or returns
+an invalid result, the SDK uses its default and records
+`metadata.yield_callback_failed=true`; it does not store exception text. Keep
+callbacks read-only: they may query host state and questions, but must not write,
+publish or retain files, send messages, cancel work or cause other side effects.
+A guarded append retry may run them again with different observations; the final
+committed result is authoritative. Once committed, replay and recovery only read
+the recorded result. Completed child files follow the existing host delivery
+path (for example a later status-tool call); yielding does not transfer files.
+Change the host handler version when changing the renderer's semantics.
+
+A targeted steer for the current turn yields only when every remaining batch
+item can yield. A running command, an undeclared wait, approval, user wait or
+planned operation holds the steer in the inbox. Finished undeclared siblings no
+longer block. At the same inbox watermark, verified child terminals are consumed
+before steer, even when steer arrived first. A fully finished batch returns its
+real results. Otherwise tool results, steer application and input consumption
+commit together. The next model request sees tool results followed by the new
+user input. Model selection still waits for the batch boundary.
+
+Yielding does not cancel or change child records. Later child completion follows
+background rules: notify at a batch boundary while the original turn remains
+active; after it ends or is cancelled, retain audit only. A yielded provider
+handle is closed: no further query or cancel, and late authenticated results are
+only audit inputs. A later ordinary parent cancellation still uses the existing
+child cancellation rules. Forks copy ended-turn messages, including the yielded
+result and steer, but no pending work or declarations. New operations choose
+again. App Server projects the observation as a completed tool item; a host that
+uses separate workers still wakes the session after admitting input.
+
+Local RunHandle execution drives declared children independently while the parent
+keeps waiting. Steering can reach the parent even during a synchronous child
+model call. With no steer, the parent still waits for the real child result;
+when a child parks for a person/provider, the usual retained wait returns.
+Wake may start an empty recovery pass. A completed child driver is coalesced only
+while an active worker owns its subtree; retained child ownership survives a
+yielded wait or an ended parent turn. Exit follows the full-pass progress and
+marker rule above.
+Undeclared foreground children keep their existing execution path.
+
+Persist a provider's original acceptance declaration with its evidence. When
+recovering before park commit, include `yield_on_steer: true` in the
+`provider_evidence` payload if the original Accepted declared it; otherwise omit
+it. Authenticate the entire payload including that field. Adding or removing it
+changes `InboxItem.encode()` bytes and digest. Direct submit and attachment use
+the same park construction. Identical attachments are idempotent; conflicting
+attachment declarations are rejected as `acceptance declaration conflict`.
+A later query Accepted must repeat the original handle and declaration or raises
+`provider_result_invalid`; it never changes the original choice.
+
+The declaration is retained on the original acceptance evidence and `op_parked` record:
+`yield_on_steer=true`, plus `yieldable_children` for children. Completion records
+name the applied input in `yielded_by`. Old sessions and undeclared operations
+write none of these fields. See [upgrading](upgrading.md#0350--2026-11-08)
+before routing declared sessions to another runtime version.

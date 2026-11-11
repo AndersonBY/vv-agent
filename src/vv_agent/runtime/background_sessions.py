@@ -273,17 +273,25 @@ class BackgroundSessionManager:
         session = self._get(session_id)
         if session is None:
             return lambda: None
+
+        def notify(payload):
+            current = listener
+            if current is not None:
+                current(payload)
+
+        notify._active = True
         with session.lock:
             snapshot = self._snapshot(session) if session.status in _TERMINAL_STATUSES else None
             if snapshot is None:
-                session.listeners.append(listener)
+                session.listeners.append(notify)
         if snapshot is not None:
-            listener(snapshot)
+            notify(snapshot)
 
         def unsubscribe() -> None:
-            with session.lock:
-                if listener in session.listeners:
-                    session.listeners.remove(listener)
+            nonlocal listener
+            # Safe from a finalizer: only local state, no locks or callbacks.
+            notify._active = False
+            listener = None
 
         return unsubscribe
 
@@ -305,6 +313,9 @@ class BackgroundSessionManager:
             session.done.wait(_WATCH_POLL_INTERVAL_SECONDS)
 
     def _advance(self, session: _SessionState) -> list[BackgroundSessionListener]:
+        # The ordinary observer already holds session.lock. Cancelled listeners
+        # retain no callback; prune their empty slots here, never in a finalizer.
+        session.listeners[:] = [listener for listener in session.listeners if listener._active]
         if session.status in _TERMINAL_STATUSES:
             self._ensure_terminal_output(session)
             return []

@@ -325,7 +325,8 @@ def test_renewed_holder_defers_retry_until_new_expiry_without_another_acquire(tm
         assert len(attempts) == 1
         eventually(lambda: bool(server.kernel.store.read_state("thread")[0].turns))
         server.run_adapter.join()
-        assert len(attempts) == 2
+        # The successful retry is followed by the required no-progress exit pass.
+        assert len(attempts) == 3
         state = server.kernel.store.read_state("thread")[0]
         assert state.turns["thread/turn/prompt"].ended
 

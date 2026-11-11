@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -21,10 +21,12 @@ from vv_agent.interaction import derive_controller_command_id
 from vv_agent.types import AgentStatus, Message
 
 from .context_view import context_view
+from .ownership import committed_guard
 from .projection import project_records
 from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
+from .sqlite import SQLiteStore
 from .store import Conflict
 from .surfaces import SessionDriver
 
@@ -96,6 +98,7 @@ def _content(
 
 
 def thread_status(kernel, thread_id, *, snapshot=None):
+    committed_guard(kernel.store)
     import time
 
     state, records, _ = snapshot or kernel.store.read_state(thread_id)
@@ -154,6 +157,12 @@ class ContextVersionMismatch(ValueError):
 
 class TurnMismatch(ValueError):
     pass
+
+
+class _AfterResponseError(BaseException):
+    def __init__(self, error: BaseException):
+        super().__init__(str(error))
+        self.error = error
 
 
 @dataclass
@@ -251,41 +260,37 @@ class _KernelThreadStore:
             ),
         )
 
-    def read_thread(self, thread_id):
-        try:
-            state, records, _ = self.kernel.store.read_state(thread_id)
-        except KeyError:
-            raise KeyError(thread_id) from None
-        thread = self._thread_metadata(thread_id, state, records)
-        turns = []
+    def _turn_record(self, thread_id, tid, snapshot):
+        state, records, _ = snapshot
+        turn = state.turns[tid]
         runtime = self.runtimes.get(thread_id)
-        for tid, turn in state.turns.items():
-            start = next(r for r in records if r.record == turn.start)
-            initial = state.applied_inputs[turn.start._payload["input_ids"][0]]._payload["input"]
-            content = initial["payload"]["content"]
-            wire_input = content.get("app_server", {}).get("input", []) if isinstance(content, dict) else []
-            terminal = next((r for r in records if r.record.kind == "turn_ended" and r.record.turn_id == tid), None)
-            status = (
-                "completed"
-                if terminal and terminal.record._payload["status"] == "completed"
-                else "failed"
-                if terminal
-                else ("interrupted" if state.turns[tid].wait or state.turns[tid].suspended or state.waits else "running")
-            )
-            projected = project_result(self.kernel.store, thread_id, tid, runtime=runtime, snapshot=(state, records, 0))
-            result = _result_fields(projected)
-            turns.append(
-                TurnRecord(
-                    tid,
-                    thread_id,
-                    tid,
-                    status,
-                    start.created_ms / 1000,
-                    terminal.created_ms / 1000 if terminal else None,
-                    wire_input,
-                    result,
-                )
-            )
+        start = next(r for r in records if r.record == turn.start)
+        initial = state.applied_inputs[turn.start._payload["input_ids"][0]]._payload["input"]
+        content = initial["payload"]["content"]
+        wire_input = content.get("app_server", {}).get("input", []) if isinstance(content, dict) else []
+        terminal = next((r for r in records if r.record.kind == "turn_ended" and r.record.turn_id == tid), None)
+        status = (
+            "completed"
+            if terminal and terminal.record._payload["status"] == "completed"
+            else "failed"
+            if terminal
+            else ("interrupted" if state.turns[tid].wait or state.turns[tid].suspended or state.waits else "running")
+        )
+        projected = project_result(self.kernel.store, thread_id, tid, runtime=runtime, snapshot=(state, records, 0))
+        result = _result_fields(projected)
+        return TurnRecord(
+            tid,
+            thread_id,
+            tid,
+            status,
+            start.created_ms / 1000,
+            terminal.created_ms / 1000 if terminal else None,
+            wire_input,
+            result,
+        )
+
+    def _pending_turns(self, thread_id, state, records):
+        turns = []
         pending = []
         for stored in self.kernel.store.peek_inbox(thread_id):
             if stored.item.kind in {"user", "follow_up"} and stored.item.target_turn_id is None:
@@ -299,6 +304,17 @@ class _KernelThreadStore:
             turns.append(
                 TurnRecord(tid, thread_id, tid, input=content.get("app_server", {}).get("input", []), started_at=received / 1000)
             )
+        return turns
+
+    def read_thread(self, thread_id):
+        committed_guard(self.kernel.store)
+        try:
+            state, records, _ = self.kernel.store.read_state(thread_id)
+        except KeyError:
+            raise KeyError(thread_id) from None
+        thread = self._thread_metadata(thread_id, state, records)
+        turns = [self._turn_record(thread_id, tid, (state, records, 0)) for tid in state.turns]
+        turns.extend(self._pending_turns(thread_id, state, records))
         items = []
         for event in project_records(records):
             projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
@@ -389,11 +405,15 @@ class _KernelRunAdapter(RunAdapter):
         self._notification_lock = threading.RLock()
         self._notification_positions: dict[str, _NotificationPosition] = {}
         self._lease_retries: dict[str, tuple[float, str, int, int, str | None]] = {}
+        self._pending_recoveries: dict[str, tuple[str | None, bool, bool, set[str], set[Any]]] = {}
+        self._recovering: set[str] = set()
         self._notification_stop = threading.Event()
         self._notification_thread: threading.Thread | None = None
         self.kernel._on_close(self.close)
 
     def subscribe(self, thread_id, connection_id):
+        if isinstance(self.kernel.store, SQLiteStore):
+            self.kernel.store._committed_guard()
         state, records, _ = self.kernel.store.read_state(thread_id)
         start = state.turns[state.active_turn_id].start if state.active_turn_id else None
         position = next(r.seq for r in records if r.record == start) - 1 if start else records[-1].seq
@@ -407,11 +427,73 @@ class _KernelRunAdapter(RunAdapter):
 
     def _ensure_observer(self):
         with self._notification_lock:
+            if self._notification_stop.is_set():
+                return
             if self._notification_thread is None:
                 self._notification_thread = threading.Thread(
                     target=self._observe_turns, name="app-server-notifications", daemon=True
                 )
-                self._notification_thread.start()
+                try:
+                    self._notification_thread.start()
+                except BaseException:
+                    self._notification_thread = None
+                    raise
+
+    def _transaction_stores(self):
+        from .sql import SQLStore
+
+        store = self.kernel.store
+        sources = {store}
+        if isinstance(store, SQLStore) and (scoped := store._scoped_store()) is not None:
+            sources.add(scoped)
+        return sources
+
+    def _store_transaction_open(self):
+        return any(self._transaction_open(source) for source in self._transaction_stores())
+
+    def _transaction_open(self, store):
+        # A callback may admit on a scoped connection rather than the original
+        # host connection. Each deferred hint keeps those actual source stores.
+        from .postgres import PostgresStore
+        from .sqlite import SQLiteStore
+
+        if isinstance(store, (PostgresStore, SQLiteStore)):
+            if not store._connection_lock.acquire(blocking=False):
+                return True
+            try:
+                if isinstance(store, SQLiteStore):
+                    import sqlite3
+
+                    try:
+                        return store.connection.in_transaction
+                    except sqlite3.ProgrammingError:
+                        # A scoped source closed only after its transaction ended.
+                        return False
+                from psycopg.pq import TransactionStatus
+
+                return not store.connection.closed and store.connection.info.transaction_status != TransactionStatus.IDLE
+            finally:
+                store._connection_lock.release()
+        return False
+
+    def _defer_recovery(self, connection_id, sid, queued_only, lease_retry, target_sid=None):
+        sources = self._transaction_stores()
+        if not self._store_transaction_open():
+            return False
+        with self._notification_lock:
+            if self._notification_stop.is_set():
+                return True
+            previous = self._pending_recoveries.get(sid)
+            targets = {target_sid} if target_sid is not None else set()
+            if previous is not None:
+                connection_id = connection_id or previous[0]
+                queued_only = queued_only and previous[1]
+                lease_retry = lease_retry or previous[2]
+                targets |= previous[3]
+                sources |= previous[4]
+            self._pending_recoveries[sid] = (connection_id, queued_only, lease_retry, targets, sources)
+            self._ensure_observer()
+        return True
 
     def unsubscribe(self, thread_id, connection_id):
         with self._notification_lock:
@@ -426,7 +508,48 @@ class _KernelRunAdapter(RunAdapter):
                 if not self._state_manager.subscribers(sid):
                     del self._notification_positions[sid]
 
+    def _drain_recoveries(self):
+        if self._notification_stop.is_set() or self._store_transaction_open():
+            return
+        with self._notification_lock:
+            recoveries = list(self._pending_recoveries.items())[:32]
+        for sid, recovery in recoveries:
+            if any(self._transaction_open(source) for source in recovery[4]):
+                continue
+            with self._notification_lock:
+                if self._pending_recoveries.get(sid) is not recovery or sid in self._recovering:
+                    continue
+                self._recovering.add(sid)
+                del self._pending_recoveries[sid]
+            try:
+                connection, queued_only, lease_retry, targets, _sources = recovery
+                for target in targets:
+                    self.wake(sid, target_sid=target)
+                if not targets:
+                    self.recover(connection, sid, queued_only=queued_only, lease_retry=lease_retry)
+            finally:
+                with self._notification_lock:
+                    self._recovering.remove(sid)
+
     def _observe_turns(self):
+        try:
+            scope = ExitStack()
+            try:
+                scope.enter_context(self.kernel._connection_scope())
+            except Exception as exc:
+                with self._notification_lock:
+                    sessions = list(self._pending_recoveries)
+                for sid in sessions:
+                    self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {exc}", "code": "drive_start"})
+                return
+            with scope:
+                self._observe_committed_turns()
+        finally:
+            with self._notification_lock:
+                if not self._notification_stop.is_set():
+                    self._notification_thread = None
+
+    def _observe_committed_turns(self):
         while not self._notification_stop.wait(0.05):
             now = time.monotonic()
             with self._notification_lock:
@@ -435,6 +558,9 @@ class _KernelRunAdapter(RunAdapter):
                     key=lambda entry: entry[1].due,
                 )[:32]
                 retries = [(sid, retry) for sid, retry in self._lease_retries.items() if retry[0] <= now][:32]
+            if self._store_transaction_open():
+                continue
+            self._drain_recoveries()
             for sid, retry in retries:
                 self._retry_lease(sid, retry)
             for sid, position in sessions:
@@ -453,16 +579,13 @@ class _KernelRunAdapter(RunAdapter):
                 position.due = time.monotonic() + position.delay
 
     def _schedule_lease_retry(self, sid, started, connection_id):
-        target = started.handle._lease_unavailable_session or sid
-        if not started.handle._lease_retry_allowed:
-            self._notify_subscribers(
-                sid,
-                "error/warning",
-                {"message": "Execution lease still unavailable after expiry retry", "code": "lease_retry_exhausted"},
-            )
+        if self._notification_stop.is_set():
             return
+        target = started.handle._lease_unavailable_session or sid
         head, epoch, remaining = self.kernel.store.lease_status(target)
         with self._notification_lock:
+            if self._notification_stop.is_set():
+                return
             self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, head, epoch, connection_id)
             self._ensure_observer()
 
@@ -479,17 +602,69 @@ class _KernelRunAdapter(RunAdapter):
                     with self._notification_lock:
                         self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, new_head, new_epoch, None)
                     return
-                self.recover(self._subscriber(sid), sid, lease_retry=False)
             except Exception as exc:
                 self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
+                return
+            self.recover(self._subscriber(sid), sid, lease_retry=False)
 
     def _subscriber(self, sid):
         return next((cid for cid in self._state_manager.subscribers(sid) if self._router.is_registered(cid)), None)
 
-    def wake(self, thread_id):
+    def wake(self, thread_id, *, target_sid=None):
+        if isinstance(self.kernel.store, SQLiteStore) and self.kernel.store._defer_memory_wake(
+            target_sid or thread_id, lambda: self.wake(thread_id, target_sid=target_sid)
+        ):
+            return
+        if self._notification_stop.is_set():
+            return
+        if self._defer_recovery(self._subscriber(thread_id), thread_id, False, True, target_sid):
+            return
+        if target_sid is not None and target_sid != thread_id:
+            self.kernel._wake(target_sid)
         self.recover(self._subscriber(thread_id), thread_id)
 
-    def _publish_turns(self, sid, *, through_seq=None):
+    def _turn_notifications(self, sid, previous, through_seq):
+        rows = self.kernel.store.read(sid, after_seq=previous, through_seq=through_seq, limit=256).records
+        notifications = []
+        snapshot = None
+        for stored in rows:
+            record = stored.record
+            if record.kind == "turn_started":
+                notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
+            elif record.kind == "turn_ended":
+                if snapshot is None:
+                    snapshot = self.kernel.store.read_state(sid)
+                result = project_result(
+                    self.kernel.store, sid, record.turn_id, runtime=self._store.runtimes.get(sid), snapshot=snapshot
+                )
+                notifications.append(
+                    (
+                        stored.seq,
+                        "turn/completed",
+                        {
+                            "threadId": sid,
+                            "turnId": record.turn_id,
+                            "status": "completed" if record._payload["status"] == "completed" else "failed",
+                            **_result_fields(result),
+                        },
+                    )
+                )
+        if rows:
+            sequences = {row.seq for row in rows}
+            for event in project_records(self.kernel.store.projection_context(sid, rows)):
+                if event.metadata["session_seq"] not in sequences:
+                    continue
+                projection = map_run_event(event, thread_id=sid, turn_id=event.run_id)
+                notifications.extend(
+                    (event.metadata["session_seq"], m, p)
+                    for m, p in projection.additional_notifications
+                    if m.startswith("contextCompaction/")
+                )
+        return rows, notifications
+
+    def _publish_turns(self, sid, *, through_seq=None, read_error_code=None):
+        if isinstance(self.kernel.store, SQLiteStore):
+            self.kernel.store._committed_guard()
         """Each API node tails lifecycle records independently of execution consumers."""
         with self._notification_lock:
             position = self._notification_positions.get(sid)
@@ -502,42 +677,13 @@ class _KernelRunAdapter(RunAdapter):
                 if self._notification_positions.get(sid) is not position:
                     return False
                 previous = position.seq
-            rows = self.kernel.store.read(sid, after_seq=previous, through_seq=through_seq, limit=256).records
-            notifications = []
-            snapshot = None
-            for stored in rows:
-                record = stored.record
-                if record.kind == "turn_started":
-                    notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
-                elif record.kind == "turn_ended":
-                    if snapshot is None:
-                        snapshot = self.kernel.store.read_state(sid)
-                    result = project_result(
-                        self.kernel.store, sid, record.turn_id, runtime=self._store.runtimes.get(sid), snapshot=snapshot
-                    )
-                    notifications.append(
-                        (
-                            stored.seq,
-                            "turn/completed",
-                            {
-                                "threadId": sid,
-                                "turnId": record.turn_id,
-                                "status": "completed" if record._payload["status"] == "completed" else "failed",
-                                **_result_fields(result),
-                            },
-                        )
-                    )
-            if rows:
-                sequences = {row.seq for row in rows}
-                for event in project_records(self.kernel.store.projection_context(sid, rows)):
-                    if event.metadata["session_seq"] not in sequences:
-                        continue
-                    projection = map_run_event(event, thread_id=sid, turn_id=event.run_id)
-                    notifications.extend(
-                        (event.metadata["session_seq"], m, p)
-                        for m, p in projection.additional_notifications
-                        if m.startswith("contextCompaction/")
-                    )
+            try:
+                rows, notifications = self._turn_notifications(sid, previous, through_seq)
+            except Exception as exc:
+                if read_error_code is None:
+                    raise
+                self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {exc}", "code": read_error_code})
+                return None
             with self._notification_lock:
                 if self._notification_positions.get(sid) is not position:
                     return False
@@ -549,12 +695,16 @@ class _KernelRunAdapter(RunAdapter):
 
     def close(self):
         self._notification_stop.set()
-        if self._notification_thread is not None:
-            self._notification_thread.join()
+        with self._notification_lock:
+            self._pending_recoveries.clear()
+            self._lease_retries.clear()
+        thread = self._notification_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
 
     def _binding(self, thread_id, content=None, *, turn_id=None):
-        thread = self._store.read_thread(thread_id).thread
-        state, _records, _ = self.kernel.store.read_state(thread_id)
+        state, records, _ = self.kernel.store.read_state(thread_id)
+        thread = self._store._thread_metadata(thread_id, state, records)
         if content is None:
             selected_turn = turn_id or state.active_turn_id
             initial_id = state.turns[selected_turn].start._payload["input_ids"][0] if selected_turn else None
@@ -648,10 +798,12 @@ class _KernelRunAdapter(RunAdapter):
                             expected_turn_id if kind == "steer" else None,
                             state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
                         )
-                    receipt = self.kernel.push(thread_id, item)
+                    receipt = tx.push(thread_id, item)
                     break
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
+        if kind == "steer":
+            self.wake(thread_id)
         tid = expected_turn_id if kind == "steer" else f"{thread_id}/turn/{input_id}"
         payload = {
             "threadId": thread_id,
@@ -664,6 +816,8 @@ class _KernelRunAdapter(RunAdapter):
         return payload, content
 
     def start_turn(self, *, connection_id, thread_id, input, input_id, expected_turn_id, metadata=None, request_id=None):
+        if isinstance(self.kernel.store, SQLiteStore):
+            self.kernel.store._committed_guard()
         payload, _content = self.submit_input(
             connection_id=connection_id,
             thread_id=thread_id,
@@ -675,123 +829,302 @@ class _KernelRunAdapter(RunAdapter):
         )
         if request_id is not None:
             self._router.send_response(connection_id, request_id, payload)
-        self.recover(connection_id, thread_id)
+        try:
+            self.recover(connection_id, thread_id)
+        except Exception as exc:
+            if request_id is not None:
+                # The admission ACK was already attempted; callback defects remain
+                # visible to the host without a second response for this request.
+                raise _AfterResponseError(exc) from exc
+            raise
         return payload
 
-    def _start(self, connection_id, thread_id, content, *, input_id=None, request_id=None, lease_retry=True):
+    def _startup_response(self, errors, attempted, callback, *args, **kwargs):
+        if attempted is not None:
+            attempted[0] = True
+        return self._startup_callback(errors, callback, *args, **kwargs)
+
+    def _startup_callback(self, errors, callback, *args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except BaseException as exc:
+            if errors is not None:
+                errors.append(exc)
+            raise
+
+    def _start(
+        self,
+        connection_id,
+        thread_id,
+        content,
+        *,
+        input_id=None,
+        request_id=None,
+        lease_retry=True,
+        _report_errors=False,
+        _callback_errors=None,
+        _response_attempted=None,
+    ):
+        with self.kernel._connection_scope():
+            return self._start_scoped(
+                connection_id,
+                thread_id,
+                content,
+                input_id=input_id,
+                request_id=request_id,
+                lease_retry=lease_retry,
+                _report_errors=_report_errors,
+                _callback_errors=_callback_errors,
+                _response_attempted=_response_attempted,
+            )
+
+    def _start_scoped(
+        self,
+        connection_id,
+        thread_id,
+        content,
+        *,
+        input_id,
+        request_id,
+        lease_retry,
+        _report_errors,
+        _callback_errors,
+        _response_attempted,
+    ):
         with self._state_manager.turn_lock(thread_id):
             active = self._state_manager.active_turn(thread_id)
             if active is None:
                 return self._start_locked(
-                    connection_id, thread_id, content, input_id=input_id, request_id=request_id, lease_retry=lease_retry
+                    connection_id,
+                    thread_id,
+                    content,
+                    input_id=input_id,
+                    request_id=request_id,
+                    lease_retry=lease_retry,
+                    _report_errors=_report_errors,
+                    _callback_errors=_callback_errors,
+                    _response_attempted=_response_attempted,
                 )
             if request_id is not None:
-                self._router.send_response(
+                self._startup_response(
+                    _callback_errors,
+                    _response_attempted,
+                    self._router.send_response,
                     connection_id,
                     request_id,
                     {"threadId": thread_id, "turnId": active.turn_id, "runId": active.turn_id, "status": "running"},
                 )
             return None
 
-    def _start_locked(self, connection_id, thread_id, content, *, input_id=None, request_id=None, lease_retry=True):
+    def _start_locked(
+        self,
+        connection_id,
+        thread_id,
+        content,
+        *,
+        input_id=None,
+        request_id=None,
+        lease_retry=True,
+        _report_errors=False,
+        _callback_errors=None,
+        _response_attempted=None,
+    ):
         if connection_id is not None and self._router.is_registered(connection_id):
             self.subscribe(thread_id, connection_id)
         else:
             connection_id = self._subscriber(thread_id)
-        thread, agent, config = self._binding(thread_id, content)
-        with self.kernel.store.atomic():
-            identities = [t.turn_id for t in self._store.read_thread(thread_id).turns]
-            input_id = input_id or "resume"
-            tid = f"{thread_id}/turn/{input_id}" if content is not None else thread.active_turn_id or identities[-1]
-            config = self._with_app_server_controls(config, connection_id=connection_id, thread_id=thread_id, turn_id=tid)
-            host_stream = config.stream
-
-            def stream(event):
-                if host_stream:
-                    host_stream(event)
-                if event.type == "run_started":
-                    self._publish_turns(thread_id, through_seq=event.metadata["session_seq"])
-                projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
-                projection = self._hydrate_host_interaction_projection(thread_id, event, projection)
-                if projection.notification_method:
-                    self._notify_subscribers(thread_id, projection.notification_method, projection.notification_params)
-                for method, params in projection.additional_notifications:
-                    if not method.startswith("contextCompaction/"):
-                        self._notify_subscribers(thread_id, method, params)
-
-            # SessionRunEventStore commits its cursor inside consume(); pump delivery
-            # keeps host callbacks and transport writes outside that transaction.
-            config = replace(config, stream=None)
-            handle = self.kernel.start(
-                thread_id, agent, config, content, input_id=input_id, consumer="app_server", autostart=False
-            )
-            handle._wait_for_lease = False
-            handle._lease_retry_allowed = lease_retry
-            handle.runtime.wake = lambda _sid: self.wake(thread_id)
-        self._store.runtimes[thread_id] = handle.runtime
-        turn = next(t for t in self._store.read_thread(thread_id).turns if t.turn_id == handle.run_id)
-        started = StartedTurn(thread, turn, handle)
-        self._state_manager.set_active_turn(thread_id=thread_id, turn_id=turn.turn_id, handle=handle)
-        status_payload = self.public_thread_status(thread_id)
-        if request_id is not None:
-            self._router.send_response(
-                connection_id,
-                request_id,
-                {
-                    "threadId": thread_id,
-                    "turnId": turn.turn_id,
-                    "status": "running",
-                    **({"runId": turn.turn_id} if content is None else {}),
-                },
-            )
-        self._notify_subscribers(thread_id, "thread/status/changed", status_payload)
-        pump = threading.Thread(target=self._pump_events, args=(connection_id, started, stream), name="session-app-server-pump")
+        handle = None
+        pump = None
+        prepared = False
+        failure = None
         try:
-            handle.start()
+            thread, agent, config = self._binding(thread_id, content)
+            with self.kernel.store.atomic():
+                snapshot = self.kernel.store.read_state(thread_id)
+                identities = [
+                    *snapshot[0].turns,
+                    *(turn.turn_id for turn in self._store._pending_turns(thread_id, snapshot[0], snapshot[1])),
+                ]
+                input_id = input_id or "resume"
+                tid = f"{thread_id}/turn/{input_id}" if content is not None else thread.active_turn_id or identities[-1]
+                config = self._with_app_server_controls(config, connection_id=connection_id, thread_id=thread_id, turn_id=tid)
+                host_stream = config.stream
+
+                def stream(event):
+                    if host_stream:
+                        host_stream(event)
+                    if event.type == "run_started":
+                        self._publish_turns(thread_id, through_seq=event.metadata["session_seq"])
+                    projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
+                    projection = self._hydrate_host_interaction_projection(thread_id, event, projection)
+                    if projection.notification_method:
+                        self._notify_subscribers(thread_id, projection.notification_method, projection.notification_params)
+                    for method, params in projection.additional_notifications:
+                        if not method.startswith("contextCompaction/"):
+                            self._notify_subscribers(thread_id, method, params)
+
+                # SessionRunEventStore commits its cursor inside consume(); pump delivery
+                # keeps host callbacks and transport writes outside that transaction.
+                config = replace(config, stream=None)
+                handle = self.kernel.start(
+                    thread_id, agent, config, content, input_id=input_id, consumer="app_server", autostart=False
+                )
+                handle._independent_store = True
+                handle._wait_for_lease = False
+                handle._lease_retry_allowed = lease_retry
+                handle.runtime.wake = lambda sid: self.wake(thread_id, target_sid=sid)
+            self._store.runtimes[thread_id] = handle.runtime
+            snapshot = self.kernel.store.read_state(thread_id)
+            turn = (
+                self._store._turn_record(thread_id, handle.run_id, snapshot)
+                if handle.run_id in snapshot[0].turns
+                else next(
+                    t for t in self._store._pending_turns(thread_id, snapshot[0], snapshot[1]) if t.turn_id == handle.run_id
+                )
+            )
+            started = StartedTurn(thread, turn, handle)
+            status_payload = self.public_thread_status(thread_id)
+            prepared = True
+            self._state_manager.set_active_turn(thread_id=thread_id, turn_id=turn.turn_id, handle=handle)
+            if request_id is not None:
+                self._startup_response(
+                    _callback_errors,
+                    _response_attempted,
+                    self._router.send_response,
+                    connection_id,
+                    request_id,
+                    {
+                        "threadId": thread_id,
+                        "turnId": turn.turn_id,
+                        "status": "running",
+                        **({"runId": turn.turn_id} if content is None else {}),
+                    },
+                )
+            self._startup_callback(_callback_errors, self._notify_subscribers, thread_id, "thread/status/changed", status_payload)
+            pump = threading.Thread(
+                target=self._pump_events, args=(connection_id, started, stream), name="session-app-server-pump"
+            )
+            # The consumer must exist before execution can begin. It waits on the
+            # handle condition; an unstarted failure wakes it without a business terminal.
             pump.start()
             self._pumps.append(pump)
-        except Exception as exc:
-            self._state_manager.clear_active_turn(thread_id, turn.turn_id, handle=handle)
-            self._notify_subscribers(thread_id, "error/warning", {"message": str(exc), "code": "drive_start"})
+            handle.start()
+        except BaseException as exc:
+            if pump is not None and pump.ident is not None and pump not in self._pumps:
+                self._pumps.append(pump)
+            if handle is not None and handle._fail_unstarted(exc):
+                self._state_manager.clear_active_turn(thread_id, handle.run_id, handle=handle)
+            if not prepared and _report_errors and isinstance(exc, Exception):
+                failure = exc
+            else:
+                raise
+        if failure is not None:
+            self._startup_callback(
+                _callback_errors,
+                self._notify_subscribers,
+                thread_id,
+                "error/warning",
+                {"message": f"{thread_id}: {failure}", "code": "drive_start"},
+            )
+            return None
         return started
 
-    def recover(self, connection_id, thread_id, *, follow_up_only=False, lease_retry=True):
+    def recover(self, connection_id, thread_id, *, queued_only=False, lease_retry=True):
+        if isinstance(self.kernel.store, SQLiteStore):
+            self.kernel.store._committed_guard()
         if self._notification_stop.is_set():
             return
-        try:
-            with self._state_manager.turn_lock(thread_id):
-                if self._state_manager.active_turn(thread_id) is None:
+        if self._defer_recovery(connection_id, thread_id, queued_only, lease_retry):
+            return
+        with self._notification_lock:
+            if self._pending_recoveries and self._notification_thread is None:
+                self._ensure_observer()
+        self._recover_committed(connection_id, thread_id, queued_only=queued_only, lease_retry=lease_retry)
+
+    def _recover_committed(self, connection_id, thread_id, *, queued_only, lease_retry):
+        if self._notification_stop.is_set():
+            return
+        failure = None
+        with self._state_manager.turn_lock(thread_id):
+            active = self._state_manager.active_turn(thread_id)
+            if self.kernel._wake(thread_id):
+                if active is not None:
+                    active.handle._owner_wake_requested = True
+                return
+            if active is not None:
+                # The finished handle's pump still owns completion.
+                active.handle._owner_wake_requested = True
+                return
+            with ExitStack() as scope:
+                try:
+                    scope.enter_context(self.kernel._connection_scope())
                     state, _, _ = self.kernel.store.read_state(thread_id)
-                    kinds = {"follow_up"} if follow_up_only else {"user", "follow_up"}
+                    if state.closed or state.archived:
+                        return
+                    kinds = {"follow_up"} if queued_only else {"user", "follow_up"}
                     queued = any(
                         r._payload["disposition"] == "queued"
                         and key not in state.admitted_inputs
                         and r._payload["input"]["kind"] in kinds
                         for key, r in state.applied_inputs.items()
                     )
-                    if (
-                        state.active_turn_id
+                    needed = (
+                        (not queued_only and bool(state.turns))
                         or queued
                         or any(
                             (x.item.kind in kinds and x.item.target_turn_id is None)
                             or x.item.kind in {"provider_result", "provider_evidence", "child_result"}
                             for x in self.kernel.store.peek_inbox(thread_id)
                         )
-                    ):
-                        self._start(connection_id, thread_id, None, lease_retry=lease_retry)
-        except Exception as exc:
-            self._notify_subscribers(thread_id, "error/warning", {"message": str(exc), "code": "drive_start"})
+                    )
+                except Exception as exc:
+                    failure = exc
+                else:
+                    if needed:
+                        callback_errors = []
+                        callback_failure = None
+                        try:
+                            self._start(
+                                connection_id,
+                                thread_id,
+                                None,
+                                lease_retry=lease_retry,
+                                _report_errors=True,
+                                _callback_errors=callback_errors,
+                            )
+                        except Exception as exc:
+                            if callback_errors:
+                                callback_failure = callback_errors[0]
+                            else:
+                                failure = exc
+                        if callback_failure is not None:
+                            raise callback_failure
+        if failure is not None:
+            self._notify_subscribers(thread_id, "error/warning", {"message": f"{thread_id}: {failure}", "code": "drive_start"})
 
     def _pump_events(self, connection_id, started, stream):
         result, error = None, None
-        try:
-            for _event in started.handle.events():
-                with suppress(Exception):
-                    stream(_event)
-            result = started.handle.result(timeout=0)
-        except BaseException as exc:
-            error = exc
-        self._complete_turn(connection_id, started, result=result, error=error)
+        with ExitStack() as scope:
+            try:
+                scope.enter_context(self.kernel._connection_scope())
+            except Exception as exc:
+                # Execution may already have started. Retain completion ownership
+                # and wait for its ordinary done notification, without SQL/callbacks.
+                for _event in started.handle.events():
+                    pass
+                self._complete_turn(connection_id, started, result=None, error=exc)
+                return
+            try:
+                for _event in started.handle.events():
+                    with suppress(Exception):
+                        stream(_event)
+                if started.handle._error is not None:
+                    raise started.handle._error
+                if not started.handle._lease_unavailable:
+                    result = started.handle.result(timeout=0)
+            except BaseException as exc:
+                error = exc
+            self._complete_turn(connection_id, started, result=result, error=error)
 
     def resume_turn(self, *, connection_id, thread_id, turn_id, request_id=None):
         snapshot = self._store.read_thread(thread_id)
@@ -817,7 +1150,19 @@ class _KernelRunAdapter(RunAdapter):
                     connection_id, request_id, {"threadId": thread_id, "turnId": turn_id, "runId": turn_id, "status": "running"}
                 )
             return
-        self._start(connection_id, thread_id, None, request_id=request_id)
+        if self._defer_recovery(connection_id, thread_id, False, True):
+            if request_id is not None:
+                self._router.send_response(
+                    connection_id, request_id, {"threadId": thread_id, "turnId": turn_id, "runId": turn_id, "status": "running"}
+                )
+            return
+        attempted = [False]
+        try:
+            self._start(connection_id, thread_id, None, request_id=request_id, _response_attempted=attempted)
+        except Exception as exc:
+            if attempted[0]:
+                raise _AfterResponseError(exc) from exc
+            raise
 
     def public_thread_status(self, thread_id):
         return thread_status(self.kernel, thread_id)
@@ -828,6 +1173,8 @@ class _KernelRunAdapter(RunAdapter):
         return fork_thread(self.kernel, self._host, params)
 
     def read_context(self, thread_id):
+        if isinstance(self.kernel.store, SQLiteStore):
+            self.kernel.store._committed_guard()
         return context_view(self.kernel.store, thread_id)
 
     def compact_thread(self, *, thread_id, action_id, expected_context_version=None, connection_id=None):
@@ -1007,48 +1354,66 @@ class _KernelRunAdapter(RunAdapter):
         with self._state_manager.turn_lock(sid):
             if not self._state_manager.clear_active_turn(sid, started.turn.turn_id, handle=started.handle):
                 return
-            if started.handle._lease_unavailable:
-                try:
-                    self._publish_turns(sid)
-                    self._schedule_lease_retry(sid, started, connection_id)
-                except Exception as exc:
-                    self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "lease_retry_exhausted"})
-                return
             if error is not None:
                 from .bindings import MissingHostBinding
                 from .providers import ProviderResultInvalid
                 from .store import LeaseRetryExhausted
 
-                retained_wait = isinstance(error, (MissingHostBinding, ProviderResultInvalid))
                 code = (
                     error.code
                     if isinstance(error, (LeaseRetryExhausted, MissingHostBinding, ProviderResultInvalid))
                     else "event_stream"
                 )
-                self._notify_subscribers(sid, "error/warning", {"message": str(error), "code": code})
-                self._publish_turns(sid)
-                state, _, _ = self.kernel.store.read_state(sid)
-                if not retained_wait and (tid not in state.turns or not state.turns[tid].ended):
+                self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {error}", "code": code})
+                # Failed reads cannot establish a terminal; retained waits stay retained.
+                # Durable lifecycle observers publish verified records independently.
+                return
+            if started.handle._lease_unavailable:
+                if self._publish_turns(sid, read_error_code="lease_retry_exhausted") is None:
+                    return
+                if not started.handle._lease_retry_allowed:
                     self._notify_subscribers(
-                        sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": "failed", "error": str(error)}
+                        sid,
+                        "error/warning",
+                        {"message": "Execution lease still unavailable after expiry retry", "code": "lease_retry_exhausted"},
                     )
+                    return
+                try:
+                    self._schedule_lease_retry(sid, started, connection_id)
+                except Exception as exc:
+                    self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {exc}", "code": "lease_retry_exhausted"})
                 return
             with self._notification_lock:
                 self._lease_retries.pop(sid, None)
-            self._notify_subscribers(sid, "thread/status/changed", self.public_thread_status(sid))
-            self._publish_turns(sid)
-            state, _, _ = self.kernel.store.read_state(sid)
-            incoming = [x.item for x in self.kernel.store.peek_inbox(sid)]
+            try:
+                status = self.public_thread_status(sid)
+            except Exception as exc:
+                self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {exc}", "code": "event_stream"})
+                return
+            self._notify_subscribers(sid, "thread/status/changed", status)
+            if self._publish_turns(sid, read_error_code="event_stream") is None:
+                return
+            try:
+                snapshot = self.kernel.store.read_state(sid)
+                state = snapshot[0]
+                turn = (
+                    self._store._turn_record(sid, tid, snapshot)
+                    if state.active_turn_id == tid and not started.handle._owner_wake_requested
+                    else None
+                )
+            except Exception as exc:
+                self._notify_subscribers(sid, "error/warning", {"message": f"{sid}: {exc}", "code": "event_stream"})
+                return
+            if started.handle._owner_wake_requested or state.active_turn_id not in (None, tid):
+                self.recover(connection_id, sid)
+                return
             if state.active_turn_id:
-                if any(x.kind in {"control", "approval_answer", "user", "child_result"} for x in incoming):
-                    self.recover(connection_id, sid)
-                    return
-                turn = next(t for t in self._store.read_thread(sid).turns if t.turn_id == tid)
+                assert turn is not None
                 self._notify_subscribers(
                     sid, "turn/completed", {"threadId": sid, "turnId": tid, "status": turn.status, **turn.result}
                 )
             else:
-                self.recover(connection_id, sid, follow_up_only=True)
+                self.recover(connection_id, sid, queued_only=True)
 
     def join(self):
         for pump in self._pumps:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.35.0 — 2026-11-08
+
+- Yield callbacks observe read-only host state; verified child terminal results
+  and references are supplied, files stay on the host delivery path.
+- Provider acceptance recovery preserves and authenticates the original yield
+  declaration; later conflicting attachments/queries are rejected.
+- Local parked drivers stop without progress. Long receipt candidates include
+  content SHA-256 in their immutable identity; structured yield bodies validate.
+
+Hosts can let foreground child and Accepted provider waits yield to new input.
+The kernel commits completed observation results and steering together. Children
+keep running and later notify as background work; provider handles close without
+cancellation. Undeclared waits retain their bytes and behavior. New optional
+record fields reject 0.34.1 readers; no SQL migration or dependency changes. See
+[release notes](docs/releases/0.35.0.md) and [host usage](docs/session-kernel.md#yielding-a-wait-to-new-input).
+
 ## 0.34.1 — 2026-11-07
 
 0.34.0 was tagged but its release workflow failed before publication to PyPI.

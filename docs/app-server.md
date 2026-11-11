@@ -185,7 +185,13 @@ A child can expose a pending interaction while the parent is child_running.
 No provider handles or job secrets appear in status. A user form carries its public requestDigest.
 
 A turn/completed notification can describe an interrupted execution attempt.
-Only a retained turn_ended record makes a turn terminal. Each node tails durable
+Only a retained turn_ended record makes a turn terminal. Completion releases its local
+owner before reporting an asynchronous error. It reports that error once and
+does not reread failed storage to guess a failed terminal. Missing host bindings
+and invalid provider results retain their existing waits. Separate lifecycle
+observers publish verified durable terminals after storage recovers. Read and
+projection failures during completion are controlled warnings; notification
+callback exceptions remain visible to the host. Each node tails durable
 turn records for lifecycle notifications, including follow-ups. A non-holder
 attempts the lease once and schedules a retry at the holder's lease expiry,
 including when a foreground child is blocked. Renewal, record progress or a
@@ -200,6 +206,18 @@ then remain durably parked for approval/resolve from any authorized connection,
 subject to the retained deadline. Notification
 observers never acquire execution leases. Read status or replay
 records to recover after missing a notification.
+
+When a foreground child's lease is unavailable before its turn is admitted,
+the parent remains waiting for the ordinary lease retry. A missing child turn
+at this point is not an execution error. After an admission ACK, a startup host
+callback failure escapes as its original exception without a second RPC response.
+
+Notification preparation failures (record reads or projection) leave the local
+page cursor unchanged. Sending starts after the cursor has advanced for the
+whole prepared page. If a host notification callback raises, later notifications
+in that page may never be sent; they are not automatically resent. Use status or
+durable replay to recover. ACK establishes consumption, not successful delivery
+or business completion.
 Each subscribed session backs off independently from 50 ms to 1 s, including
 after transient store failures. The last local unsubscribe drops its position;
 the next subscription starts at the head or the active turn's start. Use

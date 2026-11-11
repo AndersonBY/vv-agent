@@ -22,7 +22,7 @@ from unittest.mock import patch
 from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConfig, handoff, input_guardrail
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.schema import export_schema_bundles
-from vv_agent.budget import RunBudgetLimits, UnavailableMetricPolicy
+from vv_agent.budget import BudgetEvaluator, RunBudgetLimits, UnavailableMetricPolicy
 from vv_agent.events import event_from_dict
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
@@ -32,7 +32,7 @@ from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.runtime.hooks import BaseRuntimeHook
-from vv_agent.session.children import child_delivery, child_handles
+from vv_agent.session.children import ChildSession, child_delivery, child_handles
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
@@ -52,6 +52,7 @@ from vv_agent.session.records import (
     InboxItem,
     Record,
     RecordError,
+    SessionSpec,
     make_record,
 )
 from vv_agent.session.reducer import TransitionError, fold
@@ -152,7 +153,8 @@ class PendingApproval:
 class Provider:
     """Independent trusted provider truth with one stable accepted job."""
 
-    def __init__(self, *, unknown=False, usage=None):
+    def __init__(self, *, unknown=False, usage=None, yield_on_steer=False):
+        self.yield_on_steer = yield_on_steer
         self.unknown = unknown
         self.handle = None
         self.result = None
@@ -173,11 +175,11 @@ class Provider:
             "query_ref": "query/job",
             "cancel_ref": "cancel/job",
         }
-        return Unknown("response lost") if self.unknown else Accepted(self.handle)
+        return Unknown("response lost") if self.unknown else Accepted(self.handle, yield_on_steer=self.yield_on_steer)
 
     def query(self, handle):
         assert handle == self.handle
-        return Accepted(handle)
+        return Accepted(handle, yield_on_steer=self.yield_on_steer)
 
     def cancel(self, handle):
         return Unknown("stop unconfirmed")
@@ -186,7 +188,8 @@ class Provider:
         if self.handle is None:
             return False
         if item.kind == "provider_evidence":
-            return item.payload["handle"] == self.handle
+            expected = self.callback("provider_evidence", item.target_turn_id, item.input_id)
+            return item.encode() == expected.encode()
         return (
             item.payload["result"] == self.result
             and item.payload["usage"] == self.usage
@@ -199,6 +202,8 @@ class Provider:
         p = {k: h[k] for k in ("operation_id", "attempt", "request_digest")}
         if kind == "provider_evidence":
             p["handle"] = h
+            if self.yield_on_steer:
+                p["yield_on_steer"] = True
         else:
             p.update(provider_binding=h["provider"], result=self.result, usage=self.usage, evidence=[h["evidence"]])
         return InboxItem(input_id, kind, p, tid, 0)
@@ -438,6 +443,8 @@ class Fixtures:
         )
 
     def produce(self):
+        self.yieldable_wait()
+        self.yieldable_provider_recovery()
         self.endpoint_routing()
         self.model_selection()
         self.provider_usage()
@@ -1165,6 +1172,8 @@ class Fixtures:
             "replayed"
         ]
         assert request(42, "turn/start", original_submission)["result"]["replayed"]
+        # Replay may run an empty recovery pump; settle its notices before closing.
+        server.run_adapter.join()
         assert request(43, "turn/start", original_submission | {"input": []})["error"]["code"] == -32024
         assert (
             request(44, "turn/start", original_submission | {"inputId": "stale", "expectedTurnId": "wrong"})["error"]["code"]
@@ -1504,6 +1513,77 @@ class Fixtures:
                     "completion_count": len(completions),
                 }
             )
+
+    def yieldable_wait(self):
+        sid = "yieldable_wait"
+        rt = self.admit(
+            sid,
+            [LLMResponse("", [ToolCall("observe", "echo", {"text": "work"})]), LLMResponse("new direction")],
+            children={
+                "echo": lambda _plan, *, tx: ChildSession(
+                    SessionSpec("yieldable_child", "local", "/fixture"), "work", yield_on_steer=True
+                )
+            },
+        )
+        self.run(sid)
+        self.push(sid, InboxItem("new-input", "steer", {"content": "new direction"}, f"{sid}/turn/initial", 0))
+        self.run(sid)
+        state, records, _ = self.kernel.store.read_state(sid)
+        receipt = next(r for r in records if r.record._payload.get("yielded_by") == "new-input")
+        applied = next(
+            r for r in records if r.record.kind == "input_applied" and r.record._payload["input"]["input_id"] == "new-input"
+        )
+        assert receipt.commit_id == applied.commit_id
+        assert self.result(sid).final_output == "new direction"
+        assert not self.state("yieldable_child").turns
+        assert not rt.llm.steps
+        assert state.active_turn_id is None
+        self.semantics.append(
+            {
+                "case": "yieldable_wait_atomic_steer",
+                "session_id": sid,
+                "input_id": "new-input",
+                "same_commit": True,
+                "child_stopped": False,
+                "result": receipt.record._payload["result"],
+            }
+        )
+
+    def yieldable_provider_recovery(self):
+        sid = "yieldable_provider_recovery"
+        provider = Provider(yield_on_steer=True)
+        rt = self.admit(
+            sid,
+            [LLMResponse("", [ToolCall("observe", "echo", {"text": "work"})]), LLMResponse("new direction")],
+            providers={"echo": provider},
+        )
+
+        class Cut(BaseException):
+            pass
+
+        def cut(point, record):
+            if point == "before_commit" and record and record.kind == "op_parked":
+                raise Cut()
+
+        rt.hook = cut
+        try:
+            self.run(sid)
+        except Cut:
+            pass
+        else:
+            raise AssertionError("acceptance cut was not reached")
+        rt.hook = lambda *_: None
+        self.push(sid, provider.callback("provider_evidence", f"{sid}/turn/initial", "acceptance-recovery"))
+        self.run(sid)
+        self.push(sid, InboxItem("new-input", "steer", {"content": "new direction"}, f"{sid}/turn/initial", 0))
+        self.run(sid)
+        state, records, _ = self.kernel.store.read_state(sid)
+        assert state.active_turn_id is None
+        park = next(r.record for r in records if r.record.kind == "op_parked")
+        assert park.payload["yield_on_steer"] is True
+        self.semantics.append(
+            {"case": sid, "acceptance_preserved": True, "yielded": any("yielded_by" in r.record.payload for r in records)}
+        )
 
     def collect(self):
         streams = []
@@ -1889,6 +1969,10 @@ def generate(output: Path):
     with ExitStack() as stack:
         # Fixed elapsed-time observations do not affect deadlines, which use store time.
         stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
+        # The evaluator's default captured the real clock when budget.py was imported.
+        stack.enter_context(
+            patch("vv_agent.session.kernel.BudgetEvaluator", partial(BudgetEvaluator, clock_ns=lambda: 100_000_000))
+        )
         stack.enter_context(patch("vv_agent.prompt.builder.datetime", FixedDatetime))
         with TemporaryDirectory(prefix="c1b-producer-") as workspace:
             stack.enter_context(

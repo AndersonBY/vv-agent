@@ -147,7 +147,7 @@ def test_manual_compaction_idle_receipt_replay_conflict_stale_and_reuse(tmp_path
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp_path, cancel):
+def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp_path, cancel, monkeypatch):
     entered, release = Event(), Event()
     calls = []
 
@@ -165,6 +165,13 @@ def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp
     with ExitStack() as stack:
         a = node(stack, tmp_path / "store", "A", provider)
         b = node(stack, tmp_path / "store", "B", provider)
+        original_rows = b.kernel.store._rows
+
+        def rows_outside_background_lock(*args, **kwargs):
+            assert not b.kernel._background_lock._is_owned(), "store accessed while holding local scheduling lock"
+            return original_rows(*args, **kwargs)
+
+        monkeypatch.setattr(b.kernel.store, "_rows", rows_outside_background_lock)
         a.run_adapter._host._run_config = replace(
             a.run_adapter._host._run_config, initial_messages=history(), metadata={"memory_keep_recent_messages": 1}
         )

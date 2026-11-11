@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+from queue import Empty
 
 import pytest
 from support import FixedModelProvider
@@ -366,7 +367,7 @@ def test_shared_state_survives_runtime_reconstruction(tmp_path):
     class StopDrive(BaseException):
         pass
 
-    def stop(point, record):
+    def stop(point, record, *, tx):
         if point == "after_commit" and record.kind == "op_completed" and "/tool/" in record.operation_id:
             raise StopDrive
 
@@ -726,6 +727,7 @@ def test_lease_recovery_exhaustion_reaches_public_caller(monkeypatch, tmp_path, 
     from vv_agent.session.store import LeaseLost, LeaseRetryExhausted
     from vv_agent.session.surfaces import SessionDriver
 
+    original_drive = kernel_module._drive_owned
     attempts, delays = [], []
     original_runtime = SessionDriver.runtime
 
@@ -743,7 +745,7 @@ def test_lease_recovery_exhaustion_reaches_public_caller(monkeypatch, tmp_path, 
         raise LeaseLost("writer lost")
 
     monkeypatch.setattr(SessionDriver, "runtime", runtime)
-    monkeypatch.setattr(kernel_module, "drive", lost)
+    monkeypatch.setattr(kernel_module, "_drive_owned", lost)
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("unused")])
     agent = Agent("lease", "Answer.")
     config = RunConfig(model_provider=provider, workspace=tmp_path)
@@ -780,11 +782,30 @@ def test_lease_recovery_exhaustion_reaches_public_caller(monkeypatch, tmp_path, 
         while True:
             message = transport.receive_outbound(timeout=2)
             messages.append(message)
-            if message.get("method") == "turn/completed":
+            if message.get("method") == "error/warning" and message["params"]["code"] == "lease_retry_exhausted":
                 break
         server.run_adapter.join()
-        assert messages[-1]["params"]["status"] == "failed"
-        assert any(m.get("method") == "error/warning" and m["params"]["code"] == "lease_retry_exhausted" for m in messages)
+        while True:
+            try:
+                messages.append(transport.receive_outbound(timeout=0))
+            except Empty:
+                break
+        assert not any(m.get("method") == "turn/completed" for m in messages)
+        assert sum(m.get("method") == "error/warning" and m["params"]["code"] == "lease_retry_exhausted" for m in messages) == 1
+        state, records, _ = server.kernel.store.read_state("thread_1")
+        assert not state.turns and not any(row.record.kind == "turn_ended" for row in records)
+        assert [row.item.input_id for row in server.kernel.store.peek_inbox("thread_1")] == ["turn_1"]
+        assert server.run_adapter._state_manager.active_turn("thread_1") is None
+        assert all(h.done() for h in server.kernel.handles)
+        # The typed warning leaves the input recoverable, without inventing a terminal.
+        monkeypatch.setattr(kernel_module, "_drive_owned", original_drive)
+        server.wake("thread_1")
+        server.run_adapter.join()
+        state, records, _ = server.kernel.store.read_state("thread_1")
+        assert len(state.turns) == 1 and state.active_turn_id is None
+        assert [row.record.payload["status"] for row in records if row.record.kind == "turn_ended"] == ["completed"]
+        assert not server.kernel.store.peek_inbox("thread_1")
+        server.kernel.close()
     assert len(attempts) == 4
     assert delays == [0.01, 0.02, 0.025]
 
@@ -796,7 +817,7 @@ def test_lease_recovery_reuses_retained_work(monkeypatch, terminal_loss):
     from vv_agent.session.store import LeaseLost
     from vv_agent.session.surfaces import SessionDriver
 
-    original_drive = kernel_module.drive
+    original_drive = kernel_module._drive_owned
     attempts, delays = [], []
     driver = SessionDriver()
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])
@@ -814,14 +835,15 @@ def test_lease_recovery_reuses_retained_work(monkeypatch, terminal_loss):
             raise LeaseLost("temporary loss")
         return original_drive(*args, **kwargs)
 
-    monkeypatch.setattr(kernel_module, "drive", drive)
+    monkeypatch.setattr(kernel_module, "_drive_owned", drive)
     try:
         handle.start()
         assert handle.result(timeout=2).final_output == "done"
         records = driver.store.read_state("retry")[1]
         assert sum(row.record.kind == "turn_started" for row in records) == 1
         assert sum(row.record.kind == "turn_ended" for row in records) == 1
-        assert len(attempts) == (1 if terminal_loss else 3)
+        # The final no-progress pass also verifies retained work after terminal loss.
+        assert len(attempts) == (2 if terminal_loss else 4)
         assert delays == ([] if terminal_loss else [0.01, 0.02])
     finally:
         driver.close()
@@ -883,19 +905,21 @@ def test_lease_loss_during_recovery_read_still_uses_backoff_and_typed_cap(monkey
     handle.runtime.lease_retry_attempts = 3
     handle.runtime.lease_retry_sleep = delays.append
     handle.runtime.lease_retry_jitter = lambda low, high: low
-    original_read = driver.store.read_state
+    from vv_agent.session.sql import SQLStore
+
+    original_read = SQLStore.read_state
 
     def lost(*args, **kwargs):
         attempts.append(1)
         raise LeaseLost("drive lost")
 
-    def read(*args, **kwargs):
-        if attempts:
+    def read(current, *args, **kwargs):
+        if current is handle._execution_store and attempts:
             raise LeaseLost("recovery read lost")
-        return original_read(*args, **kwargs)
+        return original_read(current, *args, **kwargs)
 
-    monkeypatch.setattr(kernel_module, "drive", lost)
-    monkeypatch.setattr(driver.store, "read_state", read)
+    monkeypatch.setattr(kernel_module, "_drive_owned", lost)
+    monkeypatch.setattr(SQLStore, "read_state", read)
     try:
         handle.start()
         with pytest.raises(LeaseRetryExhausted) as exc:

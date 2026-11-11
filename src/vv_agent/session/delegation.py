@@ -42,6 +42,7 @@ from vv_agent.types import (
 from vv_agent.workspace import DiscoveryFilteredWorkspaceBackend
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
+from .callbacks import hook
 from .children import ChildSession
 from .records import CHILD_ADMISSION, InboxItem, Record, SessionSpec, copy_json, digest, validate
 from .reducer import ExecutionState
@@ -76,7 +77,9 @@ def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:
 def child_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     manager = cast(ChildTasks, context.sub_task_manager)
     # Tool providers run on a separate thread from the parent's driver.
-    with manager.runtime.heartbeat_store() as store:
+    from .ownership import checkout
+
+    with checkout(manager.store, role="projection") as store:
         tasks = ChildTasks(store, manager.parent_id, manager.runtime)
         return status_with_store(replace(context, sub_task_manager=tasks), arguments)
 
@@ -666,7 +669,7 @@ class ChildTasks:
         with self.store.atomic() as tx:
             tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
         self.runtime.wake(task_id)
-        self.runtime.hook("after_input", None)
+        hook(self.runtime, "after_input", None, tx=None)
         return action
 
 

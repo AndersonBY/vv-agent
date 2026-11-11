@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
+from .callbacks import Admission, SummaryAdmission
 from .records import InboxItem, Record, SessionSpec
 from .store import SessionStore, SessionTx, StoredRecord
 
@@ -22,6 +23,15 @@ class ChildSession:
     generation: int = 0
     consumers: tuple[str, ...] = ()
     background: bool = False
+    yield_on_steer: bool = False
+
+
+@dataclass(frozen=True)
+class ChildTool:
+    """Transactional admission with an optional read-only interruption observer."""
+
+    admit: Admission
+    on_yield: Callable[[Record, list[dict[str, Any]], str], ToolExecutionResult] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +44,8 @@ class SummaryChildTool:
     """
 
     requires_summary: Callable[[Record], bool]
-    admit: Callable[[Record, str | None], ChildSession | Sequence[ChildSession]]
+    admit: SummaryAdmission
+    on_yield: Callable[[Record, list[dict[str, Any]], str], ToolExecutionResult] | None = None
 
 
 class InvalidChildBatch(ValueError):

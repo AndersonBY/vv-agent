@@ -436,6 +436,8 @@ def test_interactive_real_same_turn_user_reply(surface, tmp_path):
     second = session.continue_run("value")
     assert second.final_output == "resumed"
     assert second.run_id == first.run_id
+    # The typed reply belongs to explicit continuation, without a competing driver.
+    assert len([h for h in session.driver.handles if h.session_id == session.session_id]) == 2
     state, records, _ = surface.store.read_state(session.session_id)
     assert len(state.turns) == 1
     assert sum(r.record.kind == "turn_ended" for r in records) == 1

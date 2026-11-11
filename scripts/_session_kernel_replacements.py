@@ -725,6 +725,63 @@ class Author:
                 ],
             }
         )
+        ownership_behavior = {
+            "session_SessionStore": (
+                "single atomic log and inbox authority; lease-fenced defer_drive(lease, retry_after_ms) gates even "
+                "ready inbox and lease acquisition; defer_projection(session_id, consumer, retry_after_ms) gates "
+                "only that consumer; retries preserve execution facts and newer schedules; "
+                "execution_store checks out an exclusive execution or "
+                "projection connection; heartbeat_store is independent; targets freeze at idle initialization or "
+                "outermost schema installation"
+            ),
+            "session_SessionTx": (
+                "atomic admission, fences and consumer transactions; connection borrows the actual transaction "
+                "handle on its owner thread and lexical scope; unsupported handles reject only at access"
+            ),
+            "session_SQLiteStore": (
+                "SQLite main-file identity and private cache; independent file execution/projection; memory "
+                "borrows one serialized connection and rejects same-thread committed views inside atomic"
+            ),
+            "session_PostgresStore": (
+                "PostgreSQL frozen database and five relation namespace identities; exclusive idle autocommit "
+                "execution/projection and validated independent heartbeat; optional driver is not required to "
+                "import SDK"
+            ),
+            "session_SummaryChildTool": (
+                "pure requires_summary predicate; logged full-history summary; "
+                "validate synchronous admit(plan, summary, *, tx) before "
+                "summary preparation; admission and before_commit borrow the same actual transaction"
+            ),
+        }
+        for surface in d["surfaces"]:
+            if surface["id"] in ownership_behavior:
+                surface["behavior"] = ownership_behavior[surface["id"]]
+            if surface["id"] == "session_SessionStore":
+                surface["members"] = [m for m in surface.get("members", []) if m["id"] != "execution_store"]
+                surface["members"].append(
+                    {
+                        "id": "execution_store",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "method",
+                            "name": "execution_store",
+                            "signature": signature(resolve("vv_agent.SessionStore").execution_store),
+                        },
+                    }
+                )
+            if surface["id"] == "session_SessionTx":
+                surface["members"] = [
+                    {
+                        "id": "connection",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "property",
+                            "name": "connection",
+                            "declaration": "property",
+                            "signature": signature(resolve("vv_agent.SessionTx").connection.fget),
+                        },
+                    }
+                ]
         for domain in d["domains"]:
             names = (
                 ("Provider", "Accepted", "Definitive", "Unknown", "is_task_artifact_path")
@@ -808,7 +865,9 @@ class Author:
         for surface in d["surfaces"]:
             if surface["id"] == "session_Runtime":
                 surface["behavior"] = (
-                    "resolve retained model/settings/route; reject selection before apply; verify planned binding on recovery"
+                    "resolve retained model/settings/route; reject selection before apply; verify planned binding on "
+                    "recovery; children require synchronous admit(plan, *, tx); hooks require hook(point, record, *, "
+                    "tx), with a live tx only at before_commit"
                 )
                 surface["members"] = [m for m in surface["members"] if m["id"] not in {"model_resolver", "resolve_model"}]
                 surface["members"].extend(

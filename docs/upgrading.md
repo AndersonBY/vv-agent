@@ -77,6 +77,79 @@ old-version session.
 
 ## Version notes
 
+### Unreleased
+
+#### Explicit interactive session close
+
+Dropping an `AgentSession` does not persist closure, cancel active work, publish
+a close event, or wake a receiver blocked in `recv()`. Use `session.close()` or a
+session context manager to close it explicitly. Finalization only marks the local
+object and subscriptions closed and cancels local background listeners; it does
+not acquire SDK locks, enter checkout or issue SQL. Dropping the object does not
+notify a receiver already blocked in recv().
+
+Background listener cancellation is local and takes no lock. The ordinary
+background observer removes cancelled listener slots. Cancellation prevents new
+notifications, but an in-flight notification may still finish its callback. The driver fallback still only closes the SQLite
+connection it created itself, without entering the ownership ledger.
+
+Ownership keeps its non-reentrant ledger lock. A same-thread attempt to enter the
+ledger again raises OwnershipError with stage lock-reentry instead of waiting.
+Admission markers attach only to the calling thread's outer transaction; another
+thread's transaction on the shared memory connection is not an outer transaction
+of the caller.
+
+### 0.35.0 — 2026-11-08
+
+Hosts can opt a foreground `ChildSession` or provider `Accepted` wait into
+`yield_on_steer=True`. A new targeted steer ends the observation and becomes
+model-visible in the same commit. Children continue; their later completion
+follows background notification rules. Provider handles close without cancel.
+See [the host example](session-kernel.md#yielding-a-wait-to-new-input).
+
+This release targets contract 38.0.0. It adds optional closed park, completion and provider acceptance inbox
+fields, not SQL columns. No store migration or dependency update is required.
+Undeclared waits keep their scheduling and declaration bytes. The shared
+long-result fix changes newly prepared archive identities for all tool results;
+existing stored bytes and references are untouched. Once any operation
+has written a declaration, keep that entire session on 0.35.0 or newer, even after
+it finishes: 0.34.1 rejects the new fields with `RecordError`. Do not strip fields
+or edit handles to downgrade it. Route retained sessions by producing runtime,
+or keep a host-owned history copy and start a new session when changing versions.
+
+Read the saved `artifact.path` or App Server resource reference instead of
+deriving archive paths. Update tests that assert archive filenames, previews
+containing paths, or complete result digests for newly prepared long results.
+
+Callbacks are read-only observers: host reads are allowed, writes and side
+effects are forbidden. Commit retries may produce different observations; the
+committed result is authoritative and replay only reads it. Files are not
+transferred during yielding. Supply `ChildTool.on_yield`,
+`SummaryChildTool.on_yield`, or the provider's optional `on_yield` method; omission
+uses the default. Exceptions fall back to the default with a failure marker.
+Admission callables now require explicit keyword-only tx (summary admission
+also receives summary); Runtime hooks require explicit keyword-only tx, with a
+live transaction only at before_commit. Old arities/default tx/**kwargs-only or
+async bindings reject; no fallback is retained. Business SQL must use the
+borrowed tx.connection on the execution transaction, rather than captured H.
+Yieldability still requires each child to opt in. This API replacement introduces
+no store boundary: record/inbox schemas and SQLite user_version stay unchanged.
+An unchanged business binding needs no stored-session rewrite; changed business
+semantics still follow the host's handler_version/drain/pin policy. M1 only
+connects the core and necessary RunHandle callers; M2 surface/lock migration,
+external host adoption and final integration remain pending. Do not release or
+roll out this intermediate checkout. Persist the original Accepted declaration with provider evidence and include
+it in authenticated `provider_evidence` recovery inputs before park commit.
+Conflicting later attachments are rejected; query declaration conflicts fail
+with `provider_result_invalid`. Old readers reject a declared inbox value even
+before a park exists. Restart reads the recorded declaration, even if the
+current binding's default changes. Forks copy completed-turn context only; they
+admit fresh waits. Rust remains frozen and does not support this capability.
+
+The release lock and vendored snapshot remain at 37.0.0 until the immutable
+38.0.0 contract is published. During development use `VV_AGENT_CONTRACT_SOURCE`
+for local producer gates; publication and central adoption are separate gates.
+
 ### 0.34.1 — 2026-11-07
 
 0.34.1 includes 0.34.0, which was not published to PyPI, plus two test

@@ -222,13 +222,14 @@ def test_invalid_stored_bytes_are_unavailable_not_accepted(fault):
     assert projected["metadata"]["app_server_resources"][0]["status"] == "unavailable"
 
 
-def test_same_completion_different_body_downgrades_without_overwrite():
+def test_same_operation_different_candidate_retains_both_without_overwrite():
     plan, receipt, backend = produce("A" * 13000)
     path = receipt._payload["result"]["artifact"]["path"]
     second = prepare_tool_resources(plan, ToolExecutionResult("call-s1", "B" * 13000).to_dict(), backend)
-    assert second["artifact"]["path"] == path
-    assert "vv_artifact" not in second["metadata"]
-    assert second["metadata"]["app_server_resources"][0]["status"] == "unavailable"
+    assert second["artifact"]["path"] != path
+    assert second["metadata"]["vv_artifact"]["sha256"] == hashlib.sha256(b"B" * 13000).hexdigest()
+    assert second["metadata"]["app_server_resources"][0]["status"] == "retained"
+    assert backend.read_text(second["artifact"]["path"]) == "B" * 13000
     assert backend.read_text(path) == "A" * 13000
 
 

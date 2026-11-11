@@ -211,7 +211,7 @@ def generate():
         ],
         "rules": {
             "writer": "kernel_only_discard_or_reject_producer_namespace",
-            "identity": "session_turn_operation_attempt",
+            "identity": "session_turn_operation_attempt_content_sha256",
             "same_identity_different_bytes": "EIO_never_overwrite",
             "archive_failure": "success_receipt_expected_pointer_unavailable_no_retry",
             "terminal_retention_failure": "confirmed_command_result_unavailable_without_pointer_no_retry",

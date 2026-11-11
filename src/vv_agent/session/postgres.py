@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from threading import RLock
+from threading import RLock, get_ident
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
 from .sql import SQLSessionTx, SQLStore
@@ -88,21 +88,127 @@ class PostgresStore(SQLStore):
     clock_sql = CLOCK
 
     def __init__(self, connection: Connection[Any]):
+        self._initialize(connection)
+
+    def _initialize(self, connection, *, source=None, input_only=False):
+        from psycopg.pq import TransactionStatus
+
+        from .ownership import OwnershipError, register_host, restore_host
+
+        if connection.closed:
+            raise OwnershipError(stage="initialization-closed")
+        super().__init__()
         self.connection = connection
         self._connection_lock = RLock()
+        self._target = None
+        self._conninfo = None
+        self._initial_thread = get_ident()
+        from .ownership import native_keys
+
+        self._ownership_keys = native_keys(self)
+        previous = register_host(self, input_only=input_only) if source is None else None
+        try:
+            self._configure_target = source is not None
+            if source is not None:
+                self._target = source._target
+                self._conninfo = source._conninfo
+                return
+            if input_only or not connection.autocommit or connection.info.transaction_status != TransactionStatus.IDLE:
+                return
+            self._conninfo = _connection_conninfo(connection)
+            self._target = self._freeze_target()
+        except BaseException:
+            if previous is not None:
+                restore_host(self, previous)
+            raise
+
+    def _freeze_target(self):
+        from .ownership import OwnershipError
+
+        db = self._one("SELECT oid FROM pg_database WHERE datname=current_database()")[0]
+        relations = self._rows(
+            "SELECT c.relname,c.oid,n.oid,n.nspname FROM "
+            "unnest(ARRAY['sk_session','sk_record','sk_inbox','sk_consumer','sk_commit']) AS t(name) "
+            "JOIN pg_class c ON c.oid=to_regclass(t.name) JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "ORDER BY c.relname"
+        )
+        if not relations:
+            return None
+        if len(relations) != 5 or len({r[2] for r in relations}) != 1 or relations[0][3].startswith("pg_temp_"):
+            raise OwnershipError(stage="initialization-tables")
+        info = self.connection.info
+        return (db, relations[0][3], tuple(relations), info.host, info.port)
+
+    def _validate_checkout(self, source):
+        from psycopg.pq import TransactionStatus
+
+        from .ownership import OwnershipError
+
+        if (
+            self.connection.closed
+            or not self.connection.autocommit
+            or self.connection.info.transaction_status != TransactionStatus.IDLE
+        ):
+            raise OwnershipError(stage="idle")
+        if self._configure_target:
+            from psycopg import sql
+
+            self.connection.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(source._target[1])))
+            self._configure_target = False
+        if source._target is None or self._freeze_target() != source._target:
+            raise OwnershipError(stage="target")
+
+    def execution_store(self):
+        from .ownership import OwnershipError
+
+        if self._target is None:
+            raise OwnershipError(stage="setup-only")
+        return self._checkout()
 
     def heartbeat_store(self):
-        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+        return self.execution_store()
 
-        conninfo = _connection_conninfo(self.connection)
-        options = conninfo_to_dict(conninfo).get("options", "")
-        return PostgresStore.standalone(
-            make_conninfo(
-                conninfo,
-                connect_timeout=3,
-                options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
-            )
-        )
+    @contextmanager
+    def _checkout(self):
+        import psycopg
+        from psycopg.conninfo import make_conninfo
+
+        assert self._conninfo is not None
+        store = None
+        connection = None
+        error = None
+        yielded = False
+        try:
+            connection = psycopg.connect(make_conninfo(self._conninfo, connect_timeout=3), autocommit=True)
+            store = PostgresStore.__new__(PostgresStore)
+            store._initialize(connection, source=self)
+            from .ownership import OwnershipError, native_keys, register_host
+
+            if set(native_keys(store)) & set(self._ownership_keys):
+                raise OwnershipError(stage="factory-alias")
+            register_host(store)
+            store._validate_checkout(self)
+            with connection:
+                yielded = True
+                yield store
+
+        except BaseException as caught:
+            error = caught
+            raise
+        finally:
+            try:
+                if connection is not None and not connection.closed:
+                    try:
+                        connection.close()
+                    except BaseException as cleanup:
+                        if error is None:
+                            raise
+                        error.add_note(f"checkout close failed: {type(cleanup).__name__}")
+            finally:
+                if store is not None and (not yielded or (connection is not None and connection.closed)):
+                    from .ownership import forget_host
+
+                    forget_host(store)
 
     @contextmanager
     def _bound_append(self, lease: Lease) -> Iterator[None]:
@@ -156,8 +262,15 @@ class PostgresStore(SQLStore):
     def install_schema(self) -> None:
         with self._transaction():
             self._rows(DDL)
+        from psycopg.pq import TransactionStatus
+
+        if self.connection.info.transaction_status == TransactionStatus.IDLE:
+            self._conninfo = _connection_conninfo(self.connection)
+            self._target = self._freeze_target()
 
 
 def join_transaction(connection: Connection[Any]) -> SQLSessionTx:
     """Join the host's open transaction; never open a connection or commit it."""
-    return SQLSessionTx(PostgresStore(connection))
+    store = PostgresStore.__new__(PostgresStore)
+    store._initialize(connection, input_only=True)
+    return SQLSessionTx(store)

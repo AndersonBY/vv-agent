@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from vv_agent import SummaryChildTool
+from vv_agent.session.callbacks import noop_hook
 from vv_agent.session.children import ChildSession
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import SessionSpec, digest
@@ -35,12 +36,14 @@ def wait() -> ToolExecutionResult:
     return ToolExecutionResult("", "question", directive=ToolDirective.WAIT_USER)
 
 
-def configured(database, steps, *, child=False, hook=lambda *_: None, initial=True):
+def configured(database, steps, *, child=False, hook=noop_hook, initial=True):
     bindings = {}
     if child:
         bindings["child_task"] = SummaryChildTool(
             lambda plan: plan.payload["request"]["arguments"].get("include_main_summary", True),
-            lambda plan, summary: ChildSession(SessionSpec("child", "test", "/tmp"), f"child input\n{summary}", background=True),
+            lambda plan, summary, *, tx: ChildSession(
+                SessionSpec("child", "test", "/tmp"), f"child input\n{summary}", background=True
+            ),
         )
     rt = runtime(database, steps, [compact, child_task, finish, wait], children=bindings, hook=hook)
     rt.config = replace(rt.config, initial_messages=history() if initial else [])
@@ -247,7 +250,7 @@ def test_crash_commit_cuts_reuse_summary_and_pairing(store, database, child, poi
         calls.append(request.metadata["attempt"])
         return LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})
 
-    def hook(at, record):
+    def hook(at, record, *, tx):
         if at != "after_commit":
             return
         is_summary = record.operation_id is not None and (
@@ -335,7 +338,7 @@ def process_summary_worker(database, pipe, child, cut):
             counter.connection.execute("INSERT INTO summary_calls VALUES (1)")
         return LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         receipt = record.kind == "op_completed" and record.payload.get("usage", {}).get("prompt_tokens") == 12000
         admission = child and record.kind == "op_completed" and record.payload.get("result", {}).get("tool_call_id") == "request"
         replacement = not child and record.kind == "context_compacted"
@@ -495,7 +498,7 @@ def test_child_summary_does_not_consume_unknown_outside_its_source(store, databa
 
     observed = []
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         if point == "after_commit" and record.kind == "op_planned" and record.payload["purpose"] == "compaction":
             observed.append(record.payload["consumed_unknowns"])
 

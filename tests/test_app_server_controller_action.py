@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from typing import Any, cast
 
 import pytest
@@ -109,6 +111,8 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
         adapter.controller_action(
             connection_id="conn_1", thread_id=thread.thread_id, turn_id=tid, action_id="reply", action=reply
         )
+        # Finish the adapter's reply drive before starting a competing manual drive.
+        server.run_adapter.join()
         drive(kernel.store, thread.thread_id, runtime=handle.runtime, _one_turn=True)
         assert kernel.store.read_state(thread.thread_id)[0].phase == "suspended"
         with kernel.store.atomic():
@@ -123,7 +127,12 @@ def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp
                 action={"kind": terminal_action},
             )
         server.run_adapter.join()
+        # Outermost commit queues recovery to the observer; join covers started pumps.
+        deadline = monotonic() + 5
         state, records, _ = kernel.store.read_state(thread.thread_id)
+        while not state.turns[tid].ended and monotonic() < deadline:
+            Event().wait(0.02)
+            state, records, _ = kernel.store.read_state(thread.thread_id)
         assert state.turns[tid].ended
         assert [r.record._payload["status"] for r in records if r.record.kind == "turn_ended"] == [
             "cancelled" if terminal_action == "cancel" else "aborted"

@@ -379,128 +379,133 @@ def _search_files_local_rg(
     except OSError:
         return None
 
-    assert process.stdout is not None
-
-    searched_files: set[str] = set()
-    files_with_matches_set: set[str] = set()
-    file_counts: dict[str, int] = {}
-    line_rows: dict[tuple[str, int], dict[str, Any]] = {}
-    content_rows: list[dict[str, Any]] = []
-    summary_searches: int | None = None
-
     try:
-        for raw_line in process.stdout:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                return None
+        assert process.stdout is not None
 
-            event_type = event.get("type")
-            data = event.get("data")
-            if not isinstance(data, dict):
-                continue
-            if event_type == "summary":
-                stats = data.get("stats")
-                if isinstance(stats, dict):
-                    searches = stats.get("searches")
-                    if isinstance(searches, int):
-                        summary_searches = searches
-                continue
+        searched_files: set[str] = set()
+        files_with_matches_set: set[str] = set()
+        file_counts: dict[str, int] = {}
+        line_rows: dict[tuple[str, int], dict[str, Any]] = {}
+        content_rows: list[dict[str, Any]] = []
+        summary_searches: int | None = None
 
-            rel_from_base = _decode_rg_field(data.get("path"))
-            if not rel_from_base:
-                continue
-            normalized = rel_from_base.replace("\\", "/")
-            rel_workspace = _format_output_path(context, base_path / normalized)
-            if file_type and not _matches_file_type(rel_workspace, file_type):
-                continue
+        try:
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    return None
 
-            if event_type == "begin":
-                searched_files.add(rel_workspace)
-                continue
-
-            if event_type == "match":
-                searched_files.add(rel_workspace)
-                submatches = data.get("submatches")
-                increment = len(submatches) if isinstance(submatches, list) and submatches else 1
-                file_counts[rel_workspace] = file_counts.get(rel_workspace, 0) + increment
-                files_with_matches_set.add(rel_workspace)
-
-                if output_mode != "content":
+                event_type = event.get("type")
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                if event_type == "summary":
+                    stats = data.get("stats")
+                    if isinstance(stats, dict):
+                        searches = stats.get("searches")
+                        if isinstance(searches, int):
+                            summary_searches = searches
                     continue
 
-                line_number = data.get("line_number")
-                if not isinstance(line_number, int):
-                    line_number = 1
-                matched_lines = _decode_rg_field(data.get("lines"))
+                rel_from_base = _decode_rg_field(data.get("path"))
+                if not rel_from_base:
+                    continue
+                normalized = rel_from_base.replace("\\", "/")
+                rel_workspace = _format_output_path(context, base_path / normalized)
+                if file_type and not _matches_file_type(rel_workspace, file_type):
+                    continue
 
-                if multiline_mode:
-                    if isinstance(submatches, list) and submatches:
-                        for sub in submatches:
-                            if not isinstance(sub, dict):
-                                continue
-                            start = sub.get("start")
-                            end = sub.get("end")
-                            if isinstance(start, int) and isinstance(end, int) and 0 <= start <= end <= len(matched_lines):
-                                snippet = matched_lines[start:end]
-                            else:
-                                snippet = _decode_rg_field(sub.get("match")) or matched_lines
+                if event_type == "begin":
+                    searched_files.add(rel_workspace)
+                    continue
+
+                if event_type == "match":
+                    searched_files.add(rel_workspace)
+                    submatches = data.get("submatches")
+                    increment = len(submatches) if isinstance(submatches, list) and submatches else 1
+                    file_counts[rel_workspace] = file_counts.get(rel_workspace, 0) + increment
+                    files_with_matches_set.add(rel_workspace)
+
+                    if output_mode != "content":
+                        continue
+
+                    line_number = data.get("line_number")
+                    if not isinstance(line_number, int):
+                        line_number = 1
+                    matched_lines = _decode_rg_field(data.get("lines"))
+
+                    if multiline_mode:
+                        if isinstance(submatches, list) and submatches:
+                            for sub in submatches:
+                                if not isinstance(sub, dict):
+                                    continue
+                                start = sub.get("start")
+                                end = sub.get("end")
+                                if isinstance(start, int) and isinstance(end, int) and 0 <= start <= end <= len(matched_lines):
+                                    snippet = matched_lines[start:end]
+                                else:
+                                    snippet = _decode_rg_field(sub.get("match")) or matched_lines
+                                content_rows.append(
+                                    {
+                                        "path": rel_workspace,
+                                        "line": line_number,
+                                        "text": snippet,
+                                        "is_match": True,
+                                    }
+                                )
+                        else:
                             content_rows.append(
                                 {
                                     "path": rel_workspace,
                                     "line": line_number,
-                                    "text": snippet,
+                                    "text": matched_lines,
                                     "is_match": True,
                                 }
                             )
                     else:
-                        content_rows.append(
-                            {
+                        row_key = (rel_workspace, line_number)
+                        row_text = matched_lines.rstrip("\n")
+                        existing = line_rows.get(row_key)
+                        if existing is None:
+                            line_rows[row_key] = {
                                 "path": rel_workspace,
                                 "line": line_number,
-                                "text": matched_lines,
+                                "text": row_text,
                                 "is_match": True,
                             }
-                        )
-                else:
-                    row_key = (rel_workspace, line_number)
-                    row_text = matched_lines.rstrip("\n")
-                    existing = line_rows.get(row_key)
-                    if existing is None:
-                        line_rows[row_key] = {
-                            "path": rel_workspace,
-                            "line": line_number,
-                            "text": row_text,
-                            "is_match": True,
-                        }
-                    else:
-                        existing["is_match"] = True
-                        existing["text"] = row_text
-                continue
+                        else:
+                            existing["is_match"] = True
+                            existing["text"] = row_text
+                    continue
 
-            if event_type == "context" and output_mode == "content" and not multiline_mode:
-                searched_files.add(rel_workspace)
-                line_number = data.get("line_number")
-                if not isinstance(line_number, int):
-                    continue
-                row_key = (rel_workspace, line_number)
-                if row_key in line_rows:
-                    continue
-                line_rows[row_key] = {
-                    "path": rel_workspace,
-                    "line": line_number,
-                    "text": _decode_rg_field(data.get("lines")).rstrip("\n"),
-                    "is_match": False,
-                }
+                if event_type == "context" and output_mode == "content" and not multiline_mode:
+                    searched_files.add(rel_workspace)
+                    line_number = data.get("line_number")
+                    if not isinstance(line_number, int):
+                        continue
+                    row_key = (rel_workspace, line_number)
+                    if row_key in line_rows:
+                        continue
+                    line_rows[row_key] = {
+                        "path": rel_workspace,
+                        "line": line_number,
+                        "text": _decode_rg_field(data.get("lines")).rstrip("\n"),
+                        "is_match": False,
+                    }
+        finally:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+
     finally:
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=1)
+        if process.stdout is not None:
+            process.stdout.close()
 
     if process.returncode not in (0, 1, 2):
         return None

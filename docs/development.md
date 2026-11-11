@@ -126,6 +126,50 @@ VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live
   `VV_AGENT_TEST_POSTGRES_DSN`. They create disposable databases and drop them
   afterwards. Without either, the PostgreSQL cases are skipped.
 
+Readiness timeout tests in `tests/session/test_connection_ownership_factories.py`
+sample inside the actual Python `ready.wait` call using a thread-local profile
+hook. The latest entry and earliest return CLOCK_REALTIME samples bound an inner
+interval; acquire, runtime construction, SQL and cleanup are outside it. The
+assertion requires 15 seconds without a lower tolerance. Endpoint sample spans
+and monotonic/raw clocks are diagnostic evidence. CLOCK_REALTIME is adjustable;
+this does not establish the same lower bound in another clock domain or prove
+that the host clock cannot step. The peripheral-delay sensitivity probe must
+exercise the real drive acceptance, rather than only the timing helper.
+
+Background child delivery can require another parent model response when it
+arrives after a primary request was frozen. The existing
+`test_background_notification_waits_for_frozen_model_then_forces_next_model` in
+`tests/session/test_children.py` pins that behavior. A script with only two parent
+responses cannot cover every asynchronous delivery ordering; distinguish script
+exhaustion from duplicate child execution using model returns and durable records.
+
+The RunHandle ownership tests make that ordering explicit. The foreground
+parameter retains its original identity. Background ownership uses
+`test_background_child_ownership_and_notification_order` with three parameters:
+delivery before request 2 freezes (two requests, notification once in request 2),
+delivery after request 2 freezes but before terminal (three requests, notification
+once in request 3), and delivery after terminal (two requests, audit-only input,
+no successor). Events order normal child callbacks and committed delivery outside
+the scheduling and store locks. Actual model entries, returns, durable completions,
+turn identity, hooks, threads and connections are checked together. This corrects
+the old asynchronous two-response test premise; it changes no product behavior
+and does not identify the first exception in historical failures without a trace.
+
+The native commit companion uses `test_native_companion_accepted_work` and the
+finite observer in `tests/session/test_connection_ownership_native_lifecycle.py`.
+It observes the exact deferred hint accepted by its own transactional wake,
+then waits for that hint's ordinary recovery handoff and all naturally registered
+workers and completion pumps in this case. A hint leaving pending is not worker
+completion: recovery can still be processing, and a pump can register a successor.
+The bounded owner traversal covers those handoffs before checking every handle
+and the durable ledger. The observer stays open until after these assertions.
+This revises the test's lifetime premise without changing product behavior.
+`join()` still waits for started pumps and flushes notifications; it does not
+close recovery producers or promise quiescence under future external wakes.
+The deterministic companion orders the observer after the original join and
+holds its third natural worker until the new acceptance is waiting for that
+owner. Historical failures retain their original identities and outcomes.
+
 ### Bounded-result fixture ownership
 
 `scripts/session_kernel_fixtures.py` owns the whole `bounded_tool_result.json`,

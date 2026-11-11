@@ -124,7 +124,7 @@ def test_runtime_not_ready_preserves_input_and_existing_turn_then_succeeds(store
     assert store.is_runnable("s")
 
     # Now admit a real turn, pause it at the model plan, and defer its preparation.
-    def stop(point, record):
+    def stop(point, record, *, tx):
         if point == "after_commit" and record and record.kind == "op_planned":
             raise RuntimeError("pause existing turn")
 
@@ -136,7 +136,7 @@ def test_runtime_not_ready_preserves_input_and_existing_turn_then_succeeds(store
     assert read_state(store, "s")[0].active_turn_id == tid
     assert not finished(store, "s")
     clock(CONTRACT["retry_after_ms"])
-    rt.hook = lambda *_: None
+    rt.hook = lambda *_, tx: None
     tick(store, runtime=lambda _: rt, project=lambda sid, c: project(store, sid, c))
     assert finished(store, "s")
     assert not rt.llm.steps
@@ -184,16 +184,16 @@ def test_drive_backoff_database_failure_is_chained_to_original(store, database, 
     error = RuntimeNotReady(250) if failure == "not_ready" else ValueError(f"original {failure} error")
     rt = runtime(database, [])
     backoff_errors = []
-    query_rows = store._rows
+    query_rows = type(store)._rows
 
-    def broken_write(query, params=()):
+    def broken_write(current, query, params=()):
         if query.startswith("UPDATE sk_session SET drive_retry_at_ms"):
             try:
-                return query_rows("SELECT * FROM missing_backoff_table")
+                return query_rows(current, "SELECT * FROM missing_backoff_table")
             except Exception as exc:
                 backoff_errors.append(exc)
                 raise
-        return query_rows(query, params)
+        return query_rows(current, query, params)
 
     def fail(*_args, **_kwargs):
         raise error
@@ -203,20 +203,20 @@ def test_drive_backoff_database_failure_is_chained_to_original(store, database, 
             fail()
         return rt
 
-    monkeypatch.setattr(store, "_rows", broken_write)
+    monkeypatch.setattr(type(store), "_rows", broken_write)
     if failure == "drive":
         monkeypatch.setattr(_Driver, "step", fail)
     elif failure == "renew":
         # Exercise the main-thread TTL handoff, after factory renewal has started.
-        renew = store.renew
+        renew = type(store).renew
         caller = current_thread()
 
-        def fail_handoff(*args, **kwargs):
+        def fail_handoff(current, *args, **kwargs):
             if current_thread() is caller:
                 fail()
-            return renew(*args, **kwargs)
+            return renew(current, *args, **kwargs)
 
-        monkeypatch.setattr(store, "renew", fail_handoff)
+        monkeypatch.setattr(type(store), "renew", fail_handoff)
     with pytest.raises(type(error)) as caught:
         drive(store, "s", runtime=factory)
     assert caught.value is error
@@ -228,21 +228,21 @@ def test_drive_backoff_database_failure_is_chained_to_original(store, database, 
 def test_dispatch_backoff_lease_loss_keeps_only_original_failure(store, clock, monkeypatch):
     start(store)
     error = ValueError("original dispatch error")
-    defer = store.defer_drive
+    defer = type(store).defer_drive
     rows = []
 
-    def taken_over(lease, *, retry_after_ms):
+    def taken_over(current_store, lease, *, retry_after_ms):
         clock(15000)
         current = store.acquire("s", owner="new", ttl_ms=30000)
         assert current is not None
-        defer(current, retry_after_ms=500)
+        defer(store, current, retry_after_ms=500)
         rows.append(store._one("SELECT * FROM sk_session WHERE session_id=%s", ("s",)))
-        defer(lease, retry_after_ms=retry_after_ms)
+        defer(current_store, lease, retry_after_ms=retry_after_ms)
 
     def dispatch(_sid):
         raise error
 
-    monkeypatch.setattr(store, "defer_drive", taken_over)
+    monkeypatch.setattr(type(store), "defer_drive", taken_over)
     with pytest.raises(ExceptionGroup) as caught:
         tick(store, dispatch=dispatch, project=lambda sid, c: project(store, sid, c))
     assert caught.value.exceptions == (error,)
@@ -257,10 +257,10 @@ def test_tick_backoff_database_failure_is_reported_with_original(store, clock, m
     def fail(*_args):
         raise error
 
-    def broken_write(*_args, **_kwargs):
-        store._rows("SELECT * FROM missing_backoff_table")
+    def broken_write(current, *_args, **_kwargs):
+        current._rows("SELECT * FROM missing_backoff_table")
 
-    monkeypatch.setattr(store, "defer_drive" if failure == "dispatch" else "defer_projection", broken_write)
+    monkeypatch.setattr(type(store), "defer_drive" if failure == "dispatch" else "defer_projection", broken_write)
     with pytest.raises(ExceptionGroup) as caught:
         tick(
             store,

@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from vv_agent.session import children
+from vv_agent.session.callbacks import noop_hook
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.types import LLMResponse
@@ -20,7 +21,7 @@ CHILDREN = ("child-0", "child-1", "child-2")
 
 def batch_runtime(database, *, background=False):
     rt = parent_runtime(database)
-    rt.children["child_task"] = lambda _plan: tuple(
+    rt.children["child_task"] = lambda _plan, *, tx: tuple(
         children.ChildSession(SessionSpec(sid, "test", "/tmp"), "work", background=background) for sid in CHILDREN
     )
     return rt
@@ -86,12 +87,12 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
     rt = batch_runtime(database)
     callback = rt.children["child_task"]
 
-    def admit(plan):
+    def admit(plan, *, tx):
         for index in range(3):
-            store._rows("INSERT INTO host_child VALUES (%s)", (index,))
+            tx.store._rows("INSERT INTO host_child VALUES (%s)", (index,))
             if fault == "host" and index == 1:
                 raise RuntimeError("host row 2 failed")
-        return callback(plan)
+        return callback(plan, tx=tx)
 
     rt.children["child_task"] = admit
     create = kernel.create_child
@@ -123,9 +124,9 @@ def test_invalid_batch_has_no_admission_effect(store, database, invalid):
     rt = batch_runtime(database)
     callback = rt.children["child_task"]
 
-    def bad(plan):
-        store._rows("INSERT INTO host_child VALUES (1)")
-        batch = list(callback(plan))
+    def bad(plan, *, tx):
+        tx.connection.execute("INSERT INTO host_child VALUES (1)")
+        batch = list(callback(plan, tx=tx))
         if invalid == "empty":
             return []
         if invalid == "mixed_background":
@@ -148,11 +149,11 @@ def test_batch_host_rows_and_child_admission_roll_back_with_parent_append(store,
     rt = batch_runtime(database)
     callback = rt.children["child_task"]
 
-    def admit(plan):
-        store._rows("INSERT INTO host_child VALUES (1)")
-        return callback(plan)
+    def admit(plan, *, tx):
+        tx.connection.execute("INSERT INTO host_child VALUES (1)")
+        return callback(plan, tx=tx)
 
-    def fail(point, record):
+    def fail(point, record, *, tx):
         if point == "before_commit" and record and record.kind == "op_parked":
             raise RuntimeError("parent append failed")
 
@@ -161,7 +162,7 @@ def test_batch_host_rows_and_child_admission_roll_back_with_parent_append(store,
         drive(store, "s", runtime=rt)
     assert store.list_sessions() == ("s",)
     assert store._rows("SELECT * FROM host_child") == []
-    rt.hook = lambda *_: None
+    rt.hook = noop_hook
     drive(store, "s", runtime=rt)
     assert store._rows("SELECT * FROM host_child") == [(1,)]
 
@@ -263,7 +264,7 @@ def test_background_batch_delivers_all_notifications_at_next_safe_model_boundary
 
     rt.llm.steps[-1] = model
 
-    def hook(point, record):
+    def hook(point, record, *, tx):
         if point == "after_commit" and record and record.kind == "op_completed" and "/tool/" in record.operation_id:
             for sid in CHILDREN:
                 complete(store, database, sid)

@@ -106,6 +106,22 @@ When you build the `Runtime`:
 - Bind live stream sinks separately from durable projection consumers (see
   [streaming](#streaming-and-cancellation)).
 
+A Scope serializes its polls from the Lease snapshot through renewal and
+publication. Heartbeat renewal does not hold the commit latch, and its state
+lock is released before calling the store. Final append keeps its commit latch
+through the transaction exit and still checks the captured Lease against the
+database fence. Each Scope marks commit and poll entry separately for each
+thread, before it waits for the latch, and clears the mark in `finally` after
+release. Calling poll on that thread while either mark is set raises
+immediately, including synchronous callbacks at latch entry and release.
+Other threads can still wait normally; other Scopes have their own marks.
+This is not a guarantee of recovery from arbitrary asynchronous exceptions.
+Do not drive or poll while holding a write
+transaction: the SDK cannot detect an outer transaction hidden by an opaque
+adapter. These rules prevent the SDK latch from reversing the store's lock
+order; they do not remove database lock contention or make long transactions
+safe.
+
 ## Submitting input and waking
 
 1. In a host transaction, push an inbox input with a stable `input_id` owned by
@@ -118,6 +134,127 @@ the worker still has to take the lease. If a wake is lost, the periodic
 
 An input with a future `available_ms` is not applied before that time. The tick
 picks it up when it becomes due.
+
+## Connection ownership (0.35.0 development M1)
+
+The low-level public `drive` checks out E through `SessionStore.execution_store()`;
+its private owned driver and the migrated RunHandle worker keep that explicit
+store. H remains the host's stable `store.connection` for input transactions.
+`execution_store()` also supplies independent projection/recovery checkouts P;
+heartbeat connections HB are independent and used only for renewal. E/P do not
+receive the heartbeat's 250 ms lock / 1 s statement limits. Explicit conninfo
+options and final append's remaining-lease bounds remain effective.
+
+Initialize a PostgreSQL store on an exclusively owned, idle autocommit H before
+sharing it. Initialization freezes the database and the actual namespace/OIDs of
+all five sk_* tables. Default checkouts use the cached conninfo and correctly
+quoted schema; they do not copy later H SET/ROLE/ORM state. An empty store is
+setup-only until top-level `install_schema()` commits. Installation inside a
+native outer transaction stays setup-only: after outer commit, reconstruct the
+store on idle H. Native `join_transaction(H)` is input-only and never initializes
+an execution target. SQLite files use main-file identity and a private cache;
+SQLite memory borrows its one C and lock S, without closing C on borrow exit.
+
+Known raw aliases, non-idle/non-autocommit checkouts and wrong targets reject
+before execution acquire. Both bootstrap and actual Runtime HB are validated
+before timeout SQL/renew, and must renew successfully before Driver loading or
+callback/model execution. A heartbeat that has not stopped retains the lease;
+shutdown cannot hand it off. A factory must exclusively own its checkout and
+bound enter/exit. Opaque adapters must prove their own pool/physical identity;
+SDK checks cannot discover unregistered external aliases or undo a factory
+that itself closes someone else's H.
+
+The ownership guard identifies a connection by one stable raw object: PostgreSQL's
+PGconn or SQLite's Connection, not a store wrapper or server process number. A PID
+can be reused, and cached client status cannot prove server liveness without I/O.
+The SDK does not send I/O to someone else's connection to check this. Different
+wrappers for the same libpq connection must expose the same PGconn object. During
+checkout the host must not rewrap, replace, privately reset or finish that object.
+Distinct PGconn objects wrapping the same C pointer are no longer automatically
+recognized as aliases. An adapter that cannot preserve this object identity must
+prove physical exclusivity itself or not adopt this integration. Transaction
+pooling such as PgBouncer transaction mode and dynamically changing physical
+sessions remain outside the adoption contract.
+
+Pre-open connection pins prevent raw addresses from being reused through factory
+entry and checkout exit. Every active reservation strongly retains its raw object.
+Normal exit or closure confirmed during checkout exit removes only the matching
+token. The SDK's default PG and SQLite factories close their own connections even
+when exiting fails; only a close failure or unconfirmed closure leaves a quarantine.
+A host-supplied factory must guarantee rollback, close or invalidation in its own
+failure handling. If release cannot be confirmed, the SDK will not lend it again;
+the host must handle the resource owner through its fault-recovery procedure.
+
+The SDK preserves errors raised synchronously by the default PG factory's entry
+steps. After ownership.checkout has entered the body, preserving_exit preserves
+the caller's original error, including cancellation thrown into the factory's
+yield, while separately tracking exit errors for quarantine. The default PG
+factory does not restore a body error itself: doing so would hide an unconfirmed
+release from ownership. The bare `with source.execution_store() as store:` entry
+does not promise body-error identity if psycopg's exit also fails; that later
+error may be raised, with the original in its exception chain.
+
+This is not a guarantee against asynchronous interruption at any Python bytecode
+boundary. In the window between entering `with connection:` and the first yield,
+neither asynchronous interruptions nor exceptions raised synchronously by tracing,
+profiling or monitoring callbacks are covered by the error-identity guarantee.
+The callback exclusion is specific to that window; the guarantees for synchronous
+failures of ordinary SDK entry operations and errors from a body entered through
+ownership.checkout remain unchanged. Hosts requiring reliable body-error handling
+should use ownership.checkout rather than the bare factory.
+
+The default PG factory initializes and checks its new connection before entering
+psycopg's connection context. On entry failure it attempts close once, outside
+the ownership lock, adds a close failure as a note and does not retry. The
+connection may stay open until its object is collected, but is never lent out;
+the factory removes the candidate's host registration even if close fails.
+Autocommit does not imply that a query still executing or waiting has no
+transaction. If a statement is in flight when close fails, that statement and
+its implicit transaction continue until the statement ends or the connection is
+collected. The transaction does not extend beyond that statement. If the statement
+waits indefinitely for a lock and the failed connection remains referenced,
+preventing collection, the statement and its implicit transaction can persist
+indefinitely; the SDK provides no upper bound. Hosts should configure statement or
+lock timeouts, or handle the resource through their fault-recovery procedure.
+A single close attempt and lease expiry do not prove that the server has cancelled
+the statement. Target checks also set the connection's search_path, which can
+remain with an open connection.
+
+The yielded body still runs inside psycopg's connection context, with its real
+commit and rollback behavior. Once the factory has set its yielded marker, an
+unconfirmed close retains the host registration, including cancellation on the
+yield line before the caller receives the store. This is fail-closed; the marker
+is not an atomic proof of delivery. If both psycopg's exit close and the factory's
+existing finally close fail there, the registration remains.
+
+A quarantine permanently retains the object and any open socket or file handle,
+including unfinished transactions and database locks. PG can block work needing
+the same lock; SQLite can block subsequent writers to the entire file. Lease expiry,
+dropping wrappers and forget_host do not roll back those transactions. Closing the
+connection later releases native resources but does not clear the original ledger
+entry. There is no new cleanup API. The SDK does not actively call factory, SQL,
+close or host callbacks under the ownership lock, or release the last resource
+reference there. This does not promise that Python's automatic GC or arbitrary
+host finalizers can never run while the lock is held.
+
+Runner (including configured, compiled and resume), Interactive and SessionDriver
+use independent execution checkouts for their ordinary runs. RunHandle keeps the
+current E for its same-thread execution tree and child delivery; a background
+child opens its own E on its thread. Committed messages, waits, retained results,
+events and traces use explicit projection checkouts P. Child status uses P rather
+than borrowing HB. Runtime.for_agent does not inherit the root hook or wrapper.
+
+SessionDriver uses H for host admission. Control and reply reads inside an
+admission transaction use that same store; markers wait for the outer SDK commit.
+For a native host transaction, the host remains responsible for on_commit wake
+and starting execution after commit. The SDK does not close an externally supplied
+H. Tick scans use P; dispatch-only does not open E or build a Runtime, while inline
+execution uses public drive. Backoff acquire/defer/release owns a separate
+maintenance checkout, rather than giving its P scan execution authority.
+
+This remains an unreleased integration. App Server P/startup/retry/completion,
+notification locks and legacy routing cleanup still require M2b/M2c. This checkout
+must not be treated as a fully adopted SDK release.
 
 ## Workers: drive
 
@@ -342,8 +479,9 @@ An empty batch, an invalid member or a mix of background and blocking children
 raises `session.children.InvalidChildBatch` (code `invalid_child_batch`) before
 any child is created or the parent parks. Host rows written through the same
 connection roll back too. Do no non-transactional I/O and no external side
-effects inside this callback. A Django adapter must open the matching ORM
-transaction.
+effects inside this callback. An ORM adapter must bind to `tx.connection` in
+this same physical transaction; opening a separate Django atomic transaction is
+not participation in the admission transaction.
 
 Each child's creation and initial input, the parent's started and parked
 records, the background admission result and the callback's host rows all
@@ -361,6 +499,52 @@ commit together.
   the SDK use the same admission and delivery path.
 
 #### Transaction callbacks
+
+The three callback shapes are synchronous and forward-only:
+
+```python
+def admit(plan, *, tx): ...
+def summary_admit(plan, summary, *, tx): ...
+def hook(point, record, *, tx): ...
+```
+
+`tx` is explicit, required and keyword-only; an old arity, default tx, only
+**kwargs, opaque direct binding or async callable rejects with
+`transaction_callback_contract`. An explicit synchronous wrapper may adapt a
+host binding. The original hook is validated before SDK wrapping, and selected
+bindings are captured/validated again before use. Summary admission is validated
+before its predicate or paid summary preparation. The kernel never retries a
+business TypeError as an arity probe. Synchronous returns of awaitables reject;
+new native coroutines are closed without running them.
+
+Async callable instances are also rejected through `functools.partial`, including
+nested partials. Signature checks still use the partial's actual bound signature;
+binding `tx` in advance does not satisfy the required parameter. An explicit
+wrapper's `__wrapped__` metadata does not guarantee a synchronous return, so the
+return-value check remains necessary.
+
+Only `before_commit` receives the actual live SessionTx; all other hook points
+explicitly receive None. `prepare`, child `admit` and `before_commit` share that
+same actual transaction. Use `tx.connection` for business SQL. It is a borrowed
+raw handle: do not cache, cross threads, commit, roll back or close it. SDK tx
+methods/property check thread, lexical scope and observable transaction identity;
+an inner tx expires on inner exit while the outer tx remains valid. Native
+savepoint lexical boundaries and already captured raw methods cannot be revoked
+by these guards. Custom non-SQL tx operations remain valid; only raw-handle
+access rejects with `unsupported_transaction_handle`.
+
+After confirmed outer commit, tx is invalid and the committed prefix and
+children/touched-SID recovery responsibility are transferred before host
+`after_commit`. That callback or checkout close failing does not roll back the
+batch or authorize readmission. A cleanup error is secondary to the original
+execution error. Unknown COMMIT outcomes stop dispatch; recovery checks the
+original durable identities rather than guessing from a provisional receipt.
+
+Memory C only supports controlled S serialization. Within same-thread atomic,
+local tx/store reads remain local; committed status/replay/trace/publication and
+execution preparation reject before SQL. Wake records a deferred hint and does
+not take turn-owner locks or inspect uncommitted state. Other threads wait for
+the outer commit/rollback. Raw native C concurrency is unsupported.
 
 `prepare`, child `admit` and `before_commit` run in the kernel's database
 transaction. Keep them to short checks and database writes. A slow callback
@@ -447,7 +631,7 @@ For a child tool that needs current parent history, bind `SummaryChildTool`:
 ```python
 from vv_agent import SummaryChildTool
 
-def admit_child(plan, summary):
+def admit_child(plan, summary, *, tx):
     # Write host rows and return ChildSession values on the admission transaction.
     # Include summary in the child's input when it is not None.
     return make_child(plan, parent_summary=summary)
@@ -643,3 +827,24 @@ storage. This includes filesystem alias rules such as ignored trailing dots.
 Built-in remote object storage is case-sensitive. A scope predicate does not
 check a custom filesystem's alias behavior. See [upgrading](upgrading.md) for
 old compaction references and frozen turns.
+
+
+### Explicit interactive session close
+
+Dropping an `AgentSession` does not persist closure, cancel active work, publish
+a close event, or wake a receiver blocked in `recv()`. Use `session.close()` or a
+session context manager to close it explicitly. Finalization only marks the local
+object and subscriptions closed and cancels local background listeners; it does
+not acquire SDK locks, enter checkout or issue SQL. Dropping the object does not
+notify a receiver already blocked in recv().
+
+Background listener cancellation is local and takes no lock. The ordinary
+background observer removes cancelled listener slots. Cancellation prevents new
+notifications, but an in-flight notification may still finish its callback. The driver fallback still only closes the SQLite
+connection it created itself, without entering the ownership ledger.
+
+Ownership keeps its non-reentrant ledger lock. A same-thread attempt to enter the
+ledger again raises OwnershipError with stage lock-reentry instead of waiting.
+Admission markers attach only to the calling thread's outer transaction; another
+thread's transaction on the shared memory connection is not an outer transaction
+of the caller.

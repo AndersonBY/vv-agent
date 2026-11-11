@@ -489,3 +489,54 @@ def test_observer_cannot_overtake_local_completion_between_clear_and_notify(tmp_
         )
         completed = next(i for i, m in enumerate(messages) if m.get("method") == "turn/completed")
         assert terminal < completed
+
+
+@pytest.mark.parametrize("method", ["turn/start", "turn/resume"])
+def test_post_receipt_callback_failure_preserves_one_ack_and_original_error(tmp_path, monkeypatch, method):
+    with ExitStack() as stack:
+        calls = []
+
+        def model(request):
+            calls.append(request)
+            if method == "turn/resume" and len(calls) == 1:
+                return LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Keep this wait"})])
+            return LLMResponse("done")
+
+        models = ScriptedModelProvider.from_callback("test", "m", model)
+        server = node(stack, tmp_path / "callback-store", "A", models)
+        request(server, 1, "thread/start", {"inputId": "thread"})
+        params = submission()
+        if method == "turn/resume":
+            started = request(server, 0, "turn/start", params)["result"]
+            server.run_adapter.join()
+            params = {"threadId": "thread", "turnId": started["turnId"]}
+        before = len(calls)
+        messages = record_output(server, monkeypatch)
+        error = RuntimeError("startup notification callback failed")
+        callbacks = []
+        notify = server.run_adapter._notify_subscribers
+
+        def broken(sid, event, payload):
+            if event == "thread/status/changed":
+                callbacks.append(1)
+                raise error
+            return notify(sid, event, payload)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(server.run_adapter, "_notify_subscribers", broken)
+            with pytest.raises(RuntimeError) as raised:
+                request(server, 2, method, params)
+        assert raised.value is error and callbacks == [1]
+        assert Counter(m["id"] for m in messages if "id" in m) == {2: 1}
+        assert not any(m.get("method") == "error/warning" for m in messages)
+        failed = server.kernel.handles[-1]
+        assert failed.done() and failed._error is error and failed._thread.ident is None
+        assert server.state_manager.active_turn("thread") is None and len(calls) == before
+        server.wake("thread")
+        server.run_adapter.join()
+        state, records, _ = server.kernel.store.read_state("thread")
+        assert not server.kernel.store.peek_inbox("thread")
+        assert len(calls) == (1 if method == "turn/start" else before)
+        assert (state.active_turn_id is None) == (method == "turn/start")
+        assert sum(r.record.kind == "turn_ended" for r in records) == (1 if method == "turn/start" else 0)
+        assert Counter(m["id"] for m in messages if "id" in m) == {2: 1}

@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -30,12 +30,15 @@ from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
 from vv_agent.runtime.tool_results import apply_tool_use_behavior, build_skipped_result
 from vv_agent.tools.handlers.common import builtin_error
 from vv_agent.tools.orchestrator import ToolOrchestrator
+from vv_agent.tools.outcomes import validate_definitive_result
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 from .approval import resolve_approval
 from .bindings import MissingHostBinding
+from .callbacks import CallbackContractError, hook, synchronous, transaction_callback, validate, validate_runtime
 from .children import (
     ChildSession,
+    ChildTool,
     InvalidChildBatch,
     SummaryChildTool,
     cancel_children,
@@ -49,6 +52,7 @@ from .delegation import admitted_result, assemble, result_for_children
 from .lifecycle import after_cycle
 from .memory import save_projection
 from .output import prepare_output, serializable_output
+from .ownership import OwnershipError, checkout, committed_guard
 from .postgres import PostgresStore
 from .providers import (
     Accepted,
@@ -56,14 +60,13 @@ from .providers import (
     Outcome,
     ProviderResultInvalid,
     Unknown,
-    validate_provider_handle,
+    validate_acceptance,
     validate_provider_result,
 )
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, inherited_seed_policies, make_record
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .sql import SQLSessionTx, SQLStore
-from .sqlite import SQLiteStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
 
@@ -93,7 +96,10 @@ class _LeaseHeartbeat:
         heartbeat_seconds: float,
         *,
         now_ms: int | None = None,
+        source: SessionStore | None = None,
     ):
+        self.source = source
+        self.successful_ready = False
         self.lease = lease
         self.heartbeat_store = heartbeat_store
         self.ttl_ms, self.heartbeat_seconds = ttl_ms, heartbeat_seconds
@@ -102,6 +108,9 @@ class _LeaseHeartbeat:
         self.lock = threading.Lock()
         self.poll_lock = threading.Lock()
         self.commit_lock = threading.Lock()
+        self._latch_entry = threading.local()
+        self._poll_thread: int | None = None
+        self._commit_thread: int | None = None
         self.lost = False
         self.heartbeat_error: Exception | None = None
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
@@ -109,47 +118,67 @@ class _LeaseHeartbeat:
         self.thread = threading.Thread(target=self._heartbeat, daemon=True, name="session-heartbeat")
 
     def poll(self, store: SessionStore):
-        # SQLite must acquire its writer lock before the latch; an admission
-        # transaction may already hold that lock while preparing an append.
-        with (
-            self.poll_lock,
-            store._transaction() if isinstance(store, SQLiteStore) else nullcontext(),
-            self.committing() as lease,
-        ):
-            started = time.monotonic()
-            poll = store.renew(lease, ttl_ms=self.ttl_ms)
-            if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch) != (
-                lease.session_id,
-                lease.owner,
-                lease.epoch,
-            ):
-                with self.lock:
-                    self.lost = True
-                raise LeaseLost("heartbeat changed lease identity")
-            with self.lock:
-                if not self.stop.is_set() and not self.lost:
-                    self.lease = poll.lease
-                    self.expires_deadline = started + (poll.lease.expires_at_ms - poll.db_now_ms) / 1000
-                    self.heartbeat_error = None
+        thread = threading.get_ident()
+        if getattr(self._latch_entry, "commit", False) or getattr(self._latch_entry, "poll", False):
+            raise RuntimeError("poll while holding commit/poll latch")
+        self._latch_entry.poll = True
+        try:
+            with self.poll_lock:
+                self._poll_thread = thread
+                try:
+                    with self.lock:
+                        if self.lost:
+                            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+                        if self.stop.is_set():
+                            raise HeartbeatStopped("heartbeat stopped")
+                        lease = self.lease
+                    started = time.monotonic()
+                    poll = store.renew(lease, ttl_ms=self.ttl_ms)
+                    with self.lock:
+                        if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch) != (
+                            lease.session_id,
+                            lease.owner,
+                            lease.epoch,
+                        ):
+                            self.lost = True
+                            raise LeaseLost("heartbeat changed lease identity")
+                        if not self.stop.is_set() and not self.lost:
+                            self.lease = poll.lease
+                            self.expires_deadline = started + (poll.lease.expires_at_ms - poll.db_now_ms) / 1000
+                            self.heartbeat_error = None
+                            self.successful_ready = True
+                            self.ready.set()
+                finally:
+                    self._poll_thread = None
+        finally:
+            self._latch_entry.poll = False
         return poll
 
     @contextmanager
     def committing(self) -> Iterator[Lease]:
-        with self.commit_lock:
-            with self.lock:
-                if self.lost:
-                    raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
-                if self.stop.is_set():
-                    raise HeartbeatStopped("heartbeat stopped")
-                if time.monotonic() >= self.expires_deadline:
-                    self.lost = True
-                    raise LeaseLost("heartbeat lease expired")
-                lease = self.lease
-            yield lease
+        self._latch_entry.commit = True
+        try:
+            with self.commit_lock:
+                self._commit_thread = threading.get_ident()
+                try:
+                    with self.lock:
+                        if self.lost:
+                            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+                        if self.stop.is_set():
+                            raise HeartbeatStopped("heartbeat stopped")
+                        if time.monotonic() >= self.expires_deadline:
+                            self.lost = True
+                            raise LeaseLost("heartbeat lease expired")
+                        lease = self.lease
+                    yield lease
+                finally:
+                    self._commit_thread = None
+        finally:
+            self._latch_entry.commit = False
 
     def _heartbeat(self) -> None:
         try:
-            with self.heartbeat_store() as store:
+            with checkout(self.source, factory=self.heartbeat_store, role="heartbeat") as store:
                 transient_errors: tuple[type[Exception], ...] = (TimeoutError,)
                 if isinstance(store, PostgresStore):
                     from psycopg import OperationalError
@@ -172,8 +201,6 @@ class _LeaseHeartbeat:
                             self.heartbeat_error = exc
                             if self.expires_deadline - time.monotonic() <= max(2 * self.heartbeat_seconds, 1.0):
                                 raise
-                    else:
-                        self.ready.set()
                     if self.stop.wait(self.heartbeat_seconds):
                         break
         except HeartbeatStopped:
@@ -196,8 +223,8 @@ class _LeaseHeartbeat:
 
 
 class _Scope(_LeaseHeartbeat):
-    def __init__(self, lease: Lease, runtime: Runtime, *, now_ms: int | None = None):
-        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds, now_ms=now_ms)
+    def __init__(self, lease: Lease, runtime: Runtime, *, now_ms: int | None = None, source=None):
+        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds, now_ms=now_ms, source=source)
         self.runtime = runtime
         self.token = CancellationToken()
         self.turn_id: str | None = None
@@ -253,6 +280,7 @@ class _Driver:
         self.polled: set[tuple[str, int]] = set()
         self.active_since = time.monotonic_ns()
         self.active_tid: str | None = None
+        self._bound_turn_id: str | None = None
 
     def load_state(self) -> None:
         self.state, self.records, self.watermark = read_state(self.store, self.sid)
@@ -354,10 +382,10 @@ class _Driver:
         try:
             with ExitStack() as latch, self.store.atomic() as tx:
                 if prepare is not None:
-                    with phase("prepare"):
-                        records.extend(prepare(tx))
+                    with phase("prepare"), transaction_callback():
+                        records.extend(synchronous(prepare(tx)))
                 with phase("before_commit"):
-                    self.runtime.hook("before_commit", records[-1] if records else None)
+                    hook(self.runtime, "before_commit", records[-1] if records else None, tx=tx)
                 # SQL append calls this only after encoding and immutable history
                 # preparation. Keep the latch through the outer atomic exit.
                 if isinstance(tx, SQLSessionTx):
@@ -402,13 +430,37 @@ class _Driver:
                         "exception_type": error or atomic_error,
                     },
                 )
-        self.runtime.hook("after_commit", records[-1] if records else None)
+        # Commit is confirmed. Transfer durable wake responsibility before host code.
+        touched = set(getattr(tx, "touched", ()))
+        self._committed_touched = getattr(self, "_committed_touched", set()) | touched
+        self._committed_children = getattr(self, "_committed_children", set()) | set(getattr(tx, "_admitted_children", ()))
         if receipt.replayed:
             self.refresh()
         else:
             self.extend(receipt.records)
             self.watermark = receipt.inbox_seq
             self.bind_turn()
+
+        try:
+            hook(self.runtime, "after_commit", records[-1] if records else None, tx=None)
+        finally:
+            import sys
+
+            primary = sys.exception()
+            # Normal child scheduling remains the host/RunHandle's existing
+            # responsibility. A failed after_commit must not lose that handoff.
+            pending = self._committed_touched | (self._committed_children if primary is not None else set())
+            for sid in tuple(pending):
+                try:
+                    self.runtime.wake(sid)
+                except BaseException as wake_error:
+                    if primary is not None:
+                        primary.add_note(f"committed wake failed: {type(wake_error).__name__}")
+                    else:
+                        raise
+                else:
+                    self._committed_touched.discard(sid)
+                    self._committed_children.discard(sid)
 
     def boundary(self, stage: str, identity: str) -> Record | None:
         return self.state.boundaries.get((self.state.active_turn_id or "", stage, identity))
@@ -775,6 +827,13 @@ class _Driver:
             plan,
         )
 
+    def accepted(self, plan: Record, outcome: Accepted) -> Record:
+        validate_acceptance(plan, outcome)
+        parked = self.parked(plan, outcome.handle, after=True)
+        if outcome.yield_on_steer:
+            parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
+        return parked
+
     def pending_batch(self) -> bool:
         return any(
             op.turn_id == self.state.active_turn_id
@@ -786,11 +845,122 @@ class _Driver:
             for a in [op.attempts[max(op.attempts)]]
         )
 
+    def yieldable_batch(self) -> list[Attempt]:
+        """Return the whole remaining batch only when every observation can yield."""
+        tid = self.state.active_turn_id
+        if tid is None:
+            return []
+        turn = self.state.turns[tid]
+        if turn.cancelled or turn.suspended or turn.wait or self.scope.token.cancelled:
+            return []
+        pending = []
+        for op in self.state.operations.values():
+            a = op.attempts[max(op.attempts)]
+            if op.turn_id != tid or a.state == "completed":
+                continue
+            if a.state == "unknown" and a.unknown and a.unknown._payload["retry"] != "retry":
+                continue
+            if a.state != "parked" or not a.wait or not a.wait.get("yield_on_steer"):
+                return []
+            if a.child_handle:
+                completed = self.state.child_completions or {}
+                if any(
+                    h["session_id"] not in a.wait["yieldable_children"]
+                    and (a.plan.operation_id, a.plan.attempt, h["session_id"]) not in completed
+                    for h in child_handles(a.child_handle)
+                ):
+                    return []
+            pending.append(a)
+        return pending
+
+    def yield_results(self, attempts: list[Attempt], item: InboxItem) -> list[Record]:
+        records = []
+        for a in attempts:
+            plan = a.execution_plan
+            assert plan.operation_id is not None and plan.attempt is not None
+            assert a.wait is not None
+            handle = a.wait["handle"]
+            handles = child_handles(handle) if a.child_handle else handle
+            binding = self.runtime.children.get(plan._payload["request"]["name"]) if a.child_handle else self.provider(plan)
+            callback = getattr(binding, "on_yield", None)
+            metadata: dict[str, Any] = {"yield_reason": "steer"}
+            if a.child_handle:
+                completed = self.state.child_completions or {}
+                handles = [
+                    h
+                    | {
+                        "status": (
+                            completed[key]._payload["input"]["payload"]["status"]
+                            if (key := (plan.operation_id, plan.attempt, h["session_id"])) in completed
+                            else "running"
+                        )
+                    }
+                    | (
+                        {k: completed[key]._payload["input"]["payload"][k] for k in ("result", "terminal_seq", "terminal_digest")}
+                        if key in completed
+                        else {}
+                    )
+                    for h in handles
+                ]
+                metadata["children"] = [{"session_id": h["session_id"], "status": h["status"]} for h in handles]
+                metadata["running_children"] = [
+                    h["session_id"] for h in handles if (plan.operation_id, plan.attempt, h["session_id"]) not in completed
+                ]
+            result = ToolExecutionResult(
+                plan._payload["request"]["id"],
+                "Wait interrupted by new input; observed work has not been stopped.",
+                metadata=metadata,
+            )
+            if a.child_handle:
+                result.content += "\n" + canonical_json_bytes(
+                    {"children": metadata["children"], "running_children": metadata["running_children"]}
+                ).decode("utf-8")
+            if callback is not None:
+                try:
+                    rendered = callback(plan, copy_json(handles), "steer")
+                    validate_definitive_result(rendered)
+                    from .tool_results import validate_output_body
+
+                    validate_output_body(rendered)
+                    if rendered.tool_call_id != result.tool_call_id or rendered.directive != ToolDirective.CONTINUE:
+                        raise ValueError("invalid yield result")
+                    canonical_json_bytes(rendered.to_dict())
+                    result = rendered
+                except Exception:
+                    result.metadata["yield_callback_failed"] = True
+            evidence = (f"steer/{item.input_id}",)
+            if not a.child_handle:
+                evidence += (handle["evidence"],)
+            completed_records = self.completed(plan, Definitive(result.to_dict(), evidence))
+            records.extend(
+                replace(r, payload=r._payload | {"yielded_by": item.input_id}) if r.kind == "op_completed" else r
+                for r in completed_records
+            )
+        return records
+
     def apply_input(self) -> bool:
         from .tool_results import project_tool_content, provider_result_identity
 
-        for stored in self.store.peek_inbox(self.sid, through_input_seq=self.watermark):
+        inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark)
+        # At one captured watermark, authenticated child terminals win over steering.
+        declared_wait = bool(inputs) and any(
+            op.turn_id == self.state.active_turn_id
+            and (a := op.attempts[max(op.attempts)]).state == "parked"
+            and a.wait
+            and a.wait.get("yield_on_steer")
+            for op in self.state.operations.values()
+        )
+        if declared_wait:
+            inputs = sorted(inputs, key=lambda stored: stored.item.kind != "child_result")
+        for stored in inputs:
             item, extra, disposition, reason, target, wait = stored.item, [], "applied", None, None, None
+            if (
+                self._bound_turn_id in self.state.turns
+                and self.state.turns[self._bound_turn_id].ended
+                and item.kind in {"user", "follow_up"}
+                and item.target_turn_id is None
+            ):
+                continue
             tid = self.state.active_turn_id
             target_tid = item.target_turn_id
             evidence = item.kind in {"provider_result", "provider_evidence", "child_result"}
@@ -823,7 +993,18 @@ class _Driver:
                 continue
             if item.kind == "model_selection" and self.pending_batch():
                 continue
-            if item.kind == "steer" and (tid is None or (self.pending_batch() and target_tid == tid)):
+            yielding = []
+            if (
+                item.kind == "steer"
+                and tid is not None
+                and (target_tid == tid or (declared_wait and target_tid is None))
+                and item.generation in {None, self.state.turns[tid].start._payload["generation"]}
+            ):
+                yielding = self.yieldable_batch()
+            if item.kind == "steer" and (
+                tid is None
+                or (self.pending_batch() and (target_tid == tid or (declared_wait and target_tid is None)) and not yielding)
+            ):
                 continue
             if compaction_request(item) is not None:
                 if self.state.closed:
@@ -859,6 +1040,8 @@ class _Driver:
                 elif item.kind == "provider_result":
                     if item.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
                         disposition, reason = "rejected", "provider binding mismatch"
+                    elif attempt.yielded:
+                        disposition, reason = "noop", "yielded provider handle: audit only"
                     elif attempt.result is not None:
                         disposition = (
                             "noop"
@@ -874,6 +1057,7 @@ class _Driver:
                                             attempt.execution_plan,
                                             self.compaction_intent(attempt.execution_plan, item.payload[key]),
                                             self.runtime.workspace_backend,
+                                            selected_artifact=attempt.result._payload["result"].get("artifact"),
                                         )
                                     )
                                     if key == "result"
@@ -892,15 +1076,23 @@ class _Driver:
                             disposition, reason = "rejected", "provider_result_invalid"
                         else:
                             extra = self.completed(attempt.execution_plan, outcome)
+                elif attempt.yielded:
+                    disposition, reason = "noop", "yielded provider handle: audit only"
                 elif attempt.state == "started":
                     try:
-                        validate_provider_handle(attempt.execution_plan, item.payload["handle"])
+                        parked = self.accepted(
+                            attempt.execution_plan,
+                            Accepted(item.payload["handle"], yield_on_steer=item.payload.get("yield_on_steer", False)),
+                        )
                     except ProviderResultInvalid:
                         disposition, reason = "rejected", "provider_result_invalid"
                     else:
-                        extra = [self.parked(attempt.execution_plan, item.payload["handle"], after=True)]
+                        extra = [parked]
                 elif attempt.wait and attempt.wait["handle"] == item.payload["handle"]:
-                    disposition = "noop"
+                    if attempt.wait.get("yield_on_steer", False) == item.payload.get("yield_on_steer", False):
+                        disposition = "noop"
+                    else:
+                        disposition, reason = "rejected", "acceptance declaration conflict"
                 else:
                     disposition, reason = "rejected", "acceptance is not attachable"
             elif item.kind == "approval_answer":
@@ -1020,6 +1212,8 @@ class _Driver:
                     continue
                 if tid is None or target_tid not in {None, tid}:
                     disposition, reason = "rejected", "steer requires active target"
+                elif yielding:
+                    extra = self.yield_results(yielding, item)
             else:
                 disposition, reason = "rejected", "unsupported input"
             applied = self.record(
@@ -1058,7 +1252,7 @@ class _Driver:
         previous = prior._payload["input"]["payload"] if prior else None
         if previous is not None:
             return target, [], "noop" if digest(previous) == digest(p) else "rejected", "retained child completion"
-        if handle["background"]:
+        if handle["background"] or a.yielded:
             if turn.cancelled or turn.ended or op.turn_id != self.state.active_turn_id:
                 return target, [], "noop", "late background completion: audit only"
             if self.pending_batch():
@@ -1356,7 +1550,7 @@ class _Driver:
                 ),
             },
         )
-        self.runtime.hook("before_turn_end", terminal)
+        hook(self.runtime, "before_turn_end", terminal, tx=None)
         self.commit([terminal], guarded=True)
 
     def dispatch(self, attempt: Attempt) -> None:
@@ -1572,10 +1766,18 @@ class _Driver:
         name = plan._payload["request"].get("name")
         summary = None
         binding = self.runtime.children.get(name)
+        admit_callable = None
+        if kind != "model" and binding is not None:
+            admit_callable = validate(
+                binding.admit if isinstance(binding, (ChildTool, SummaryChildTool)) else binding,
+                2 if isinstance(binding, SummaryChildTool) else 1,
+            )
         if kind != "model" and isinstance(binding, SummaryChildTool):
             ready, summary = child_summary(self, plan, binding)
             if not ready:
                 return
+            if self.runtime.children.get(name) is not binding:
+                raise CallbackContractError()
         if kind != "model" and (name in self.runtime.children or name in self.runtime.delegated_tools):
             child_specs = None if name in self.runtime.children else assemble(self.runtime, plan, context, task, self.store)
             if isinstance(child_specs, ToolExecutionResult):
@@ -1588,16 +1790,23 @@ class _Driver:
                 assert plan.turn_id is not None
 
                 def admit_child(tx: SessionTx) -> list[Record]:
-                    if isinstance(binding, SummaryChildTool):
-                        specs = binding.admit(plan, summary)
+                    if admit_callable is None:
+                        specs = child_specs
                     else:
-                        specs = binding(plan) if binding is not None else child_specs
+                        with transaction_callback():
+                            specs = synchronous(
+                                admit_callable(plan, summary, tx=tx)
+                                if isinstance(binding, SummaryChildTool)
+                                else admit_callable(plan, tx=tx)
+                            )
                     if isinstance(specs, ChildSession):
                         specs = [specs]
                     if not isinstance(specs, Sequence) or not specs or any(not isinstance(c, ChildSession) for c in specs):
                         raise InvalidChildBatch("Expected one ChildSession or a nonempty sequence of ChildSession")
                     if any(c.background != specs[0].background for c in specs):
                         raise InvalidChildBatch("All children in a batch must have the same background flag")
+                    if any(type(c.yield_on_steer) is not bool or (c.background and c.yield_on_steer) for c in specs):
+                        raise InvalidChildBatch("Only foreground children may declare yield_on_steer=True")
                     assert specs is not None
                     generation = self.state.turns[plan.turn_id or ""].start._payload["generation"]
                     inherited = inherited_seed_policies(self.records[0].record._payload["attributes"])
@@ -1606,13 +1815,22 @@ class _Driver:
                         attributes = copy_json(child.spec.attributes or {})
                         attributes.setdefault("seed", {}).update(inherited)
                         inherited_specs.append(replace(child, spec=replace(child.spec, attributes=attributes)))
+                    explicit_touched = set(getattr(tx, "touched", ()))
                     handles = [create_child(tx, child, plan, generation) for child in inherited_specs]
+                    if isinstance(tx, SQLSessionTx):
+                        tx._admitted_children = {h["session_id"] for h in handles}
+                        tx.touched.difference_update(tx._admitted_children - explicit_touched)
                     handle = handles[0]
                     if len(handles) > 1:
                         handle = handle | {
                             "siblings": [{k: h[k] for k in ("session_id", "turn_id", "generation")} for h in handles[1:]]
                         }
                     parked = self.parked(plan, handle, after=True)
+                    yieldable = [c.spec.session_id for c in specs if c.yield_on_steer]
+                    if yieldable:
+                        parked = replace(
+                            parked, payload=parked._payload | {"yield_on_steer": True, "yieldable_children": yieldable}
+                        )
                     admission = specs[0].spec.attributes.get("child_admission") if specs[0].spec.attributes else None
                     if admission:
                         marker = {key: admission[key] for key in ("mode", "handoff_count", "max_handoffs")}
@@ -1639,7 +1857,7 @@ class _Driver:
                 self.commit([*budget_records, started], guarded=True, prepare=admit_child)
                 return
         self.commit([*budget_records, started], guarded=True)
-        self.runtime.hook("before_external_call", plan)
+        hook(self.runtime, "before_external_call", plan, tx=None)
 
         def model() -> Outcome:
             request = request_from_dict(copy_json(plan._payload["request"]))
@@ -1766,13 +1984,13 @@ class _Driver:
             model if provider is None else lambda: provider.submit(plan, context=context),
             self.runtime.model_timeout if kind == "model" else self.runtime.tool_timeout,
         )
-        self.runtime.hook("after_external_call", plan)
+        hook(self.runtime, "after_external_call", plan, tx=None)
         if provider is not None and plan._payload["provider_binding"] != "function":
             try:
                 if isinstance(outcome, Definitive):
                     self.check_provider_result(plan, outcome)
                 elif isinstance(outcome, Accepted):
-                    validate_provider_handle(plan, outcome.handle)
+                    validate_acceptance(plan, outcome)
             except ProviderResultInvalid:
                 outcome = Unknown("provider_result_invalid")
         if isinstance(outcome, Definitive):
@@ -1787,7 +2005,7 @@ class _Driver:
             outcome = replace(outcome, shared_state=self.runtime.durable_state(context.shared_state))
             self.commit(self.completed(plan, outcome))
         elif isinstance(outcome, Accepted):
-            self.commit([self.parked(plan, outcome.handle, after=True)])
+            self.commit([self.accepted(plan, outcome)])
         else:
             self.commit([self.unknown(plan, outcome.reason)])
 
@@ -1825,6 +2043,8 @@ class _Driver:
             return True
         if self.apply_input():
             return True
+        if self._bound_turn_id in self.state.turns and self.state.turns[self._bound_turn_id].ended:
+            return False
         tid = self.state.active_turn_id
         if tid is None:
             save_projection(self)
@@ -1994,10 +2214,7 @@ class _Driver:
             if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "provider":
                 key = (oid, a.plan.attempt or 1)
                 if key not in self.polled:
-                    with (
-                        self.store._transaction() if isinstance(self.store, SQLiteStore) else nullcontext(),
-                        self.scope.committing() as lease,
-                    ):
+                    with self.scope.committing() as lease:
                         if self.store.next_drive_delay_ms(self.sid, lease=lease) != 0:
                             return False
                     self.polled.add(key)
@@ -2008,8 +2225,10 @@ class _Driver:
                         self.check_provider_result(a.execution_plan, outcome)
                         self.commit(self.completed(a.execution_plan, outcome), guarded=True)
                         return True
-                    if isinstance(outcome, Accepted) and outcome.handle != handle:
-                        raise ProviderResultInvalid()
+                    if isinstance(outcome, Accepted):
+                        validate_acceptance(a.execution_plan, outcome)
+                        if outcome.handle != handle or outcome.yield_on_steer != a.wait.get("yield_on_steer", False):
+                            raise ProviderResultInvalid()
                 return False
         if self.pending_batch():
             return False
@@ -2130,7 +2349,47 @@ def drive(
     failure_backoff_ms: int = 1000,
     _one_turn: bool = False,
     _wait_for_lease: bool = False,
+    _on_progress: Callable[[], None] | None = None,
+    _wake_on_exit: bool = True,
+    _turn_id: str | None = None,
 ) -> bool:
+    """Drive using an exclusive validated checkout; never borrow host H."""
+    committed_guard(store)
+    if isinstance(store, PostgresStore) and store._initial_thread == threading.get_ident():
+        from psycopg.pq import TransactionStatus
+
+        if not store.connection.closed and store.connection.info.transaction_status != TransactionStatus.IDLE:
+            raise OwnershipError(stage="caller-transaction")
+    if isinstance(runtime, Runtime):
+        validate_runtime(runtime)
+    with checkout(store) as execution:
+        return _drive_owned(
+            execution,
+            session_id,
+            runtime=runtime,
+            failure_backoff_ms=failure_backoff_ms,
+            _one_turn=_one_turn,
+            _wait_for_lease=_wait_for_lease,
+            _on_progress=_on_progress,
+            _wake_on_exit=_wake_on_exit,
+            _turn_id=_turn_id,
+        )
+
+
+def _drive_owned(
+    store: SessionStore,
+    session_id: str,
+    *,
+    runtime: Runtime | Callable[[str], Runtime],
+    failure_backoff_ms: int = 1000,
+    _one_turn: bool = False,
+    _wait_for_lease: bool = False,
+    _on_progress: Callable[[], None] | None = None,
+    _wake_on_exit: bool = True,
+    _turn_id: str | None = None,
+) -> bool:
+    if isinstance(runtime, Runtime):
+        validate_runtime(runtime)
     if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
         raise ValueError("failure_backoff_ms must be a positive integer")
     scheduled = not isinstance(runtime, Runtime)
@@ -2154,17 +2413,31 @@ def drive(
                 ttl_ms,
                 FACTORY_HEARTBEAT_SECONDS,
                 now_ms=store._now() if isinstance(store, SQLStore) else None,
+                source=store,
             )
-            build.thread.start()
             try:
+                build.thread.start()
                 if not build.ready.wait(ttl_ms / 1000):
                     raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
-                if build.lost:
-                    raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
+                if build.lost or not build.successful_ready:
+                    if build.heartbeat_error is not None:
+                        raise build.heartbeat_error
+                    raise LeaseLost("factory heartbeat lost ownership")
                 runtime = runtime(session_id)
+                validate_runtime(runtime)
             finally:
-                build.close()
-                lease = build.lease
+                import sys
+
+                primary = sys.exception()
+                try:
+                    if build.thread.ident is not None:
+                        build.close()
+                except BaseException as cleanup:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"bootstrap close failed: {type(cleanup).__name__}")
+                finally:
+                    lease = build.lease
             if build.lost:
                 raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
             lease = store.renew(lease, ttl_ms=runtime.ttl_ms).lease
@@ -2187,13 +2460,22 @@ def drive(
                 with suppress(Exception):
                     store.release(lease)
             raise
-    scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None)
-    scope.thread.start()
+    validate_runtime(runtime)
+    scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None, source=store)
     try:
+        scope.thread.start()
+        if not scope.ready.wait(runtime.ttl_ms / 1000) or not scope.successful_ready or scope.lost:
+            if scope.heartbeat_error is not None:
+                raise scope.heartbeat_error
+            raise LeaseLost("runtime heartbeat did not become ready")
         driver = _Driver(store, session_id, runtime, scope)
+        driver._bound_turn_id = _turn_id
         while not scope.lost:
             try:
                 if not driver.step():
+                    # An ended turn cannot defer its independently queued successor.
+                    if _turn_id in driver.state.turns and driver.state.turns[_turn_id].ended:
+                        break
                     with ExitStack() as latch:
                         if isinstance(store, SQLStore):
                             store._defer_idle_drive(
@@ -2204,24 +2486,56 @@ def drive(
                         else:
                             store.defer_idle_drive(latch.enter_context(scope.committing()), poll_ms=runtime.poll_ms)
                     break
+                if _on_progress is not None:
+                    _on_progress()
                 if _one_turn and driver.records[-1].record.kind == "turn_ended":
                     break
             except SequenceConflict:
                 continue
         if scope.lost:
             raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
-    except Exception as exc:
-        scope.close()
-        if scheduled:
-            _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
+    except BaseException:
         raise
     finally:
-        scope.close()
-        with suppress(Exception):
-            store.release(scope.lease)
-        with suppress(Exception):
-            runtime.hook("after_drive", None)
-        with suppress(Exception):
-            if store.is_runnable(session_id):
-                runtime.wake(session_id)
+        import sys
+
+        primary = sys.exception()
+        cleanup_error = None
+        try:
+            if scope.thread.ident is not None:
+                scope.close()
+        except BaseException as error:
+            cleanup_error = error
+        if not scope.thread.is_alive():
+            if primary is not None and scheduled and isinstance(primary, Exception):
+                try:
+                    _defer_after_error(store, scope.lease, failure_backoff_ms, primary)
+                except BaseException as error:
+                    if error is not primary:
+                        primary.add_note(f"defer failed: {type(error).__name__}")
+            try:
+                store.release(scope.lease)
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+            if "driver" in locals():
+                try:
+                    hook(runtime, "after_drive", None, tx=None)
+                except BaseException as error:
+                    if primary is not None:
+                        primary.add_note(f"after_drive failed: {type(error).__name__}")
+                    else:
+                        cleanup_error = cleanup_error or error
+                try:
+                    if _wake_on_exit and store.is_runnable(session_id):
+                        runtime.wake(session_id)
+                except BaseException as error:
+                    if primary is not None:
+                        primary.add_note(f"exit wake failed: {type(error).__name__}")
+                    else:
+                        cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            if primary is not None:
+                primary.add_note(f"execution cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}")
+            else:
+                raise cleanup_error
     return True

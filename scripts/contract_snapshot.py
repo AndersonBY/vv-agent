@@ -457,6 +457,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "check":
             report = check_lock(args.repo_root.resolve(), args.lock, source=args.source, artifact=args.artifact)
+            if args.source is None and (local_source := os.environ.get("VV_AGENT_CONTRACT_SOURCE")):
+                canonical = contract_source(Path(local_source).resolve())
+                local = validate_snapshot(canonical["fixtures"])
+                if local["manifest_sha256"] != canonical["manifest_sha256"]:
+                    raise SnapshotError("local canonical manifest does not match contract.json")
+                report = {
+                    "mode": "local-development",
+                    "locked_snapshot": report,
+                    "local_contract_version": canonical["version"],
+                    "local_fixtures": local,
+                }
         elif args.command == "adoption":
             report = verify_adoption(
                 args.repo_root.resolve(),

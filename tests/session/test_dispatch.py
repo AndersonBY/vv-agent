@@ -12,6 +12,7 @@ import pytest
 from vv_agent.events import RunStateChangedEvent
 from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
+from vv_agent.session.callbacks import noop_hook
 from vv_agent.session.kernel import _Driver, drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.store import LeaseLost
@@ -125,8 +126,8 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
     transport.create(steps=[LLMResponse("first"), LLMResponse("second")])
     transport.push("s", prompt())
     store = transport.store
-    release = store.release
-    check = store.is_runnable
+    release = type(store).release
+    check = type(store).is_runnable
     raced = False
 
     def push():
@@ -134,10 +135,10 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
             tx.push("s", prompt("racing"))
         transport.wake("s")
 
-    def exiting(lease):
+    def exiting(candidate, lease):
         nonlocal raced
         if raced:
-            return release(lease)
+            return release(candidate, lease)
         raced = True
         if window == "before_release":
             push()
@@ -145,20 +146,20 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
             with open_store(transport.database) as duplicate:
                 drive(duplicate, "s", runtime=transport.runtimes["s"])
             assert transport.wakes == ["s", "s"]
-        released = release(lease)
+        released = release(candidate, lease)
         if window == "after_release":
             push()
             transport.queue.pop()  # The post-release check must independently see it.
         return released
 
-    def fresh_check(sid):
+    def fresh_check(candidate, sid):
         with pytest.raises(RuntimeError, match="transaction"):
-            store._transaction_id()
-        assert store._rows("SELECT lease_owner FROM sk_session WHERE session_id=%s", (sid,)) == [(None,)]
-        return check(sid)
+            candidate._transaction_id()
+        assert candidate._rows("SELECT lease_owner FROM sk_session WHERE session_id=%s", (sid,)) == [(None,)]
+        return check(candidate, sid)
 
-    monkeypatch.setattr(store, "release", exiting)
-    monkeypatch.setattr(store, "is_runnable", fresh_check)
+    monkeypatch.setattr(type(store), "release", exiting)
+    monkeypatch.setattr(type(store), "is_runnable", fresh_check)
     transport.deliver()
     assert transport.queue == ["s"]
     assert transport.wakes == ["s", "s", "s"]
@@ -182,7 +183,7 @@ def test_abandoned_worker_recovers_from_committed_log_after_ttl(transport, clock
     transport.create(steps=[model, LLMResponse("done")], tools=[effect])
     transport.push("s", prompt())
 
-    def kill(point, record):
+    def kill(point, record, *, tx):
         if (
             point == ("after_commit" if committed else "before_commit")
             and record
@@ -195,7 +196,7 @@ def test_abandoned_worker_recovers_from_committed_log_after_ttl(transport, clock
     rt = transport.runtimes["s"]
     rt.hook = kill
     with monkeypatch.context() as patch:
-        patch.setattr(transport.store, "release", lambda _lease: False)
+        patch.setattr(type(transport.store), "release", lambda self, _lease: False)
         with pytest.raises(WorkerKilled):
             transport.deliver()
     assert transport.queue == []
@@ -204,7 +205,7 @@ def test_abandoned_worker_recovers_from_committed_log_after_ttl(transport, clock
     transport.tick()
     assert calls == ["model"]
     clock(rt.ttl_ms)  # Heartbeat has stopped; equality at expiry is runnable.
-    rt.hook = lambda *_: None
+    rt.hook = noop_hook
     if not committed:
         rt.llm.steps.insert(0, model)
     transport.tick()
@@ -547,6 +548,8 @@ def test_local_accepted_returns_parked_until_due_drive(
 ):
     rt = transport.runtimes["s"]
     rt.poll_ms = 60_000
+    # Bound the return well below polling, allowing cold imports and SQL scheduling.
+    parked_return_timeout = 5
     kernel = SessionDriver(store=transport.store)
     monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: kernel)
     monkeypatch.setattr(kernel, "runtime", lambda agent, config, task=None: rt)
@@ -554,14 +557,14 @@ def test_local_accepted_returns_parked_until_due_drive(
     def run():
         if surface == "run_sync":
             return Runner.run_sync(rt.agent, "go", run_config=rt.config)
-        return Runner.start(rt.agent, "go", run_config=rt.config).result(timeout=1)
+        return Runner.start(rt.agent, "go", run_config=rt.config).result(timeout=parked_return_timeout)
 
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             started = monotonic()
             pending = pool.submit(run)
             try:
-                result = pending.result(timeout=1)
+                result = pending.result(timeout=parked_return_timeout)
             finally:
                 # Release a regressed blocking driver without waiting for the real poll interval.
                 if any(h._thread.is_alive() for h in kernel.handles):
@@ -571,7 +574,7 @@ def test_local_accepted_returns_parked_until_due_drive(
                     for h in kernel.handles:
                         h.join(2)
             elapsed = monotonic() - started
-        assert elapsed < 1 < rt.poll_ms / 1000
+        assert elapsed < parked_return_timeout < rt.poll_ms / 1000
         record_property("parked_return_wall_ms", elapsed * 1000)
         handle = kernel.handles[0]
         assert handle.done() and not handle._thread.is_alive()

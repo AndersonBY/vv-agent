@@ -7,7 +7,7 @@ import json
 from pathlib import PurePosixPath
 
 from vv_agent.canonical_json import canonical_json_bytes
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolArtifactRef, ToolExecutionResult
 from vv_agent.workspace.artifacts import (
     BOUNDED_TEXT_CHARS,
     bounded_text_preview,
@@ -79,7 +79,7 @@ def output_location(result):
     return value if isinstance(value, dict) else None
 
 
-def project_tool_content(record, raw, backend):
+def project_tool_content(record, raw, backend, *, selected_artifact=None):
     """Pure receipt projection, also used when comparing repeated provider receipts."""
     if record._payload["op_kind"] == "model":
         return raw
@@ -87,9 +87,23 @@ def project_tool_content(record, raw, backend):
     result = ToolExecutionResult.from_dict(raw)
     if result.truncated or len(result.content) <= BOUNDED_TEXT_CHARS:
         return raw
-    artifact = text_artifact_ref(
-        str(getattr(backend, "task_id", record.turn_id)), "result", result.content, identity=result_owner(record)
-    )
+    content_digest = hashlib.sha256()
+    size_bytes = 0
+    for start in range(0, len(result.content), 65_536):
+        chunk = result.content[start : start + 65_536].encode("utf-8")
+        content_digest.update(chunk)
+        size_bytes += len(chunk)
+    if selected_artifact is not None:
+        artifact = ToolArtifactRef.from_dict(selected_artifact)
+        if artifact.sha256 != content_digest.hexdigest() or artifact.size_bytes != size_bytes:
+            return raw
+    else:
+        artifact = text_artifact_ref(
+            str(getattr(backend, "task_id", record.turn_id)),
+            "result",
+            result.content,
+            identity=f"{result_owner(record)}/{content_digest.hexdigest()}",
+        )
     preview = bounded_text_preview(result.content, artifact_path=artifact.path)
     return raw | {
         "content": preview.content,
@@ -115,7 +129,7 @@ def prepare_tool_artifact(record, raw, backend):
                 "result",
                 raw["content"],
                 reuse_existing=True,
-                identity=result_owner(record),
+                identity=f"{result_owner(record)}/{result.artifact.sha256}",
             )
         else:
             verify_text_artifact(backend, result.artifact)

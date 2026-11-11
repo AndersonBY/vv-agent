@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from vv_agent.tracing import Span, TraceProcessor
 
+from .ownership import committed_guard
 from .records import copy_json, digest
 from .sql import SQLStore
 from .store import SessionStore, StoredRecord
@@ -97,6 +98,7 @@ def project_spans(records: tuple[StoredRecord, ...]) -> list[tuple[int, str, Spa
 
 
 def deliver_spans(store: SessionStore, session_id: str, processors: list[TraceProcessor], *, consumer: str = "traces") -> int:
+    committed_guard(store)
     # Telemetry is at-most-once: the cursor must commit before nontransactional processors.
     if isinstance(store, SQLStore):
         try:

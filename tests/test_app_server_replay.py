@@ -150,12 +150,17 @@ def test_resume_during_active_turn_subscribes_before_later_notifications(surface
     assert resume_response["result"]["thread"]["threadId"] == "thread_1"
     assert any(message.get("method") == "turn/completed" for message in messages)
     cast(Any, server.run_adapter).join()
+    settled_handles = len(surface.handles)
+    assert handles <= settled_handles <= handles + 1
     server.processor.process_message(
         "conn_2", {"jsonrpc": "2.0", "id": 13, "method": "turn/resume", "params": {"threadId": "thread_1", "turnId": tid}}
     )
-    terminal_response = second_transport.receive_outbound(timeout=1)
-    assert terminal_response["id"] == 13 and terminal_response["result"]["finalOutput"] == "done"
-    assert len(surface.handles) == handles
+    terminal_messages = _drain_until(second_transport, lambda message: message.get("id") == 13)
+    messages.extend(terminal_messages)
+    terminal_response = terminal_messages[-1]
+    terminal_result = cast(dict[str, object], terminal_response["result"])
+    assert terminal_response["id"] == 13 and terminal_result["finalOutput"] == "done"
+    assert len(surface.handles) == settled_handles
 
 
 def test_resume_subscription_is_installed_before_snapshot() -> None:

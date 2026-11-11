@@ -12,6 +12,7 @@ from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
 from vv_agent.workspace.artifacts import _session_artifact_scope
 
+from .callbacks import hook
 from .context import message_ids, protected_start
 from .memory import extract_memory, finish_compact, start_compact
 from .records import Record, digest
@@ -252,7 +253,7 @@ def compact_context(driver: _Driver, *, requested_by: list[str] | None = None) -
                         }
                     },
                 )
-                driver.runtime.hook("after_microcompact_artifacts", record)
+                hook(driver.runtime, "after_microcompact_artifacts", record, tx=None)
                 driver.commit([record], guarded=True)
                 return True
         if not requested_by and current_tokens <= manager.autocompact_threshold:

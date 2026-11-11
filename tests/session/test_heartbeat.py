@@ -12,7 +12,7 @@ from vv_agent import Agent, RunConfig, Runner
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.kernel import _Driver, _Scope
 from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.store import Lease, LeaseLost, LeaseRetryExhausted
+from vv_agent.session.store import Lease, LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse
 
@@ -20,7 +20,7 @@ from .test_runner_parity import RESOLVED
 
 
 @pytest.mark.parametrize("password", ["", "test 'password\\value"])
-def test_connection_conninfo_preserves_password(password):
+def test_connection_conninfo_preserves_password(password, postgres_admin_dsn):
     psycopg = pytest.importorskip("psycopg")
     from psycopg.conninfo import conninfo_to_dict
 
@@ -28,7 +28,7 @@ def test_connection_conninfo_preserves_password(password):
 
     with ExitStack() as stack:
         try:
-            connection = stack.enter_context(psycopg.connect("dbname=postgres", password=password, connect_timeout=3))
+            connection = stack.enter_context(psycopg.connect(postgres_admin_dsn, password=password, connect_timeout=3))
         except psycopg.OperationalError:
             connection = Mock()
             connection.info.dsn = "dbname=postgres user=test"
@@ -57,11 +57,10 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
     monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: driver)
     config = RunConfig(model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("unused")]), RESOLVED), workspace=tmp_path)
     try:
-        with pytest.raises(LeaseRetryExhausted) as caught:
+        with pytest.raises(ConnectionError) as caught:
             Runner.run_sync(Agent("heartbeat", "Answer."), "go", run_config=config)
-        assert isinstance(caught.value.__cause__, LeaseLost)
-        assert caught.value.__cause__.__cause__ is error
-        scope = _Scope(Lease("s", "owner", 1, 0), driver.runtime(Agent("heartbeat", "Answer."), config))
+        assert caught.value is error
+        scope = _Scope(Lease("s", "owner", 1, 0), driver.runtime(Agent("heartbeat", "Answer."), config), source=driver.store)
         scope._heartbeat()
         with pytest.raises(LeaseLost) as lost:
             scope.poll(driver.store)

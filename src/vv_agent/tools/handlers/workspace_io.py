@@ -250,83 +250,90 @@ def _find_files_local_rg(
     except OSError:
         return None
 
-    assert process.stdout is not None
-
-    matched_files: list[str] = []
-    matched_count = 0
-    scanned_count = 0
-    scan_limited = False
-    should_stop = False
-    remainder = b""
-
     try:
-        while True:
-            chunk = process.stdout.read(64 * 1024)
-            if not chunk:
-                break
+        assert process.stdout is not None
 
-            payload = remainder + chunk
-            entries = payload.split(b"\x00")
-            remainder = entries.pop()
+        matched_files: list[str] = []
+        matched_count = 0
+        scanned_count = 0
+        scan_limited = False
+        should_stop = False
+        remainder = b""
 
-            for raw_entry in entries:
-                if not raw_entry:
-                    continue
-
-                scanned_count += 1
-                if scanned_count > scan_limit:
-                    scan_limited = True
-                    should_stop = True
+        try:
+            while True:
+                chunk = process.stdout.read(64 * 1024)
+                if not chunk:
                     break
 
-                rel_from_base = _normalize_relative_path(raw_entry.decode("utf-8", errors="replace"))
-                if not rel_from_base:
-                    continue
-                if not glob_regex.match(rel_from_base):
-                    continue
+                payload = remainder + chunk
+                entries = payload.split(b"\x00")
+                remainder = entries.pop()
 
+                for raw_entry in entries:
+                    if not raw_entry:
+                        continue
+
+                    scanned_count += 1
+                    if scanned_count > scan_limit:
+                        scan_limited = True
+                        should_stop = True
+                        break
+
+                    rel_from_base = _normalize_relative_path(raw_entry.decode("utf-8", errors="replace"))
+                    if not rel_from_base:
+                        continue
+                    if not glob_regex.match(rel_from_base):
+                        continue
+
+                    candidate_path = base_path / rel_from_base
+                    rel_workspace = _format_output_path(context, candidate_path)
+
+                    matched_count += 1
+                    if len(matched_files) < max_results:
+                        matched_files.append(rel_workspace)
+
+                if should_stop:
+                    break
+
+        except TimeoutError:
+            process.kill()
+            process.wait(timeout=1)
+            raise
+
+        if should_stop:
+            process.terminate()
+
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+
+        if not scan_limited and process.returncode not in (0, 1):
+            return None
+
+        if remainder and not scan_limited:
+            rel_from_base = _normalize_relative_path(remainder.decode("utf-8", errors="replace"))
+            scanned_count += 1
+            if scanned_count <= scan_limit and rel_from_base and glob_regex.match(rel_from_base):
                 candidate_path = base_path / rel_from_base
                 rel_workspace = _format_output_path(context, candidate_path)
-
                 matched_count += 1
                 if len(matched_files) < max_results:
                     matched_files.append(rel_workspace)
+            elif scanned_count > scan_limit:
+                scan_limited = True
 
-            if should_stop:
-                break
+        matched_files.sort()
+        truncated = matched_count > len(matched_files) or scan_limited
+        return matched_files, matched_count, truncated, scan_limited
 
-    except TimeoutError:
-        process.kill()
-        process.wait(timeout=1)
-        raise
-
-    if should_stop:
-        process.terminate()
-
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=1)
-
-    if not scan_limited and process.returncode not in (0, 1):
-        return None
-
-    if remainder and not scan_limited:
-        rel_from_base = _normalize_relative_path(remainder.decode("utf-8", errors="replace"))
-        scanned_count += 1
-        if scanned_count <= scan_limit and rel_from_base and glob_regex.match(rel_from_base):
-            candidate_path = base_path / rel_from_base
-            rel_workspace = _format_output_path(context, candidate_path)
-            matched_count += 1
-            if len(matched_files) < max_results:
-                matched_files.append(rel_workspace)
-        elif scanned_count > scan_limit:
-            scan_limited = True
-
-    matched_files.sort()
-    truncated = matched_count > len(matched_files) or scan_limited
-    return matched_files, matched_count, truncated, scan_limited
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
 
 
 def _find_files_local_fast(

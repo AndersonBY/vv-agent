@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from threading import RLock
+from threading import RLock, get_ident
 from typing import Any
 from uuid import uuid4
-from weakref import WeakKeyDictionary, WeakValueDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary, finalize
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
@@ -21,9 +22,11 @@ from vv_agent.types import AgentTask, Message
 from .children import child_handles
 from .context import project_context
 from .kernel import drive
+from .ownership import checkout
 from .records import InboxItem, SessionSpec
 from .result import project_result
 from .runtime import Runtime
+from .sql import SQLStore
 from .sqlite import SQLiteStore
 from .store import Conflict, SessionStore
 
@@ -37,12 +40,49 @@ class SessionDriver:
         self._owns_store = store is None
         self.store = store if store is not None else SQLiteStore(str(path))
         self.path = self.store.path if isinstance(self.store, SQLiteStore) else None
+        # Workers, handles and resumable results retain this owner. Once none
+        # remain, close only the connection this driver created itself.
+        self._owned_connection = (
+            finalize(self, self.store.connection.close) if self._owns_store and isinstance(self.store, SQLiteStore) else None
+        )
         if isinstance(self.store, SQLiteStore) and not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
             self.store.install_schema()
         self.handles: list[RunHandle] = []
         self._background: dict[str, RunHandle] = {}
         self._background_lock = RLock()
         self._close_callbacks = []
+
+    @contextmanager
+    def _connection_scope(self, *, independent=True):
+        if independent and isinstance(self.store, SQLStore):
+            with self.store._connection_scope():
+                yield
+        else:
+            yield
+
+    def _projection_store(self):
+        return checkout(self.store, role="projection")
+
+    def _after_admission_commit(self, key, callback):
+        if isinstance(self.store, SQLStore):
+            transactions = tuple(self.store._atomic_stack)
+            thread = get_ident()
+            current = next((tx for tx in reversed(transactions) if tx._thread == thread and tx._scope_active), None)
+            if current is not None:
+                current._commit_callbacks[key] = callback
+                return
+            if not transactions:
+                try:
+                    self.store._transaction_id()
+                except RuntimeError:
+                    pass
+                else:
+                    # A native outer transaction is the host's on_commit responsibility.
+                    return
+        callback()
+
+    def _wake_after_commit(self, sid):
+        self._after_admission_commit(("wake", sid), lambda: self._wake(sid))
 
     def _control_runtime(self, sid: str) -> Runtime:
         from vv_agent.model import ScriptedModelProvider
@@ -60,9 +100,13 @@ class SessionDriver:
             if callback in retained:
                 retained.remove(callback)
         self._close_callbacks.clear()
-        if self._owns_store and isinstance(self.store, SQLiteStore):
+        if self._owned_connection is not None:
             with self.store._connection_lock:
-                self.store.connection.close()
+                self._owned_connection()
+                self.store._checkout_closed = True
+            from .ownership import forget_host
+
+            forget_host(self.store)
 
     def _on_close(self, callback):
         self._close_callbacks.append(callback)
@@ -75,7 +119,6 @@ class SessionDriver:
             tx.create(spec, consumers=("events", "app_server", "traces"))
 
     def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
-
         llm, resolved = resolve_run_model(agent=agent, run_config=config)
         metadata = dict(agent.metadata) | config.metadata
         settings = config.model_provider.default_settings(resolved) if config.model_provider else agent.model_settings
@@ -129,10 +172,12 @@ class SessionDriver:
         consumer: str = "events",
         autostart: bool = True,
     ) -> RunHandle:
-        state, _, _ = self.store.read_state(sid)
-        if state.turns and config.shared_state is None:
-            prior = project_result(self.store, sid, next(reversed(state.turns)))
-            config = replace(config, shared_state=prior.raw_result.shared_state)
+        with self._projection_store() as projection:
+            state, _, _ = projection.read_state(sid)
+            pending_inputs = projection.peek_inbox(sid)
+            if state.turns and config.shared_state is None:
+                prior = project_result(projection, sid, next(reversed(state.turns)))
+                config = replace(config, shared_state=prior.raw_result.shared_state)
         if task is not None and config.shared_state is not None:
             task = replace(task, initial_shared_state=dict(config.shared_state))
         runtime = self.runtime(agent, config, task)
@@ -152,11 +197,7 @@ class SessionDriver:
                 None,
             )
             pending = next(
-                (
-                    s.item
-                    for s in self.store.peek_inbox(sid)
-                    if s.item.kind in {"user", "follow_up"} and s.item.target_turn_id is None
-                ),
+                (s.item for s in pending_inputs if s.item.kind in {"user", "follow_up"} and s.item.target_turn_id is None),
                 None,
             )
             tid = state.active_turn_id or (
@@ -174,26 +215,58 @@ class SessionDriver:
 
     def push(self, sid: str, item: InboxItem):
         with self.store.atomic() as tx:
-            return tx.push(sid, item)
+            receipt = tx.push(sid, item)
+        # Typed replies, controls and new turns have their own explicit drive owner.
+        if item.kind in {"steer", "provider_result", "provider_evidence", "child_result", "control", "approval_answer"} or (
+            item.kind == "user" and item.target_turn_id is not None
+        ):
+            self._wake_after_commit(sid)
+        return receipt
+
+    def _wake(self, sid: str) -> bool:
+        if isinstance(self.store, SQLiteStore) and self.store._defer_memory_wake(sid, lambda: self._wake(sid)):
+            return True
+        with self._background_lock:
+            for handle in reversed(self.handles):
+                if sid in handle._observed_sessions and handle._wake():
+                    return True
+        return False
 
     def control(self, sid: str, action: str, input_id: str, *, runtime: Runtime | None = None):
-        state, _, _ = self.store.read_state(sid)
-        tid = None if action in {"archive", "close"} else state.active_turn_id
-        receipt = self.push(sid, InboxItem(input_id, "control", {"action": action}, tid))
+        admission = self.store
+        with admission.atomic() as tx:
+            state, _, _ = admission.read_state(sid)
+            tid = None if action in {"archive", "close"} else state.active_turn_id
+            receipt = tx.push(sid, InboxItem(input_id, "control", {"action": action}, tid))
+        self._wake_after_commit(sid)
         if runtime is None and state.active_turn_id is None:
             runtime = self._control_runtime(sid)
         if runtime is not None:
-            drive(self.store, sid, runtime=runtime, _one_turn=True)
+
+            def execute_control():
+                drive(admission, sid, runtime=runtime, _one_turn=True)
+
+            self._after_admission_commit(("control-drive", sid), execute_control)
         return receipt
 
     def messages(self, sid: str) -> list[Message]:
-        state, records, _ = self.store.read_state(sid)
-        return [m for m in project_context(records, state) if m.role != "system"]
+        with self._projection_store() as projection:
+            state, records, _ = projection.read_state(sid)
+            return [m for m in project_context(records, state) if m.role != "system"]
 
     def waits(
         self, sid: str, runtime: Runtime | None = None, *, snapshot=None
     ) -> list[tuple[str, Runtime | None, dict[str, Any]]]:
-        state, _records, _ = snapshot or self.store.read_state(sid)
+        with self._projection_store() as projection:
+            return self._waits_on(projection, sid, runtime, snapshot, frozenset())
+
+    def _waits_on(self, store, sid, runtime, snapshot, ancestors):
+        if sid in ancestors:
+            raise Conflict(f"cyclic child ownership: {sid}")
+        if ancestors and runtime is not None:
+            runtime = runtime.child_runtime(store, sid)
+        ancestors = ancestors | {sid}
+        state, _records, _ = snapshot or store.read_state(sid)
         from .interactions import user_interaction
 
         found = []
@@ -223,7 +296,7 @@ class SessionDriver:
             if handle["kind"] == "child":
                 for child in child_handles(handle):
                     child_id = child["session_id"]
-                    found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id) if runtime else None))
+                    found.extend(self._waits_on(store, child_id, runtime, None, ancestors))
             elif handle["kind"] in {"user", "approval"}:
                 public = {}
                 if handle["kind"] == "user":
@@ -241,8 +314,8 @@ class SessionDriver:
                     continue
                 for child in child_handles(admitted.child_handle):
                     child_id = child["session_id"]
-                    if child["background"] and child_id not in seen:
-                        found.extend(self.waits(child_id, runtime.child_runtime(self.store, child_id) if runtime else None))
+                    if (child["background"] or admitted.yielded) and child_id not in seen:
+                        found.extend(self._waits_on(store, child_id, runtime, None, ancestors))
                         seen.add(child_id)
         return found
 
@@ -254,33 +327,42 @@ class SessionDriver:
 
         if not isinstance(target, InteractionReplyTarget) or not isinstance(answer, InteractionAnswer):
             raise TypeError("answer requires InteractionReplyTarget and InteractionAnswer")
-        try:
-            chain, root_turn = validate_child_graph(self.store, sid, target.session_id)
-        except ToolResultReadError:
-            raise InteractionError("stale_interaction") from None
-        previous = self._retained_reply(sid, input_id)
-        item = InboxItem(input_id, "user", {"content": reply_content(target, answer)}, target.turn_id, target.generation)
-        if previous:
-            if previous[0] != target.session_id or previous[1].encode() != item.encode():
-                raise Conflict("input_id reused with different bytes")
+        with self._projection_store() as projection:
+            try:
+                chain, root_turn = validate_child_graph(projection, sid, target.session_id)
+            except ToolResultReadError:
+                raise InteractionError("stale_interaction") from None
+            previous = self._retained_reply_on(projection, sid, input_id)
+            item = InboxItem(input_id, "user", {"content": reply_content(target, answer)}, target.turn_id, target.generation)
+            if previous:
+                if previous[0] != target.session_id or previous[1].encode() != item.encode():
+                    raise Conflict("input_id reused with different bytes")
+                replayed = True
+            else:
+                replayed = False
+            if not replayed:
+                captured = {identity: projection.read_state(identity) for identity in [sid, *chain]}
+                try:
+                    validate_child_graph(projection, sid, target.session_id, active=True)
+                except ToolResultReadError:
+                    raise InteractionError("stale_interaction") from None
+                root_state, _, _ = captured[sid]
+                if target.session_id != sid and root_turn != root_state.active_turn_id:
+                    raise InteractionError("stale_interaction")
+                state, _, _ = captured[target.session_id]
+                validate_reply(state, target.session_id, target, answer)
+        if replayed:
             return self.push(target.session_id, item)
-        captured = {identity: self.store.read_state(identity) for identity in [sid, *chain]}
-        try:
-            validate_child_graph(self.store, sid, target.session_id, active=True)
-        except ToolResultReadError:
-            raise InteractionError("stale_interaction") from None
-        root_state, _, _ = captured[sid]
-        if target.session_id != sid and root_turn != root_state.active_turn_id:
-            raise InteractionError("stale_interaction")
-        state, _, _ = captured[target.session_id]
-        validate_reply(state, target.session_id, target, answer)
-        with self.store.atomic() as tx:
+        admission = self.store
+        with admission.atomic() as tx:
             # Prepare outside row locks; recheck the captured heads before mutation.
             for identity in [sid, *chain]:
                 tx.lock_session(identity)
-                if self.store.lease_status(identity)[0] != captured[identity][1][-1].seq:
+                if admission.lease_status(identity)[0] != captured[identity][1][-1].seq:
                     raise InteractionError("stale_interaction")
-            return self.push(target.session_id, item)
+            receipt = tx.push(target.session_id, item)
+        self._wake_after_commit(target.session_id)
+        return receipt
 
     def approve(self, sid: str, runtime: Runtime, request_id: str, decision: ApprovalDecision | str, input_id: str):
         if isinstance(decision, str):
@@ -301,32 +383,45 @@ class SessionDriver:
         if len(waits) != 1:
             raise KeyError(f"Unknown approval request: {request_id}")
         target, _, wait = waits[0]
-        state, _, _ = self.store.read_state(target)
-        payload = {k: wait[k] for k in ("operation_id", "attempt", "request_id", "request_digest", "scope")}
-        payload.update(
-            decision="approve" if decision.action == "allow" else decision.action,
-            reason=decision.reason,
-            metadata=decision.metadata,
-        )
-        return self.push(
-            target,
-            InboxItem(
-                input_id, "approval_answer", payload, wait["turn_id"], state.turns[wait["turn_id"]].start._payload["generation"]
-            ),
-        )
+        admission = self.store
+        with admission.atomic() as tx:
+            tx.lock_session(target)
+            state, _, _ = admission.read_state(target)
+            payload = {k: wait[k] for k in ("operation_id", "attempt", "request_id", "request_digest", "scope")}
+            payload.update(
+                decision="approve" if decision.action == "allow" else decision.action,
+                reason=decision.reason,
+                metadata=decision.metadata,
+            )
+            receipt = tx.push(
+                target,
+                InboxItem(
+                    input_id,
+                    "approval_answer",
+                    payload,
+                    wait["turn_id"],
+                    state.turns[wait["turn_id"]].start._payload["generation"],
+                ),
+            )
+        self._wake_after_commit(target)
+        return receipt
 
     def _retained_reply(self, sid: str, input_id: str):
-        state, records, _ = self.store.read_state(sid)
+        with self._projection_store() as projection:
+            return self._retained_reply_on(projection, sid, input_id)
+
+    def _retained_reply_on(self, store, sid: str, input_id: str):
+        state, records, _ = store.read_state(sid)
         if input_id in state.applied_inputs:
             return sid, InboxItem(**state.applied_inputs[input_id]._payload["input"])
-        for pending in self.store.peek_inbox(sid):
+        for pending in store.peek_inbox(sid):
             if pending.item.input_id == input_id:
                 return sid, pending.item
         for stored in records:
             r = stored.record
             if r.kind == "op_parked" and r._payload["handle"]["kind"] == "child":
                 for child in child_handles(r._payload["handle"]):
-                    previous = self._retained_reply(child["session_id"], input_id)
+                    previous = self._retained_reply_on(store, child["session_id"], input_id)
                     if previous:
                         return previous
         return None
@@ -340,7 +435,8 @@ def resume_turn(session_id: str, turn_id: str) -> RunResult:
     driver = _DRIVERS.get(session_id)
     if driver is None:
         raise MissingHostBinding("resume requires the original host runtime; use AgentSession for durable sessions")
-    state, _, _ = driver.store.read_state(session_id)
+    with driver._projection_store() as projection:
+        state, _, _ = projection.read_state(session_id)
     if state.closed or state.archived:
         raise ValueError("session is closed or archived")
     if turn_id not in state.turns or state.active_turn_id not in {None, turn_id}:

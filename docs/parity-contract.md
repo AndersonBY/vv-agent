@@ -394,3 +394,52 @@ projections and bounded Unknown retries use existing paths.
 real vv-llm adapter/kernel, independent seed replay and real 0.33.3 SQLite and
 PostgreSQL rollback. The closed seed policies share default/replay/inheritance
 logic in `session.records`; no record, inbox or SQL version changes.
+
+
+## Yieldable-wait Python mapping
+
+Contract 38.0.0 defines yieldable observations in `docs/yieldable-waits.md`.
+Python uses `session.children.ChildSession.yield_on_steer`,
+`session.providers.Accepted.yield_on_steer`, `ChildTool(admit, on_yield=...)`,
+`SummaryChildTool.on_yield`, and an optional provider `on_yield` method. Child
+renderers receive `(plan, handles, "steer")`, with copied per-member statuses;
+provider renderers receive `(plan, handle, "steer")`. Both return an ordinary
+`ToolExecutionResult`. The default/fallback, atomicity and late-work rules are
+shared, not Python-only adaptations. No model/tool schema or App Server wire
+changes are required. Frozen Rust does not support these waits.
+
+`scripts/yieldable_wait_fixtures.py` produces canonical evidence from real kernel
+operations. `tests/session/test_yieldable_waits.py` covers both SQL stores, process
+kills, bindings, event completion and fork context. Until publication, run all
+gates with `VV_AGENT_CONTRACT_SOURCE=/path/to/vv-agent-contract`.
+`contract_snapshot.py check` then checks the pinned snapshot and the local
+canonical manifest separately and labels the result `local-development`.
+An explicit `--source` still requires the published lock to match that source.
+
+Yield callbacks are read-only observers with commit-authoritative results.
+Verified child handles carry terminal `result` and exact terminal sequence/digest.
+Provider evidence transports the original optional literal-true declaration in
+its authenticated payload. Both attachment and submit use the same park builder;
+conflicting attachments reject and query conflicts are provider_result_invalid.
+Kernel long-body archives include the source content SHA-256 in the immutable
+operation-owned identity, shared by ordinary and yielded results. Existing
+archive failure rules remain explicit unavailable expectations, without retries
+of completed effects or overwrites of existing objects.
+
+The M1 ownership core adds SessionStore.execution_store and SessionTx.connection,
+with mandatory keyword-only tx for synchronous admission and Runtime hooks.
+Only before_commit receives the live tx. The public inventory is generated from
+these actual APIs; the canonical behavior and Python mapping change intentionally.
+The immutable 37 lock/vendor and all record/inbox/SQL/App Server/RunEvent wire
+shapes remain unchanged. Confirmed postcommit errors preserve durable admission;
+unknown commit outcomes require original-identity recovery.
+
+Explicit E replaces ambient SQL/cache/tx routing in the core and migrated
+RunHandle worker. Remaining App Server projection/recovery/completion and
+legacy scope/independent callers are M2 open gaps. This milestone does not prove
+full SDK ownership or all A9 cuts. Notification delivery has not been rewritten:
+a first callback failure may drop the rest of a page whose cursor already
+advanced; it does not authorize resending the page or its remainder.
+
+Contract 38 remains in-progress. Full producer, SDK/central adoption and external
+host integration are pending; no immutable remote release was checked here.
