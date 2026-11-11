@@ -1087,6 +1087,10 @@
               "maxLength": 64,
               "pattern": "^[0-9a-f]{64}$",
               "type": "string"
+            },
+            "yield_on_steer": {
+              "const": true,
+              "type": "boolean"
             }
           },
           "required": [

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.0 — 2026-11-12
+
+The SQL kernel can yield declared foreground child waits and Accepted provider
+waits to steering (contract 38.0.0). Undeclared waits are byte-identical to
+0.34.1. L1 fixes heartbeat lock ordering. Older readers reject sessions that
+carry the new closed fields. Local App Server, Interactive and Runner accept
+declarations but do not yield. See [release notes](docs/releases/0.35.0.md) and
+the [upgrade notes](docs/upgrading.md#0350--2026-11-12).
+
 ## 0.34.1 — 2026-11-07
 
 0.34.0 was tagged but its release workflow failed before publication to PyPI.

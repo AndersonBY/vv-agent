@@ -11,8 +11,8 @@ on one machine, or `PostgresStore` for workers that share a database. Host setup
 [cloud host integration](host-integration.md). This page is the reference for
 how the kernel behaves, for contributors and for hosts that need exact rules.
 
-`contract.lock.json` records the immutable baseline. Input protection in 0.34.0
-targets contract 37.0.0 and uses local contract selection until release sync.
+`contract.lock.json` records the immutable baseline. Yieldable waits and L1 in
+0.35.0 target contract 38.0.0; the lock pins its v38.0.0 release.
 Current versions: public API v15, inbox schema 3, record schema 1, RunEvent v6,
 model-call v2, task-token-usage v3, strict Message, App Server protocol v5 and
 SQLite `user_version` 3. Rust (vv-agent-rs) stays frozen at contract 23.0.0.

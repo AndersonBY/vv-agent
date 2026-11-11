@@ -77,14 +77,14 @@ old-version session.
 
 ## Version notes
 
-### 0.35.0
+### 0.35.0 — 2026-11-12
 
-From 0.34.1, the SQL core can yield declared child or provider observations to
-steering. Undeclared waits keep their existing behavior. A yield commits the
-observation completions, applied steering and input consumption together. L1
-changes heartbeat lock ordering; it does not change TTLs, heartbeat intervals,
-timeouts, retry classes or lease fences. Admission and Runtime.hook signatures
-and the caller-supplied store instance stay the same.
+Compared with 0.34.1, the SQL core can yield declared child or provider
+observations to steering. Undeclared waits keep their existing behavior. A yield
+commits the observation completions, applied steering and input consumption
+together. L1 changes heartbeat lock ordering; it does not change TTLs, heartbeat
+intervals, timeouts, retry classes or lease fences. Admission and Runtime.hook
+signatures and the caller-supplied store instance stay the same.
 
 Record schema 1, inbox schema 3 and SQL DDL are unchanged. Existing 0.34.1
 sessions without the new fields remain readable. Declared parked operations
