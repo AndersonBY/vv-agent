@@ -4,10 +4,20 @@ from dataclasses import replace
 
 import pytest
 
-from vv_agent import Agent, AgentSessionOptions, InteractiveAgentClient, RunConfig, Runner, ScriptedModelProvider, function_tool
+from vv_agent import (
+    Agent,
+    AgentSessionOptions,
+    InteractiveAgentClient,
+    RunConfig,
+    RunHandle,
+    Runner,
+    ScriptedModelProvider,
+    function_tool,
+)
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 from vv_agent.session import kernel
+from vv_agent.session.children import ChildTool, child_delivery
 from vv_agent.session.records import InboxItem
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
@@ -188,3 +198,145 @@ def test_local_declaration_keeps_steer_pending_until_normal_result(store, tmp_pa
         if server is not None:
             server.run_adapter.close()
         driver.close()
+
+
+@pytest.mark.parametrize("entry", ["runner", "interactive"])
+def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, tmp_path, monkeypatch, entry):
+    assemble = kernel.assemble
+
+    def exercise(declared):
+        driver = SessionDriver(store=store)
+        admitted, rendered, observed = [], [], []
+        original_runtime = driver.runtime
+
+        def on_yield(*args):
+            rendered.append(args)
+            raise AssertionError("local waits must not render a yield")
+
+        def runtime(*args, **kwargs):
+            value = original_runtime(*args, **kwargs)
+
+            def admit(plan):
+                state, _, _ = store.read_state(plan.session_id)
+                task = state.turns[plan.turn_id].start.task()
+                context = value.context(task, plan, kernel.CancellationToken(), store=store, session_id=plan.session_id)
+                specs = assemble(value, plan, context, task, store)
+                admitted.extend(replace(child, yield_on_steer=declared) for child in specs)
+                return admitted
+
+            value.children["worker"] = ChildTool(admit, on_yield=on_yield)
+            return value
+
+        @function_tool
+        def wait_child() -> ToolExecutionResult:
+            return ToolExecutionResult("", "Need child input", directive=ToolDirective.WAIT_USER)
+
+        def finish(request):
+            observed.append(request)
+            return LLMResponse("parent done")
+
+        child = Agent("worker", "Work.", model="m", tools=[wait_child])
+        agent = Agent("parent", "Delegate.", model="m", tools=[child.as_tool()])
+        provider = ScriptedModelProvider.new(
+            "test",
+            "m",
+            [
+                LLMResponse("", [ToolCall("child-call", "worker", {"task_description": "work"})]),
+                LLMResponse("", [ToolCall("wait", "wait_child", {})]),
+                LLMResponse("child done"),
+                finish,
+            ],
+        )
+        config = RunConfig(model_provider=provider, workspace=tmp_path)
+        with monkeypatch.context() as patch:
+            patch.setattr("vv_agent.session.surfaces.SessionDriver", lambda *args, **kwargs: driver)
+            patch.setattr(driver, "runtime", runtime)
+            try:
+                if entry == "runner":
+                    handle = Runner.start(agent, "go", run_config=config)
+                    assert handle.result(timeout=10).status == AgentStatus.WAIT_USER
+                    sid, tid = handle.session_id, handle.run_id
+
+                    def resume():
+                        return Runner.resume(sid, tid)
+                else:
+                    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+                    session = client.create_session(agent=agent)
+                    assert session.prompt("go", auto_follow_up=False).status == AgentStatus.WAIT_USER
+                    sid = session.session_id
+                    tid = store.read_state(sid)[0].active_turn_id
+                    resume = session.continue_run
+
+                _, records, before = store.read_state(sid)
+                parked = next(r.record for r in records if r.record.kind == "op_parked")
+                assert parked.payload.get("yield_on_steer", False) is declared
+                assert len(admitted) == 1
+                child_sid, child_runtime, wait = driver.waits(sid, driver.handles[-1].runtime)[0]
+                target = InteractionReplyTarget.from_dict(
+                    {
+                        k: wait["interaction"][k]
+                        for k in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")
+                    }
+                )
+                driver.answer(sid, driver.handles[-1].runtime, target, InteractionAnswer("text", text="answer"), "answer")
+                child_handle = RunHandle(driver, child_sid, target.turn_id, child_runtime, None)
+                driver.handles.append(child_handle)
+                child_handle.start()
+                assert child_handle.result(timeout=10).status == AgentStatus.COMPLETED
+                assert not store.peek_inbox(sid)
+
+                with store.atomic() as tx:
+                    tx.push(sid, InboxItem("steer", "steer", {"content": "Change direction now"}, tid, 0))
+                    for index in range(255):
+                        tx.push(sid, InboxItem(f"stale-{index}", "follow_up", {"content": "old"}, "stale-turn", 0))
+                    child_delivery(store, tx, child_sid)
+                _, _, watermark = store.read_state(sid)
+                page = store.peek_inbox(sid, through_input_seq=watermark, limit=257)
+                assert watermark == before + 257
+                assert len(page) == 257
+                assert [item.item.input_id for item in page[:256]] == ["steer", *[f"stale-{i}" for i in range(255)]]
+                assert page[256].item.kind == "child_result"
+                terminal_id = page[256].item.input_id
+                peeks = []
+                original_peek = store.peek_inbox
+
+                def peek(session_id, *, through_input_seq=None, limit=256, ready_only=True):
+                    result = original_peek(session_id, through_input_seq=through_input_seq, limit=limit, ready_only=ready_only)
+                    if session_id == sid:
+                        peeks.append((through_input_seq, limit, len(result)))
+                    return result
+
+                patch.setattr(store, "peek_inbox", peek)
+                assert resume().status == AgentStatus.COMPLETED
+                state, records, _ = store.read_state(sid)
+                assert state.active_turn_id is None
+                assert not any(r.record.payload.get("yielded_by") for r in records)
+                assert not rendered
+                assert len(observed) == 1
+                assert any("Change direction now" in str(m.content) for m in observed[0].messages)
+                assert not original_peek(sid)
+                consumed = [
+                    (r.record.payload["input"]["input_id"], r.record.payload["disposition"])
+                    for r in records
+                    if r.record.kind == "input_applied"
+                    and r.record.payload["input"]["input_id"] in {i.item.input_id for i in page}
+                ]
+                consumed = [
+                    ("child_result" if identity == terminal_id else identity, disposition) for identity, disposition in consumed
+                ]
+                assert consumed == [
+                    *[(f"stale-{i}", "rejected") for i in range(255)],
+                    ("child_result", "applied"),
+                    ("steer", "applied"),
+                ]
+                assert peeks
+                assert all(limit == 256 for _, limit, _ in peeks)
+                captured = [p for p in peeks if p[0] is not None]
+                assert captured[0] == (watermark, 256, 256)
+                assert all(through == watermark for through, _, _ in captured)
+                return consumed, peeks
+            finally:
+                driver.close()
+
+    baseline = exercise(False)
+    assert exercise(True) == baseline
