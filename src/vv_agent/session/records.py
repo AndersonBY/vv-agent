@@ -350,6 +350,7 @@ INPUT_PAYLOADS = {
 }
 # Optional typed decision details remain inside the closed approval answer.
 INPUT_PAYLOADS["approval_answer"]["properties"].update(reason={"type": "string"}, metadata=JSON_OBJECT)
+INPUT_PAYLOADS["provider_evidence"]["properties"]["yield_on_steer"] = {"const": True, "type": "boolean"}
 
 INPUT_SCHEMA = closed(
     schema_version={"type": "integer", "const": 3},
@@ -466,6 +467,9 @@ PAYLOADS = {
 BOUNDARY_DATA["output_checked"]["properties"]["partial_output"] = JSON_VALUE
 PAYLOADS["op_started"]["properties"]["endpoint_id"] = TEXT
 PAYLOADS["op_parked"]["properties"]["interaction_result"] = JSON_OBJECT
+PAYLOADS["op_parked"]["properties"]["yield_on_steer"] = {"const": True, "type": "boolean"}
+PAYLOADS["op_parked"]["properties"]["yieldable_children"] = STRINGS
+PAYLOADS["op_completed"]["properties"]["yielded_by"] = TEXT
 PAYLOADS["context_compacted"]["properties"]["micro_usage"] = closed(
     archived_count=NAT,
     reclaimed_tokens=NAT,
@@ -570,6 +574,8 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
             return lambda v: isinstance(v, str) and pattern.fullmatch(v) is not None
     if schema == {"type": "boolean"}:
         return lambda v: type(v) is bool
+    if schema == {"type": "boolean", "const": True}:
+        return lambda v: v is True
     if schema == {"type": "null"}:
         return lambda v: v is None
     raise ValueError(f"unsupported session schema: {schema}")

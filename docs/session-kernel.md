@@ -268,11 +268,14 @@ The final PostgreSQL append also limits lock waits to 250 ms and statements to
 1 second, each capped by the remaining Lease lifetime. These transaction-local
 limits begin after encoding and history preparation.
 
-State locking covers only short reads and updates. A separate latch serializes
-renewal and its publication with the final append. Encoding and history reads
-finish before append takes that latch and reads the current Lease, then locks
-the parent row. The latch stays held through the transaction exit. Owner,
-epoch, both lease expiry checks, head and inbox checks remain in force.
+State locking covers only short reads and updates. The poll latch covers the
+whole snapshot, renewal and publication so concurrent polls always renew the
+last published Lease. Renewal holds neither the commit latch nor the state
+lock while calling the store. Encoding and history reads finish before append
+takes the commit latch and reads the current Lease, then locks the parent row.
+That latch stays held through the transaction exit. Polling from the same
+thread while entering, holding or releasing either latch raises RuntimeError.
+Owner, epoch, both lease expiry checks, head and inbox checks remain in force.
 PostgreSQL uses `FOR NO KEY UPDATE` because session keys never change; it
 serializes writers while allowing child foreign-key checks to retain their
 parent references. For callback requirements and transaction timing logs, see
@@ -437,6 +440,44 @@ If a turn is cancelled during a dispatched provider wait and the stop cannot be
 confirmed, the attempt can become unknown while keeping its acceptance evidence.
 Ordinary parked recovery never turns a wait into unknown. A durable abort
 control, not token timing, decides whether a terminal is aborted.
+
+### Yielding an observation to steering
+
+SQL hosts can declare a foreground child observation with
+`ChildSession(yield_on_steer=True)` or a provider observation with
+`Accepted(handle, yield_on_steer=True)`. Only unfinished observations in which
+every remaining member declared this choice may yield. Commands, retrying
+unknown outcomes, cancellation, suspension and human waits keep their existing
+rules. A stale generation cannot interrupt the observation. Model selection
+still waits for the batch to finish.
+
+At a captured inbox watermark, verified child terminals are processed before
+steering, including ready evidence beyond the first inbox page. If observations remain, one append writes their tool results and the
+applied steer and consumes that input. The SQL store rejects a yielded result
+without the same turn's applied steer and consume in that batch. The next
+model request sees the tool results before the new user input.
+
+`ChildTool(admit, on_yield=...)`, `SummaryChildTool(..., on_yield=...)` and an
+optional provider `on_yield` render the result. They receive the plan, copied
+handles and the reason `"steer"`. Child handles include verified terminal
+results when available. Renderers may read host state, but must not write,
+publish files, bill, or send messages. A commit conflict may call them again;
+replay uses only the committed result. Missing or invalid renderers produce a
+short default result; invalid output adds `yield_callback_failed` metadata.
+Long result candidates have content-bound archive identities, so discarded
+observations cannot overwrite the selected result.
+
+Yielding does not stop children. Their later completions follow background
+notification rules while the parent turn remains active, and are audit only
+after it ends or is cancelled. A yielded provider handle is closed: no further
+query or cancel runs, and authenticated late evidence is audit only. Admission
+and Runtime.hook retain their existing signatures and use the caller's store.
+
+This describes the SQL core. Local RunHandle, Interactive and App Server
+scheduling retain their existing behavior; local yield scheduling and canonical
+producer adoption are separate work. Undeclared waits emit none of these new
+fields. An older reader rejects an entire session containing the new closed
+fields rather than ignoring them.
 
 ### Inputs during a turn
 

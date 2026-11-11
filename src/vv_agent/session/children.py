@@ -22,6 +22,15 @@ class ChildSession:
     generation: int = 0
     consumers: tuple[str, ...] = ()
     background: bool = False
+    yield_on_steer: bool = False
+
+
+@dataclass(frozen=True)
+class ChildTool:
+    """Transactional admission with an optional read-only interruption observer."""
+
+    admit: Callable[[Record], ChildSession | Sequence[ChildSession]]
+    on_yield: Callable[[Record, list[dict[str, Any]], str], ToolExecutionResult] | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,7 @@ class SummaryChildTool:
 
     requires_summary: Callable[[Record], bool]
     admit: Callable[[Record, str | None], ChildSession | Sequence[ChildSession]]
+    on_yield: Callable[[Record, list[dict[str, Any]], str], ToolExecutionResult] | None = None
 
 
 class InvalidChildBatch(ValueError):

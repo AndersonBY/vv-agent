@@ -51,6 +51,10 @@ class Attempt:
     approval_answer: Record | None = None
 
     @property
+    def yielded(self) -> bool:
+        return self.result is not None and "yielded_by" in self.result._payload
+
+    @property
     def execution_plan(self) -> Record:
         if self.prepared is None:
             return self.plan
@@ -370,6 +374,24 @@ def _operation(state: ExecutionState, record: Record) -> None:
         before = p["phase"] == "before_dispatch"
         require(attempt.state == ("planned" if before else "started"), "invalid park transition")
         handle = p["handle"]
+        if "yield_on_steer" in p:
+            require(
+                not before and op.kind == "tool" and handle["kind"] in {"child", "provider"},
+                "only dispatched observations may yield",
+            )
+            if handle["kind"] == "child":
+                require(
+                    not handle["background"]
+                    and "yieldable_children" in p
+                    and bool(p["yieldable_children"])
+                    and len(set(p["yieldable_children"])) == len(p["yieldable_children"])
+                    and set(p["yieldable_children"]) <= {h["session_id"] for h in child_handles(handle)},
+                    "invalid yieldable child membership",
+                )
+            else:
+                require("yieldable_children" not in p, "provider cannot declare child membership")
+        else:
+            require("yieldable_children" not in p, "yieldable children require declaration")
         require(not before or handle["kind"] in {"approval", "user", "child"}, "provider park needs dispatch")
         if handle["kind"] == "user":
             require(
@@ -454,7 +476,34 @@ def _operation(state: ExecutionState, record: Record) -> None:
         require(p["execution_started"] == attempt.started, "execution_started disagrees with dispatch")
         if attempt.started:
             require(bool(p["evidence"]), "dispatched result requires authenticated evidence reference")
-        if attempt.child_handle and not attempt.child_handle["background"]:
+        yielded = p.get("yielded_by")
+        if yielded is not None:
+            steering = state.applied_inputs.get(yielded)
+            require(
+                attempt.state == "parked"
+                and attempt.wait is not None
+                and attempt.wait.get("yield_on_steer") is True
+                and steering is not None
+                and steering.turn_id == op.turn_id
+                and steering._payload["disposition"] == "applied"
+                and steering._payload["input"]["kind"] == "steer"
+                and f"steer/{yielded}" in p["evidence"]
+                and not turn.cancelled
+                and not turn.suspended
+                and not turn.ended,
+                "yield requires declared wait and applied active steering",
+            )
+            if attempt.child_handle:
+                assert attempt.wait is not None
+                require(
+                    all(
+                        h["session_id"] in attempt.wait["yieldable_children"]
+                        or (oid, number, h["session_id"]) in (state.child_completions or {})
+                        for h in child_handles(attempt.child_handle)
+                    ),
+                    "unfinished nonyieldable child blocks yielding",
+                )
+        if attempt.child_handle and not attempt.child_handle["background"] and yielded is None:
             require(
                 all(
                     state.child_completions is not None

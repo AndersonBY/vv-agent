@@ -20,7 +20,7 @@ from .test_runner_parity import RESOLVED
 
 
 @pytest.mark.parametrize("password", ["", "test 'password\\value"])
-def test_connection_conninfo_preserves_password(password):
+def test_connection_conninfo_preserves_password(password, postgres_admin_dsn):
     psycopg = pytest.importorskip("psycopg")
     from psycopg.conninfo import conninfo_to_dict
 
@@ -28,7 +28,7 @@ def test_connection_conninfo_preserves_password(password):
 
     with ExitStack() as stack:
         try:
-            connection = stack.enter_context(psycopg.connect("dbname=postgres", password=password, connect_timeout=3))
+            connection = stack.enter_context(psycopg.connect(postgres_admin_dsn, password=password, connect_timeout=3))
         except psycopg.OperationalError:
             connection = Mock()
             connection.info.dsn = "dbname=postgres user=test"

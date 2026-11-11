@@ -79,6 +79,13 @@ class Definitive:
 @dataclass(frozen=True)
 class Accepted:
     handle: dict[str, Any]
+    yield_on_steer: bool = False
+
+
+def validate_acceptance(plan: Record, outcome: Accepted) -> None:
+    validate_provider_handle(plan, outcome.handle)
+    if type(outcome.yield_on_steer) is not bool:
+        raise ProviderResultInvalid()
 
 
 @dataclass(frozen=True)
