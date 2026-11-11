@@ -509,7 +509,10 @@ def curate(output, streams, semantics, independent, facts):
                 lines.append("    ]" + ("," if index + 1 < len(sources) else ""))
             path.write_text("\n".join([*lines, "  }", "}", ""]))
         else:
-            path.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n")
+            # Keep negative-vector source bytes intact while bounding indentation growth.
+            path.write_text(
+                json.dumps(value, ensure_ascii=True, sort_keys=True, indent=1 if name == "session_invalid.json" else 2) + "\n"
+            )
     for name in SCENARIO_FILES:
         cases = Counter(case["case"] for case in values[name]["cases"])
         assert all(count == 1 for count in cases.values()), (name, cases)

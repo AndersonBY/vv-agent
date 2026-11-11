@@ -609,3 +609,14 @@ def test_store_rejects_yield_completion_without_matching_steer_and_consume(store
     finally:
         store.release(lease)
     assert snapshot() == before
+
+
+def test_yield_producer_matches_local_contract():
+    import json
+    import runpy
+    from pathlib import Path
+
+    from support.contract import fixture_root
+
+    producer = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/yieldable_wait_fixtures.py"))
+    assert producer["produce"]() == json.loads((fixture_root() / "yieldable_waits.json").read_text())

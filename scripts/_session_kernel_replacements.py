@@ -701,6 +701,16 @@ class Author:
 
     def public_api(self):
         d = self.outputs["public_api.json"]
+
+        def inventory_names(value):
+            return {"capability/" + c["id"] for domain in value["domains"] for c in domain["capabilities"]} | {
+                surface["id"] + "/" + member["id"]
+                for surface in value["surfaces"]
+                for group in ("members", "protocol_operations", "supporting_operations")
+                for member in surface.get(group, [])
+            }
+
+        before = inventory_names(d)
         d.update(contract="vv-agent-public-api-v15", schema_version=15)
         d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "session_Provider"]
         d["surfaces"].append(
@@ -981,6 +991,61 @@ class Author:
                 },
             }
         )
+        # Y-only additions: derive fields and signatures from the selected implementation.
+        for domain_id in ("session", "exports"):
+            domain = next(item for item in d["domains"] if item["id"] == domain_id)
+            if not any(item["python"] == "vv_agent.ChildTool" for item in domain["capabilities"]):
+                domain["capabilities"].append({"id": domain_id + ".ChildTool", "python": "vv_agent.ChildTool"})
+        d["surfaces"] = [s for s in d["surfaces"] if s["id"] not in {"session_ChildTool", "session_project_tool_content"}]
+        d["surfaces"].append(
+            {
+                "id": "session_ChildTool",
+                "python_target": "vv_agent.ChildTool",
+                "behavior": "existing transactional admit(plan) with optional read-only on_yield(plan, handles, reason)",
+                "members": [],
+            }
+        )
+        for surface_id, field_names in (
+            ("session_ChildSession", ("yield_on_steer",)),
+            ("session_Accepted", ("yield_on_steer",)),
+            ("session_ChildTool", ("admit", "on_yield")),
+            ("session_SummaryChildTool", ("on_yield",)),
+        ):
+            surface = next(s for s in d["surfaces"] if s["id"] == surface_id)
+            declared = {item.name for item in fields(resolve(surface["python_target"]))}
+            assert set(field_names) <= declared
+            surface["members"] = [m for m in surface.get("members", []) if m["id"] not in field_names]
+            surface["members"].extend(
+                {
+                    "id": name,
+                    "kind": "field",
+                    "python": {"kind": "field", "name": name, "declaration": "dataclass_field"},
+                }
+                for name in field_names
+            )
+        provider = next(s for s in d["surfaces"] if s["id"] == "session_Provider")
+        provider["behavior"] += (
+            "; optional on_yield(plan, handle, reason) read-only renderer; absence uses the default; "
+            "committed yields close the observation without query or cancel; late evidence is audit-only"
+        )
+        d["surfaces"].append(
+            {
+                "id": "session_project_tool_content",
+                "python_target": "vv_agent.session.tool_results",
+                "behavior": "bounded receipt projection; selected_artifact validates replay against the committed reference",
+                "members": [
+                    {
+                        "id": "project_tool_content",
+                        "kind": "operation",
+                        "python": {
+                            "kind": "function",
+                            "name": "project_tool_content",
+                            "signature": signature(resolve("vv_agent.session.tool_results.project_tool_content")),
+                        },
+                    }
+                ],
+            }
+        )
         for domain in d["domains"]:
             for capability in domain["capabilities"]:
                 resolve(capability["python"])
@@ -1002,7 +1067,7 @@ class Author:
                         assert py["name"] in {f.name for f in fields(owner)} or any(
                             py["name"] in getattr(b, "__annotations__", {}) for b in owner.__mro__
                         )
-        self.public_delta = {"added": [], "removed": []}
+        self.public_delta = {"added": sorted(inventory_names(d) - before), "removed": sorted(before - inventory_names(d))}
 
     def usage(self):
         d = self.outputs["token_usage.json"]
@@ -2850,19 +2915,13 @@ def write_report(report, path):
     from collections import Counter
 
     lines = [
-        "# C1c-1b fixture production report",
+        "# Session kernel fixture production report",
         "",
-        "v23 source: the unchanged vendored snapshot, byte-identical to the read-only contract fixtures at authoring start.",
-        "All dispositions use proposal sections 1.2/4/5/6 and binding reviewer decisions; "
-        "no contract or vendored files were written.",
-        "The generator rechecks the nearby read-only contract source when present "
-        "and verifies all Keep-byte hashes before/after.",
-        "Only the private selector uses new Runner/ConfiguredRunner, Message/result and JSONL-sink paths. "
-        "Source fixes preserve independent subscriptions, durable cancellation and idempotent cancellation admission, "
-        "continuation hints, strict current values, and retained child error details. "
-        "Configured memory routes now resolve once, freeze their own endpoint bindings, dispatch through the matching "
-        "client and retain the matching backend in usage projections; the v23 route facts remain unchanged. "
-        "Public exports/default selection remain v23.",
+        "Inputs are selected by VV_AGENT_CONTRACT_SOURCE, otherwise the vendored snapshot. "
+        "Real producers generate the current records, projections and public inventory; "
+        "this command writes only its output directory and report, not the canonical or vendored source.",
+        "Keep fixtures are checked byte-for-byte. Public fields and callable signatures are resolved "
+        "against the selected Python implementation.",
         "",
         "| File | Kept | Changed | Deleted | Added | Reason |",
         "| --- | ---: | ---: | ---: | ---: | --- |",
@@ -2882,7 +2941,7 @@ def write_report(report, path):
         "",
         "## Preservation",
         "",
-        "Unchanged v23 named cases retain their identities and bytes. Rendered prompts, memory summaries, "
+        "Unchanged named cases retain their identities and bytes. Rendered prompts, memory summaries, "
         "evidence and provider deltas are reproduced before emission. Retired inputs remain negative base64 vectors.",
         "The full producer corpus is validated before deterministic set cover. Event files contain representatives "
         "per type/variant; named semantic and recovery scenarios appear once. Built-in schemas are checked separately "

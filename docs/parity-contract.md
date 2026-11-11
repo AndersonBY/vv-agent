@@ -394,3 +394,29 @@ projections and bounded Unknown retries use existing paths.
 real vv-llm adapter/kernel, independent seed replay and real 0.33.3 SQLite and
 PostgreSQL rollback. The closed seed policies share default/replay/inheritance
 logic in `session.records`; no record, inbox or SQL version changes.
+
+## Contract 38.0.0 local candidate
+
+Python 0.35.0 adds yieldable waits in the SQL kernel and L1 lease lock ordering.
+The canonical rule is `docs/yieldable-waits.md` in the contract repository.
+Local App Server, Interactive and Runner retain declarations but wait for real
+results; they do not yield. Shared raw connections require exclusive host use,
+and concurrent native transactions are unsupported without promised detection.
+Admission and hook callback signatures are unchanged.
+
+For the unpublished candidate, run producer and focused regression tests with
+`VV_AGENT_CONTRACT_SOURCE=/path/to/the/contract-38-checkout`. This selects the
+candidate's fixtures through the existing local-source mechanism. The release
+lock and its matching vendored snapshot remain together on the immutable 37.0.0
+release until a reviewed contract revision and artifact exist. After publication,
+run the snapshot sync command above with that actual revision and artifact, then
+rerun producer gates against the synchronized snapshot without the override.
+Local validation is not immutable-lock synchronization or central adoption.
+
+`scripts/yieldable_wait_fixtures.py` produces child/provider yielding, recovered
+acceptance, terminal-first ordering and model projection from real SQL commits.
+`scripts/session_kernel_fixtures.py` also produces the optional closed fields and
+codec negatives. The public inventory is generated from current declarations
+and signatures; optional provider `on_yield(plan, handle, reason)` is a behavioral
+extension consumed by the kernel and exercised by the yield producer. It adds
+no connection checkout or borrowed-transaction surface.
