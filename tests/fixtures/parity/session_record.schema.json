@@ -1901,6 +1901,17 @@
                   "type": "null"
                 }
               ]
+            },
+            "yield_on_steer": {
+              "const": true,
+              "type": "boolean"
+            },
+            "yieldable_children": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -2030,6 +2041,10 @@
             },
             "usage": {
               "type": "object"
+            },
+            "yielded_by": {
+              "minLength": 1,
+              "type": "string"
             }
           },
           "required": [

@@ -1,0 +1,1095 @@
+{
+  "cases": [
+    {
+      "atomic_yield": true,
+      "child_running_at_yield": [
+        "yield-child-0"
+      ],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "single_child",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Wait interrupted by new input; observed work has not been stopped.\n{\"children\":[{\"session_id\":\"yield-child-0\",\"status\":\"running\"}],\"running_children\":[\"yield-child-0\"]}",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "background": false,
+              "delivery_target": {
+                "attempt": 1,
+                "generation": 0,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "session_id": "s",
+                "turn_id": "s/turn/initial"
+              },
+              "generation": 0,
+              "kind": "child",
+              "session_id": "yield-child-0",
+              "turn_id": "yield-child-0/turn/start"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": null,
+            "yield_on_steer": true,
+            "yieldable_children": [
+              "yield-child-0"
+            ]
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "steer/steer"
+            ],
+            "execution_started": true,
+            "provider_binding": "function",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "Wait interrupted by new input; observed work has not been stopped.\n{\"children\":[{\"session_id\":\"yield-child-0\",\"status\":\"running\"}],\"running_children\":[\"yield-child-0\"]}",
+              "directive": "continue",
+              "metadata": {
+                "children": [
+                  {
+                    "session_id": "yield-child-0",
+                    "status": "running"
+                  }
+                ],
+                "running_children": [
+                  "yield-child-0"
+                ],
+                "yield_reason": "steer"
+              },
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "5971a834eaef2b6a9e9793d8c3c8d7cb9c8b5677cbeacdcba9571d6880e580d5",
+            "shared_state": null,
+            "usage": {},
+            "yielded_by": "steer"
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-0/turn/yield-child-0/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-0 done",
+                "session_id": "yield-child-0",
+                "status": "completed",
+                "terminal_digest": "0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-0/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "dcd859795e570c248d2cc820dd66c313a85d8f064822f02411882653c0226462",
+            "position": "between_actions",
+            "reason": "background child notification",
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-0/turn/yield-child-0/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ]
+    },
+    {
+      "atomic_yield": true,
+      "child_running_at_yield": [
+        "yield-child-0",
+        "yield-child-1",
+        "yield-child-2"
+      ],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "child_batch",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Wait interrupted by new input; observed work has not been stopped.\n{\"children\":[{\"session_id\":\"yield-child-0\",\"status\":\"running\"},{\"session_id\":\"yield-child-1\",\"status\":\"running\"},{\"session_id\":\"yield-child-2\",\"status\":\"running\"}],\"running_children\":[\"yield-child-0\",\"yield-child-1\",\"yield-child-2\"]}",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "background": false,
+              "delivery_target": {
+                "attempt": 1,
+                "generation": 0,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "session_id": "s",
+                "turn_id": "s/turn/initial"
+              },
+              "generation": 0,
+              "kind": "child",
+              "session_id": "yield-child-0",
+              "siblings": [
+                {
+                  "generation": 0,
+                  "session_id": "yield-child-1",
+                  "turn_id": "yield-child-1/turn/start"
+                },
+                {
+                  "generation": 0,
+                  "session_id": "yield-child-2",
+                  "turn_id": "yield-child-2/turn/start"
+                }
+              ],
+              "turn_id": "yield-child-0/turn/start"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": null,
+            "yield_on_steer": true,
+            "yieldable_children": [
+              "yield-child-0",
+              "yield-child-1",
+              "yield-child-2"
+            ]
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "steer/steer"
+            ],
+            "execution_started": true,
+            "provider_binding": "function",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "Wait interrupted by new input; observed work has not been stopped.\n{\"children\":[{\"session_id\":\"yield-child-0\",\"status\":\"running\"},{\"session_id\":\"yield-child-1\",\"status\":\"running\"},{\"session_id\":\"yield-child-2\",\"status\":\"running\"}],\"running_children\":[\"yield-child-0\",\"yield-child-1\",\"yield-child-2\"]}",
+              "directive": "continue",
+              "metadata": {
+                "children": [
+                  {
+                    "session_id": "yield-child-0",
+                    "status": "running"
+                  },
+                  {
+                    "session_id": "yield-child-1",
+                    "status": "running"
+                  },
+                  {
+                    "session_id": "yield-child-2",
+                    "status": "running"
+                  }
+                ],
+                "running_children": [
+                  "yield-child-0",
+                  "yield-child-1",
+                  "yield-child-2"
+                ],
+                "yield_reason": "steer"
+              },
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "1b2fea1ef7a81a0ccd612185c00d6aab94d09065fd00975aff94173271df2b24",
+            "shared_state": null,
+            "usage": {},
+            "yielded_by": "steer"
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-0/turn/yield-child-0/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-0 done",
+                "session_id": "yield-child-0",
+                "status": "completed",
+                "terminal_digest": "0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-0/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "dcd859795e570c248d2cc820dd66c313a85d8f064822f02411882653c0226462",
+            "position": "between_actions",
+            "reason": "background child notification",
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-0/turn/yield-child-0/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-1/turn/yield-child-1/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-1 done",
+                "session_id": "yield-child-1",
+                "status": "completed",
+                "terminal_digest": "7a3c18b91ea4075f8815459b57733fcb7d17195c75de4cf9521b94278e47570d",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-1/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "36c801cefd353ed6c5ac67fb46075f65cdb223fe1048b465d9a3b4e11abdd8aa",
+            "position": "between_actions",
+            "reason": "background child notification",
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-1/turn/yield-child-1/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-2/turn/yield-child-2/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-2 done",
+                "session_id": "yield-child-2",
+                "status": "completed",
+                "terminal_digest": "75e52d805b24fab29b5f8706c1b58ad15c053427fa574d53ab7f928ff7df9dc8",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-2/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "284e46c7802203094327f56d1014d0d64b20d4a0cc7dc3f4ddeede1d33817e8c",
+            "position": "between_actions",
+            "reason": "background child notification",
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-2/turn/yield-child-2/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ]
+    },
+    {
+      "atomic_yield": true,
+      "child_running_at_yield": [],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "provider",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Provider observation interrupted",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "attempt": 1,
+              "cancel_ref": null,
+              "evidence": "provider-accepted",
+              "job_id": "job",
+              "kind": "provider",
+              "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+              "provider": "child_task",
+              "query_ref": null,
+              "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": 1800000001000,
+            "yield_on_steer": true
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "steer/steer",
+              "provider-accepted"
+            ],
+            "execution_started": true,
+            "provider_binding": "child_task",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "Provider observation interrupted",
+              "directive": "continue",
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "1ddfe5d046bc6ce7d1dabe036f4c93c490a1402673549b731ad97708b0883d16",
+            "shared_state": null,
+            "usage": {},
+            "yielded_by": "steer"
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ]
+    },
+    {
+      "atomic_yield": false,
+      "child_running_at_yield": [],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "terminal_before_steer",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "yield-child-0 done",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "background": false,
+              "delivery_target": {
+                "attempt": 1,
+                "generation": 0,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "session_id": "s",
+                "turn_id": "s/turn/initial"
+              },
+              "generation": 0,
+              "kind": "child",
+              "session_id": "yield-child-0",
+              "turn_id": "yield-child-0/turn/start"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": null,
+            "yield_on_steer": true,
+            "yieldable_children": [
+              "yield-child-0"
+            ]
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-0/turn/yield-child-0/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-0 done",
+                "session_id": "yield-child-0",
+                "status": "completed",
+                "terminal_digest": "0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-0/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "dcd859795e570c248d2cc820dd66c313a85d8f064822f02411882653c0226462",
+            "position": "between_actions",
+            "reason": null,
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-0/turn/yield-child-0/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "child/11/0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb"
+            ],
+            "execution_started": true,
+            "provider_binding": "function",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "yield-child-0 done",
+              "directive": "continue",
+              "metadata": {
+                "child_session_id": "yield-child-0",
+                "child_turn_id": "yield-child-0/turn/start",
+                "status": "completed"
+              },
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "d585d3f21e9033205496652aade9bac78d09ba73b8eeefbb1a71227f0cf7ce57",
+            "shared_state": null,
+            "usage": {}
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ]
+    },
+    {
+      "atomic_yield": true,
+      "child_running_at_yield": [],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "provider_recovered",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Provider observation interrupted",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "attempt": 1,
+              "cancel_ref": null,
+              "evidence": "provider-accepted",
+              "job_id": "job",
+              "kind": "provider",
+              "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+              "provider": "child_task",
+              "query_ref": null,
+              "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": 1800000001000,
+            "yield_on_steer": true
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "steer/steer",
+              "provider-accepted"
+            ],
+            "execution_started": true,
+            "provider_binding": "child_task",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "Provider observation interrupted",
+              "directive": "continue",
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "1ddfe5d046bc6ce7d1dabe036f4c93c490a1402673549b731ad97708b0883d16",
+            "shared_state": null,
+            "usage": {},
+            "yielded_by": "steer"
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ],
+      "recovery_input": {
+        "available_ms": 0,
+        "generation": 0,
+        "input_id": "recovered-acceptance",
+        "kind": "provider_evidence",
+        "payload": {
+          "attempt": 1,
+          "handle": {
+            "attempt": 1,
+            "cancel_ref": null,
+            "evidence": "provider-accepted",
+            "job_id": "job",
+            "kind": "provider",
+            "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "provider": "child_task",
+            "query_ref": null,
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49"
+          },
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+          "yield_on_steer": true
+        },
+        "schema_version": 3,
+        "target_turn_id": "s/turn/initial"
+      }
+    },
+    {
+      "atomic_yield": true,
+      "callback_handles": [
+        {
+          "background": false,
+          "delivery_target": {
+            "attempt": 1,
+            "generation": 0,
+            "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "session_id": "s",
+            "turn_id": "s/turn/initial"
+          },
+          "generation": 0,
+          "kind": "child",
+          "result": "yield-child-0 done",
+          "session_id": "yield-child-0",
+          "status": "completed",
+          "terminal_digest": "0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb",
+          "terminal_seq": 11,
+          "turn_id": "yield-child-0/turn/start"
+        },
+        {
+          "background": false,
+          "delivery_target": {
+            "attempt": 1,
+            "generation": 0,
+            "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "session_id": "s",
+            "turn_id": "s/turn/initial"
+          },
+          "generation": 0,
+          "kind": "child",
+          "session_id": "yield-child-1",
+          "status": "running",
+          "turn_id": "yield-child-1/turn/start"
+        }
+      ],
+      "child_running_at_yield": [
+        "yield-child-1"
+      ],
+      "completed_events": [
+        "tool_call_completed"
+      ],
+      "name": "completed_and_waiting",
+      "next_messages": [
+        {
+          "content": "go",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "child_task"
+              },
+              "id": "child-call",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Interrupted with completed child result",
+          "role": "tool",
+          "tool_call_id": "child-call"
+        },
+        {
+          "content": "Change direction now",
+          "role": "user"
+        }
+      ],
+      "records": [
+        {
+          "attempt": 1,
+          "kind": "op_parked",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "deadline_ms": null,
+            "handle": {
+              "background": false,
+              "delivery_target": {
+                "attempt": 1,
+                "generation": 0,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "session_id": "s",
+                "turn_id": "s/turn/initial"
+              },
+              "generation": 0,
+              "kind": "child",
+              "session_id": "yield-child-0",
+              "siblings": [
+                {
+                  "generation": 0,
+                  "session_id": "yield-child-1",
+                  "turn_id": "yield-child-1/turn/start"
+                }
+              ],
+              "turn_id": "yield-child-0/turn/start"
+            },
+            "phase": "after_dispatch",
+            "poll_at_ms": null,
+            "yield_on_steer": true,
+            "yieldable_children": [
+              "yield-child-0",
+              "yield-child-1"
+            ]
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/parked/after_dispatch",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "child/yield-child-0/turn/yield-child-0/turn/start/ended",
+              "kind": "child_result",
+              "payload": {
+                "attempt": 1,
+                "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+                "result": "yield-child-0 done",
+                "session_id": "yield-child-0",
+                "status": "completed",
+                "terminal_digest": "0c47ed412701104a7b0fb80ecbb82850a0e8eb28013bb6a4fae63690403ee1bb",
+                "terminal_seq": 11,
+                "turn_id": "yield-child-0/turn/start"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "dcd859795e570c248d2cc820dd66c313a85d8f064822f02411882653c0226462",
+            "position": "between_actions",
+            "reason": "batch member completed",
+            "target_operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+            "target_wait_id": null
+          },
+          "record_id": "input/child/yield-child-0/turn/yield-child-0/turn/start/ended/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": null,
+          "kind": "input_applied",
+          "operation_id": null,
+          "payload": {
+            "disposition": "applied",
+            "input": {
+              "available_ms": 0,
+              "generation": 0,
+              "input_id": "steer",
+              "kind": "steer",
+              "payload": {
+                "content": "Change direction now"
+              },
+              "schema_version": 3,
+              "target_turn_id": "s/turn/initial"
+            },
+            "input_digest": "04d08a40764e71347e91a8f397f89ba85c06ff899ebae26de0995bf46c1e4796",
+            "position": "before_model",
+            "reason": null,
+            "target_operation_id": null,
+            "target_wait_id": null
+          },
+          "record_id": "input/steer/applied",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        },
+        {
+          "attempt": 1,
+          "kind": "op_completed",
+          "operation_id": "s/turn/initial/model/primary/1/attempt/1/tool/0",
+          "payload": {
+            "context": "normal",
+            "evidence": [
+              "steer/steer"
+            ],
+            "execution_started": true,
+            "provider_binding": "function",
+            "request_digest": "61a52946f8b1f249946574ab86191a9a02e02d14e820c0a78281de039b24bb49",
+            "result": {
+              "content": "Interrupted with completed child result",
+              "directive": "continue",
+              "status_code": "SUCCESS",
+              "tool_call_id": "child-call"
+            },
+            "result_digest": "6ee68a256edda77b140df9e3c2899cdbae9cd79d7e33ce7c0c6351bd2b72edde",
+            "shared_state": null,
+            "usage": {},
+            "yielded_by": "steer"
+          },
+          "record_id": "op/s/turn/initial/model/primary/1/attempt/1/tool/0/1/result",
+          "schema_version": 1,
+          "session_id": "s",
+          "turn_id": "s/turn/initial"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1
+}

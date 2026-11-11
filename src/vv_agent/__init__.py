@@ -129,7 +129,7 @@ from vv_agent.runtime.lifecycle import (
     NativeCycleOutcomeKind,
 )
 from vv_agent.session.bindings import MissingHostBinding
-from vv_agent.session.children import SummaryChildTool
+from vv_agent.session.children import ChildTool, SummaryChildTool
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import HeartbeatStopped
 from vv_agent.session.postgres import PostgresStore
@@ -228,6 +228,7 @@ __all__ = [
     "BudgetUsageSnapshot",
     "CacheUsage",
     "CacheUsageStatus",
+    "ChildTool",
     "CompletionReason",
     "ConfigError",
     "ConfiguredRunner",

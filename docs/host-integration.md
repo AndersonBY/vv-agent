@@ -377,6 +377,25 @@ commit an independent business transaction or start a child execution loop.
 Database rollback does not undo object storage requests or changes to Python
 objects.
 
+The worker uses the store instance passed to public `drive`; dispatch-only
+`tick` scans its supplied store. Custom subclasses and per-instance acquire or
+inbox hooks are preserved. Heartbeats still use the independent connection
+factory.
+
+Renewal holds the poll latch through snapshot, database renewal and publication,
+and releases the short state lock before database calls. It never holds the
+commit latch while renewing. Do not drive or poll while holding a host write
+transaction: the SDK cannot detect every opaque host transaction. Synchronous
+poll reentry while entering, holding or releasing this heartbeat's commit or
+poll latch raises RuntimeError immediately.
+Do not run concurrent native transactions on the raw connection shared with the
+runtime; this is unsupported, and the SDK does not promise to detect it.
+
+For opt-in observation interruption and read-only rendering, see
+[yielding an observation](session-kernel.md#yielding-an-observation-to-steering).
+Child admission remains `admit(plan)`, or `admit(plan, summary)` for summary
+bindings; `Runtime.hook` remains `(point, record)`.
+
 Heartbeat renewal continues during these callbacks. A PostgreSQL heartbeat
 allows 250 ms for a lock wait and 1 second for a statement, including on
 connections opened by a host's custom factory. A renewal timeout or operational

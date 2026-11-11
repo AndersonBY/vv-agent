@@ -679,6 +679,23 @@ class SQLSessionTx:
             _natural(expected_inbox_seq, "expected_inbox_seq")
         if len(set(consume_input_ids)) != len(consume_input_ids):
             raise Conflict("duplicate consume_input_ids")
+        for record in records:
+            if (
+                record.kind == "op_completed"
+                and (input_id := record._payload.get("yielded_by")) is not None
+                and (
+                    input_id not in consume_input_ids
+                    or not any(
+                        r.kind == "input_applied"
+                        and r.turn_id == record.turn_id
+                        and r._payload["input"]["input_id"] == input_id
+                        and r._payload["input"]["kind"] == "steer"
+                        and r._payload["disposition"] == "applied"
+                        for r in records
+                    )
+                )
+            ):
+                raise Conflict("yield completion and steering must commit together")
         encoded = []
         for record in records:
             encoded.append(record.encode())

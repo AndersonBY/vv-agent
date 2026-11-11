@@ -77,6 +77,44 @@ old-version session.
 
 ## Version notes
 
+### 0.35.0 — 2026-11-12
+
+Compared with 0.34.1, the SQL core can yield declared child or provider
+observations to steering. Undeclared waits keep their existing behavior. A yield
+commits the observation completions, applied steering and input consumption
+together. L1 changes heartbeat lock ordering; it does not change TTLs, heartbeat
+intervals, timeouts, retry classes or lease fences. Admission and Runtime.hook
+signatures and the caller-supplied store instance stay the same.
+
+Record schema 1, inbox schema 3 and SQL DDL are unchanged. Existing 0.34.1
+sessions without the new fields remain readable. Declared parked operations
+and recovered provider acceptance can contain literal-true `yield_on_steer`;
+child waits also identify `yieldable_children`. Yielded completions contain
+`yielded_by`. An older reader rejects a session containing these new closed
+fields, even though the schema versions have not changed. Keep these sessions
+and their dependent parent/child work on a reader that supports them. Do not
+strip fields to send a session back to an older worker.
+
+New long result candidates include their content hash in archive identity.
+Existing committed long receipts keep their original reference and validation
+rules. No stored-session rewrite is required.
+
+Known limitations:
+
+- App Server, Interactive and local Runner/RunHandle entry points accept wait
+  declarations but treat them as undeclared waits. Steering waits for the normal
+  result; these entry points do not provide yieldable waits in 0.35.0.
+- A host must not run a whole `drive` or `poll` inside an outer write transaction.
+  Savepoints do not release the outer transaction's locks.
+- Concurrent native transactions on the same raw connection shared by the host
+  and runtime are unsupported. The SDK does not promise to detect them.
+- L2–L5 remain unfixed: cleanup evidence and full handoff after stop (L2),
+  control-token lifetime (L3), opaque deadline start (L4), and SQLite busy
+  classification (L5).
+
+See the [release notes](releases/0.35.0.md) for scope. Canonical contract adoption
+and release validation remain separate gates.
+
 ### 0.34.1 — 2026-11-07
 
 0.34.1 includes 0.34.0, which was not published to PyPI, plus two test

@@ -786,6 +786,10 @@
 {
 "id": "session.HeartbeatStopped",
 "python": "vv_agent.HeartbeatStopped"
+},
+{
+"id": "session.ChildTool",
+"python": "vv_agent.ChildTool"
 }
 ],
 "id": "session"
@@ -1295,6 +1299,10 @@
 {
 "id": "exports.is_task_artifact_path",
 "python": "vv_agent.is_task_artifact_path"
+},
+{
+"id": "exports.ChildTool",
+"python": "vv_agent.ChildTool"
 }
 ],
 "id": "exports"
@@ -6013,6 +6021,17 @@
 {
 "behavior": "authentic retained provider handle",
 "id": "session_Accepted",
+"members": [
+{
+"id": "yield_on_steer",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "yield_on_steer"
+}
+}
+],
 "python_target": "vv_agent.Accepted"
 },
 {
@@ -6116,6 +6135,17 @@
 {
 "behavior": "one admitted child specification",
 "id": "session_ChildSession",
+"members": [
+{
+"id": "yield_on_steer",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "yield_on_steer"
+}
+}
+],
 "python_target": "vv_agent.session.children.ChildSession"
 },
 {
@@ -6188,6 +6218,17 @@
 {
 "behavior": "pure requires_summary predicate; logged full-history summary before atomic admit(plan, summary) callback",
 "id": "session_SummaryChildTool",
+"members": [
+{
+"id": "on_yield",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "on_yield"
+}
+}
+],
 "python_target": "vv_agent.SummaryChildTool"
 },
 {
@@ -6196,7 +6237,7 @@
 "python_target": "vv_agent.HeartbeatStopped"
 },
 {
-"behavior": "submit only after admission; query retained acceptance; validate definitive identity and evidence; authenticate callbacks including usage",
+"behavior": "submit only after admission; query retained acceptance; validate definitive identity and evidence; authenticate callbacks including usage; optional on_yield(plan, handle, reason) read-only renderer; absence uses the default; committed yields close the observation without query or cancel; late evidence is audit-only",
 "id": "session_Provider",
 "members": [
 {
@@ -7319,6 +7360,71 @@
 }
 ],
 "python_target": "vv_agent.OutputRetentionBackend"
+},
+{
+"behavior": "existing transactional admit(plan) with optional read-only on_yield(plan, handles, reason)",
+"id": "session_ChildTool",
+"members": [
+{
+"id": "admit",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "admit"
+}
+},
+{
+"id": "on_yield",
+"kind": "field",
+"python": {
+"declaration": "dataclass_field",
+"kind": "field",
+"name": "on_yield"
+}
+}
+],
+"python_target": "vv_agent.ChildTool"
+},
+{
+"behavior": "bounded receipt projection; selected_artifact validates replay against the committed reference",
+"id": "session_project_tool_content",
+"members": [
+{
+"id": "project_tool_content",
+"kind": "operation",
+"python": {
+"kind": "function",
+"name": "project_tool_content",
+"signature": {
+"async": false,
+"parameters": [
+{
+"kind": "positional_or_keyword",
+"name": "record",
+"required": true
+},
+{
+"kind": "positional_or_keyword",
+"name": "raw",
+"required": true
+},
+{
+"kind": "positional_or_keyword",
+"name": "backend",
+"required": true
+},
+{
+"kind": "keyword_only",
+"name": "selected_artifact",
+"required": false
+}
+]
+}
+}
+}
+],
+"python_target": "vv_agent.session.tool_results"
 }
 ],
 "verification": {
