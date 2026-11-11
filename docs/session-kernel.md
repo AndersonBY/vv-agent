@@ -473,11 +473,12 @@ after it ends or is cancelled. A yielded provider handle is closed: no further
 query or cancel runs, and authenticated late evidence is audit only. Admission
 and Runtime.hook retain their existing signatures and use the caller's store.
 
-This describes the SQL core. Local RunHandle, Interactive and App Server
-scheduling retain their existing behavior; local yield scheduling and canonical
-producer adoption are separate work. Undeclared waits emit none of these new
-fields. An older reader rejects an entire session containing the new closed
-fields rather than ignoring them.
+This describes the SQL core. In 0.35.0, local Runner/RunHandle, Interactive and
+App Server entries accept declarations but treat them as undeclared waits.
+Steering stays pending until the normal result arrives. Canonical producer
+adoption is separate work. Undeclared waits emit none of these new fields. An
+older reader rejects an entire session containing the new closed fields rather
+than ignoring them.
 
 ### Inputs during a turn
 

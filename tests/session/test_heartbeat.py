@@ -20,21 +20,48 @@ from .test_runner_parity import RESOLVED
 
 
 @pytest.mark.parametrize("password", ["", "test 'password\\value"])
-def test_connection_conninfo_preserves_password(password, postgres_admin_dsn):
+def test_connection_conninfo_preserves_password(password, monkeypatch):
     psycopg = pytest.importorskip("psycopg")
     from psycopg.conninfo import conninfo_to_dict
 
     from vv_agent.session.postgres import _connection_conninfo
 
-    with ExitStack() as stack:
-        try:
-            connection = stack.enter_context(psycopg.connect(postgres_admin_dsn, password=password, connect_timeout=3))
-        except psycopg.OperationalError:
-            connection = Mock()
-            connection.info.dsn = "dbname=postgres user=test"
-            connection.info.password = password
-        parameters = conninfo_to_dict(_connection_conninfo(connection))
-        assert parameters == conninfo_to_dict(connection.info.dsn) | ({"password": password} if password else {})
+    monkeypatch.setattr(psycopg, "connect", Mock(side_effect=AssertionError("unit test must not connect")))
+    connection = Mock()
+    connection.info.dsn = "host=127.0.0.1 port=55483 dbname=isolated user=test"
+    connection.info.password = password
+    parameters = conninfo_to_dict(_connection_conninfo(connection))
+    assert parameters == conninfo_to_dict(connection.info.dsn) | ({"password": password} if password else {})
+    psycopg.connect.assert_not_called()
+
+
+@pytest.fixture
+def explicit_postgres_dsn():
+    import os
+
+    psycopg = pytest.importorskip("psycopg")
+    dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("real connection tests require an explicit temporary PostgreSQL DSN")
+    try:
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=3):
+            pass
+    except psycopg.OperationalError:
+        pytest.skip("explicit temporary PostgreSQL is unavailable")
+    return dsn
+
+
+@pytest.mark.postgres
+def test_real_connection_conninfo_preserves_password(explicit_postgres_dsn):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    from vv_agent.session.postgres import _connection_conninfo
+
+    with psycopg.connect(explicit_postgres_dsn, connect_timeout=3) as connection:
+        assert conninfo_to_dict(_connection_conninfo(connection)) == conninfo_to_dict(connection.info.dsn) | (
+            {"password": connection.info.password} if connection.info.password else {}
+        )
 
 
 def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
@@ -71,7 +98,7 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def password_postgres_dsn(database):
+def password_postgres_dsn(explicit_postgres_dsn, database):
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo

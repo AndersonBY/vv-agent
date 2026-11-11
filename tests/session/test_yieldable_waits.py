@@ -542,19 +542,70 @@ def test_implicit_active_turn_steer_uses_the_same_atomic_rule(store, database):
     assert any("Implicit active turn input" in str(m.content) for m in observed[0].messages)
 
 
-def test_store_rejects_yield_completion_without_steer_in_its_commit(store, database):
+@pytest.mark.parametrize("invalid", ["missing_steer", "missing_consume", "different_turn"])
+def test_store_rejects_yield_completion_without_matching_steer_and_consume(store, database, monkeypatch, invalid):
+    from vv_agent.session.sql import SQLSessionTx
     from vv_agent.session.store import Conflict
 
     start(store)
     rt, _ = waiting_runtime(database)
     drive(store, "s", runtime=rt)
     steer(store)
-    drive(store, "s", runtime=rt)
-    receipt = next(r for r in rows(store, kind="op_completed") if "yielded_by" in r.record.payload)
+
+    def snapshot():
+        return (
+            tuple(
+                (seq, bytes(body))
+                for seq, body in store._rows("SELECT seq,body FROM sk_record WHERE session_id=%s ORDER BY seq", ("s",))
+            ),
+            tuple(
+                (seq, bytes(body), consumed, available)
+                for seq, body, consumed, available in store._rows(
+                    "SELECT input_seq,body,consumed_seq,available_ms FROM sk_inbox WHERE session_id=%s ORDER BY input_seq", ("s",)
+                )
+            ),
+        )
+
+    before = snapshot()
+    candidate = {}
+    append = SQLSessionTx.append
+
+    class PreparedYield(Exception):
+        pass
+
+    def capture(self, *args, **kwargs):
+        if any(r.kind == "op_completed" and "yielded_by" in r.payload for r in kwargs["records"]):
+            candidate.update(kwargs)
+            raise PreparedYield
+        return append(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SQLSessionTx, "append", capture)
+        with pytest.raises(PreparedYield):
+            drive(store, "s", runtime=rt)
+    assert snapshot() == before
+    assert not any("yielded_by" in r.record.payload for r in rows(store))
+    records = candidate["records"]
+    consume = candidate["consume_input_ids"]
+    assert consume == ("steer",)
+    if invalid == "missing_steer":
+        records = tuple(r for r in records if r.kind != "input_applied")
+    elif invalid == "missing_consume":
+        consume = ()
+    else:
+        records = tuple(replace(r, turn_id="other/turn") if r.kind == "input_applied" else r for r in records)
     lease = store.acquire("s", owner="split-commit", ttl_ms=15000)
     assert lease is not None
     try:
         with pytest.raises(Conflict, match="yield completion and steering must commit together"), store.atomic() as tx:
-            tx.append("s", lease=lease, expected_seq=store.read("s").head_seq, commit_id="split", records=(receipt.record,))
+            tx.append(
+                "s",
+                lease=lease,
+                expected_seq=store.read("s").head_seq,
+                commit_id="split",
+                records=records,
+                consume_input_ids=consume,
+            )
     finally:
         store.release(lease)
+    assert snapshot() == before

@@ -270,8 +270,9 @@ def _invoke(scope: _Scope, callback: Callable[[], Outcome], timeout: float) -> O
 
 
 class _Driver:
-    def __init__(self, store: SessionStore, sid: str, runtime: Runtime, scope: _Scope):
+    def __init__(self, store: SessionStore, sid: str, runtime: Runtime, scope: _Scope, *, one_turn: bool = False):
         self.store, self.sid, self.runtime, self.scope = store, sid, runtime, scope
+        self.one_turn = one_turn
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
         self.active_since = time.monotonic_ns()
@@ -819,7 +820,8 @@ class _Driver:
     def yieldable_batch(self) -> list[Attempt]:
         """Return the whole remaining batch only when every observation can yield."""
         tid = self.state.active_turn_id
-        if tid is None:
+        # shortcut: local drivers keep normal waits; enable yielding with local scheduling.
+        if self.one_turn or tid is None:
             return []
         turn = self.state.turns[tid]
         if turn.cancelled or turn.suspended or turn.wait or self.scope.token.cancelled:
@@ -914,12 +916,16 @@ class _Driver:
 
         inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark)
         # At one captured watermark, authenticated child terminals win over steering.
-        declared_wait = bool(inputs) and any(
-            op.turn_id == self.state.active_turn_id
-            and (a := op.attempts[max(op.attempts)]).state == "parked"
-            and a.wait
-            and a.wait.get("yield_on_steer")
-            for op in self.state.operations.values()
+        declared_wait = (
+            not self.one_turn
+            and bool(inputs)
+            and any(
+                op.turn_id == self.state.active_turn_id
+                and (a := op.attempts[max(op.attempts)]).state == "parked"
+                and a.wait
+                and a.wait.get("yield_on_steer")
+                for op in self.state.operations.values()
+            )
         )
         if declared_wait:
             if len(inputs) == 256 and self.watermark > 256:
@@ -2358,7 +2364,7 @@ def drive(
     scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None)
     scope.thread.start()
     try:
-        driver = _Driver(store, session_id, runtime, scope)
+        driver = _Driver(store, session_id, runtime, scope, one_turn=_one_turn)
         while not scope.lost:
             try:
                 if not driver.step():

@@ -388,6 +388,8 @@ commit latch while renewing. Do not drive or poll while holding a host write
 transaction: the SDK cannot detect every opaque host transaction. Synchronous
 poll reentry while entering, holding or releasing this heartbeat's commit or
 poll latch raises RuntimeError immediately.
+Do not run concurrent native transactions on the raw connection shared with the
+runtime; this is unsupported, and the SDK does not promise to detect it.
 
 For opt-in observation interruption and read-only rendering, see
 [yielding an observation](session-kernel.md#yielding-an-observation-to-steering).
