@@ -1,9 +1,9 @@
 """Closed declarations, exact baseline readers, and unchanged undeclared SQL waits."""
 
-import subprocess
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha1
 from pathlib import Path
 from types import ModuleType
 
@@ -22,17 +22,16 @@ from .test_recovery_matrix import start
 from .test_yieldable_waits import YieldProvider, provider_runtime, steer, waiting_runtime
 
 BASELINE = "6cbc06b61d869e836ccf946984a29f70bcdc547b"
+BASELINE_BLOBS = {"records": "532662aec84014693e4b0c1700ac696e9e790708", "kernel": "30c102ea0efd0e1355b4e291bc8826969286848d"}
 
 
 def baseline_module(name, monkeypatch):
-    root = Path(__file__).resolve().parents[2]
-    source = subprocess.run(
-        ["git", "show", f"{BASELINE}:src/vv_agent/session/{name}.py"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    path = Path(__file__).resolve().parent / "fixtures" / "baseline_0341" / f"{name}.py.txt"
+    data = path.read_bytes()
+    expected = BASELINE_BLOBS[name]
+    actual = sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    assert actual == expected, f"Baseline Git blob SHA-1 mismatch for {path.name}: expected {expected}, got {actual}"
+    source = data.decode("utf-8")
     module = ModuleType(f"vv_agent.session._baseline_{name}")
     module.__package__ = "vv_agent.session"
     monkeypatch.setitem(sys.modules, module.__name__, module)
