@@ -84,6 +84,7 @@ def test_sql_clock_controls_records_inbox_and_lease_fencing(tmp_path, file_store
         assert store.read("s").records[0].created_ms == clock.ms
         assert not store.peek_inbox("s")
         lease = store.acquire("s", owner="first", ttl_ms=100)
+        assert lease is not None
         assert lease.expires_at_ms == clock.ms + 100
         with store.heartbeat_store() as other:
             assert other.clock is clock
@@ -98,6 +99,7 @@ def test_sql_clock_controls_records_inbox_and_lease_fencing(tmp_path, file_store
             assert other.peek_inbox("s")[0].received_ms == 100_000
             clock.advance(100)
             replacement = other.acquire("s", owner="second", ttl_ms=100)
+            assert replacement is not None
             assert replacement.epoch == lease.epoch + 1
             with pytest.raises(LeaseLost):
                 store.renew(renewed.lease, ttl_ms=100)
@@ -181,6 +183,7 @@ def test_heartbeat_deadline_uses_injected_monotonic_time(tmp_path):
         store.install_schema()
         start(store)
         lease = store.acquire("s", owner="first", ttl_ms=100)
+        assert lease is not None
         heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, 0.01, clock=clock)
         with heartbeat.committing() as captured:
             assert captured is lease
@@ -195,7 +198,7 @@ def test_wait_for_lease_uses_injected_sleep(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
         store.install_schema()
         start(store)
-        store.acquire("s", owner="other", ttl_ms=120)
+        assert store.acquire("s", owner="other", ttl_ms=120) is not None
         rt = runtime(store, [LLMResponse("done")], clock=clock, lease_keeper=keeper, invoker=invoker)
         assert kernel.drive(store, "s", runtime=rt, _wait_for_lease=True)
         assert clock.ms == 100_150
@@ -203,11 +206,13 @@ def test_wait_for_lease_uses_injected_sleep(tmp_path):
 
 def test_child_wait_uses_runtime_clock(monkeypatch):
     clock = ManualClock()
-    tasks = ChildTasks(None, "parent", runtime(None, [], clock=clock))
-    running = SimpleNamespace(is_running=lambda: True)
-    monkeypatch.setattr(tasks, "get", lambda _sid: running)
-    assert tasks.wait("child", timeout=0.025) is running
-    assert clock.monotonic() == 0.03
+    with SQLiteStore.standalone(":memory:", clock=clock) as store:
+        store.install_schema()
+        tasks = ChildTasks(store, "parent", runtime(store, [], clock=clock))
+        running = SimpleNamespace(is_running=lambda: True)
+        monkeypatch.setattr(tasks, "get", lambda _sid: running)
+        assert tasks.wait("child", timeout=0.025) is running
+        assert clock.monotonic() == 0.03
 
 
 def test_app_server_status_uses_thread_store_clock(tmp_path):
