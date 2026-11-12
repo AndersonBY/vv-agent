@@ -11,7 +11,7 @@ from heapq import heapify, heappop, heappush
 from typing import TYPE_CHECKING
 
 from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages, retained_start
-from vv_agent.runtime.tool_results import build_image_notification
+from vv_agent.kernel._tool_behavior import build_image_notification
 from vv_agent.types import AgentTask, Message, ToolExecutionResult
 
 from .records import InboxItem, _MessageCache, copy_json, digest
