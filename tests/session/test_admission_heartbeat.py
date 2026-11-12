@@ -34,6 +34,14 @@ def elapsed_lease_clock(monkeypatch):
     monkeypatch.setattr(PostgresStore, "clock_sql", property(lambda _: str(monotonic_ns() // 1_000_000)))
 
 
+@pytest.fixture(scope="module")
+def local_counting_ready():
+    # Admission timing starts after the real local counting dependencies are ready.
+    from vv_agent.memory.token_utils import count_messages_tokens
+
+    count_messages_tokens([{"role": "user", "content": "admission timing readiness"}], model="")
+
+
 def wait_until(callback, *, timeout=5, future=None):
     deadline = monotonic() + timeout
     while not callback():
@@ -107,6 +115,7 @@ def observe_three_ttls(store):
     return initial, expiries
 
 
+@pytest.mark.usefixtures("local_counting_ready")
 @pytest.mark.parametrize("competitor", [False, True])
 @pytest.mark.parametrize("phase", ["prepare", "before_commit"])
 def test_four_children_survive_three_real_ttls(store, database, competitor, phase, caplog):
@@ -174,6 +183,7 @@ def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
     assert {r.writer_epoch for r in rows(store)[1:]} == {initial[1]}
 
 
+@pytest.mark.usefixtures("local_counting_ready")
 def test_real_expiry_fences_old_admission_and_preserves_new_schedule(store, database, monkeypatch):
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
