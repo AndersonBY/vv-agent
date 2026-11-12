@@ -132,7 +132,20 @@ Execution/task/usage/result values are implemented once in
 `kernel/_execution_values.py`. Existing module and root exports resolve to those
 actual objects; the public inventory target `vv_agent.types.AgentResult` remains
 valid. This ownership change preserves wire versions, fields, bounds, diagnostics
-and bytes. The separate W9.6 `core_types.py` rename has not been applied.
+and bytes. `core_types.py` holds the same 47 value exports; `types.py` explicitly
+forwards every existing binding, including consumed private helpers, to those
+same objects. The canonical W9.6 exception retains `vv_agent.types` until the
+next Python package major release; it adds no wire reader, defaults or fixture
+version. See the contract's [allowed adaptations](https://github.com/AndersonBY/vv-agent-contract/blob/09e348b/docs/parity-contract.md#allowed-adaptations-and-evidence).
+
+When imported as top-level `types` from the package working directory, the old
+file loads the interpreter's actual standard-library module without loading
+`vv_agent`. Its bootstrap uses public `PathFinder` and the stdlib location of
+`os.__file__`, without `sysconfig`, `importlib.util`, private `sys` attributes or
+layout fallbacks. This bounded mapping covers the tested ordinary CPython
+installations; Windows, PyPy and frozen/embedded or zip-only distributions have
+not been verified. `tests/test_core_types_forwarding.py` checks real-cwd startup,
+export identity and stdlib metadata; the existing public manifest remains valid.
 
 After-cycle values and durable denial-state validation are implemented once in
 `kernel/_cycle_values.py`; existing lifecycle and root bindings resolve to the

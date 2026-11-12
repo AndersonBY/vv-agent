@@ -107,6 +107,9 @@ Compaction capacity and integer coercion are owned by
 `kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
 provides Runtime with the current settings projection; its constructor remains
 the single source of defaults and policy normalization.
+`memory/prepared_tokens.py` can bind a local encoder and formatter before
+counting. It shares the existing token-counting algorithm and is currently an
+opt-in assembly seam; the default replay path still uses the ordinary counter.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
@@ -114,8 +117,10 @@ with their existing validation and wire versions. The module imports only stdlib
 and other core values. `types.py` remains the explicit existing export surface for
 the same actual objects, including the canonical `vv_agent.types.AgentResult`
 binding. Private helper exports remain only where SDK or producer callers use them.
-The W9.6 rename to `core_types.py` remains pending; this extraction retains the
-current `types.py` path and does not resolve its stdlib-name collision.
+`core_types.py` owns that export surface. `types.py` forwards the existing
+bindings until the next Python package major release. When found as top-level
+`types` from the package working directory, it loads the actual standard-library
+module without importing the agent package; see the Python contract mapping.
 
 After-cycle decisions, native outcomes, detached snapshots, validation errors and
 durable denial-state helpers are owned by `kernel/_cycle_values.py`. Their
