@@ -72,6 +72,23 @@ tests are skipped by default:
 uv run pytest
 ```
 
+### Deterministic session simulation
+
+`tests/sim/` schedules the real driver and SQL stores with scripted external
+services. See its README for covered invariants, replay reports and limits.
+Use a small explicit sample during local development:
+
+```bash
+uv run python scripts/session_simulation.py --seeds 5 --workers 2
+uv run pytest tests/sim/test_mutations.py -k sqlite -q
+```
+
+The PR smoke gate runs 1,000 independent SQLite-file seeds within 60 seconds,
+including process startup and tokenizer initialization. Each world uses one
+thread; separate processes run independent seeds. Full suites and the million-seed
+SQLite / 10,000-seed PostgreSQL campaigns run remotely. PostgreSQL acceptance
+requires a disposable database reached over TCP with password authentication.
+
 ### App Server changes
 
 Also check the CLI entry points and schema generation:

@@ -88,3 +88,6 @@ jobs:
             tests/test_tool_metadata_contract.py \
             tests/test_app_server_contract_parity.py \
             tests/test_runner_events_producer_parity.py
+
+      - name: Seeded real-store simulation smoke
+        run: timeout 60s uv run pytest tests/sim -k smoke -q -s
