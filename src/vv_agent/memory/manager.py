@@ -21,18 +21,17 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._compaction_text import build_compacted_tool_content, has_recovery_envelope
 from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages, retained_start
 from vv_agent.kernel._message_values import COMPACTION_METADATA_KEY, Message, ToolArtifactRef, validate_compaction_metadata
-from vv_agent.kernel._tool_values import ToolExecutionResult
-from vv_agent.memory.microcompact import (
+from vv_agent.kernel._microcompaction import (
     EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
     MicrocompactPlan,
-    build_compacted_tool_content,
-    has_recovery_envelope,
     plan_microcompact,
     replace_with_compacted_marker,
 )
+from vv_agent.kernel._tool_values import ToolExecutionResult
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
 from vv_agent.microcompaction import MicrocompactionPolicy
