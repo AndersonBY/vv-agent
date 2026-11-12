@@ -58,6 +58,7 @@ from .providers import FunctionProvider, Provider
 from .records import MODEL_BINDING, Record, copy_json, validate
 from .reducer import ExecutionState
 from .store import SessionStore
+from .timing import Clock, Invoker, LeaseKeeper, SystemClock, ThreadInvoker, ThreadLeaseKeeper
 
 
 class RuntimeNotReady(Exception):
@@ -107,6 +108,9 @@ class Runtime:
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None
     wake: Callable[[str], None] = lambda _sid: None
     memory_manager: MemoryManager = field(default_factory=MemoryManager)
+    clock: Clock = field(default_factory=SystemClock)
+    lease_keeper: LeaseKeeper = field(default_factory=ThreadLeaseKeeper)
+    invoker: Invoker = field(default_factory=ThreadInvoker)
 
     def __post_init__(self) -> None:
         if (
@@ -218,6 +222,9 @@ class Runtime:
             model_resolver=self.model_resolver,
             children=self.children,
             host_bindings=self.host_bindings,
+            clock=self.clock,
+            lease_keeper=self.lease_keeper,
+            invoker=self.invoker,
             handler_version=self.handler_version,
             ttl_ms=self.ttl_ms,
             heartbeat_seconds=self.heartbeat_seconds,

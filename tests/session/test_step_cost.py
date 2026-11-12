@@ -59,7 +59,7 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     # Freeze observations, not the decisions being compared; both stores use the same clock.
     monkeypatch.setattr(PostgresStore, "clock_sql", "100000")
     monkeypatch.setattr(SQLiteStore, "clock_sql", "100000")
-    monkeypatch.setattr(kernel.time, "monotonic_ns", lambda: 100_000_000)
+    monkeypatch.setattr("vv_agent.session.timing.time.monotonic_ns", lambda: 100_000_000)
     decisions = []
     micro = MemoryManager.plan_microcompaction
     summary = MemoryManager.plan_summary

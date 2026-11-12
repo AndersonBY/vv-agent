@@ -8,7 +8,6 @@ import traceback
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -20,6 +19,7 @@ from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Lease, LeaseLost, LeasePoll, SessionStore, SessionTx
+from vv_agent.session.timing import SystemClock
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
@@ -438,9 +438,11 @@ def test_private_memory_renew_boundary_holds_no_commit_or_state_latch():
         assert not worker.is_alive() and not errors and not heartbeat.lost
 
 
-def _heartbeat(factory=None):
+def _heartbeat(factory=None, *, clock=None):
     lease = Lease("s", "owner", 1, 15000)
-    return kernel._LeaseHeartbeat(lease, factory or (lambda: nullcontext(cast(SessionStore, PollStore()))), 15000, 0.25, now_ms=0)
+    return kernel._LeaseHeartbeat(
+        lease, factory or (lambda: nullcontext(cast(SessionStore, PollStore()))), 15000, 0.25, now_ms=0, clock=clock
+    )
 
 
 class PollStore:
@@ -614,14 +616,18 @@ def test_stop_before_publication_never_marks_success_ready():
     assert heartbeat.ready.is_set() and not heartbeat.successful_ready and heartbeat.lease is old
 
 
-def test_deadline_uses_call_start_and_identity_change_is_terminal(monkeypatch):
-    clock = [100.0]
-    monkeypatch.setattr(kernel, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    heartbeat = _heartbeat()
+def test_deadline_uses_call_start_and_identity_change_is_terminal():
+    now = [100.0]
+
+    class Clock(SystemClock):
+        def monotonic(self):
+            return now[0]
+
+    heartbeat = _heartbeat(clock=Clock())
 
     class Store:
         def renew(self, lease, *, ttl_ms):
-            clock[0] = 110.0
+            now[0] = 110.0
             return LeasePoll(replace(lease, expires_at_ms=20000), 5000, 0, ())
 
     heartbeat.poll(Store())

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from threading import RLock
 
 from .sql import SQLStore
+from .timing import Clock, SystemClock
 
 DDL = """
 CREATE TABLE sk_session (
@@ -73,9 +73,10 @@ class SQLiteStore(SQLStore):
     clock_sql = "session_now_ms()"
 
     def heartbeat_store(self):
-        return nullcontext(self) if self.path == ":memory:" else SQLiteStore.standalone(self.path)
+        return nullcontext(self) if self.path == ":memory:" else SQLiteStore.standalone(self.path, clock=self.clock)
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, clock: Clock | None = None):
+        self.clock = clock if clock is not None else SystemClock()
         self.path = path
         self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
@@ -87,15 +88,15 @@ class SQLiteStore(SQLStore):
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.execute("PRAGMA busy_timeout=5000")
-        self.connection.create_function("session_now_ms", 0, lambda: time.time_ns() // 1_000_000)
+        self.connection.create_function("session_now_ms", 0, self.clock.now_ms)
         self._connection_lock = RLock()
         self._epoch = 0
         self._depth = 0
 
     @classmethod
     @contextmanager
-    def standalone(cls, path: str) -> Iterator[SQLiteStore]:
-        store = cls(path)
+    def standalone(cls, path: str, *, clock: Clock | None = None) -> Iterator[SQLiteStore]:
+        store = cls(path, clock=clock)
         try:
             yield store
         finally:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import replace
@@ -67,6 +66,7 @@ from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, mode
 from .sql import SQLSessionTx, SQLStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
+from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
 
 MODEL_REJECTION_BACKOFF_SECONDS = 2
 
@@ -77,7 +77,6 @@ def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[Sto
 
 FACTORY_LEASE_TTL_MS = 15000
 FACTORY_HEARTBEAT_SECONDS = 0.25
-HEARTBEAT_CLOSE_SECONDS = 6.0
 logger = logging.getLogger(__name__)
 
 
@@ -94,7 +93,11 @@ class _LeaseHeartbeat:
         heartbeat_seconds: float,
         *,
         now_ms: int | None = None,
+        clock: Clock | None = None,
+        lease_keeper: LeaseKeeper | None = None,
     ):
+        self.clock = clock if clock is not None else SystemClock()
+        self.lease_keeper = lease_keeper if lease_keeper is not None else ThreadLeaseKeeper()
         self.successful_ready = False
         self.lease = lease
         self.heartbeat_store = heartbeat_store
@@ -109,8 +112,8 @@ class _LeaseHeartbeat:
         self._commit_thread: int | None = None
         self.lost = False
         self.heartbeat_error: Exception | None = None
-        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-        self.expires_deadline = time.monotonic() + (lease.expires_at_ms - now_ms) / 1000
+        now_ms = self.clock.now_ms() if now_ms is None else now_ms
+        self.expires_deadline = self.clock.monotonic() + (lease.expires_at_ms - now_ms) / 1000
         self.thread = threading.Thread(target=self._heartbeat, daemon=True, name="session-heartbeat")
 
     def poll(self, store: SessionStore):
@@ -128,7 +131,7 @@ class _LeaseHeartbeat:
                         if self.stop.is_set():
                             raise HeartbeatStopped("heartbeat stopped")
                         lease = self.lease
-                    started = time.monotonic()
+                    started = self.clock.monotonic()
                     poll = store.renew(lease, ttl_ms=self.ttl_ms)
                     with self.lock:
                         if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch) != (
@@ -162,7 +165,7 @@ class _LeaseHeartbeat:
                             raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
                         if self.stop.is_set():
                             raise HeartbeatStopped("heartbeat stopped")
-                        if time.monotonic() >= self.expires_deadline:
+                        if self.clock.monotonic() >= self.expires_deadline:
                             self.lost = True
                             raise LeaseLost("heartbeat lease expired")
                         lease = self.lease
@@ -184,7 +187,7 @@ class _LeaseHeartbeat:
                     store._rows("SELECT set_config('lock_timeout','250ms',false),set_config('statement_timeout','1000ms',false)")
                 while not self.stop.is_set():
                     with self.lock:
-                        if self.heartbeat_error is not None and self.expires_deadline - time.monotonic() <= max(
+                        if self.heartbeat_error is not None and self.expires_deadline - self.clock.monotonic() <= max(
                             2 * self.heartbeat_seconds, 1.0
                         ):
                             raise self.heartbeat_error
@@ -195,7 +198,7 @@ class _LeaseHeartbeat:
                             raise
                         with self.lock:
                             self.heartbeat_error = exc
-                            if self.expires_deadline - time.monotonic() <= max(2 * self.heartbeat_seconds, 1.0):
+                            if self.expires_deadline - self.clock.monotonic() <= max(2 * self.heartbeat_seconds, 1.0):
                                 raise
                     if self.stop.wait(self.heartbeat_seconds):
                         break
@@ -208,11 +211,14 @@ class _LeaseHeartbeat:
         finally:
             self.ready.set()
 
+    def start(self) -> None:
+        self.lease_keeper.start(self)
+
     def close(self) -> None:
         with self.lock:
             self.stop.set()
-        self.thread.join(timeout=HEARTBEAT_CLOSE_SECONDS)
-        if self.thread.is_alive():
+        self.lease_keeper.close(self)
+        if self.lease_keeper.is_alive(self):
             with self.lock:
                 self.lost = True
             raise LeaseLost("heartbeat did not stop; lease cannot be released or handed off")
@@ -220,7 +226,15 @@ class _LeaseHeartbeat:
 
 class _Scope(_LeaseHeartbeat):
     def __init__(self, lease: Lease, runtime: Runtime, *, now_ms: int | None = None):
-        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds, now_ms=now_ms)
+        super().__init__(
+            lease,
+            runtime.heartbeat_store,
+            runtime.ttl_ms,
+            runtime.heartbeat_seconds,
+            now_ms=now_ms,
+            clock=runtime.clock,
+            lease_keeper=runtime.lease_keeper,
+        )
         self.runtime = runtime
         self.token = CancellationToken()
         self.turn_id: str | None = None
@@ -244,29 +258,13 @@ class _Scope(_LeaseHeartbeat):
 
 
 def _invoke(scope: _Scope, callback: Callable[[], Outcome], timeout: float) -> Outcome:
-    done = threading.Event()
-    result: list[Outcome] = []
-
-    def run() -> None:
-        try:
-            result.append(callback())
-        except Exception as exc:
-            result.append(Unknown(f"{type(exc).__name__}: external outcome unavailable"))
-        finally:
-            done.set()
-
-    worker = threading.Thread(target=run, daemon=True, name="session-external-call")
-    worker.start()
-    deadline = time.monotonic() + timeout
-    while not done.wait(0.02):
-        if scope.token.cancelled:
-            if done.wait(scope.runtime.cancellation_grace):
-                break
-            return Unknown("cancellation without confirmed external stop")
-        if time.monotonic() >= deadline:
-            return Unknown("external call timeout")
-    worker.join()
-    return result[0] if result else Unknown("external worker exited without a receipt")
+    return scope.runtime.invoker.invoke(
+        callback,
+        timeout=timeout,
+        token=scope.token,
+        cancellation_grace=scope.runtime.cancellation_grace,
+        clock=scope.runtime.clock,
+    )
 
 
 class _Driver:
@@ -275,7 +273,7 @@ class _Driver:
         self.one_turn = one_turn
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
-        self.active_since = time.monotonic_ns()
+        self.active_since = self.runtime.clock.monotonic_ns()
         self.active_tid: str | None = None
 
     def load_state(self) -> None:
@@ -315,7 +313,7 @@ class _Driver:
     def bind_turn(self) -> None:
         tid = self.state.active_turn_id
         if tid != self.active_tid:
-            self.active_since = time.monotonic_ns()
+            self.active_since = self.runtime.clock.monotonic_ns()
             self.active_tid = tid
         self.scope.turn_id = tid
         self.scope.generation = self.state.turns[tid].start._payload["generation"] if tid else None
@@ -354,18 +352,21 @@ class _Driver:
                         "observation": self.state.usage_observations.get(meter, 0) + 1,
                         "mode": "cumulative",
                         "source": "kernel-active-scope",
-                        "usage": {"elapsed_ms": (time.monotonic_ns() - self.active_since) // 1000000, "host_cost": cost},
+                        "usage": {
+                            "elapsed_ms": (self.runtime.clock.monotonic_ns() - self.active_since) // 1000000,
+                            "host_cost": cost,
+                        },
                     },
                 ),
                 *records,
             ]
         timings: list[tuple[str, float, str, str | None]] = []
-        atomic_start = time.monotonic_ns()
+        atomic_start = self.runtime.clock.monotonic_ns()
         atomic_error = None
 
         @contextmanager
         def phase(name: str):
-            begin = time.monotonic_ns()
+            begin = self.runtime.clock.monotonic_ns()
             error = None
             try:
                 yield
@@ -373,7 +374,7 @@ class _Driver:
                 error = type(exc).__name__
                 raise
             finally:
-                timings.append((name, (time.monotonic_ns() - begin) / 1_000_000, "error" if error else "ok", error))
+                timings.append((name, (self.runtime.clock.monotonic_ns() - begin) / 1_000_000, "error" if error else "ok", error))
 
         try:
             with ExitStack() as latch, self.store.atomic() as tx:
@@ -400,7 +401,7 @@ class _Driver:
             atomic_error = type(exc).__name__
             raise
         finally:
-            atomic_ms = (time.monotonic_ns() - atomic_start) / 1_000_000
+            atomic_ms = (self.runtime.clock.monotonic_ns() - atomic_start) / 1_000_000
             source = next((r for r in reversed(records) if r.operation_id), None)
             request_digest = source._payload.get("request_digest") if source else None
             if source and source.operation_id in self.state.operations:
@@ -468,7 +469,9 @@ class _Driver:
         retained_ms = saved._payload["usage"].get("elapsed_ms", 0) if saved else 0
         initial = evaluator.snapshot()
         initial = replace(
-            initial, elapsed_ms=initial.elapsed_ms + max(0, (time.monotonic_ns() - self.active_since) // 1000000 - retained_ms)
+            initial,
+            elapsed_ms=initial.elapsed_ms
+            + max(0, (self.runtime.clock.monotonic_ns() - self.active_since) // 1000000 - retained_ms),
         )
         return BudgetEvaluator(evaluator.limits, initial_usage=initial, host_cost_meter=self.runtime.config.host_cost_meter)
 
@@ -2305,14 +2308,45 @@ def drive(
     _one_turn: bool = False,
     _wait_for_lease: bool = False,
 ) -> bool:
+    """Run the session through the shared lease-fenced driver."""
+    return _drive(
+        store,
+        session_id,
+        runtime=runtime,
+        failure_backoff_ms=failure_backoff_ms,
+        _one_turn=_one_turn,
+        _wait_for_lease=_wait_for_lease,
+    )
+
+
+def _drive(
+    store: SessionStore,
+    session_id: str,
+    *,
+    runtime: Runtime | Callable[[str], Runtime],
+    failure_backoff_ms: int = 1000,
+    _one_turn: bool = False,
+    _wait_for_lease: bool = False,
+    clock: Clock | None = None,
+    lease_keeper: LeaseKeeper | None = None,
+) -> bool:
+    """Drive with runtime bindings and optional factory-admission seams."""
     if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
         raise ValueError("failure_backoff_ms must be a positive integer")
     scheduled = not isinstance(runtime, Runtime)
+    clock = clock if clock is not None else runtime.clock if isinstance(runtime, Runtime) else SystemClock()
+    lease_keeper = (
+        lease_keeper
+        if lease_keeper is not None
+        else runtime.lease_keeper
+        if isinstance(runtime, Runtime)
+        else ThreadLeaseKeeper()
+    )
     ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else FACTORY_LEASE_TTL_MS
     lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     delay = 0.05
     while lease is None and _wait_for_lease:
-        time.sleep(delay)
+        clock.sleep(delay)
         delay = min(1.0, delay * 2)
         lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     if lease is None:
@@ -2327,9 +2361,11 @@ def drive(
                 lambda: heartbeat,
                 ttl_ms,
                 FACTORY_HEARTBEAT_SECONDS,
+                clock=clock,
+                lease_keeper=lease_keeper,
                 now_ms=store._now() if isinstance(store, SQLStore) else None,
             )
-            build.thread.start()
+            build.start()
             try:
                 if not build.ready.wait(ttl_ms / 1000):
                     raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
@@ -2349,7 +2385,7 @@ def drive(
                 store.release(lease)
             return True
         except Exception as exc:
-            if build is not None and build.thread.is_alive():
+            if build is not None and build.lease_keeper.is_alive(build):
                 raise
             try:
                 _defer_after_error(store, lease, failure_backoff_ms, exc)
@@ -2357,12 +2393,12 @@ def drive(
                 store.release(lease)
             raise
         except BaseException:
-            if build is None or not build.thread.is_alive():
+            if build is None or not build.lease_keeper.is_alive(build):
                 with suppress(Exception):
                     store.release(lease)
             raise
     scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None)
-    scope.thread.start()
+    scope.start()
     try:
         driver = _Driver(store, session_id, runtime, scope, one_turn=_one_turn)
         while not scope.lost:

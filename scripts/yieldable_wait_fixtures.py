@@ -19,7 +19,7 @@ from vv_agent.types import LLMResponse, ToolExecutionResult
 
 def produce():
     cases = []
-    with patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000):
+    with patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000):
         for name, count in (
             ("single_child", 1),
             ("child_batch", 3),

@@ -9,11 +9,12 @@ from time import monotonic, monotonic_ns
 
 import pytest
 
-from vv_agent.session import children, kernel
+from vv_agent.session import children, kernel, timing
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import SessionSpec
 from vv_agent.session.sql import SQLSessionTx
 from vv_agent.session.store import LeaseLost
+from vv_agent.session.timing import SystemClock
 from vv_agent.types import LLMResponse
 
 from .helpers import runtime_turn_record
@@ -299,7 +300,7 @@ def test_factory_close_timeout_never_hands_off_or_releases(store, database, monk
     start(store)
     entered, finish = threading.Event(), threading.Event()
     threads, releases, model_calls = [], [], []
-    monkeypatch.setattr(kernel, "HEARTBEAT_CLOSE_SECONDS", 0.1)
+    monkeypatch.setattr(timing, "HEARTBEAT_CLOSE_SECONDS", 0.1)
     heartbeat_store = store.heartbeat_store
 
     @contextmanager
@@ -604,13 +605,19 @@ def test_persistent_heartbeat_timeouts_exhaust_margin_and_abort_append(store, da
     assert len(attempts) == count
 
 
-def test_committing_refuses_expired_published_lease(store, monkeypatch):
+def test_committing_refuses_expired_published_lease(store):
     start(store)
     lease = store.acquire("s", owner="old", ttl_ms=100)
     assert lease is not None
-    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, INTERVAL, now_ms=store._now())
+    now = [0.0]
+
+    class Clock(SystemClock):
+        def monotonic(self):
+            return now[0]
+
+    heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, INTERVAL, now_ms=store._now(), clock=Clock())
     # A database wall-clock jump does not imply the local monotonic deadline elapsed.
-    monkeypatch.setattr(kernel.time, "monotonic", lambda: heartbeat.expires_deadline)
+    now[0] = heartbeat.expires_deadline
     with pytest.raises(LeaseLost, match="expired"), heartbeat.committing():
         pytest.fail("expired published lease admitted an append")
 

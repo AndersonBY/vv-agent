@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -621,12 +619,12 @@ class ChildTasks:
         )
 
     def wait(self, task_id: str, timeout: float | None = None):
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = None if timeout is None else self.runtime.clock.monotonic() + timeout
         while True:
             record = self.get(task_id)
-            if record is None or not record.is_running() or (deadline is not None and time.monotonic() >= deadline):
+            if record is None or not record.is_running() or (deadline is not None and self.runtime.clock.monotonic() >= deadline):
                 return record
-            Event().wait(0.01)
+            self.runtime.clock.sleep(0.01)
 
     def handle(self, task_id: str) -> ChildTaskHandle:
         if self.get(task_id) is None:

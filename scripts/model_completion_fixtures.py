@@ -14,7 +14,7 @@ from vv_agent.session.sqlite import SQLiteStore
 
 def generate():
     cases = []
-    with patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000):
+    with patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000):
         for case in CASES:
             for declared in (None, False, True):
                 with SQLiteStore.standalone(":memory:") as store:

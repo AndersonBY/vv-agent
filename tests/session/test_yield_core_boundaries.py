@@ -161,7 +161,7 @@ class FixedDatetime(datetime):
 @pytest.mark.parametrize("provider_wait", [False, True])
 def test_undeclared_wait_log_is_byte_identical_to_0341(monkeypatch, provider_wait):
     old = baseline_module("kernel", monkeypatch)
-    monkeypatch.setattr(kernel.time, "monotonic_ns", lambda: 100_000_000)
+    monkeypatch.setattr("vv_agent.session.timing.time.monotonic_ns", lambda: 100_000_000)
     monkeypatch.setattr("vv_agent.prompt.builder.datetime", FixedDatetime)
 
     def produce(driver):
