@@ -5,10 +5,11 @@ from copy import deepcopy
 from hashlib import sha256
 
 import pytest
-from jsonschema import ValidationError
+from jsonschema import Draft202012Validator
+from jsonschema.validators import extend
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._record_schema import _CHECKS, HANDLE
+from vv_agent.kernel._record_schema import _CHECKS, _SCHEMAS, HANDLE
 from vv_agent.kernel._schema import _compile_check
 from vv_agent.session import records
 from vv_agent.session.kernel import read_state
@@ -126,9 +127,14 @@ def example(schema):
     return True if kind == "boolean" else None
 
 
+StrictValidator = extend(
+    Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", lambda _, value: type(value) is int)
+)
+
+
 @pytest.mark.parametrize(
     "validator",
-    list(records._VALIDATORS.values()),
+    [StrictValidator(schema) for schema in _SCHEMAS],
     ids=lambda v: str(list(v.schema.get("properties", v.schema))),
 )
 def test_compiled_checks_match_jsonschema(validator):
@@ -138,21 +144,13 @@ def test_compiled_checks_match_jsonschema(validator):
         valid = validator.is_valid(candidate)
         assert check(candidate) == valid, candidate
         if not valid:
-            with pytest.raises(ValidationError) as reference:
-                validator.validate(candidate)
-            with pytest.raises(RecordError) as actual:
+            with pytest.raises(RecordError, match=r"^invalid session schema$"):
                 records.validate(candidate, validator.schema, canonical=False)
-            cause = actual.value.__cause__
-            assert isinstance(cause, ValidationError)
-            assert str(actual.value) == str(reference.value)
-            assert cause.schema is reference.value.schema
-            assert list(cause.path) == list(reference.value.path)
-            assert list(cause.schema_path) == list(reference.value.schema_path)
 
 
 @pytest.mark.parametrize("variant", HANDLE["oneOf"])
 def test_compiled_checks_match_all_nested_handles(variant):
-    validator = records._StrictValidator(variant)
+    validator = StrictValidator(variant)
     check = _compile_check(variant)
     value = example(variant)
     for candidate in [value, *mutations(value)]:

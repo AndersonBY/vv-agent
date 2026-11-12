@@ -49,9 +49,11 @@ schema definitions and their compiled-check registry in
 `src/vv_agent/kernel/_record_schema.py`, using the standard-library-only compiler
 in `src/vv_agent/kernel/_schema.py`. Both modules support ordinary package imports
 without loading the outer SDK. `session/records.py` consumes these same schema
-objects and checks; its jsonschema validators provide the existing diagnostic
-errors over those objects. Outer schema imports still refer to the core objects
-while record-layer extraction remains incomplete.
+objects and checks. `kernel/_record_codec.py` owns standard-library object
+loading, duplicate-member rejection and schema validation. Closed-schema
+failures use the contract 39 diagnostic `invalid session schema`; specific
+semantic/parser errors and canonical bytes remain unchanged. Record classes,
+retained fragments and orjson interning still reside outside core.
 
 Message values, artifact references, cursors and compaction evidence validation
 are owned by `kernel/_message_values.py`; the strict Message decoder is owned by
@@ -67,8 +69,7 @@ library and the existing canonical JSON and Message values. Existing `types.py`
 and root bindings refer to the same actual classes and enums; compaction memory
 and reducer result validation import them directly from core. Unknown/null field,
 metadata, status, recovery-pointer and byte-size rules remain part of this one
-implementation. Tool execution, artifact persistence and compaction planning
-remain outside core.
+implementation. Tool execution and artifact persistence remain outside core.
 
 Model settings, tool choice, response format and retry settings are owned by
 `kernel/_model_settings.py`. Microcompaction policy and normalization are owned by
@@ -88,8 +89,9 @@ import those budget objects directly from core without loading the evaluator.
 
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
-reducer imports the core renderer. Compaction planning, Message mutation,
-workspace I/O, callbacks and token counting remain outside core.
+reducer imports the core renderer. `kernel/_microcompaction.py` owns candidate
+planning and Message replacement using the existing estimator callbacks.
+Workspace I/O, summary orchestration and token counting remain outside core.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
@@ -103,8 +105,8 @@ current `types.py` path and does not resolve its stdlib-name collision.
 Record Message and model-settings validation import the actual core values
 directly. Record task decoding can consume the authoritative `AgentTask` and
 `SubAgentConfig` from `kernel/_execution_values.py`; the existing `types.py`
-bindings resolve to those same objects. Record codecs and diagnostics are a separate
-extraction boundary. The reducer still depends on context, memory/tokenizer,
+bindings resolve to those same objects. Record classes and retained caches still
+require extraction. The reducer still depends on context, memory/tokenizer,
 lifecycle, budget and event code; SQL stores and the execution driver remain
 under `session/`. These extractions do not establish a core-only simulation or
 complete W9. LocalWorker convergence belongs to W4/P3.
@@ -184,8 +186,9 @@ cycle reported that metric.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/vv_agent/kernel/_schema.py` | Standard-library-only compiler for the closed session-schema vocabulary; record codecs and validation diagnostics remain outside core. |
-| `src/vv_agent/kernel/_record_schema.py` | Authoritative closed session schemas and compiled checks; outer record diagnostics use these same objects. |
+| `src/vv_agent/kernel/_schema.py` | Standard-library-only compiler for the closed session-schema vocabulary. |
+| `src/vv_agent/kernel/_record_schema.py` | Authoritative closed session schemas and compiled checks. |
+| `src/vv_agent/kernel/_record_codec.py` | Schema rejection, duplicate-checking object loading and concise contract 39 diagnostics. |
 | `src/vv_agent/kernel/_canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
 | `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |

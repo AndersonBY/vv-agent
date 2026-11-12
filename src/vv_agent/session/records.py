@@ -9,12 +9,13 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
-import jiter
 import orjson
-from jsonschema import Draft202012Validator, ValidationError
-from jsonschema.validators import extend
 
 from vv_agent.kernel._canonical_json import _stdlib_compatible, canonical_json_bytes, utf16_sort_key
+from vv_agent.kernel._model_settings import ModelSettings
+from vv_agent.kernel._record_codec import RecordError as RecordError
+from vv_agent.kernel._record_codec import _load as _load
+from vv_agent.kernel._record_codec import validate as validate
 from vv_agent.kernel._record_schema import _CHECKS as _CHECKS
 from vv_agent.kernel._record_schema import _SCHEMAS as _SCHEMAS
 from vv_agent.kernel._record_schema import APP_SERVER_ATTRIBUTES as APP_SERVER_ATTRIBUTES
@@ -32,14 +33,10 @@ from vv_agent.kernel._record_schema import SEED as SEED
 from vv_agent.kernel._record_schema import SEED_POLICIES as SEED_POLICIES
 from vv_agent.kernel._record_schema import TASK_SESSION_METADATA as TASK_SESSION_METADATA
 from vv_agent.kernel._record_schema import nullable as nullable
-from vv_agent.model_settings import ModelSettings
 
 if TYPE_CHECKING:
-    from vv_agent.types import AgentTask, Message
-
-
-class RecordError(ValueError):
-    pass
+    from vv_agent.kernel._message_values import Message
+    from vv_agent.types import AgentTask
 
 
 def copy_json(value: Any) -> Any:
@@ -126,7 +123,7 @@ class _MessageCache:
         return b"".join(parts)
 
     def parse(self, value: dict[str, Any]) -> Message:
-        from vv_agent.types import Message
+        from vv_agent.kernel._message_values import Message
 
         cached = self._decoded.get(id(value))
         if cached is None:
@@ -156,47 +153,6 @@ def inherited_seed_policies(attributes: dict[str, Any]) -> dict[str, bool]:
     """Derivation freezes each source choice, including an undeclared source's false."""
     seed = attributes.get("seed", {})
     return {name: seed.get(name, False) for name in SEED_POLICIES}
-
-
-_StrictValidator = extend(
-    Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", lambda _, value: type(value) is int)
-)
-_VALIDATORS = {id(schema): _StrictValidator(schema) for schema in _SCHEMAS}
-
-
-def validate(value: Any, schema: dict[str, Any], *, canonical: bool = True) -> None:
-    try:
-        if canonical:
-            canonical_json_bytes(value)
-        if not _CHECKS[id(schema)](value):
-            _VALIDATORS[id(schema)].validate(value)
-    except (ValueError, TypeError, ValidationError) as exc:
-        # jsonschema.ValidationError and the existing canonical codec have different bases.
-        raise RecordError(str(exc)) from exc
-
-
-def _load(body: bytes, *, strict: bool = False) -> dict[str, Any]:
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in items:
-            if key in result:
-                raise RecordError(f"duplicate field: {key}")
-            result[key] = value
-        return result
-
-    try:
-        try:
-            value = jiter.from_json(body, catch_duplicate_keys=True, cache_mode="all", allow_inf_nan=not strict)
-        except (ValueError, TypeError):
-            if strict:
-                raise
-            # Preserve the existing accepted inputs and error messages on invalid JSON.
-            value = json.loads(body, object_pairs_hook=pairs)
-    except (ValueError, UnicodeError) as exc:
-        raise RecordError(str(exc)) from exc
-    if not isinstance(value, dict):
-        raise RecordError("expected object")
-    return value
 
 
 def _check_digest(payload: dict[str, Any], field: str, encoded: bytes | None = None) -> bytes:
@@ -387,7 +343,7 @@ class Record:
         return self._task_value
 
     def task(self) -> AgentTask:
-        from vv_agent.model_settings import ResponseFormat
+        from vv_agent.kernel._model_settings import ResponseFormat
 
         task = self._task()
         settings = task.model_settings
@@ -474,7 +430,7 @@ class Record:
         encoded_fields = {}
         if self.kind == "session_created" and "seed" in self.payload["attributes"]:
             validate(self.payload["attributes"]["seed"], SEED, canonical=False)
-            from vv_agent.types import Message
+            from vv_agent.kernel._message_values import Message
 
             for message in self.payload["attributes"]["seed"].get("messages", []):
                 try:
@@ -519,7 +475,7 @@ class Record:
                 encoded = None
                 if self.kind == "op_planned" and self.payload["op_kind"] == "model" and messages is not None:
                     request = self.payload["request"]
-                    if isinstance(request.get("messages"), list):
+                    if isinstance(request.get("messages"), list) and _stdlib_compatible(request["messages"]):
                         encoded = _object_bytes(request, {"messages": messages.wire_array(request["messages"])})
                 encoded_fields[digest_field] = _check_digest(self.payload, digest_field, encoded)
         if self.kind == "input_applied":
@@ -529,10 +485,11 @@ class Record:
             validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
             if self.payload["stage"] == "before_memory" and messages is not None:
                 data = self.payload["data"]
-                try:
-                    encoded_fields["data"] = _object_bytes(data, {"messages": messages.wire_array(data["messages"])})
-                except (ValueError, TypeError) as exc:
-                    raise RecordError(str(exc)) from exc
+                if _stdlib_compatible(data["messages"]):
+                    try:
+                        encoded_fields["data"] = _object_bytes(data, {"messages": messages.wire_array(data["messages"])})
+                    except (ValueError, TypeError) as exc:
+                        raise RecordError(str(exc)) from exc
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
         return encoded_fields
@@ -561,13 +518,7 @@ class Record:
 
     @classmethod
     def _parse(cls, body: bytes, messages: _MessageCache | None = None) -> Record:
-        # Fragment reuse requires strict JSON; legacy/error paths retain the full encoder.
-        try:
-            value = _load(body, strict=messages is not None)
-        except (ValueError, TypeError):
-            if messages is None:
-                raise
-            value, messages = _load(body), None
+        value = _load(body)
         try:
             record = cls(**value)
         except TypeError as exc:

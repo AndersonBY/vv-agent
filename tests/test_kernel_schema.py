@@ -139,9 +139,7 @@ def test_record_schemas_and_checks_have_one_owner():
     ):
         assert getattr(records, name) is getattr(_record_schema, name), name
     assert records._CHECKS is _record_schema._CHECKS
-    assert records._VALIDATORS.keys() == _record_schema._CHECKS.keys() == {id(s) for s in _record_schema._SCHEMAS}
-    for schema in _record_schema._SCHEMAS:
-        assert records._VALIDATORS[id(schema)].schema is schema
+    assert _record_schema._CHECKS.keys() == {id(s) for s in _record_schema._SCHEMAS}
     assert _record_schema.PAYLOADS["input_applied"]["properties"]["input"] is _record_schema.INPUT_SCHEMA
     assert _record_schema.INPUT_PAYLOADS["provider_evidence"]["properties"]["handle"] is _record_schema.HANDLE
 
