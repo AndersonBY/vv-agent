@@ -139,6 +139,8 @@ def paired(store, database, agent, config, steps, *, cut=None):
     return old, new, rt
 
 
+@pytest.mark.capability("child-lifecycle")
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("batch", [False, True])
 @pytest.mark.parametrize("cut_at", ["before", "after", None])
 def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, batch, cut_at):
@@ -184,6 +186,8 @@ def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, b
     assert set(store.read_state("control")[0].child_completions) == keys
 
 
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("child-inheritance")
 @pytest.mark.parametrize("mode", ["as_tool", "configured"])
 def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database, tmp_path, mode):
     seen = []
@@ -259,6 +263,7 @@ def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database,
     assert new.budget_usage.tool_calls == old.budget_usage.tool_calls
 
 
+@pytest.mark.capability("agent-as-tool")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 def test_sdk_children_never_recursive_runner_or_parent_lease(store, database, tmp_path, monkeypatch, mode):
     child = Agent("worker", "Worker instructions.")
@@ -288,6 +293,7 @@ def test_sdk_children_never_recursive_runner_or_parent_lease(store, database, tm
     assert project_result(store, "control", "control/turn/initial", runtime=rt).final_output == old.final_output
 
 
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -309,6 +315,7 @@ def test_configured_child_argument_failure_parity(store, database, tmp_path, inv
     assert store.list_sessions() == ("control",)
 
 
+@pytest.mark.capability("sub-task-status")
 def test_sub_task_status_records_projection_parity(store, database, tmp_path):
     def status(request):
         child = json.loads(next(m.content for m in request.messages if m.role == "tool"))
@@ -336,6 +343,7 @@ def test_sub_task_status_records_projection_parity(store, database, tmp_path):
     assert rebuilt.child_tasks(store, "control").get("missing") is None
 
 
+@pytest.mark.capability("background-task")
 @pytest.mark.parametrize("cancel", [False, True])
 def test_background_handle_start_poll_wait_cancel_reconstruction(store, database, tmp_path, cancel):
     entered, release = Event(), Event()
@@ -392,6 +400,7 @@ def test_background_handle_start_poll_wait_cancel_reconstruction(store, database
     assert len([r for r in store.read_state("control")[1] if r.record.kind == "turn_ended"]) == 1
 
 
+@pytest.mark.capability("handoff")
 @pytest.mark.parametrize("depth", [0, 1, 2])
 def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, depth):
     third = Agent("third", "Third.")
@@ -435,6 +444,7 @@ def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, 
     assert before == {s: store.read(s).head_seq for s in store.list_sessions()}
 
 
+@pytest.mark.capability("shared-state")
 def test_shared_state_host_binding_restart_intentional_difference(store, database, tmp_path):
     class Host:
         def __deepcopy__(self, memo):
@@ -484,6 +494,7 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
     assert seen == [original, supplied]
 
 
+@pytest.mark.capability("shared-state")
 @pytest.mark.parametrize("change", ["replace", "delete", "arbitrary", "collision"])
 def test_host_binding_json_boundary_rejects_invalid_state(store, database, tmp_path, change):
     obj = object()
@@ -519,6 +530,7 @@ def test_host_binding_json_boundary_rejects_invalid_state(store, database, tmp_p
     )
 
 
+@pytest.mark.capability("workspace-backends")
 @pytest.mark.parametrize("streaming", [False, True])
 def test_s3_streaming_workspace_paired_producers(store, database, tmp_path, streaming):
     bodies = []
@@ -583,6 +595,8 @@ def test_s3_streaming_workspace_paired_producers(store, database, tmp_path, stre
     assert bodies and all(b.closed for b in bodies if b.source)
 
 
+@pytest.mark.capability("background-task")
+@pytest.mark.capability("child-lifecycle")
 @pytest.mark.parametrize("mode", ["configured", "batch", "async", "as_tool", "background"])
 def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, tmp_path, mode):
     entered, release = Event(), Event()
@@ -664,6 +678,7 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
     )
 
 
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("batch", [False, True])
 def test_configured_async_admission_status_and_late_delivery_parity(store, database, tmp_path, batch):
     entered, release = Event(), Event()
@@ -724,6 +739,7 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
     )
 
 
+@pytest.mark.capability("sub-task-status")
 def test_sub_task_status_message_continuation_and_wait_projection_parity(store, database, tmp_path):
     def status(request):
         payload = json.loads(next(m.content for m in request.messages if m.role == "tool"))
@@ -802,6 +818,8 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
     assert len([r for r in store.read_state(sid)[1] if r.record.kind == "turn_ended"]) == 2
 
 
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 def test_blocking_child_user_wait_is_durable_intentional_difference(store, database, tmp_path, mode):
     @function_tool
@@ -855,6 +873,7 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
     assert rt.child_tasks(store, "control").get(sid).outcome.final_answer == "child done"
 
 
+@pytest.mark.capability("handoff")
 @pytest.mark.parametrize("blocked", [False, True])
 def test_handoff_target_validation_state_and_events_parity(store, database, tmp_path, blocked):
     seen = []
@@ -970,6 +989,8 @@ def test_child_admission_closed_fields_and_rollback(store, database, tmp_path, m
     assert digest(admission["definition"]) == admission["definition_digest"] or mutation == "digest"
 
 
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("child-inheritance")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 @pytest.mark.parametrize("budget_stop", [False, True])
 def test_child_inherited_denial_and_budget_execute_real_producers(store, database, tmp_path, mode, budget_stop):
@@ -1006,6 +1027,7 @@ def test_child_inherited_denial_and_budget_execute_real_producers(store, databas
     assert new.status == old.status
 
 
+@pytest.mark.capability("child-lifecycle")
 def test_completion_projection_uses_authenticated_turn_not_later_continuation(store, database, tmp_path, monkeypatch):
     parent = configured()
     parent.model = "parent"
@@ -1050,6 +1072,7 @@ def test_completion_projection_uses_authenticated_turn_not_later_continuation(st
     assert len(builds) == 1, "only the executing parent needs tool registration; child result projection is read-only"
 
 
+@pytest.mark.capability("child-lifecycle")
 @pytest.mark.parametrize("cut", ["before_parent_inbox", "after_parent_inbox", "after_child_ack"])
 def test_sdk_completion_delivery_failure_cut_and_replay_parity(store, database, tmp_path, cut):
     steps = [

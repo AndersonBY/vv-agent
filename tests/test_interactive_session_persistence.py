@@ -21,6 +21,7 @@ def client(tmp_path, steps, store=None):
     )
 
 
+@pytest.mark.capability("interactive")
 def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tmp_path: Path):
     requests = []
 

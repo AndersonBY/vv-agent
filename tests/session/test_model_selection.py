@@ -69,6 +69,7 @@ def plans(store):
     ]
 
 
+@pytest.mark.capability("model-selection")
 @pytest.mark.parametrize("output_cap,request_max,expected_reserve", [(2048, 1024, 1024), (0, None, 0)])
 def test_inflight_switch_cross_backend_usage_and_capacity(store, database, output_cap, request_max, expected_reserve):
     start(store)
@@ -135,6 +136,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     assert (manager.model, manager.model_context_window, manager.reserved_output_tokens) == ("B", 8192, expected_reserve)
 
 
+@pytest.mark.capability("model-selection")
 def test_persistent_latest_wins_clear_reject_and_idempotency(store, database):
     start(store)
     rt, b = routed(database, [LLMResponse("A")], [LLMResponse("B1"), LLMResponse("B2")])
@@ -167,6 +169,7 @@ class WorkerDeath(BaseException):
     pass
 
 
+@pytest.mark.capability("model-selection")
 def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, database, monkeypatch):
     from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
     from vv_agent.output_validation import OutputValidationResult
@@ -256,6 +259,7 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
     ]
 
 
+@pytest.mark.capability("model-selection")
 @pytest.mark.parametrize("cut", ["after_commit", "before_external_call", "after_external_call"])
 def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
     start(store)
@@ -333,6 +337,7 @@ def selection_worker(database, pipe, cut):
         drive(worker_store, "s", runtime=rt)
 
 
+@pytest.mark.capability("model-selection")
 @pytest.mark.persistent_store
 @pytest.mark.parametrize("cut", ["after_commit", "before_external_call", "after_external_call"])
 def test_process_kill_recovery_uses_original_plan(store, database, cut):
@@ -371,6 +376,7 @@ def test_process_kill_recovery_uses_original_plan(store, database, cut):
             kill(proc, parent, database)
 
 
+@pytest.mark.capability("model-selection")
 def test_selection_is_local_to_one_session_and_default_rejects(store, database):
     start(store)
     start(store, "child")
@@ -426,6 +432,7 @@ def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, da
     assert primary[-1].usage.total_tokens == 12300
 
 
+@pytest.mark.capability("model-selection")
 def test_parent_selection_does_not_propagate_to_real_child(store, database):
     from vv_agent.session.children import ChildSession, child_delivery
     from vv_agent.session.records import SessionSpec

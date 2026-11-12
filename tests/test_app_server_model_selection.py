@@ -12,6 +12,7 @@ from vv_agent.app_server.schema import json_schema_bundle
 from vv_agent.model import ScriptedModelProvider
 
 
+@pytest.mark.capability("app-server-model-selection")
 def test_model_selection_method_admission_replay_conflict_and_schema():
     transport = ChannelTransport(connection_id="test")
     server = AppServer(

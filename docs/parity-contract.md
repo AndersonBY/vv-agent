@@ -118,7 +118,7 @@ next frozen endpoint only when multiple endpoints exist; 429 retains backoff and
 one retry even with a single endpoint. Explicit adapter retryability overrides
 these defaults. Unknown retains its separate retry rules. The normative
 classification order, content string limits and summary failure behavior live in the contract's
-`docs/model-rejection.md`.
+[model-rejection.md](https://github.com/AndersonBY/vv-agent-contract/blob/1f4e6ff891996f1199f02e6b65edb1305ec7d8ae/docs/model-rejection.md).
 `scripts/model_rejection_fixtures.py` and the matching rejection tests pin this
 behavior. Contract 35.0.0 adds no store or frozen-definition boundary.
 
@@ -398,7 +398,7 @@ logic in `session.records`; no record, inbox or SQL version changes.
 ## Contract 38.0.0 yieldable waits
 
 Python 0.35.0 adds yieldable waits in the SQL kernel and L1 lease lock ordering.
-The canonical rule is `docs/yieldable-waits.md` in the contract repository.
+The canonical rule is [yieldable-waits.md](https://github.com/AndersonBY/vv-agent-contract/blob/1f4e6ff891996f1199f02e6b65edb1305ec7d8ae/docs/yieldable-waits.md) in the contract repository.
 Local App Server, Interactive and Runner retain declarations but wait for real
 results; they do not yield. Shared raw connections require exclusive host use,
 and concurrent native transactions are unsupported without promised detection.

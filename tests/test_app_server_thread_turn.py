@@ -439,6 +439,7 @@ def _drain_until_turn_completed(transport: ChannelTransport, *, count: int = 1) 
     return outbound
 
 
+@pytest.mark.capability("app-server-turns")
 def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     from vv_agent import function_tool
     from vv_agent.types import SubAgentConfig, ToolDirective, ToolExecutionResult

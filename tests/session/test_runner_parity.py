@@ -95,6 +95,9 @@ def echo(text: str) -> str:
     return text
 
 
+@pytest.mark.capability("basic-completion")
+@pytest.mark.capability("no-tool-finish")
+@pytest.mark.capability("serial-tools")
 @pytest.mark.parametrize("calls", [[], [ToolCall("a", "echo", {"text": "one"}), ToolCall("b", "echo", {"text": "two"})]])
 def test_basic_runner_parity(tmp_path, calls):
     agent = Agent("parity", "Be concise.", tools=[echo])
@@ -103,6 +106,8 @@ def test_basic_runner_parity(tmp_path, calls):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("tool-enabled")
+@pytest.mark.capability("tool-registry")
 @pytest.mark.parametrize("enabled", [True, False])
 def test_dynamic_enabled_and_registry_factory_parity(tmp_path, enabled):
     from vv_agent.tools.builtins import build_default_registry
@@ -127,6 +132,7 @@ def test_dynamic_enabled_and_registry_factory_parity(tmp_path, enabled):
     assert observe(agent, [response], config, kernel=True) == observe(agent, [response], config, kernel=False)
 
 
+@pytest.mark.capability("model-settings")
 def test_shared_state_and_settings_parity(tmp_path):
     from vv_agent.tools.base import ToolContext
 
@@ -146,6 +152,7 @@ def test_shared_state_and_settings_parity(tmp_path):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("budget-usage")
 def test_budget_usage_parity(tmp_path):
     agent = Agent("parity", "Be concise.", tools=[echo])
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "prompt_tokens_details": {"cached_tokens": 0}}
@@ -157,6 +164,8 @@ def test_budget_usage_parity(tmp_path):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("input-guardrails")
+@pytest.mark.capability("output-guardrails")
 @pytest.mark.parametrize("stage", ["input", "output"])
 @pytest.mark.parametrize("action", ["allow", "rewrite", "block", "require_approval"])
 def test_guardrail_parity(tmp_path, stage, action):
@@ -178,6 +187,7 @@ def test_guardrail_parity(tmp_path, stage, action):
     assert new == old
 
 
+@pytest.mark.capability("output-validator")
 @pytest.mark.parametrize("repair", [False, True])
 def test_output_validation_parity(tmp_path, repair):
     from vv_agent.output_validation import OutputValidationResult
@@ -207,6 +217,7 @@ def test_output_validation_parity(tmp_path, repair):
     assert new == old
 
 
+@pytest.mark.capability("llm-hooks")
 def test_llm_hook_parity(tmp_path):
     from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeLLMPatch
     from vv_agent.types import Message
@@ -239,6 +250,7 @@ def test_llm_hook_parity(tmp_path):
     assert observe(agent, [response], config, kernel=True) == observe(agent, [response], config, kernel=False)
 
 
+@pytest.mark.capability("tool-stop")
 @pytest.mark.parametrize("behavior", ["stop_on_first_tool", "stop_at_tool_names"])
 def test_tool_stop_parity(tmp_path, behavior):
     agent = Agent("parity", "Be concise.", tools=[echo], tool_use_behavior=behavior, stop_at_tool_names=["echo"])
@@ -264,6 +276,7 @@ def test_tool_hooks_parity(tmp_path):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("context-providers")
 def test_context_provider_parity(tmp_path):
     from vv_agent.context_providers import ContextFragment
 
@@ -280,6 +293,11 @@ def test_context_provider_parity(tmp_path):
     assert observe(agent, [response], config, kernel=True) == observe(agent, [response], config, kernel=False)
 
 
+@pytest.mark.capability("edit-file")
+@pytest.mark.capability("find-files")
+@pytest.mark.capability("read-file")
+@pytest.mark.capability("search-files")
+@pytest.mark.capability("write-file")
 @pytest.mark.parametrize(
     "name,arguments",
     [
@@ -318,6 +336,7 @@ def test_workspace_tool_parity(tmp_path, name, arguments):
     assert one(True) == one(False)
 
 
+@pytest.mark.capability("endpoint-routing")
 def test_endpoint_attempts_do_not_stack(tmp_path, monkeypatch):
     from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 
@@ -401,6 +420,7 @@ def test_shared_state_survives_runtime_reconstruction(tmp_path):
         assert [m.content for m in project_context(records, state) if m.role == "tool"] == ["1", "2"]
 
 
+@pytest.mark.capability("input-guardrails")
 def test_blocked_input_does_not_compile_providers(tmp_path):
     from vv_agent.guardrails import GuardrailResult
 
@@ -452,6 +472,9 @@ def test_result_projection_parity(tmp_path):
             assert "session_shared_state" not in call.usage.provider_usage
 
 
+@pytest.mark.capability("bash")
+@pytest.mark.capability("file-info")
+@pytest.mark.capability("read-image")
 @pytest.mark.parametrize(
     "name,arguments",
     [
@@ -475,6 +498,8 @@ def test_additional_builtin_parity(tmp_path, name, arguments):
         assert new["tools"] == [("a", "kernel-parity")]
 
 
+@pytest.mark.capability("activate-skill")
+@pytest.mark.capability("todo-write")
 def test_todo_and_skill_state_parity(tmp_path, monkeypatch):
     from datetime import UTC, datetime
 
@@ -555,6 +580,8 @@ def test_llm_hook_tool_visibility_is_enforced(tmp_path):
     assert effects == []
 
 
+@pytest.mark.capability("multimodal")
+@pytest.mark.capability("read-image")
 @pytest.mark.parametrize("image_path", ["https://example.invalid/tool.png", "pixel.png"])
 def test_multimodal_model_context_parity(tmp_path, monkeypatch, image_path):
     import base64
@@ -588,6 +615,7 @@ def test_multimodal_model_context_parity(tmp_path, monkeypatch, image_path):
     )
 
 
+@pytest.mark.capability("no-tool-continue")
 @pytest.mark.parametrize("cycles", [1, 2])
 def test_continue_max_cycles_parity(tmp_path, cycles):
     agent = Agent("parity", "Be concise.", no_tool_policy="continue", max_cycles=cycles)
@@ -596,6 +624,7 @@ def test_continue_max_cycles_parity(tmp_path, cycles):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("model-settings")
 def test_provider_default_settings_parity(tmp_path):
     def response(request):
         assert request.model_settings.temperature == 0.4
@@ -614,6 +643,7 @@ def test_provider_default_settings_parity(tmp_path):
     )
 
 
+@pytest.mark.capability("tool-enabled")
 def test_disabled_tool_never_executes(tmp_path):
     effects = []
 

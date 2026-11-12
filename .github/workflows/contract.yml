@@ -63,6 +63,12 @@ jobs:
       - name: Verify vendored contract snapshot
         run: python3 scripts/contract_snapshot.py check
 
+      - name: Verify repository documentation and capability contracts
+        run: uv run python scripts/check_repository_contracts.py
+
+      - name: Test repository contract gate
+        run: uv run pytest -q --strict-markers tests/test_repository_contracts.py
+
       - name: Verify formatting
         run: uv run ruff format --check .
 

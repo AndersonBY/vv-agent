@@ -51,6 +51,7 @@ module-name = "vv_agent"
 addopts = "-ra"
 testpaths = ["tests"]
 markers = [
+    "capability(id): explicit capability ID mapped to a test node in the session kernel matrix",
     "live: tests that call real remote LLM endpoints",
     "postgres: PostgreSQL host transaction integration",
     "persistent_store: process death or independent-connection persistence requires a file or PostgreSQL",

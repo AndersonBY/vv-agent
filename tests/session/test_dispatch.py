@@ -448,6 +448,7 @@ def test_accepted_provider_poll_cadence_and_zero_immediate_rewakes(transport, cl
     record_property("accepted_queries", polls)
 
 
+@pytest.mark.capability("provider-polling")
 def test_provider_deadline_caps_idle_deferral(transport, clock, provider_wait, monkeypatch):
     provider_wait.deadline = 1_001_250
     parked = _Driver.parked
@@ -503,6 +504,7 @@ def test_first_provider_poll_obeys_poll_at_even_with_early_drives(transport, clo
     assert provider_wait.queries == [park.payload["poll_at_ms"]]
 
 
+@pytest.mark.capability("provider-polling")
 @pytest.mark.parametrize("kind", ["user", "follow_up", "stale"])
 def test_unrelated_input_preserves_provider_deferral(transport, clock, provider_wait, kind):
     transport.push("s", prompt())
@@ -530,6 +532,7 @@ def test_unrelated_input_preserves_provider_deferral(transport, clock, provider_
     assert provider_wait.queries == [1_001_000, due]
 
 
+@pytest.mark.capability("provider-polling")
 def test_authenticated_provider_result_is_immediate_before_poll_due(transport, clock, provider_wait):
     transport.push("s", prompt())
     transport.drain()
@@ -540,6 +543,7 @@ def test_authenticated_provider_result_is_immediate_before_poll_due(transport, c
     assert records(transport.store, kind="turn_ended")[0].payload["status"] == "completed"
 
 
+@pytest.mark.capability("provider-polling")
 @pytest.mark.parametrize("surface", ["run_sync", "handle"])
 @pytest.mark.parametrize("continuation", ["tick", "resume"])
 def test_local_accepted_returns_parked_until_due_drive(
