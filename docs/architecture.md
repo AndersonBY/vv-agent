@@ -144,6 +144,24 @@ convenience entry requires a CPU-only counter; the default SDK drives
 execution and other SDK effects remain outside core, and later W9 public
 surfaces and staging obligations remain open.
 
+Lease ownership, renewal publication, expiry checks, commit/poll latch ordering,
+heartbeat error-budget decisions and control matching live in
+`kernel/_lease_scope.py`. The SDK uses those actual methods and supplies the
+existing Clock port, synchronization objects and actor identity. Core calls the
+injected clock at the original sampling points; it does not read system time or
+construct threads, events, locks or thread-local state. SDK constructors, keeper
+scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
+`session/_driver_scope.py` / `session/timing.py`. Public HeartbeatStopped bindings
+resolve to the single core exception class. Invocation uses the real provider
+outcomes; no duplicate outcome or cancellation-error type is introduced.
+
+The existing ScheduledLeaseKeeper simulation adapter still treats all LeaseLost
+exceptions, including HeartbeatStopped, as loss; the SDK treats HeartbeatStopped
+as normal shutdown. This preserved difference must be closed before claiming
+full SimWorld/core scheduling integration or a shared end-to-end exception
+strategy. The extraction preserves L2-L5 behavior and does not make the default
+scheduler a P3 implementation.
+
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
 with their existing validation and wire versions. The module imports only stdlib

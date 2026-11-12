@@ -7,6 +7,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
+from vv_agent.kernel._lease_scope import Clock as Clock
+
 if TYPE_CHECKING:
     from vv_agent.runtime.cancellation import CancellationToken
 
@@ -14,16 +16,6 @@ if TYPE_CHECKING:
     from .providers import Outcome
 
 HEARTBEAT_CLOSE_SECONDS = 6.0
-
-
-class Clock(Protocol):
-    def now_ms(self) -> int: ...
-
-    def monotonic(self) -> float: ...
-
-    def monotonic_ns(self) -> int: ...
-
-    def sleep(self, seconds: float) -> None: ...
 
 
 class SystemClock:

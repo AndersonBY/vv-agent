@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from vv_agent.kernel._lease_scope import apply_controls
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session import kernel
 from vv_agent.session.children import ChildSession
@@ -154,12 +155,12 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
         world.push("s", InboxItem("next", "follow_up", {"content": "continue"}))
         # Pause after the control matched old_tid, before the token attribute is read.
         # Source lookup locates a scheduling cut; all verdicts below use SQL/driver outcomes.
-        source, start_line = inspect.getsourcelines(kernel._Scope.poll)
+        source, start_line = inspect.getsourcelines(apply_controls)
         cut_line = start_line + next(i for i, line in enumerate(source) if "self.token.cancel(item.payload" in line)
         reached = []
 
         def switch_turn(frame, event, _arg):
-            if event == "line" and frame.f_code is kernel._Scope.poll.__code__ and frame.f_lineno == cut_line:
+            if event == "line" and frame.f_code is apply_controls.__code__ and frame.f_lineno == cut_line:
                 sys.settrace(None)
                 reached.append(old_tid)
                 until(worker, lambda: worker.state.active_turn_id not in {None, old_tid})
