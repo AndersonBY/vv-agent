@@ -17,6 +17,7 @@ from pathlib import Path
 
 from vv_agent.agent import Agent
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._lease_scope import HeartbeatStopped, cancel_if_lost
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session import kernel
@@ -163,18 +164,22 @@ class ScheduledLeaseKeeper:
 
     def start(self, heartbeat):
         self.poll(heartbeat)
-        self.world.enqueue(f"renew/{self.participant}", lambda: self.poll(heartbeat))
+        if not heartbeat.stop.is_set():
+            self.world.enqueue(f"renew/{self.participant}", lambda: self.poll(heartbeat))
 
     def poll(self, heartbeat):
         try:
             heartbeat.poll(self.world.connection(f"{self.participant}/heartbeat"))
-        except LeaseLost:
-            heartbeat.lost = True
+        except LeaseLost as exc:
+            heartbeat.heartbeat_failed(exc)
             if hasattr(heartbeat, "token"):
-                heartbeat.token.cancel("lease_lost")
-            raise
+                cancel_if_lost(heartbeat)
+            if not isinstance(exc, HeartbeatStopped):
+                raise
         finally:
-            heartbeat.ready.set()
+            heartbeat.heartbeat_finished()
+            if heartbeat.stop.is_set() or heartbeat.lost:
+                self.close(heartbeat)
 
     def close(self, heartbeat):
         self.world.tasks.pop(f"renew/{self.participant}", None)

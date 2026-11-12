@@ -24,10 +24,10 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
-`session/kernel.py` coordinates the drive loop. Lease ownership, heartbeat
-scheduling and the shared invocation boundary live in `session/_driver_scope.py`.
-The kernel and public `HeartbeatStopped` export refer to those same objects;
-clock, lease-keeper and invoker injection retain their existing behavior.
+`session/kernel.py` coordinates the drive loop. `kernel/_lease_scope.py` owns
+lease rules; `session/_driver_scope.py` supplies synchronization primitives,
+heartbeat scheduling and the shared invocation boundary. Public
+`HeartbeatStopped` resolves to the same core exception class.
 `session/_driver_dispatch.py` owns operation execution and tool finalization.
 The driver keeps its synchronous method entry points and delegates to that one
 implementation. `session/_driver_inputs.py` owns input acceptance, child replies
@@ -155,12 +155,10 @@ scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
 resolve to the single core exception class. Invocation uses the real provider
 outcomes; no duplicate outcome or cancellation-error type is introduced.
 
-The existing ScheduledLeaseKeeper simulation adapter still treats all LeaseLost
-exceptions, including HeartbeatStopped, as loss; the SDK treats HeartbeatStopped
-as normal shutdown. This preserved difference must be closed before claiming
-full SimWorld/core scheduling integration or a shared end-to-end exception
-strategy. The extraction preserves L2-L5 behavior and does not make the default
-scheduler a P3 implementation.
+ScheduledLeaseKeeper shares the core normal-stop/loss classification and removes
+stopped renewal work. Normal stopping does not imply lease loss or cancellation.
+Its waiting and transient/error-budget scheduling still differ from the SDK;
+normal-stop parity alone does not establish complete scheduling equivalence.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
@@ -433,6 +431,11 @@ directive. The target agent's output becomes the run output, and the runtime
 emits `HandoffStartedEvent` and `HandoffCompletedEvent`.
 
 ### Tool policy
+
+`kernel/_tool_policy.py` owns ToolPolicy, policy merging, compiler metadata
+projection and frozen/current context-policy composition. Compiler and Runtime
+use these same implementations; execution context and user callback bindings
+remain with their SDK owners.
 
 `ToolPolicy` is checked twice: when the runtime builds the tool schema list
 for the model, and again when the executor dispatches a call. Besides
