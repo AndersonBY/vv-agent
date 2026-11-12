@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from copy import copy, deepcopy
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
@@ -561,20 +561,7 @@ class Runtime:
                 task_key = canonical_json_bytes(task_value)
             if retained is not None:
                 self._retained_task_key = (retained, task_key)
-        memory_settings = {
-            f.name: getattr(self.memory_manager, f.name)
-            for f in fields(self.memory_manager)
-            if f.name
-            not in {
-                "protected_start",
-                "workspace_backend",
-                "summary_callback",
-                "session_memory",
-                "microcompaction_policy",
-                "recovery_tool_available",
-            }
-        }
-        memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
+        memory_settings = self.memory_manager._definition_settings()
         model_binding = _model_identity(self.model_binding(self.llm, self.resolved))
         memory_bindings = self._memory_bindings(task)
         if memory_bindings:

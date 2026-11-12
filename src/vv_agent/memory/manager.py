@@ -15,11 +15,12 @@ if TYPE_CHECKING:
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Literal
 
 from vv_agent.kernel import _summary_compaction
 from vv_agent.kernel._compaction_text import build_compacted_tool_content, has_recovery_envelope
+from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
 from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages
 from vv_agent.kernel._context_messages import retained_start as retained_start
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
@@ -33,7 +34,7 @@ from vv_agent.kernel._microcompaction import (
 from vv_agent.kernel._summary_compaction import SummaryPlan as SummaryPlan
 from vv_agent.kernel._tool_values import ToolExecutionResult as ToolExecutionResult
 from vv_agent.memory.session_memory import SessionMemory
-from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
+from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.workspace.artifacts import persist_text_artifact
@@ -125,6 +126,23 @@ class MemoryManager:
     def __post_init__(self) -> None:
         if not isinstance(self.microcompaction_policy, MicrocompactionPolicy):
             self.microcompaction_policy = MicrocompactionPolicy.from_dict(self.microcompaction_policy)
+
+    def _definition_settings(self) -> dict[str, Any]:
+        memory_settings = {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if f.name
+            not in {
+                "protected_start",
+                "workspace_backend",
+                "summary_callback",
+                "session_memory",
+                "microcompaction_policy",
+                "recovery_tool_available",
+            }
+        }
+        memory_settings["microcompaction_policy"] = self.microcompaction_policy.to_dict()
+        return memory_settings
 
     @property
     def effective_context_window(self) -> int:
