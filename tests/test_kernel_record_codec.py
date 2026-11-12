@@ -10,6 +10,7 @@ import pytest
 
 from vv_agent.kernel import _record_codec as codec
 from vv_agent.kernel import _record_schema as schemas
+from vv_agent.kernel import _records as core_records
 from vv_agent.session import records
 
 
@@ -55,7 +56,7 @@ assert {n for n in sys.modules if n.startswith("vv_agent")} == {
 def test_outer_records_use_the_actual_core_error_reader_and_validator():
     assert records.RecordError is codec.RecordError
     assert records.validate is codec.validate
-    assert records._load is codec._load
+    assert core_records._load is codec._load
 
 
 @pytest.mark.parametrize("body", [b'{"a":}', b"\xff", b'{"a":1,}'])
@@ -126,7 +127,7 @@ def test_real_diagnostic_producer_is_deterministic():
 
 def test_app_server_schema_errors_and_their_chains_do_not_dump_values(monkeypatch):
     errors: list[BaseException] = []
-    original = records.validate
+    original = core_records.validate
 
     def observed(*args, **kwargs):
         try:
@@ -135,7 +136,7 @@ def test_app_server_schema_errors_and_their_chains_do_not_dump_values(monkeypatc
             errors.append(error)
             raise
 
-    monkeypatch.setattr(records, "validate", observed)
+    monkeypatch.setattr(core_records, "validate", observed)
     script = Path(__file__).resolve().parents[1] / "scripts/record_codec_fixtures.py"
     error = runpy.run_path(str(script))["app_server_error"]()
     assert error == {"code": -32603, "message": "invalid session schema"}

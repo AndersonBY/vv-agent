@@ -52,8 +52,10 @@ without loading the outer SDK. `session/records.py` consumes these same schema
 objects and checks. `kernel/_record_codec.py` owns standard-library object
 loading, duplicate-member rejection and schema validation. Closed-schema
 failures use the contract 39 diagnostic `invalid session schema`; specific
-semantic/parser errors and canonical bytes remain unchanged. Record classes,
-retained fragments and orjson interning still reside outside core.
+semantic/parser errors and canonical bytes remain unchanged.
+`kernel/_records.py` owns Record, InboxItem, SessionSpec, retained fragments and
+message interning with stdlib/core dependencies only. `session/records.py`
+exports the same actual objects; no second Record implementation exists.
 
 Message values, artifact references, cursors and compaction evidence validation
 are owned by `kernel/_message_values.py`; the strict Message decoder is owned by
@@ -115,14 +117,13 @@ The reducer validates after-cycle and budget boundaries through core values;
 its remaining memory/tokenizer, context, event and store dependencies still
 prevent a core-only fold.
 
-Record Message and model-settings validation import the actual core values
-directly. Record task decoding can consume the authoritative `AgentTask` and
-`SubAgentConfig` from `kernel/_execution_values.py`; the existing `types.py`
-bindings resolve to those same objects. Record classes and retained caches still
-require extraction. The reducer still depends on context, memory/tokenizer,
-lifecycle, budget and event code; SQL stores and the execution driver remain
-under `session/`. These extractions do not establish a core-only simulation or
-complete W9. LocalWorker convergence belongs to W4/P3.
+Record task decoding consumes core `AgentTask` and preserves its cached private
+value and detached public copies. Its private interning keys remain separate
+from canonical wire bytes, and future message validation is still deferred to
+its owning boundary. The reducer still depends on context, memory/tokenizer and
+event code; SQL stores and the execution driver remain under `session/`. These
+extractions do not establish a core-only simulation or complete W9. LocalWorker
+convergence belongs to W4/P3.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply
@@ -202,6 +203,7 @@ cycle reported that metric.
 | `src/vv_agent/kernel/_schema.py` | Standard-library-only compiler for the closed session-schema vocabulary. |
 | `src/vv_agent/kernel/_record_schema.py` | Authoritative closed session schemas and compiled checks. |
 | `src/vv_agent/kernel/_record_codec.py` | Schema rejection, duplicate-checking object loading and concise contract 39 diagnostics. |
+| `src/vv_agent/kernel/_records.py` | Record, inbox and session values, canonical identity, retained fragments and private message caching. |
 | `src/vv_agent/kernel/_canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
 | `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |

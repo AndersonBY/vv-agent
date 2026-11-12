@@ -8,6 +8,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema.validators import extend
 
+from vv_agent.kernel import _records as core_records
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._record_schema import _CHECKS, _SCHEMAS, HANDLE
 from vv_agent.kernel._schema import _compile_check
@@ -31,8 +32,8 @@ def test_record_bytes_and_digest_are_retained_without_payload_aliases(monkeypatc
     def unexpected(*args, **kwargs):
         raise AssertionError("a retained record must not encode or validate again")
 
-    monkeypatch.setattr(records, "canonical_json_bytes", unexpected)
-    monkeypatch.setattr(records, "validate", unexpected)
+    monkeypatch.setattr(core_records, "canonical_json_bytes", unexpected)
+    monkeypatch.setattr(core_records, "validate", unexpected)
     assert rec.encode() is body and rec.digest is checksum
     assert deepcopy(rec) is rec
     assert rec.payload["definition"] == {}

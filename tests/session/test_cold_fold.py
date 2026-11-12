@@ -432,7 +432,7 @@ def test_fragment_cache_cannot_replace_nan_with_an_interned_null(kind):
             },
         ).to_dict()
     cache = _MessageCache()
-    cache.share(deepcopy(message), strict=True)
+    cache.share(deepcopy(message))
     snapshots = value["payload"]["request"] if kind == "op_planned" else value["payload"]["data"]
     snapshots["messages"][0]["role"] = float("nan")
     body = json.dumps(value).encode()

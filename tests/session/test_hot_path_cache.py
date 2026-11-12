@@ -1,11 +1,13 @@
 """Cached process-local values remain isolated at every mutable host boundary."""
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 
 import pytest
 
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session import records
 from vv_agent.session.context import project_context
 from vv_agent.session.kernel import drive
@@ -72,7 +74,7 @@ def test_displaced_parent_prefix_still_checks_rollback_and_database_bytes(store,
     value = record("turn_started", tid="replacement").to_dict()
     if change == "schema":
         value["payload"]["extra"] = True
-    body = records.canonical_json_bytes(value)
+    body = canonical_json_bytes(value)
     checksum = "0" * 64 if change == "storage_digest" else sha256(body).hexdigest()
     with store.atomic():
         store._rows("UPDATE sk_record SET body=%s,digest=%s WHERE session_id=%s AND seq=2", (body, checksum, "s"))
@@ -89,21 +91,21 @@ def test_retained_json_is_not_parsed_again_and_nested_outputs_are_detached(sourc
     rec = SessionSpec("s", "p", "w", attributes=attributes).record()
     body = rec.encode()
     if source == "cold":
-        loads = records.json.loads
+        loads = json.loads
         calls = []
 
         def parse(*args, **kwargs):
             calls.append(1)
             return loads(*args, **kwargs)
 
-        monkeypatch.setattr(records.json, "loads", parse)
+        monkeypatch.setattr(json, "loads", parse)
         rec = records.Record.parse(body)
         assert len(calls) == 1
 
     def unexpected(*args, **kwargs):
         raise AssertionError("retained JSON must not be reparsed")
 
-    monkeypatch.setattr(records.json, "loads", unexpected)
+    monkeypatch.setattr(json, "loads", unexpected)
     attributes["nested"][0]["values"].clear()
     rec.payload["attributes"]["nested"][0]["values"].append(3)
     rec.to_dict()["payload"]["attributes"]["nested"].clear()
@@ -590,7 +592,7 @@ def test_retained_schema_encoding_matches_full_jcs_and_checks_embedded_digest(tm
         attempt=1 if container == "request" else None,
         payload=payload,
     )
-    assert retained.encode() == records.canonical_json_bytes(retained.to_dict())
+    assert retained.encode() == canonical_json_bytes(retained.to_dict())
     assert retained._payload[container]["tools"] is source._payload["definition"]["tools"]
     assert Record.parse(retained.encode()).to_dict() == retained.to_dict()
     with pytest.raises(RecordError, match=f"{container} digest mismatch"):

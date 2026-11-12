@@ -112,7 +112,6 @@ def test_task_dependencies_keep_actual_public_and_outer_objects():
     from vv_agent import microcompaction, model_settings, prompt, types
     from vv_agent.kernel import _microcompaction_policy, _model_settings, _prompt_values, _tool_metadata
     from vv_agent.prompt import builder
-    from vv_agent.session import records
     from vv_agent.tools import metadata
 
     for outer, core, names in (
@@ -128,5 +127,5 @@ def test_task_dependencies_keep_actual_public_and_outer_objects():
                 assert getattr(vv_agent, name) is value, name
     assert prompt.PromptBundle is builder.PromptBundle is types.PromptBundle
     assert prompt.PromptSection is builder.PromptSection
-    assert records.ModelSettings is types.ModelSettings is model_settings.ModelSettings
+    assert types.ModelSettings is model_settings.ModelSettings is _model_settings.ModelSettings
     assert builder.SystemPromptBuilder.__module__ == "vv_agent.prompt.builder"

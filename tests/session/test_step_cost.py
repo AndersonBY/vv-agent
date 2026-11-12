@@ -10,11 +10,12 @@ import httpx2
 import pytest
 from support.token_counting import PROVIDER_MODELS, legacy_count, provider_counting_settings
 
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.memory import MemoryManager, token_utils
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.session import compaction, kernel, reducer
 from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.records import InboxItem, Record, _MessageCache, canonical_json_bytes
+from vv_agent.session.records import InboxItem, Record, _MessageCache
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, Message, ToolCall
@@ -180,10 +181,10 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
 
 
 def test_producer_fragments_detach_callers_and_encode_only_new_messages(monkeypatch):
-    from vv_agent.session import records
+    from vv_agent.kernel import _records as core_records
 
     cache = _MessageCache()
-    original = records.canonical_json_bytes
+    original = core_records.canonical_json_bytes
     serialized = []
 
     def counted(value):
@@ -191,7 +192,7 @@ def test_producer_fragments_detach_callers_and_encode_only_new_messages(monkeypa
             serialized.append(value["content"])
         return original(value)
 
-    monkeypatch.setattr(records, "canonical_json_bytes", counted)
+    monkeypatch.setattr(core_records, "canonical_json_bytes", counted)
     first = {"role": "assistant", "content": "old", "metadata": {"nested": ["original"]}}
     cache.retain_array([first])
     serialized.clear()

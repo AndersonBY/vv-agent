@@ -110,17 +110,16 @@ def test_kernel_schema_import_is_isolated_without_site_packages(tmp_path):
 
 
 def test_records_use_the_extracted_compiler():
-    from vv_agent.session import records
+    from vv_agent.kernel import _record_codec
 
-    assert all(check.__module__ == "vv_agent.kernel._schema" for check in records._CHECKS.values())
+    assert _record_codec._CHECKS is _record_schema._CHECKS
+    assert all(check.__module__ == "vv_agent.kernel._schema" for check in _record_schema._CHECKS.values())
 
 
 def test_record_schemas_and_checks_have_one_owner():
     from vv_agent.session import records
 
     for name in (
-        "_CHECKS",
-        "_SCHEMAS",
         "APP_SERVER_ATTRIBUTES",
         "BOUNDARY_DATA",
         "CHILD_ADMISSION",
@@ -133,12 +132,10 @@ def test_record_schemas_and_checks_have_one_owner():
         "RECORD_SCHEMA",
         "REQUEST_SESSION_METADATA",
         "SEED",
-        "SEED_POLICIES",
         "TASK_SESSION_METADATA",
         "nullable",
     ):
         assert getattr(records, name) is getattr(_record_schema, name), name
-    assert records._CHECKS is _record_schema._CHECKS
     assert _record_schema._CHECKS.keys() == {id(s) for s in _record_schema._SCHEMAS}
     assert _record_schema.PAYLOADS["input_applied"]["properties"]["input"] is _record_schema.INPUT_SCHEMA
     assert _record_schema.INPUT_PAYLOADS["provider_evidence"]["properties"]["handle"] is _record_schema.HANDLE
