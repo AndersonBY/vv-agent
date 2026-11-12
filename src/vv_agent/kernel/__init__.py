@@ -1,1 +1,1 @@
-"""Session schemas, Message and canonical codecs; record codecs, execution and stores remain outside core."""
+"""Session records, state transitions, context projection and shared SQL rules."""

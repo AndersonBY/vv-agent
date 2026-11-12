@@ -9,7 +9,7 @@ import json
 from dataclasses import replace
 from unittest.mock import patch
 
-from vv_agent.session import reducer
+from vv_agent.kernel import _reducer as reducer
 from vv_agent.session.records import InboxItem, digest
 from vv_agent.session.reducer import Fold
 from vv_agent.types import Message, ToolExecutionResult
@@ -145,7 +145,7 @@ def reference(records):
                 require(condition, reason)
 
         with (
-            patch.object(reducer, "_compacted", lambda state, record, history: state.compactions.append(record)),
+            patch.object(reducer, "_compacted", lambda state, record, history, **_ports: state.compactions.append(record)),
             patch.object(reducer, "require", lifecycle_require),
         ):
             fold.extend([plain_creation(row)], consumed_inputs=items)

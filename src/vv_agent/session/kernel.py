@@ -61,7 +61,7 @@ from .providers import (
     validate_provider_result,
 )
 from .records import InboxItem, Record, _RetainedTools, copy_json, digest, inherited_seed_policies, make_record
-from .reducer import Attempt, ExecutionState, Fold
+from .reducer import Attempt, ExecutionState, _fold_factory_for
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .sql import SQLSessionTx, SQLStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
@@ -278,7 +278,7 @@ class _Driver:
 
     def load_state(self) -> None:
         self.state, self.records, self.watermark = read_state(self.store, self.sid)
-        self.fold = Fold()
+        self.fold = _fold_factory_for(self.store)()
         self.fold.state = self.state
         self.fold.history = list(self.records)
         self.fold.seen = {r.record.record_id: r.record.encode() for r in self.records}
@@ -1328,7 +1328,7 @@ class _Driver:
         return False
 
     def transcript(self) -> list[Message]:
-        return project_context(self.records, self.state)
+        return project_context(self.records, self.state, _fold_factory=_fold_factory_for(self.store))
 
     def durable_shared_state(self) -> dict[str, Any]:
         for stored in reversed(self.records):

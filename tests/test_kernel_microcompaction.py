@@ -100,7 +100,9 @@ def test_microcompaction_import_and_callbacks_without_outer_sdk(tmp_path, site_f
             "vv_agent", "vv_agent.kernel", "vv_agent.kernel._microcompaction",
             "vv_agent.kernel._compaction_text", "vv_agent.kernel._message_values",
             "vv_agent.kernel._canonical_json", "vv_agent.kernel._microcompaction_policy",
-            "vv_agent.kernel._tool_metadata",
+            "vv_agent.kernel._tool_metadata", "vv_agent.kernel._summary_compaction",
+            "vv_agent.kernel._compaction_threshold", "vv_agent.kernel._context_messages",
+            "vv_agent.kernel._tool_values",
         }
     """)
     result = subprocess.run(
@@ -118,17 +120,18 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     from vv_agent import memory
     from vv_agent.kernel import _compaction_text as text
     from vv_agent.kernel import _microcompaction as core
+    from vv_agent.kernel import _reducer as reducer
     from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
     from vv_agent.kernel._tool_metadata import ToolResultRetention
     from vv_agent.memory import manager, microcompact
-    from vv_agent.session import kernel, reducer
+    from vv_agent.session import kernel
 
     for name in microcompact.__all__:
         owner = text if hasattr(text, name) else core
         assert getattr(microcompact, name) is getattr(owner, name), name
     assert memory.MicrocompactPlan is core.MicrocompactPlan
     assert memory.plan_microcompact is core.plan_microcompact
-    for name in ("MicrocompactCandidate", "MicrocompactPlan", "plan_microcompact", "replace_with_compacted_marker"):
+    for name in ("MicrocompactCandidate", "MicrocompactPlan", "plan_memory_microcompact", "replace_with_compacted_marker"):
         value = getattr(core, name)
         assert value.__module__ == core.__name__, name
         assert getattr(manager, name) is value, name

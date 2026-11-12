@@ -480,8 +480,8 @@ def test_existing_artifact_validation_uses_bounded_memory(monkeypatch: pytest.Mo
 
 def test_compaction_text_helpers_share_the_kernel_implementation() -> None:
     from vv_agent.kernel import _compaction_text
+    from vv_agent.kernel import _reducer as reducer
     from vv_agent.memory import manager, microcompact
-    from vv_agent.session import reducer
 
     for name in (
         "COMPACT_MARKER_OPENING",

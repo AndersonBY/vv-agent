@@ -22,6 +22,7 @@ from .children import child_handles
 from .context import project_context
 from .kernel import drive
 from .records import InboxItem, SessionSpec
+from .reducer import _fold_factory_for
 from .result import project_result
 from .runtime import Runtime
 from .sqlite import SQLiteStore
@@ -188,7 +189,7 @@ class SessionDriver:
 
     def messages(self, sid: str) -> list[Message]:
         state, records, _ = self.store.read_state(sid)
-        return [m for m in project_context(records, state) if m.role != "system"]
+        return [m for m in project_context(records, state, _fold_factory=_fold_factory_for(self.store)) if m.role != "system"]
 
     def waits(
         self, sid: str, runtime: Runtime | None = None, *, snapshot=None

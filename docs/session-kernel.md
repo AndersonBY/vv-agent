@@ -67,17 +67,28 @@ inbox schema change, the new runtime rejects old rows, including those of
 finished sessions, so hosts keep their own product copy of what they need. See
 [session data and upgrades](upgrading.md#session-data-and-upgrades).
 
+Paths below are relative to `src/vv_agent/`.
+
 | Module | Role |
 | --- | --- |
-| `records.py` | Record and inbox kinds with closed schemas. |
-| `reducer.py` | Folds the log and consumed inputs into execution state. No clock, no persistence. |
-| `store.py`, `sql.py` | Store protocols, receipts, leases and errors; the shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
-| `postgres.py`, `sqlite.py` | The PostgreSQL reference store (psycopg v3, imported lazily; install the `[postgres]` extra or the dev group) and the single-host SQLite store. |
-| `context.py`, `compaction.py` | Model-message projection and the MemoryManager adapter. |
-| `delegation.py`, `children.py` | Child admission, agent tools, background handles, handoffs and delivery. |
-| `bindings.py`, `lifecycle.py`, `memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
-| `projection.py`, `result.py`, `events.py`, `tracing.py` | Typed host projections. |
-| `surfaces.py`, `app_server.py` | Public entrypoint handles; App Server threads and timelines. |
+| `kernel/_records.py` | Record and inbox kinds with closed schemas; `session/records.py` exports the same objects. |
+| `kernel/_state.py`, `kernel/_reducer.py` | Execution state and complete log/consumed-input validation, with injected settings normalization and counting. |
+| `kernel/_store.py`, `kernel/_sql.py` | Store protocols, receipts, leases and errors; shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
+| `session/postgres.py`, `session/sqlite.py` | Concrete PostgreSQL (lazy psycopg v3; install `[postgres]` or the dev group) and SQLite connections. |
+| `kernel/_context.py`, `session/context.py`, `session/compaction.py` | Aligned model-message projection and input protection; historical-prefix alignment and the MemoryManager adapter remain outer. |
+| `session/delegation.py`, `session/children.py` | Child admission, agent tools, background handles, handoffs and delivery. |
+| `session/bindings.py`, `session/lifecycle.py`, `session/memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
+| `session/projection.py`, `session/result.py`, `session/events.py`, `session/tracing.py` | Typed host projections. |
+| `session/surfaces.py`, `session/app_server.py` | Public entrypoint handles; App Server threads and timelines. |
+
+The SDK fold adapter keeps MemoryManager's constructor as the single source of
+settings defaults and normalization. Core compaction validation recomputes the
+accepted result; it does not trust a stored receipt or an outer acceptance flag.
+The SQL store, its cached prefixes, forked folds, driver and historical context
+rebuilds retain one fold-factory binding. Changing the factory clears both
+prefix caches. The default SDK counter retains its existing behavior; the
+prepared-counter adapter is an explicit assembly option, not a claim that
+default replay is free of tokenizer initialization I/O.
 
 ### Record validation and identity
 

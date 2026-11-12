@@ -127,9 +127,20 @@ durable denial-state helpers are owned by `kernel/_cycle_values.py`. Their
 validation and UTF-16-sorted state updates use stdlib and core values only.
 `runtime/lifecycle.py` exports those same objects and retains the hook protocol
 and `AfterCycleHookManager`, including callback execution and decision composition.
-The reducer validates after-cycle and budget boundaries through core values;
-its remaining memory/tokenizer, context and store dependencies still prevent
-a core-only fold.
+The reducer validates after-cycle and budget boundaries through core values.
+`kernel/_state.py`, `kernel/_context.py` and `kernel/_reducer.py` own execution
+state, aligned context projection, input protection and all record transitions.
+The fold receives settings normalization and message-counting callables. It
+still recomputes compaction eligibility, prompts, replacements, protected tails
+and evidence; the outer adapter supplies values, not an acceptance decision.
+`MemoryManager` and replay share the high-level microcompaction planner.
+
+`kernel/_store.py` owns store protocols, receipts, leases and errors;
+`kernel/_sql.py` owns the shared SQL transaction and scheduling rules. Concrete
+SQLite/PostgreSQL connections stay in `session/`. SQL prefixes, forked folds and
+the driver use the same fold factory. The outer context adapter also uses that
+factory when a historical prefix must be rebuilt. Replacing a store's factory
+clears both validated-prefix caches.
 
 Shared event wire validation lives in `kernel/_event_validation.py`. The outer
 event classes retain construction, time and UUID defaults. Retained memory
@@ -140,10 +151,9 @@ original position after wire validation.
 Record task decoding consumes core `AgentTask` and preserves its cached private
 value and detached public copies. Its private interning keys remain separate
 from canonical wire bytes, and future message validation is still deferred to
-its owning boundary. The reducer still depends on context, memory/tokenizer and
-event code; SQL stores and the execution driver remain under `session/`. These
-extractions do not establish a core-only simulation or complete W9. LocalWorker
-convergence belongs to W4/P3.
+its owning boundary. The execution driver and concrete database adapters remain
+under `session/`. The seeded simulation currently drives these SDK assembly
+paths over the real SQL stores with scripted external services.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply

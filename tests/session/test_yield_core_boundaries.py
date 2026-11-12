@@ -9,7 +9,8 @@ from types import ModuleType
 
 import pytest
 
-from vv_agent.session import kernel, sql
+from vv_agent.kernel import _sql as sql
+from vv_agent.session import kernel
 from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.providers import Accepted, ProviderResultInvalid, validate_acceptance
 from vv_agent.session.records import InboxItem, RecordError

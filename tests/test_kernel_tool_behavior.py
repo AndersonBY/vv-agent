@@ -84,11 +84,11 @@ def test_tool_behavior_without_site_packages(tmp_path):
 
 def test_existing_tool_helpers_are_actual_core_objects():
     from vv_agent import types
+    from vv_agent.kernel import _context as context
     from vv_agent.kernel import _tool_behavior as core
     from vv_agent.kernel import _tool_values
     from vv_agent.kernel._message_values import Message
     from vv_agent.runtime import tool_results
-    from vv_agent.session import context
 
     for name in ("apply_tool_use_behavior", "build_image_notification", "build_skipped_result"):
         assert getattr(tool_results, name) is getattr(core, name), name

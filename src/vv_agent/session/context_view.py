@@ -12,7 +12,7 @@ from vv_agent.types import Message
 from .compaction import memory_settings
 from .context import project_context
 from .records import InboxItem, digest
-from .reducer import fold
+from .reducer import Fold, _fold_factory_for
 from .store import Conflict
 from .summary_requests import compaction_request
 
@@ -39,11 +39,11 @@ def context_view(store, session_id: str) -> dict[str, Any]:
             break
     else:
         raise ContextSnapshotBusy("context_snapshot_busy")
-    return project_view(session_id, records, inbox)
+    return project_view(session_id, records, inbox, _fold_factory=_fold_factory_for(store))
 
 
-def context_messages(records, state, definition):
-    messages = project_context(records, state)
+def context_messages(records, state, definition, *, _fold_factory=Fold):
+    messages = project_context(records, state, _fold_factory=_fold_factory)
     attributes = records[0].record._payload["attributes"]
     if not state.turns and definition and "app_server_fork" not in attributes:
         from vv_agent.types import AgentTask
@@ -53,8 +53,8 @@ def context_messages(records, state, definition):
     return messages
 
 
-def project_view(session_id, records, inbox=()):
-    state = fold(
+def project_view(session_id, records, inbox=(), *, _fold_factory=Fold):
+    state = _fold_factory().extend(
         (r.record for r in records),
         consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
     )
@@ -86,7 +86,7 @@ def project_view(session_id, records, inbox=()):
     settings = memory_settings(baseline or definition, selection) if definition else None
     manager = MemoryManager(**settings) if settings else None
     binding = effective["binding"] if effective else {}
-    messages = context_messages(records, state, definition)
+    messages = context_messages(records, state, definition, _fold_factory=_fold_factory)
     summary = [m for m in messages if m.name == "memory_summary"]
     instructions = [m for m in messages if m.role == "system" and m.name != "memory_summary"]
     history = [m for m in messages if m.role != "system" and m.name != "memory_summary"]
@@ -128,7 +128,7 @@ def project_view(session_id, records, inbox=()):
             "replacedMessageCount": len(payload["prefix_ids"]),
             "summary": "\n".join(m.get("content", "") for m in payload["replacement"] if m.get("name") == "memory_summary"),
         }
-    raw = project_context(records, state, compacted=False)
+    raw = project_context(records, state, compacted=False, _fold_factory=_fold_factory)
     return {
         "threadId": session_id,
         **({"lineage": attributes["app_server_fork"]["lineage"]} if "app_server_fork" in attributes else {}),

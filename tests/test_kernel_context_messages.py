@@ -81,9 +81,11 @@ def test_context_messages_import_and_run_without_outer_sdk(tmp_path, site_flags)
 def test_context_messages_keep_public_exports_and_active_callers_identical():
     import vv_agent
     from vv_agent import memory
+    from vv_agent.kernel import _context as context
     from vv_agent.kernel import _context_messages as core
+    from vv_agent.kernel import _reducer as reducer
     from vv_agent.memory import input_protection, manager, message_sanitizer
-    from vv_agent.session import compaction, context, reducer
+    from vv_agent.session import compaction
 
     for facade in (input_protection, message_sanitizer):
         for name in facade.__all__:

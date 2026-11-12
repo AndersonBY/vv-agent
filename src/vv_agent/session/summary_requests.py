@@ -11,7 +11,7 @@ from .compaction import manager_for, tokens
 from .context import project_context
 from .providers import Definitive
 from .records import InboxItem, Record, digest
-from .reducer import fold
+from .reducer import _fold_factory_for
 
 if TYPE_CHECKING:
     from .kernel import _Driver
@@ -77,7 +77,9 @@ def source_at(driver: _Driver, version: str) -> list[Message]:
     prefix = tuple(row for row in driver.records if row.seq <= int(version))
     logical = [row.record for row in prefix]
     inputs = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
-    return project_context(prefix, fold(logical, consumed_inputs=inputs))
+    factory = _fold_factory_for(driver.store)
+    state = factory().extend(logical, consumed_inputs=inputs)
+    return project_context(prefix, state, _fold_factory=factory)
 
 
 def child_summary(driver: _Driver, plan: Record, binding: SummaryChildTool) -> tuple[bool, str | None]:

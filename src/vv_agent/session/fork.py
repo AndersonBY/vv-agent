@@ -13,7 +13,7 @@ from vv_agent.workspace.streaming import scan_text
 from .compaction import memory_settings
 from .context_view import context_messages, project_view
 from .records import InboxItem, SessionSpec, copy_json, digest, inherited_seed_policies
-from .reducer import fold
+from .reducer import _fold_factory_for
 from .store import Conflict
 
 
@@ -83,11 +83,12 @@ def fork_thread(kernel, host, params):
         ended = [r for r in ended if r.seq <= terminal.seq and ("beforeTurnId" not in params or r.seq < terminal.seq)]
     cut = ended[-1] if ended else records[0]
     records = tuple(r for r in records if r.seq <= cut.seq)
-    state = fold(
+    factory = _fold_factory_for(kernel.store)
+    state = factory().extend(
         (r.record for r in records),
         consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
     )
-    view = project_view(source, records)
+    view = project_view(source, records, _fold_factory=factory)
     definition = copy_json(
         state.turns[next(reversed(state.turns))].start._payload["definition"]
         if state.turns
@@ -107,7 +108,7 @@ def fork_thread(kernel, host, params):
             "route": {},
             "binding": definition["model_binding"],
         }
-    messages = context_messages(records, state, definition)
+    messages = context_messages(records, state, definition, _fold_factory=factory)
     copied = [m.to_dict() for m in messages]
     lineage = {
         "sourceThreadId": source,

@@ -28,7 +28,8 @@ from vv_agent.kernel._microcompaction import (
     EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
     MicrocompactPlan,
-    plan_microcompact,
+    estimate_tool_artifact_path,
+    plan_memory_microcompact,
     replace_with_compacted_marker,
 )
 from vv_agent.kernel._summary_compaction import SummaryPlan as SummaryPlan
@@ -495,36 +496,16 @@ class MemoryManager:
         current_tokens: int,
         recovery_tool_available: bool | None = None,
     ) -> MicrocompactPlan | None:
-        can_recover = self.recovery_tool_available if recovery_tool_available is None else recovery_tool_available
-        if (
-            not can_recover
-            or cycle_index is None
-            or self.microcompact_trigger_threshold <= 0
-            or current_tokens <= self.microcompact_trigger_threshold
-        ):
-            return None
-        plan = plan_microcompact(
+        return plan_memory_microcompact(
             messages,
-            current_cycle=cycle_index,
+            cycle_index=cycle_index,
             current_tokens=current_tokens,
-            target_tokens=self.microcompact_target_threshold,
-            policy=self.microcompaction_policy,
-            result_retentions=self.tool_result_retentions,
-            artifact_path_estimate_for=self._estimate_tool_artifact_path,
+            settings=self._definition_settings(),
+            protected_start=self.protected_start,
+            recovery_tool_available=self.recovery_tool_available if recovery_tool_available is None else recovery_tool_available,
+            artifact_path_estimate_for=estimate_tool_artifact_path,
             estimate_message_tokens=self._estimate_message_tokens,
-            excerpt_head_chars=self.tool_result_excerpt_head,
-            excerpt_tail_chars=self.tool_result_excerpt_tail,
         )
-        if self.protected_start is not None:
-            start = atomic_start(messages, self.protected_start)
-            plan = replace(plan, candidates=tuple(c for c in plan.candidates if c.message_index < start))
-        if current_tokens > self.autocompact_threshold:
-            parts = self._summary_parts(messages, self.keep_recent_messages)
-            if parts is None:
-                return None
-            protected = {id(message) for message in parts[3]}
-            plan = replace(plan, candidates=tuple(c for c in plan.candidates if id(messages[c.message_index]) not in protected))
-        return plan
 
     def apply_microcompaction(
         self,
@@ -638,10 +619,6 @@ class MemoryManager:
         warned = list(messages)
         warned.append(Message(role="user", content=warning_text))
         return warned, True
-
-    def _estimate_tool_artifact_path(self, tool_call_id: str) -> str:
-        del tool_call_id
-        return ".vv-agent/artifacts/estimate/call-00000000000000000000000000000000.txt"
 
     def _archive_tool_message(
         self,

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
+from vv_agent.kernel import _summary_compaction
 from vv_agent.kernel._compaction_text import (
     build_compacted_tool_content,
     has_recovery_envelope,
     is_microcompacted_tool_content,
 )
+from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
+from vv_agent.kernel._context_messages import atomic_start
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
 from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
 from vv_agent.kernel._tool_metadata import ToolResultRetention
@@ -192,3 +196,57 @@ def _infer_message_cycles(messages: list[Message]) -> list[int]:
             current_cycle += 1
         inferred_cycles.append(current_cycle)
     return inferred_cycles
+
+
+def estimate_tool_artifact_path(tool_call_id: str) -> str:
+    del tool_call_id
+    return ".vv-agent/artifacts/estimate/call-00000000000000000000000000000000.txt"
+
+
+def plan_memory_microcompact(
+    messages: list[Message],
+    *,
+    cycle_index: int | None,
+    current_tokens: int,
+    settings: Mapping[str, Any],
+    protected_start: int | None,
+    recovery_tool_available: bool,
+    artifact_path_estimate_for: Callable[[str], str],
+    estimate_message_tokens: Callable[[Message], int],
+) -> MicrocompactPlan | None:
+    if not recovery_tool_available or cycle_index is None:
+        return None
+    threshold = compute_compaction_threshold(
+        configured_threshold=settings["compact_threshold"],
+        model_context_window=settings["model_context_window"],
+        reserved_output_tokens=settings["reserved_output_tokens"],
+        autocompact_buffer_tokens=settings["autocompact_buffer_tokens"],
+    )
+    if threshold <= 0:
+        return None
+    policy = MicrocompactionPolicy.from_dict(settings["microcompaction_policy"])
+    trigger = int(threshold * policy.trigger_ratio)
+    if trigger <= 0 or current_tokens <= trigger:
+        return None
+    plan = plan_microcompact(
+        messages,
+        current_cycle=cycle_index,
+        current_tokens=current_tokens,
+        target_tokens=int(threshold * policy.target_ratio),
+        policy=policy,
+        result_retentions=settings["tool_result_retentions"],
+        artifact_path_estimate_for=artifact_path_estimate_for,
+        estimate_message_tokens=estimate_message_tokens,
+        excerpt_head_chars=settings["tool_result_excerpt_head"],
+        excerpt_tail_chars=settings["tool_result_excerpt_tail"],
+    )
+    if protected_start is not None:
+        start = atomic_start(messages, protected_start)
+        plan = replace(plan, candidates=tuple(c for c in plan.candidates if c.message_index < start))
+    if current_tokens > threshold:
+        parts = _summary_compaction._summary_parts(messages, settings["keep_recent_messages"], protected_start=protected_start)
+        if parts is None:
+            return None
+        protected = {id(message) for message in parts[3]}
+        plan = replace(plan, candidates=tuple(c for c in plan.candidates if id(messages[c.message_index]) not in protected))
+    return plan

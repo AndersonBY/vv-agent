@@ -25,7 +25,7 @@ from vv_agent.types import (
 from .context import project_context
 from .projection import project_records
 from .records import copy_json
-from .reducer import ExecutionState
+from .reducer import ExecutionState, _fold_factory_for
 from .runtime import Runtime, model_usage
 from .store import SessionStore, StoredRecord
 
@@ -44,7 +44,7 @@ def project_result(
     terminal = next((r.record for r in reversed(records) if r.record.kind == "turn_ended" and r.record.turn_id == turn_id), None)
     through = next((i + 1 for i, r in enumerate(records) if r.record is terminal), len(records))
     records = records[:through]
-    messages = project_context(records, state)
+    messages = project_context(records, state, _fold_factory=_fold_factory_for(store))
     cycles, calls, ledger = [], [], []
     plan_seqs = {r.record.record_id: r.seq for r in records}
     compaction_seqs = [r.seq for r in records if r.record.kind == "context_compacted" and r.record.turn_id == turn_id]

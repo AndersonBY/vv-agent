@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.kernel._state import child_handles as child_handles
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 from .records import InboxItem, Record, SessionSpec
@@ -51,11 +52,6 @@ class InvalidChildBatch(ValueError):
     """Custom admission must return a nonempty, uniformly scheduled child batch."""
 
     code = "invalid_child_batch"
-
-
-def child_handles(handle: dict[str, Any]) -> list[dict[str, Any]]:
-    base = {key: value for key, value in handle.items() if key != "siblings"}
-    return [base, *(base | sibling for sibling in handle.get("siblings", []))]
 
 
 def cancel_children(store: SessionStore, tx: SessionTx, state: ExecutionState, sid: str, tid: str) -> list[Record]:
