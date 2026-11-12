@@ -127,14 +127,14 @@ def versions():
 
 def mutation_identity():
     """Identify the actual functions changed by the five implementation mutants."""
-    from vv_agent.session import kernel
+    from vv_agent.session import _driver_recovery, kernel
     from vv_agent.session.sql import SQLSessionTx
 
     functions = {
         "vv_agent.session.sql.SQLSessionTx.append": SQLSessionTx.append,
         "vv_agent.session.sql.SQLSessionTx.push": SQLSessionTx.push,
-        "vv_agent.session.kernel._Driver.step": kernel._Driver.step,
-        "vv_agent.session.kernel._Driver.unknown": kernel._Driver.unknown,
+        "vv_agent.session._driver_recovery.step": _driver_recovery.step,
+        "vv_agent.session._driver_recovery.unknown": _driver_recovery.unknown,
         "vv_agent.session.kernel._LeaseHeartbeat.poll": kernel._LeaseHeartbeat.poll,
     }
     return [

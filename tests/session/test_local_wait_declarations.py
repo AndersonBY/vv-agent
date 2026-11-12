@@ -17,7 +17,8 @@ from vv_agent import (
 )
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
-from vv_agent.session import _driver_dispatch, kernel
+from vv_agent.runtime.cancellation import CancellationToken
+from vv_agent.session import _driver_dispatch
 from vv_agent.session.children import ChildSession, ChildTool, child_delivery
 from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import Runtime
@@ -222,7 +223,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
             def admit(plan):
                 state, _, _ = store.read_state(plan.session_id)
                 task = state.turns[plan.turn_id].start.task()
-                context = value.context(task, plan, kernel.CancellationToken(), store=store, session_id=plan.session_id)
+                context = value.context(task, plan, CancellationToken(), store=store, session_id=plan.session_id)
                 specs = cast(list[ChildSession], assemble(value, plan, context, task, store))
                 admitted.extend(replace(child, yield_on_steer=declared) for child in specs)
                 return admitted

@@ -132,7 +132,7 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
     from vv_agent.kernel._tool_metadata import ToolResultRetention
     from vv_agent.memory import manager, microcompact
-    from vv_agent.session import kernel
+    from vv_agent.session import _driver_planning
 
     for name in microcompact.__all__:
         if name == "plan_microcompact":
@@ -148,7 +148,7 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
         assert getattr(manager, name) is value, name
     assert manager.EXCERPT_METADATA_KEY is reducer.EXCERPT_METADATA_KEY is core.EXCERPT_METADATA_KEY
     assert reducer.replace_with_compacted_marker is core.replace_with_compacted_marker
-    assert kernel.is_microcompacted_tool_content is text.is_microcompacted_tool_content
+    assert _driver_planning.is_microcompacted_tool_content is text.is_microcompacted_tool_content
     assert core.MicrocompactionPolicy is manager.MicrocompactionPolicy is MicrocompactionPolicy
     assert core.ToolResultRetention is manager.ToolResultRetention is ToolResultRetention
     assert {name for name in vars(microcompact) if name.startswith("_") and not name.startswith("__")} == {

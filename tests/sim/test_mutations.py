@@ -1,11 +1,13 @@
 """Mutate executed production functions in memory; source files stay untouched."""
 
+import __future__
+
 import inspect
 import textwrap
 
 import pytest
 
-from vv_agent.session import kernel
+from vv_agent.session import _driver_recovery, kernel
 from vv_agent.session.records import make_record
 from vv_agent.session.sql import SQLSessionTx
 
@@ -17,7 +19,16 @@ def mutate(function, before, after):
     source = textwrap.dedent(inspect.getsource(function))
     assert source.count(before) == 1, "mutation anchor changed; update against the actual implementation"
     namespace = dict(function.__globals__)
-    exec(compile(source.replace(before, after), f"<mutation:{function.__qualname__}>", "exec"), namespace)
+    exec(
+        compile(
+            source.replace(before, after),
+            f"<mutation:{function.__qualname__}>",
+            "exec",
+            flags=function.__code__.co_flags & __future__.annotations.compiler_flag,
+            dont_inherit=True,
+        ),
+        namespace,
+    )
     return namespace[function.__name__]
 
 
@@ -40,26 +51,35 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
         source = source.replace("s._check_lease(session_id, lease, row, s._now())", "None")
         source = source.replace("s._check_lease(session_id, lease, row, now)", "None")
         namespace = dict(SQLSessionTx.append.__globals__)
-        exec(compile(source, "<mutation:SQLSessionTx.append>", "exec"), namespace)
+        exec(
+            compile(
+                source,
+                "<mutation:SQLSessionTx.append>",
+                "exec",
+                flags=SQLSessionTx.append.__code__.co_flags & __future__.annotations.compiler_flag,
+                dont_inherit=True,
+            ),
+            namespace,
+        )
         monkeypatch.setattr(SQLSessionTx, "append", namespace["append"])
     elif mutation == "input_dedupe":
         monkeypatch.setattr(SQLSessionTx, "push", mutate(SQLSessionTx.push, "if old:", "if False and old:"))
     elif mutation == "retry_key":
         monkeypatch.setattr(
-            kernel._Driver,
+            _driver_recovery,
             "step",
             mutate(
-                kernel._Driver.step,
+                _driver_recovery.step,
                 'payload=a.execution_plan._payload | {"not_before_ms": due},',
                 'payload=a.execution_plan._payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
             ),
         )
     else:
         monkeypatch.setattr(
-            kernel._Driver,
+            _driver_recovery,
             "unknown",
             mutate(
-                kernel._Driver.unknown,
+                _driver_recovery.unknown,
                 'and (is_model or (plan._payload["tool"] or {}).get("idempotency") == "supported")',
                 "and True",
             ),
@@ -145,10 +165,10 @@ def test_sqlite_failure_replay_minimization(tmp_path, monkeypatch, record_proper
 
     baseline = versions()
     monkeypatch.setattr(
-        kernel._Driver,
+        _driver_recovery,
         "step",
         mutate(
-            kernel._Driver.step,
+            _driver_recovery.step,
             'payload=a.execution_plan._payload | {"not_before_ms": due},',
             'payload=a.execution_plan._payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
         ),
@@ -163,7 +183,7 @@ def test_sqlite_failure_replay_minimization(tmp_path, monkeypatch, record_proper
         for key in ("contract_selection", "contract_version", "contract_revision", "contract_manifest_sha256", "pinned_contract")
     )
     assert len(report["in_memory_mutations"]) == 1
-    assert report["in_memory_mutations"][0]["target"].endswith("_Driver.step")
+    assert report["in_memory_mutations"][0]["target"].endswith("_driver_recovery.step")
     provenance = replay_provenance(report, baseline)
     assert not provenance["matched"] and "in_memory_mutations" in provenance["differences"]
     record_property("failure_report", report)

@@ -31,7 +31,9 @@ clock, lease-keeper and invoker injection retain their existing behavior.
 `session/_driver_dispatch.py` owns operation execution and tool finalization.
 The driver keeps its synchronous method entry points and delegates to that one
 implementation. `session/_driver_inputs.py` owns input acceptance, child replies
-and turn admission. Scheduling and recovery remain in `session/kernel.py`.
+and turn admission. `session/_driver_planning.py` builds operation/model plans;
+`session/_driver_recovery.py` advances, recovers and closes turns. The driver
+keeps one state-owning instance and its synchronous method entry points.
 
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
@@ -81,6 +83,13 @@ and root bindings refer to the same actual classes and enums; compaction memory
 and reducer result validation import them directly from core. Unknown/null field,
 metadata, status, recovery-pointer and byte-size rules remain part of this one
 implementation. Tool execution and artifact persistence remain outside core.
+
+`kernel/_tool_result_checks.py` owns definitive-result and structured-body checks
+without importing records or schemas. `kernel/_provider_outcomes.py` owns
+Definitive/Accepted/Unknown values and receipt/handle validation, including
+provider/request/attempt identity and evidence checks. Existing outer imports
+resolve to these actual objects. FunctionProvider, host-interaction outcomes and
+workspace preparation remain in the SDK.
 
 Tool completion-policy application, image notifications and skipped-result
 construction live in `kernel/_tool_behavior.py`. `runtime/tool_results.py`
