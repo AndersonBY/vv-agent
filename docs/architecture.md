@@ -24,6 +24,11 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
+`session/kernel.py` coordinates the drive loop. Lease ownership, heartbeat
+scheduling and the shared invocation boundary live in `session/_driver_scope.py`.
+The kernel and public `HeartbeatStopped` export refer to those same objects;
+clock, lease-keeper and invoker injection retain their existing behavior.
+
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
 adapter when accessed. Model execution also loads it when the kernel checks
