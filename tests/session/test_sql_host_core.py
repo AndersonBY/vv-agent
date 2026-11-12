@@ -6,7 +6,7 @@ from threading import RLock
 
 import pytest
 
-from vv_agent.session import kernel
+from vv_agent.session import _driver_dispatch, kernel
 from vv_agent.session.children import ChildSession, ChildTool, InvalidChildBatch
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import SessionSpec
@@ -118,7 +118,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
         kernel.drive(host, "s", runtime=rt)
     rt.hook = lambda *_: None
     prefix = [r.record.encode() for r in rows(host)]
-    create = kernel.create_child
+    create = _driver_dispatch.create_child
     append = SQLSessionTx.append
     append_returned = []
 
@@ -141,7 +141,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
         append_returned.append(receipt)
         return receipt
 
-    monkeypatch.setattr(kernel, "create_child", create_child)
+    monkeypatch.setattr(_driver_dispatch, "create_child", create_child)
     monkeypatch.setattr(SQLSessionTx, "append", fault_append)
     lease = host.acquire("s", owner="one-admission", ttl_ms=15000)
     assert lease is not None

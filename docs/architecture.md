@@ -28,6 +28,9 @@ supply their own store.
 scheduling and the shared invocation boundary live in `session/_driver_scope.py`.
 The kernel and public `HeartbeatStopped` export refer to those same objects;
 clock, lease-keeper and invoker injection retain their existing behavior.
+`session/_driver_dispatch.py` owns operation execution and tool finalization.
+The driver keeps its synchronous method entry points and delegates to that one
+implementation; the scheduler and recovery loop remain in `session/kernel.py`.
 
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
