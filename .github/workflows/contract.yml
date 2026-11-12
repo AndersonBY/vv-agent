@@ -90,4 +90,6 @@ jobs:
             tests/test_runner_events_producer_parity.py
 
       - name: Seeded real-store simulation smoke
+        env:
+          TMPDIR: /dev/shm
         run: timeout 60s uv run pytest tests/sim -k smoke -q -s

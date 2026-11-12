@@ -32,6 +32,9 @@ SCENARIOS = (
     "definition_mismatch",
     "model_result_precommit",
     "metered_tool",
+    "approval_reply",
+    "future_input",
+    "cancel_descendants",
 )
 
 
@@ -283,6 +286,184 @@ def check_metered_tool(w, provider):
     w.covered.update({"I5", "I10"})
 
 
+def approval_reply(w, provider):
+    w.drive(provider=provider)
+    w.check()
+    require(not any(call[3] == "tool" for call in w.calls), "I1", "unapproved effect was dispatched")
+    observer = w.connection("observer")
+    state, rows, _ = observer.read_state("s")
+    park = next(row.record for row in rows if row.record.kind == "op_parked")
+    handle = park.payload["handle"]
+    require(handle["kind"] == "approval", "approval", "tool did not wait for host approval")
+    valid = InboxItem(
+        "approval-valid",
+        "approval_answer",
+        {
+            "operation_id": park.operation_id,
+            "attempt": park.attempt,
+            "request_id": handle["request_id"],
+            "request_digest": handle["request_digest"],
+            "scope": handle["scope"],
+            "decision": "approve",
+        },
+        park.turn_id,
+        0,
+    )
+    invalid = {
+        "approval-request": replace(valid, input_id="approval-request", payload=valid.payload | {"request_id": "unrelated"}),
+        "approval-digest": replace(valid, input_id="approval-digest", payload=valid.payload | {"request_digest": "0" * 64}),
+        "approval-scope": replace(valid, input_id="approval-scope", payload=valid.payload | {"scope": ["other"]}),
+        "approval-turn": replace(valid, input_id="approval-turn", target_turn_id="s/turn/obsolete"),
+        "approval-generation": replace(valid, input_id="approval-generation", generation=1),
+    }
+    before = tuple(w.calls)
+    while invalid:
+        item = invalid.pop(w.choices.choose("approval/invalid-reply", sorted(invalid)))
+        w.push("s", item)
+        w.drive(provider=provider, participant="worker-1")
+        state, rows, _ = observer.read_state("s")
+        require(tuple(w.calls) == before, "I1", "bad or stale approval dispatched external work")
+        require(
+            state.applied_inputs[item.input_id].payload["disposition"] == "rejected"
+            and not state.operations[park.operation_id].attempts[park.attempt].started,
+            "approval",
+            "bad or stale approval authorized the parked attempt",
+        )
+        w.check()
+    for item in (valid, valid, replace(valid, input_id="approval-copy")):
+        w.push("s", item)
+    w.scan(provider=provider, participant="worker-1")
+    # A new input identity with the same resolved request also cannot send again.
+    w.push("s", replace(valid, input_id="approval-late-copy"))
+    w.scan(provider=provider, participant="worker-1")
+    state, rows, _ = observer.read_state("s")
+    require(
+        state.applied_inputs[valid.input_id].payload["disposition"] == "applied", "approval", "valid approval was not applied"
+    )
+    for key in ("approval-copy", "approval-late-copy"):
+        require(state.applied_inputs[key].payload["disposition"] == "noop", "approval", "resolved approval was applied again")
+    starts = [row for row in rows if row.record.kind == "op_started" and row.record.operation_id == park.operation_id]
+    require(len(starts) == 1 and sum(call[3] == "tool" for call in w.calls) == 1, "I1", "approval did not dispatch exactly once")
+    require(provider.store._one("SELECT count(*) FROM sim_effect")[0] == 1, "I1", "approval repeated the external effect")
+    require(state.active_turn_id is None, "I4", "approved work did not finish")
+    w.queue.clear()
+
+
+def future_input(w, provider):
+    # Warm the real runtime before establishing a real PostgreSQL due-time window.
+    w.drive(provider=provider)
+    w.check()
+    observer = w.connection("observer")
+    delay = w.choices.choose("input/delay-ms", [2000, 3000])
+    due = observer._now() + delay
+    item = InboxItem("future", "user", {"content": "run when available"}, available_ms=due)
+    w.push("s", item)
+    immutable = observer._one("SELECT body,available_ms FROM sk_inbox WHERE session_id='s' AND input_id='future'")
+    before = tuple(w.calls)
+    require(not observer.peek_inbox("s"), "I3", "future input appeared in the ready inbox")
+    w.deliver(provider=provider, participant="worker-1")
+    w.scan(provider=provider, participant="worker-1")
+    now = observer._now()
+    require(now < due, "scheduler", "early-input probe missed its real-clock window")
+    require(observer.read_input("s", "future").consumed_seq is None, "I3", "future input was consumed early")
+    require(tuple(w.calls) == before, "I1", "future input dispatched work early")
+    w.events.append({"future_input_held": "future", "available_ms": due, "observed_ms": now})
+    # SQLite advances injected time; PostgreSQL sleeps against unchanged SQL time.
+    deadline = w.clock.monotonic() + 10
+    while (remaining := due - observer._now()) > 0:
+        require(w.clock.monotonic() < deadline, "scheduler", "database due-time wait exceeded ten seconds")
+        w.clock.sleep(min(remaining / 1000, 0.1))
+    require(observer.is_runnable("s"), "I4", "due input did not make SQL work runnable")
+    require(w.scan(provider=provider, participant="worker-1"), "I4", "SQL scanner did not recover the due input")
+    state, rows, _ = observer.read_state("s")
+    applications = [
+        row for row in rows if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "future"
+    ]
+    require(
+        len(applications) == 1 and applications[0].created_ms >= due,
+        "I3",
+        "due input was not consumed exactly once at/after due time",
+    )
+    require(
+        observer._one("SELECT body,available_ms FROM sk_inbox WHERE session_id='s' AND input_id='future'") == immutable,
+        "I3",
+        "input availability or immutable body was rewritten",
+    )
+    require(state.active_turn_id is None and state.turns["s/turn/future"].ended, "I4", "due input did not finish")
+    require(
+        sum(call[3] == "tool" for call in w.calls) == 2 and provider.store._one("SELECT count(*) FROM sim_effect")[0] == 2,
+        "I1",
+        "due input did not produce exactly one additional effect",
+    )
+    w.events.append({"future_input_applied": "future", "available_ms": due, "created_ms": applications[0].created_ms})
+    w.queue.clear()
+
+
+def cancel_descendants(w, provider):
+    parent_children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "child work")}
+    child_children = {"effect": lambda _plan: ChildSession(SessionSpec("grandchild", "sim", "/tmp"), "grandchild work")}
+    w.drive(provider=provider, children=parent_children)
+    w.check()
+    w.drive("child", participant="child-worker", children=child_children)
+    w.check()
+    w.drive("grandchild", participant="grandchild-worker", provider=provider)
+    w.check()
+    observer = w.connection("observer")
+    turns = {}
+    for sid, parent in (("s", None), ("child", "s"), ("grandchild", "child")):
+        state, rows, _ = observer.read_state(sid)
+        require(
+            state.active_turn_id is not None and bool(state.waits) and bool(state.operations), "I7", f"{sid} never became active"
+        )
+        require(not any(row.record.kind == "turn_ended" for row in rows), "I7", f"{sid} ended before root cancellation")
+        require(rows[0].record.payload["parent_session_id"] == parent, "I7", f"{sid} has the wrong parent")
+        turns[sid] = state.active_turn_id
+    require({call[0] for call in w.calls} == set(turns), "I7", "cancellation tree contains an unstarted descendant")
+    before = tuple(w.calls)
+    w.events.append({"active_cancellation_tree": turns})
+    w.push("s", InboxItem("cancel-tree", "control", {"action": "cancel"}, turns["s"], 0))
+    w.drive(provider=provider, children=parent_children)
+    w.check()
+    for sid, participant, children in (("child", "child-worker", child_children), ("grandchild", "grandchild-worker", {})):
+        controls = [item.item for item in observer.peek_inbox(sid) if item.item.kind == "control"]
+        require(
+            any(
+                item.payload == {"action": "cancel"} and item.target_turn_id == turns[sid] and item.generation == 0
+                for item in controls
+            ),
+            "I7",
+            f"cancellation did not propagate to {sid}",
+        )
+        w.drive(sid, participant=participant, children=children, provider=provider)
+        w.check()
+    # Deliver actual child terminal receipts even though their parents have ended.
+    delivery = w.connection("delivery")
+    for sid, parent, participant, children in (
+        ("grandchild", "child", "child-worker", child_children),
+        ("child", "s", "worker-0", parent_children),
+    ):
+        for _ in range(2):
+            with delivery.atomic() as tx:
+                child_delivery(delivery, tx, sid)
+        w.drive(parent, participant=participant, children=children, provider=provider)
+        w.check()
+    for sid in turns:
+        state, rows, _ = observer.read_state(sid)
+        terminals = [row.record for row in rows if row.record.kind == "turn_ended"]
+        require(
+            state.active_turn_id is None and len(terminals) == 1 and terminals[0].payload["status"] == "cancelled",
+            "I7",
+            f"{sid} survived or restarted after cancellation",
+        )
+    require(
+        tuple(w.calls) == before and provider.store._one("SELECT count(*) FROM sim_effect")[0] == 0,
+        "I7",
+        "cancelled descendants dispatched external work",
+    )
+    w.covered.add("I7")
+    w.queue.clear()
+
+
 def run_scenario(world: SimWorld, scenario=None):
     w = world
     w.scenario = w.choices.choose("scenario", [scenario] if scenario else SCENARIOS)
@@ -291,6 +472,13 @@ def run_scenario(world: SimWorld, scenario=None):
     w.push("s", InboxItem("initial", "user", {"content": "go"}))
     w.stale_writer_probe()
     provider = Provider(w)
+    if w.scenario in {"approval_reply", "future_input", "cancel_descendants"}:
+        {"approval_reply": approval_reply, "future_input": future_input, "cancel_descendants": cancel_descendants}[w.scenario](
+            w, provider
+        )
+        w.check(quiescent=True)
+        w.check_accounting()
+        return w.summary()
     children = {}
     if w.scenario in {"children", "cancel"}:
         children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "child work")}

@@ -157,7 +157,11 @@ def test_sqlite_failure_replay_minimization(tmp_path, monkeypatch, record_proper
         with pytest.raises(InvariantViolation, match="I1"):
             run_scenario(failed, "unknown_idempotent")
         report = failed.summary() | versions()
-    assert report["contract_version"] == "38.0.0" and len(report["code_digest"]) == 64
+    assert len(report["code_digest"]) == 64
+    assert all(
+        report[key] == baseline[key]
+        for key in ("contract_selection", "contract_version", "contract_revision", "contract_manifest_sha256", "pinned_contract")
+    )
     assert len(report["in_memory_mutations"]) == 1
     assert report["in_memory_mutations"][0]["target"].endswith("_Driver.step")
     provenance = replay_provenance(report, baseline)

@@ -339,8 +339,11 @@ class SimWorld:
             world.calls.append((sid, op, attempt, "model", None))
             if world.scenario == "model_unknown":
                 raise TimeoutError("lost model response")
-            world.model_receipts[(sid, op, attempt)] = (11, 3) if sid == "s" and meta["cycle_index"] == 1 else (7, 1)
-            if sid == "s" and meta["cycle_index"] == 1:
+            issues_tool = meta["cycle_index"] == 1 and (
+                sid == "s" or (world.scenario == "cancel_descendants" and sid in {"child", "grandchild"})
+            )
+            world.model_receipts[(sid, op, attempt)] = (11, 3) if issues_tool else (7, 1)
+            if issues_tool:
                 return LLMResponse(
                     "", [ToolCall("job", "effect", {})], raw={"usage": {"prompt_tokens": 11, "completion_tokens": 3}}
                 )
@@ -359,6 +362,7 @@ class SimWorld:
             description="scripted effect",
             params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
             on_invoke=forbidden,
+            needs_approval=self.scenario == "approval_reply" or (self.scenario == "cancel_descendants" and sid == "grandchild"),
             tool_metadata=ToolMetadata(idempotency=ToolIdempotency.SUPPORTED if idempotent else ToolIdempotency.UNSUPPORTED),
         )
         keeper = self.keepers.setdefault(participant, ScheduledLeaseKeeper(self, participant))
@@ -459,6 +463,13 @@ class SimWorld:
                     require(epoch == actual and until is not None and until > now, "I2", f"unfenced write {rid}")
             inputs = store._rows("SELECT input_id,consumed_seq FROM sk_inbox WHERE session_id=%s", (sid,))
             applications = Counter(r._payload["input"]["input_id"] for r in records if r.kind == "input_applied")
+            for row in rows:
+                if row.record.kind == "input_applied":
+                    require(
+                        row.created_ms >= row.record._payload["input"]["available_ms"],
+                        "I3",
+                        "input consumed before its durable availability time",
+                    )
             for input_id, consumed in inputs:
                 require(applications[input_id] == int(consumed is not None), "I3", f"input {sid}/{input_id} consumption differs")
             require(set(applications) <= {key for key, _ in inputs}, "I3", "application has no inbox input")
@@ -503,11 +514,14 @@ class SimWorld:
                     if attempt.unknown and attempt.result:
                         evidence = attempt.result._payload["evidence"]
                         if attempt.child_handle:
-                            child = attempt.result._payload["result"].get("metadata", {}).get("child_session_id")
-                            terminals = store.read(child).records if child else ()
-                            trusted = any(
-                                r.record.kind == "turn_ended" and f"{child}/{r.seq}/{r.record.digest}" in evidence
-                                for r in terminals
+                            child = attempt.child_handle["session_id"]
+                            terminal_turn = attempt.child_handle["turn_id"]
+                            declared_child = attempt.result._payload["result"].get("metadata", {}).get("child_session_id")
+                            trusted = declared_child == child and any(
+                                r.record.kind == "turn_ended"
+                                and r.record.turn_id == terminal_turn
+                                and f"child/{r.seq}/{r.record.digest}" in evidence
+                                for r in store.read(child).records
                             )
                         else:
                             receipts = self.connection("provider")._rows("SELECT handle FROM sim_effect")

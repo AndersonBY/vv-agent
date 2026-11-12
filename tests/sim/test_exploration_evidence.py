@@ -136,3 +136,110 @@ def test_seeded_takeover_replays_the_same_interleaving(tmp_path):
     # SQLite's clock is injected; PostgreSQL intentionally keeps its real clock.
     assert canonical_json_bytes(first["events"]) == canonical_json_bytes(second["events"])
     assert first["calls"] == second["calls"]
+
+
+def test_approval_binds_request_digest_scope_and_generation(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "approval_reply")
+        state, rows, _ = world.connection("observer").read_state("s")
+        for suffix in ("request", "digest", "scope", "turn", "generation"):
+            assert state.applied_inputs[f"approval-{suffix}"].payload["disposition"] == "rejected"
+        assert state.applied_inputs["approval-valid"].payload["disposition"] == "applied"
+        assert all(state.applied_inputs[key].payload["disposition"] == "noop" for key in ("approval-copy", "approval-late-copy"))
+        assert len([row for row in rows if row.record.kind == "op_started" and "/tool/" in row.record.operation_id]) == 1
+        assert sum(call[3] == "tool" for call in world.calls) == 1
+        world.check(quiescent=True, every_prefix=True)
+
+
+def test_future_input_is_immutable_and_only_due_scanner_resumes(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        summary = run_scenario(world, "future_input")
+        held = next(event for event in summary["events"] if "future_input_held" in event)
+        applied = next(event for event in summary["events"] if "future_input_applied" in event)
+        assert held["observed_ms"] < held["available_ms"] == applied["available_ms"] <= applied["created_ms"]
+        item = world.connection("observer").read_input("s", "future")
+        assert item.item.available_ms == held["available_ms"] and item.consumed_seq is not None
+        assert "I4" in summary["covered"]
+        world.check(quiescent=True, every_prefix=True)
+
+
+def test_future_input_oracle_detects_removed_sql_readiness_filter(sim_database, monkeypatch):
+    from vv_agent.session.sql import SQLStore
+
+    from .test_mutations import mutate
+
+    monkeypatch.setattr(
+        SQLStore,
+        "peek_inbox",
+        mutate(
+            SQLStore.peek_inbox,
+            'readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""',
+            'readiness = ""',
+        ),
+    )
+    with SimWorld(sim_database, seed=17) as world, pytest.raises(InvariantViolation, match="I3: future input appeared"):
+        run_scenario(world, "future_input")
+
+
+def test_root_cancel_terminates_started_child_and_grandchild(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        result = run_scenario(world, "cancel_descendants")
+        active = next(event["active_cancellation_tree"] for event in result["events"] if "active_cancellation_tree" in event)
+        assert set(active) == {"s", "child", "grandchild"}
+        assert {sid for sid, _op, _attempt, kind, _key in world.calls if kind == "model"} == set(active)
+        for sid in active:
+            state, rows, _ = world.connection("observer").read_state(sid)
+            assert state.active_turn_id is None
+            assert [row.record.payload["status"] for row in rows if row.record.kind == "turn_ended"] == ["cancelled"]
+        assert "I7" in result["covered"]
+        world.check(quiescent=True, every_prefix=True)
+
+
+def test_descendant_oracle_detects_missing_second_generation_cancel(sim_database, monkeypatch):
+    from vv_agent.session import kernel
+
+    actual = kernel.cancel_children
+
+    def omit_grandchild(store, tx, state, sid, tid):
+        return [] if sid == "child" else actual(store, tx, state, sid, tid)
+
+    monkeypatch.setattr(kernel, "cancel_children", omit_grandchild)
+    with SimWorld(sim_database, seed=17) as world:
+        with pytest.raises(InvariantViolation, match="I7: cancellation did not propagate to grandchild"):
+            run_scenario(world, "cancel_descendants")
+        assert world.connection("observer").read_state("child")[0].active_turn_id is None
+        assert world.connection("observer").read_state("grandchild")[0].active_turn_id == "grandchild/turn/start"
+
+
+@pytest.mark.parametrize("scenario", ["approval_reply", "future_input", "cancel_descendants"])
+def test_participant_cases_replay_deterministically(tmp_path, scenario):
+    with SimWorld(tmp_path / "first.sqlite", seed=17) as original:
+        first = run_scenario(original, scenario)
+    with SimWorld(tmp_path / "replay.sqlite", seed=999, replay=first["decisions"]) as replay:
+        second = run_scenario(replay, scenario)
+        assert replay.choices.used == set(replay.choices.overrides)
+    assert first["events"] == second["events"]
+    assert first["calls"] == second["calls"]
+
+
+def test_descendant_settlement_requires_real_terminal_receipt(sim_database, monkeypatch):
+    from vv_agent.session import kernel
+    from vv_agent.session.reducer import TransitionError
+
+    actual = kernel._Driver.completed
+
+    def false_terminal_receipt(self, plan, outcome):
+        attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
+        if self.sid == "child" and attempt.child_handle:
+            outcome = replace(outcome, evidence=("child/0/" + "0" * 64,))
+        return actual(self, plan, outcome)
+
+    monkeypatch.setattr(kernel._Driver, "completed", false_terminal_receipt)
+    with SimWorld(sim_database, seed=17) as world:
+        with pytest.raises(TransitionError, match="child completion needs terminal input"):
+            run_scenario(world, "cancel_descendants")
+        observer = world.connection("observer")
+        _, rows, _ = observer.read_state("child")
+        assert not any(row.record.kind == "op_completed" and "/tool/" in row.record.operation_id for row in rows)
+        assert any(item.item.kind == "child_result" and item.consumed_seq is None for item in observer.peek_inbox("child"))
+        world.check()

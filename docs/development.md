@@ -65,11 +65,13 @@ uv run ruff check .
 uv run ty check
 ```
 
-Before you report a broad change as complete, run the full test suite. Live
-tests are skipped by default:
+Before you report a broad change as complete, run the full checks remotely.
+Keep correctness tests on their regular temporary filesystem and run the Linux
+simulator performance gate separately. Live tests are skipped by default:
 
 ```bash
-uv run pytest
+uv run pytest -k "not simulation_smoke"
+TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
 ```
 
 ### Deterministic session simulation
@@ -84,10 +86,21 @@ uv run pytest tests/sim/test_mutations.py -k sqlite -q
 ```
 
 The PR smoke gate runs 1,000 independent SQLite-file seeds within 60 seconds,
-including process startup and tokenizer initialization. Each world uses one
-thread; separate processes run independent seeds. Full suites and the million-seed
-SQLite / 10,000-seed PostgreSQL campaigns run remotely. PostgreSQL acceptance
-requires a disposable database reached over TCP with password authentication.
+including process startup, tokenizer initialization and process shutdown. Each
+world uses one thread; the selected implementation uses the original bounded
+batcher with spawned processes and at most `2 * workers` jobs per batch. The CI
+smoke step alone sets `TMPDIR=/dev/shm`.
+These are real SQLite files on a RAM-backed filesystem, with WAL, FULL
+synchronous mode and every invariant check retained. This evidence covers SQL
+transactions and worker-process recovery; it does not prove durability through
+host power loss.
+
+Do not export that setting for the full suite. Keep disk-directed process and
+transaction tests on regular paths and retain PostgreSQL acceptance through a
+disposable database over TCP with password authentication. Reports record the
+actual temporary directory, filesystem type (or null when unavailable), and
+requested `TMPDIR` in `environment.sqlite_temporary_storage`. Full suites and
+the million-seed SQLite / 10,000-seed PostgreSQL campaigns run remotely.
 
 ### App Server changes
 
