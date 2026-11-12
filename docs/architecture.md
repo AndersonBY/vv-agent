@@ -91,15 +91,23 @@ Pure compaction markers, rendering and recovery-envelope functions are owned by
 reducer imports the core renderer. Compaction planning, Message mutation,
 workspace I/O, callbacks and token counting remain outside core.
 
+Execution statuses, tasks and child configuration, usage accounting, cycle/model
+call records and final results are owned by `kernel/_execution_values.py`, together
+with their existing validation and wire versions. The module imports only stdlib
+and other core values. `types.py` remains the explicit existing export surface for
+the same actual objects, including the canonical `vv_agent.types.AgentResult`
+binding. Private helper exports remain only where SDK or producer callers use them.
+The W9.6 rename to `core_types.py` remains pending; this extraction retains the
+current `types.py` path and does not resolve its stdlib-name collision.
+
 Record Message and model-settings validation import the actual core values
-directly. `Record._task` still constructs `AgentTask` from `types.py`; that task's
-settings, resolved prompt, microcompaction policy, metadata normalization and
-budget-data dependencies now resolve directly to core. `AgentTask` itself and
-record values, record-specific byte framing, jiter/orjson codecs and jsonschema
-diagnostics remain outside core. The reducer still depends on context,
-memory/tokenizer, lifecycle, budget and event code; SQL stores and the execution
-driver remain under `session/`. These extractions do not establish a core-only
-simulation or complete W9. LocalWorker convergence belongs to W4/P3.
+directly. Record task decoding can consume the authoritative `AgentTask` and
+`SubAgentConfig` from `kernel/_execution_values.py`; the existing `types.py`
+bindings resolve to those same objects. Record codecs and diagnostics are a separate
+extraction boundary. The reducer still depends on context, memory/tokenizer,
+lifecycle, budget and event code; SQL stores and the execution driver remain
+under `session/`. These extractions do not establish a core-only simulation or
+complete W9. LocalWorker convergence belongs to W4/P3.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply
@@ -204,7 +212,7 @@ cycle reported that metric.
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
 | `src/vv_agent/tracing.py` | Trace spans and the processor protocol. |
 | `src/vv_agent/runtime/compiler.py` | Compiles `Agent + input + RunConfig` into an `AgentTask`. Import this submodule directly to avoid package import cycles. |
-| `src/vv_agent/types.py` | Runtime types: tasks, messages, tool calls, results, statuses, and token usage. |
+| `src/vv_agent/types.py` | Existing exports of the actual kernel-owned value objects. Execution/task/usage/result definitions live in `src/vv_agent/kernel/_execution_values.py`. |
 | `src/vv_agent/session/` | Session kernel, SQLite and PostgreSQL stores, `SessionDriver`, child sessions, and projections. See [session-kernel.md](session-kernel.md). |
 | `src/vv_agent/app_server/` | App Server protocol, transport, and thread mapping. See [app-server.md](app-server.md). |
 | `src/vv_agent/llm/` | Model protocol adapters, scripted test clients, prompt cache behavior, and the `vv-llm` client bridge. |

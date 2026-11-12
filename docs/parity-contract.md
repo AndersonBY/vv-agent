@@ -128,12 +128,18 @@ immutable release lock or vendored snapshot. After publication, synchronize
 them with the commands above. A local gate is not release or central adoption
 evidence.
 
+Execution/task/usage/result values are implemented once in
+`kernel/_execution_values.py`. Existing module and root exports resolve to those
+actual objects; the public inventory target `vv_agent.types.AgentResult` remains
+valid. This ownership change preserves wire versions, fields, bounds, diagnostics
+and bytes. The separate W9.6 `core_types.py` rename has not been applied.
+
 Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |
 | --- | --- | --- |
 | Public API v15 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
-| Strict wire formats | `events.py`, `types.py`, `kernel/_message_values.py`, `kernel/_message_codec.py`, `kernel/_tool_values.py`, `kernel/_model_settings.py`, `kernel/_microcompaction_policy.py`, `kernel/_tool_metadata.py`, `kernel/_prompt_values.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
+| Strict wire formats | `events.py`, `types.py`, `kernel/_execution_values.py`, `kernel/_message_values.py`, `kernel/_message_codec.py`, `kernel/_tool_values.py`, `kernel/_model_settings.py`, `kernel/_microcompaction_policy.py`, `kernel/_tool_metadata.py`, `kernel/_prompt_values.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
 | Prompt and run definition | `runtime/compiler.py`, `kernel/_prompt_values.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
 | Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
 | Events, results and tracing | `session/projection.py`, `session/result.py`, `session/tracing.py` | Runner event, terminal, trace and result tests |
