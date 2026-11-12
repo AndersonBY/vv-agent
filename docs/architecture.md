@@ -117,8 +117,10 @@ the workspace tool list have one core owner shared by SDK exports and the schema
 generator.
 
 Budget values and validation are owned by `kernel/_budget_values.py`.
-`budget.py` retains the evaluator, clock access and meter observation. Task values
-import those budget objects directly from core without loading the evaluator.
+`kernel/_budget.py` owns budget state, reservations, limits and unavailable-metric
+latches. It requests clock and host-cost observations; `budget.py` performs those
+reads while core evaluation is suspended and preserves the synchronous SDK API.
+Task values import the core budget objects without loading the live adapter.
 
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the

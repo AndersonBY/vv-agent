@@ -1,4 +1,4 @@
-"""Pure run-budget values and validation; observation and evaluation stay outside core."""
+"""Pure run-budget values and validation shared with the core evaluator."""
 
 from __future__ import annotations
 
