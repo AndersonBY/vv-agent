@@ -134,6 +134,12 @@ actual objects; the public inventory target `vv_agent.types.AgentResult` remains
 valid. This ownership change preserves wire versions, fields, bounds, diagnostics
 and bytes. The separate W9.6 `core_types.py` rename has not been applied.
 
+After-cycle values and durable denial-state validation are implemented once in
+`kernel/_cycle_values.py`; existing lifecycle and root bindings resolve to the
+same objects. Snapshot copy behavior, control-state mutations, limits, errors and
+canonical boundary bytes are unchanged. Hook callbacks and their composition
+remain in the outer `AfterCycleHookManager`.
+
 Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |

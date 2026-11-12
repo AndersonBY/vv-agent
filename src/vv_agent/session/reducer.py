@@ -949,7 +949,7 @@ class Fold:
                         "session memory needs a logged extraction result",
                     )
                 elif p["stage"] == "after_cycle":
-                    from vv_agent.runtime.lifecycle import AfterCycleDecision, AfterCycleStop
+                    from vv_agent.kernel._cycle_values import AfterCycleDecision, AfterCycleStop
 
                     data = p["data"]
                     AfterCycleDecision(
@@ -975,7 +975,7 @@ class Fold:
                         "cycle decision before tool batch completion",
                     )
                 elif p["stage"] == "budget":
-                    from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+                    from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot
 
                     require(
                         BudgetUsageSnapshot.from_dict(p["data"]["usage"]).to_dict() == p["data"]["usage"],

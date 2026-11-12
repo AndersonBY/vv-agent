@@ -106,6 +106,15 @@ binding. Private helper exports remain only where SDK or producer callers use th
 The W9.6 rename to `core_types.py` remains pending; this extraction retains the
 current `types.py` path and does not resolve its stdlib-name collision.
 
+After-cycle decisions, native outcomes, detached snapshots, validation errors and
+durable denial-state helpers are owned by `kernel/_cycle_values.py`. Their
+validation and UTF-16-sorted state updates use stdlib and core values only.
+`runtime/lifecycle.py` exports those same objects and retains the hook protocol
+and `AfterCycleHookManager`, including callback execution and decision composition.
+The reducer validates after-cycle and budget boundaries through core values;
+its remaining memory/tokenizer, context, event and store dependencies still
+prevent a core-only fold.
+
 Record Message and model-settings validation import the actual core values
 directly. Record task decoding can consume the authoritative `AgentTask` and
 `SubAgentConfig` from `kernel/_execution_values.py`; the existing `types.py`
