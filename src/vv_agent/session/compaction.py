@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.kernel._context_messages import UnseenInputCapacityError, retained_start
 from vv_agent.llm.errors import MAX_PTL_RETRIES
-from vv_agent.memory.input_protection import UnseenInputCapacityError, retained_start
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message

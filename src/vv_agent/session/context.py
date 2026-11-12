@@ -10,8 +10,7 @@ from difflib import SequenceMatcher
 from heapq import heapify, heappop, heappush
 from typing import TYPE_CHECKING
 
-from vv_agent.memory.input_protection import atomic_start, retained_start
-from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
+from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages, retained_start
 from vv_agent.runtime.tool_results import build_image_notification
 from vv_agent.types import AgentTask, Message, ToolExecutionResult
 

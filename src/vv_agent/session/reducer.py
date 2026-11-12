@@ -9,10 +9,9 @@ from hashlib import sha256
 from typing import Any
 
 from vv_agent.kernel._compaction_text import build_compacted_tool_content
+from vv_agent.kernel._context_messages import filter_empty_assistant_messages, retained_start
 from vv_agent.kernel._message_values import Message
-from vv_agent.memory.input_protection import retained_start
 from vv_agent.memory.manager import MemoryManager
-from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY, replace_with_compacted_marker
 from vv_agent.memory.token_utils import count_messages_tokens
 

@@ -1352,7 +1352,7 @@ class _Driver:
 
     def model_plan(self) -> Record | None:
         messages = self.transcript()
-        from vv_agent.memory.input_protection import retained_start
+        from vv_agent.kernel._context_messages import retained_start
 
         from .context import protected_start
 
@@ -2259,7 +2259,7 @@ class _Driver:
         if self.runtime.hooks.has_hooks() and self.boundary("before_memory", hook_id) is None:
             shared = self.shared_state()
             source = self.transcript()
-            from vv_agent.memory.input_protection import retained_start
+            from vv_agent.kernel._context_messages import retained_start
 
             from .context import protected_start
 

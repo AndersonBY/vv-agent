@@ -21,10 +21,9 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages, retained_start
 from vv_agent.kernel._message_values import COMPACTION_METADATA_KEY, Message, ToolArtifactRef, validate_compaction_metadata
 from vv_agent.kernel._tool_values import ToolExecutionResult
-from vv_agent.memory.input_protection import atomic_start, retained_start
-from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
     EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
