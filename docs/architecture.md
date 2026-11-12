@@ -70,18 +70,36 @@ metadata, status, recovery-pointer and byte-size rules remain part of this one
 implementation. Tool execution, artifact persistence and compaction planning
 remain outside core.
 
+Model settings, tool choice, response format and retry settings are owned by
+`kernel/_model_settings.py`. Microcompaction policy and normalization are owned by
+`kernel/_microcompaction_policy.py`; tool metadata, its enums, normalization and
+metadata-denial rules are owned by `kernel/_tool_metadata.py`. Their existing
+outer modules explicitly export the same objects for active public and SDK callers.
+
+Resolved prompt sections/bundles, immutable metadata helpers and stable prompt
+digests are owned by `kernel/_prompt_values.py`. `prompt/builder.py` and the prompt
+package expose the same resolved values. `SystemPromptBuilder`, template rendering,
+workspace/path resolution, Session Memory insertion and current-time capture stay
+outside core.
+
+Budget values and validation are owned by `kernel/_budget_values.py`.
+`budget.py` retains the evaluator, clock access and meter observation. Task values
+import those budget objects directly from core without loading the evaluator.
+
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
 reducer imports the core renderer. Compaction planning, Message mutation,
 workspace I/O, callbacks and token counting remain outside core.
 
-Record values, record-specific byte framing, jiter/orjson codecs, SDK task decoding
-and jsonschema diagnostics remain outside core. Record Message decoding still
-reaches the core values through `types.py`, which loads outer task/settings and
-prompt dependencies. The reducer still depends on context, memory/tokenizer,
-lifecycle, budget and event code; SQL stores and the execution driver remain
-under `session/`. These extractions do not establish a core-only simulation or
-complete W9. LocalWorker convergence belongs to W4/P3.
+Record Message and model-settings validation import the actual core values
+directly. `Record._task` still constructs `AgentTask` from `types.py`; that task's
+settings, resolved prompt, microcompaction policy, metadata normalization and
+budget-data dependencies now resolve directly to core. `AgentTask` itself and
+record values, record-specific byte framing, jiter/orjson codecs and jsonschema
+diagnostics remain outside core. The reducer still depends on context,
+memory/tokenizer, lifecycle, budget and event code; SQL stores and the execution
+driver remain under `session/`. These extractions do not establish a core-only
+simulation or complete W9. LocalWorker convergence belongs to W4/P3.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, cast
 
-from vv_agent.budget import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.kernel._budget_values import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._message_values import (
     _MESSAGE_FIELDS as _MESSAGE_FIELDS,
@@ -29,6 +29,9 @@ from vv_agent.kernel._message_values import (
 from vv_agent.kernel._message_values import (
     validate_compaction_metadata as validate_compaction_metadata,
 )
+from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy, normalize_microcompaction_policy
+from vv_agent.kernel._model_settings import ModelSettings
+from vv_agent.kernel._prompt_values import PromptBundle
 from vv_agent.kernel._tool_values import (
     ToolCall,
     ToolExecutionResult,
@@ -39,9 +42,6 @@ from vv_agent.kernel._tool_values import (
 from vv_agent.kernel._tool_values import (
     ToolResultStatus as ToolResultStatus,
 )
-from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
-from vv_agent.model_settings import ModelSettings
-from vv_agent.prompt import PromptBundle
 
 NoToolPolicy = Literal["continue", "wait_user", "finish"]
 _NO_TOOL_POLICIES = frozenset({"continue", "wait_user", "finish"})
@@ -620,7 +620,7 @@ class SubAgentConfig:
             raise TypeError("sub-agent exclude_tools must be a list of strings")
         if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
             raise TypeError("sub-agent metadata must be a dict with string keys")
-        from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
+        from vv_agent.kernel._tool_metadata import normalize_denied_side_effects, normalize_metadata_labels
 
         self.denied_side_effects = [item.value for item in normalize_denied_side_effects(self.denied_side_effects)]
         self.denied_capability_tags = normalize_metadata_labels(
