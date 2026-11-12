@@ -61,6 +61,15 @@ JSON helpers. Message metadata and tool arguments retain their signed-64 through
 unsigned-64 integer range; canonical digest encoding and artifact sizes/cursor
 offsets retain the narrower I-JSON safe-integer range.
 
+Tool calls, directives, result statuses and the complete `ToolExecutionResult`
+value/validator are owned by `kernel/_tool_values.py`. It uses only the standard
+library and the existing canonical JSON and Message values. Existing `types.py`
+and root bindings refer to the same actual classes and enums; compaction memory
+and reducer result validation import them directly from core. Unknown/null field,
+metadata, status, recovery-pointer and byte-size rules remain part of this one
+implementation. Tool execution, artifact persistence and compaction planning
+remain outside core.
+
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
 reducer imports the core renderer. Compaction planning, Message mutation,

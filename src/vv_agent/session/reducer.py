@@ -9,12 +9,12 @@ from hashlib import sha256
 from typing import Any
 
 from vv_agent.kernel._compaction_text import build_compacted_tool_content
+from vv_agent.kernel._message_values import Message
 from vv_agent.memory.input_protection import retained_start
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY, replace_with_compacted_marker
 from vv_agent.memory.token_utils import count_messages_tokens
-from vv_agent.types import Message
 
 from .children import child_handles
 from .context import InputProtection, message_ids, project_context, protected_start
@@ -396,7 +396,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 "user wait requires undispatched interaction",
             )
         if "interaction_result" in p:
-            from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
+            from vv_agent.kernel._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
 
             result = ToolExecutionResult.from_dict(p["interaction_result"])
             require(
@@ -452,7 +452,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
             and isinstance(p["result"].get("metadata"), dict)
             and "vv_artifact" in p["result"]["metadata"]
         ):
-            from vv_agent.types import ToolExecutionResult
+            from vv_agent.kernel._tool_values import ToolExecutionResult
 
             result = ToolExecutionResult.from_dict(p["result"])
             require(

@@ -133,7 +133,7 @@ Paths are relative to `src/vv_agent/` and `tests/`.
 | Surface | Producer | Tests |
 | --- | --- | --- |
 | Public API v15 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
-| Strict wire formats | `events.py`, `types.py`, `kernel/_message_values.py`, `kernel/_message_codec.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
+| Strict wire formats | `events.py`, `types.py`, `kernel/_message_values.py`, `kernel/_message_codec.py`, `kernel/_tool_values.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
 | Prompt and run definition | `runtime/compiler.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
 | Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
 | Events, results and tracing | `session/projection.py`, `session/result.py`, `session/tracing.py` | Runner event, terminal, trace and result tests |

@@ -21,6 +21,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._message_values import COMPACTION_METADATA_KEY, Message, ToolArtifactRef, validate_compaction_metadata
+from vv_agent.kernel._tool_values import ToolExecutionResult
 from vv_agent.memory.input_protection import atomic_start, retained_start
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
@@ -36,7 +38,6 @@ from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.tools.metadata import ToolResultRetention
-from vv_agent.types import COMPACTION_METADATA_KEY, Message, ToolArtifactRef, ToolExecutionResult, validate_compaction_metadata
 from vv_agent.workspace.artifacts import persist_text_artifact
 from vv_agent.workspace.base import WorkspaceBackend
 
