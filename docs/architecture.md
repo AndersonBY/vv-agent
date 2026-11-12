@@ -108,6 +108,14 @@ package expose the same resolved values. `SystemPromptBuilder`, template renderi
 workspace/path resolution, Session Memory insertion and current-time capture stay
 outside core.
 
+`kernel/_definition.py` owns the single frozen-definition/schema cache, canonical
+composition and digest, model identity filtering and historical endpoint
+adaptation. Runtime supplies resolved binding facts and the read-only tool
+catalog. `kernel/_tool_planner.py` owns tool selection and metadata filtering;
+SDK compilation and shell-hint resolution remain outer. Builtin tool names and
+the workspace tool list have one core owner shared by SDK exports and the schema
+generator.
+
 Budget values and validation are owned by `kernel/_budget_values.py`.
 `budget.py` retains the evaluator, clock access and meter observation. Task values
 import those budget objects directly from core without loading the evaluator.

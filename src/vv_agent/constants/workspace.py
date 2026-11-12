@@ -7,29 +7,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from vv_agent.constants.tool_names import (
-    ACTIVATE_SKILL_TOOL_NAME,
-    ASK_USER_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    FILE_INFO_TOOL_NAME,
-    FIND_FILES_TOOL_NAME,
-    READ_FILE_TOOL_NAME,
-    SEARCH_FILES_TOOL_NAME,
-    TODO_WRITE_TOOL_NAME,
-    WRITE_FILE_TOOL_NAME,
-)
+from vv_agent.kernel._tool_names import ACTIVATE_SKILL_TOOL_NAME, ASK_USER_TOOL_NAME
+from vv_agent.kernel._tool_names import WORKSPACE_TOOLS as WORKSPACE_TOOLS
 
 ToolSchema = dict[str, Any]
-
-WORKSPACE_TOOLS = [
-    FIND_FILES_TOOL_NAME,
-    FILE_INFO_TOOL_NAME,
-    READ_FILE_TOOL_NAME,
-    WRITE_FILE_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    SEARCH_FILES_TOOL_NAME,
-    TODO_WRITE_TOOL_NAME,
-]
 
 _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
     "ask_user": {

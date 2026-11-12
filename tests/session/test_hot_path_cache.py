@@ -169,10 +169,11 @@ def test_task_cache_and_context_outputs_cannot_mutate_definition(database, monke
 
 
 def test_schema_plan_and_default_registry_are_reused_across_turns(store, database, monkeypatch):
+    from vv_agent.kernel import _definition
     from vv_agent.session import runtime as bindings
 
     calls = {"registry": 0, "schemas": 0}
-    build, plan = bindings.build_default_registry, bindings.plan_tool_schemas
+    build, plan = bindings.build_default_registry, _definition.plan_tool_schemas
 
     def registry():
         calls["registry"] += 1
@@ -183,7 +184,7 @@ def test_schema_plan_and_default_registry_are_reused_across_turns(store, databas
         return plan(**kwargs)
 
     monkeypatch.setattr(bindings, "build_default_registry", registry)
-    monkeypatch.setattr(bindings, "plan_tool_schemas", schemas)
+    monkeypatch.setattr(_definition, "plan_tool_schemas", schemas)
     start(store)
     rt = runtime(database, [LLMResponse("done"), LLMResponse("done")])
     drive(store, "s", runtime=rt)

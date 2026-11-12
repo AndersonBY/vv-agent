@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import random
 import time
 from collections import Counter
@@ -11,7 +10,6 @@ from contextlib import AbstractContextManager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -29,7 +27,8 @@ from vv_agent.budget import (
 )
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
-from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
+from vv_agent.kernel._definition import model_identity as _model_identity
 from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
@@ -41,12 +40,10 @@ from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata, tool_is_enabled
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
-from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure, is_tool_executor
 from vv_agent.tools.function import FunctionTool, adapt_tool
-from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall
@@ -73,10 +70,6 @@ class RuntimeNotReady(Exception):
 
 class EndpointUnavailable(Exception):
     """The frozen endpoint disappeared before dispatch."""
-
-
-def _model_identity(binding: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in binding.items() if key != "endpoints"}
 
 
 @dataclass
@@ -137,16 +130,7 @@ class Runtime:
             from vv_agent.approval import ApprovalBroker
 
             self.approval_broker = ApprovalBroker()
-        self._definition_key: tuple[str | bytes, str | bytes] | None = None
-        self._definition_value: dict[str, Any] = {}
-        self._definition_digest = ""
-        self._retained_task_key: tuple[Record, str | bytes] | None = None
-        self._definition_binding_key: tuple | None = None
-        self._definition_binding: dict[str, Any] = {}
-        self._definition_prefix = b""
-        self._definition_suffix = b""
-        self._schema_key: tuple | None = None
-        self._schemas: list[dict[str, Any]] = []
+        self._definitions = DefinitionCache()
         self._memory_clients: dict[tuple[str | None, str], tuple[LLMClient, ResolvedModelConfig]] = {}
         self._memory_routes: dict[str, tuple[LLMClient, ResolvedModelConfig]] = {}
         self._memory_binding_key: tuple | None = None
@@ -519,116 +503,41 @@ class Runtime:
             },
         )
 
-    def definition(self, task: AgentTask) -> dict[str, Any]:
-        return copy_json(self._definition(task))
+    # Admission borrows these cached fragments; DefinitionCache remains their sole owner.
+    @property
+    def _retained_task_key(self) -> tuple[Record, str | bytes] | None:
+        return self._definitions._retained_task_key
 
-    def definition_digest(self, task: AgentTask | Record) -> str:
-        current = self._definition(task)
-        if isinstance(task, Record) and "endpoints" in task._payload["definition"]["model_binding"]:
-            # Reproduce stored bytes without treating their historical routes as identity.
-            current = copy_json(current)
-            retained = task._payload["definition"]["model_binding"]
-            for binding, old in [
-                (current["model_binding"], retained),
-                *[
-                    (value, retained.get("internal", {}).get(purpose, {}))
-                    for purpose, value in current["model_binding"].get("internal", {}).items()
-                ],
-            ]:
-                if "endpoints" in old:
-                    binding["endpoints"] = old["endpoints"]
-                    for limit in ("context_length", "max_output_tokens"):
-                        if limit not in old:
-                            binding.pop(limit, None)
-            return sha256(canonical_json_bytes(current)).hexdigest()
-        return self._definition_digest
+    @property
+    def _definition_suffix(self) -> bytes:
+        return self._definitions._definition_suffix
 
-    def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
-        # Retained tasks are immutable; mutable runtime bindings are checked on every step.
-        retained = task if isinstance(task, Record) else None
-        if retained is not None:
-            task_value = retained._payload["definition"]["task"]
-            task = retained._task()
-        else:
-            assert isinstance(task, AgentTask)
-            task_value = task.to_dict()
-        if retained is not None and self._retained_task_key is not None and self._retained_task_key[0] is retained:
-            task_key = self._retained_task_key[1]
-        else:
-            try:
-                task_key = json.dumps(task_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            except TypeError:
-                task_key = canonical_json_bytes(task_value)
-            if retained is not None:
-                self._retained_task_key = (retained, task_key)
+    @property
+    def _definition_digest(self) -> str:
+        return self._definitions._definition_digest
+
+    def _definition_bindings(self, task: AgentTask | Record) -> DefinitionBindings:
+        current_task = task._task() if isinstance(task, Record) else task
         memory_settings = self.memory_manager._definition_settings()
-        model_binding = _model_identity(self.model_binding(self.llm, self.resolved))
-        memory_bindings = self._memory_bindings(task)
+        model_binding = self.model_binding(self.llm, self.resolved)
+        memory_bindings = self._memory_bindings(current_task)
         if memory_bindings:
             model_binding["internal"] = memory_bindings
-        value: dict[str, Any] = {
-            "agent_name": self.agent.name,
-            "memory_settings": memory_settings,
-            "child_tools": sorted(self.children),
-            "model_binding": model_binding,
-        }
-        signature = self.registry.planning_signature()
-        # JSON fingerprints distinguish True from 1 and detach mutable cache inputs.
-        try:
-            binding_key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        except TypeError:
-            binding_key = canonical_json_bytes([value, signature])
-        key = (task_key, binding_key)
-        if key == self._definition_key:
-            return self._definition_value
-        schema_key = (
-            tuple(plan_tool_names(task)),
-            signature,
-            copy_json(
-                [
-                    task.metadata.get(control, [])
-                    for control in (
-                        "_vv_agent_denied_side_effects",
-                        "_vv_agent_denied_capability_tags",
-                        "_vv_agent_denied_cost_dimensions",
-                    )
-                ]
-            ),
-            task.metadata.get("_vv_agent_deny_terminal_tools", False),
+        return DefinitionBindings(
+            agent_name=self.agent.name,
+            memory_settings=memory_settings,
+            child_tools=list(self.children),
+            model_binding=model_binding,
         )
-        if schema_key != self._schema_key:
-            self._schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
-            self._schema_key = schema_key
-        if (binding_key, schema_key) != self._definition_binding_key:
-            schemas = self._schemas
-            names = [s["function"]["name"] for s in schemas]
-            retentions = dict(self.memory_manager.tool_result_retentions)
-            for name in names:
-                metadata = self.registry.tool_metadata(name)
-                if metadata is not None:
-                    retentions[name] = (
-                        ToolResultRetention.PRESERVE
-                        if ToolResultRetention.PRESERVE in (retentions.get(name), metadata.result_retention)
-                        else metadata.result_retention
-                    )
-            memory_settings["tool_result_retentions"] = retentions
-            value["capabilities"] = {
-                n: metadata.to_dict()
-                for n in names
-                if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
-            }
-            # These closed keys precede task, and tools follows it in JCS order.
-            prefix = canonical_json_bytes(value)[:-1] + b',"task":'
-            suffix = b',"tools":' + canonical_json_bytes(schemas) + b"}"
-            self._definition_binding = value | {"tools": schemas}
-            self._definition_prefix, self._definition_suffix = prefix, suffix
-            self._definition_binding_key = (binding_key, schema_key)
-        task_bytes = canonical_json_bytes(task_value)
-        value = self._definition_binding | {"task": task_value}
-        self._definition_digest = sha256(self._definition_prefix + task_bytes + self._definition_suffix).hexdigest()
-        self._definition_value = value
-        self._definition_key = key
-        return value
+
+    def definition(self, task: AgentTask) -> dict[str, Any]:
+        return self._definitions.definition(task, self._definition_bindings(task), self.registry)
+
+    def definition_digest(self, task: AgentTask | Record) -> str:
+        return self._definitions.definition_digest(task, self._definition_bindings(task), self.registry)
+
+    def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
+        return self._definitions._definition(task, self._definition_bindings(task), self.registry)
 
 
 def request_from_dict(value: dict[str, Any]) -> LlmRequest:
