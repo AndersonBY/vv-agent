@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.budget import HostCostMeter, RunBudgetLimits
 from vv_agent.context_providers import ContextProvider
 from vv_agent.event_store import _RunEventSink
 from vv_agent.events import RunEvent
+from vv_agent.kernel._tool_policy import ApprovalPolicy as ApprovalPolicy
+from vv_agent.kernel._tool_policy import CanUseTool as CanUseTool
+from vv_agent.kernel._tool_policy import ToolPolicy as ToolPolicy
+from vv_agent.kernel._tool_policy import merge_tool_policies as merge_tool_policies
+from vv_agent.kernel._tool_policy import merge_tool_policy_layers as merge_tool_policy_layers
 from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.lifecycle import AfterCycleHook
-from vv_agent.tools.metadata import (
-    ToolSideEffect,
-    normalize_denied_side_effects,
-    normalize_metadata_labels,
-)
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import Message, NoToolPolicy, _validate_no_tool_policy
 
@@ -32,9 +32,6 @@ if TYPE_CHECKING:
 
 RunEventObserver = Callable[[RunEvent], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
-ApprovalPolicy = Literal["default", "always", "never", "on_request"]
-_APPROVAL_POLICIES = frozenset({"default", "always", "never", "on_request"})
-CanUseTool = Callable[[str, dict[str, Any]], bool]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
 _MAX_U32 = (1 << 32) - 1
@@ -46,112 +43,6 @@ def _validate_bounded_int(value: object, field_name: str, *, minimum: int) -> in
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= _MAX_U32:
         raise ValueError(f"{field_name} must be between {minimum} and {_MAX_U32}")
     return value
-
-
-@dataclass(slots=True)
-class ToolPolicy:
-    allowed_tools: list[str] | None = None
-    disallowed_tools: list[str] = field(default_factory=list)
-    approval: ApprovalPolicy = "default"
-    can_use_tool: CanUseTool | None = None
-    denied_side_effects: Sequence[ToolSideEffect | str] = field(default_factory=list)
-    denied_capability_tags: list[str] = field(default_factory=list)
-    deny_terminal_tools: bool = False
-    denied_cost_dimensions: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        if self.approval not in _APPROVAL_POLICIES:
-            supported = ", ".join(sorted(_APPROVAL_POLICIES))
-            raise ValueError(f"approval must be one of: {supported}")
-        self.denied_side_effects = normalize_denied_side_effects(self.denied_side_effects)
-        self.denied_capability_tags = normalize_metadata_labels(
-            self.denied_capability_tags,
-            field_name="denied_capability_tags",
-        )
-        if not isinstance(self.deny_terminal_tools, bool):
-            raise TypeError("deny_terminal_tools must be a boolean")
-        self.denied_cost_dimensions = normalize_metadata_labels(
-            self.denied_cost_dimensions,
-            field_name="denied_cost_dimensions",
-        )
-
-
-def merge_tool_policies(
-    agent_policy: ToolPolicy | None,
-    run_policy: ToolPolicy | None,
-) -> ToolPolicy | None:
-    return merge_tool_policy_layers(agent_policy, None, run_policy)
-
-
-def merge_tool_policy_layers(
-    agent_policy: ToolPolicy | None,
-    runner_policy: ToolPolicy | None,
-    run_policy: ToolPolicy | None,
-) -> ToolPolicy | None:
-    if agent_policy is None and runner_policy is None and run_policy is None:
-        return None
-
-    agent = agent_policy or ToolPolicy()
-    runner = runner_policy or ToolPolicy()
-    run = run_policy or ToolPolicy()
-    allowed_tools = next(
-        (policy.allowed_tools for policy in (run, runner, agent) if policy.allowed_tools is not None),
-        None,
-    )
-    disallowed_tools = list(dict.fromkeys([*agent.disallowed_tools, *runner.disallowed_tools, *run.disallowed_tools]))
-    denied_side_effects = normalize_denied_side_effects(
-        [*agent.denied_side_effects, *runner.denied_side_effects, *run.denied_side_effects]
-    )
-    denied_capability_tags = normalize_metadata_labels(
-        [
-            *agent.denied_capability_tags,
-            *runner.denied_capability_tags,
-            *run.denied_capability_tags,
-        ],
-        field_name="denied_capability_tags",
-    )
-    denied_cost_dimensions = normalize_metadata_labels(
-        [
-            *agent.denied_cost_dimensions,
-            *runner.denied_cost_dimensions,
-            *run.denied_cost_dimensions,
-        ],
-        field_name="denied_cost_dimensions",
-    )
-
-    approval = next(
-        (policy.approval for policy in (run, agent, runner) if policy.approval != "default"),
-        "default",
-    )
-    can_use_tool = _merge_can_use_tool(
-        _merge_can_use_tool(agent.can_use_tool, runner.can_use_tool),
-        run.can_use_tool,
-    )
-    return ToolPolicy(
-        allowed_tools=list(allowed_tools) if allowed_tools is not None else None,
-        disallowed_tools=disallowed_tools,
-        approval=approval,
-        can_use_tool=can_use_tool,
-        denied_side_effects=denied_side_effects,
-        denied_capability_tags=denied_capability_tags,
-        deny_terminal_tools=(agent.deny_terminal_tools or runner.deny_terminal_tools or run.deny_terminal_tools),
-        denied_cost_dimensions=denied_cost_dimensions,
-    )
-
-
-def _merge_can_use_tool(
-    agent_predicate: CanUseTool | None,
-    run_predicate: CanUseTool | None,
-) -> CanUseTool | None:
-    if agent_predicate is None:
-        return run_predicate
-    if run_predicate is None:
-        return agent_predicate
-
-    def can_use_tool(tool_name: str, arguments: dict[str, Any]) -> bool:
-        return bool(agent_predicate(tool_name, dict(arguments))) and bool(run_predicate(tool_name, dict(arguments)))
-
-    return can_use_tool
 
 
 @dataclass(slots=True)

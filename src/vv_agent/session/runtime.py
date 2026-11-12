@@ -29,15 +29,16 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
+from vv_agent.kernel._tool_policy import apply_tool_context_policy
 from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef, resolve_run_model
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import PromptBundle, PromptSection
-from vv_agent.run_config import RunConfig, ToolPolicy, effective_run_config, merge_tool_policies
+from vv_agent.run_config import RunConfig, effective_run_config, merge_tool_policies
 from vv_agent.runtime.cancellation import CancellationToken
-from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata, tool_is_enabled
+from vv_agent.runtime.compiler import AgentCompiler, tool_is_enabled
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.tools.base import ToolContext
@@ -447,30 +448,12 @@ class Runtime:
     ) -> ToolContext:
         metadata = dict(task.metadata)
         if plan._payload["op_kind"] != "model":
-            frozen = ToolPolicy(
-                allowed_tools=metadata.get("_vv_agent_allowed_tools"),
-                disallowed_tools=metadata.get("_vv_agent_disallowed_tools", []),
-                denied_side_effects=metadata.get("_vv_agent_denied_side_effects", []),
-                denied_capability_tags=metadata.get("_vv_agent_denied_capability_tags", []),
-                denied_cost_dimensions=metadata.get("_vv_agent_denied_cost_dimensions", []),
-                deny_terminal_tools=metadata.get("_vv_agent_deny_terminal_tools", False),
-                approval=metadata.get("_vv_agent_tool_policy_approval", "default"),
+            apply_tool_context_policy(
+                metadata,
+                agent_policy=self.agent.tool_policy,
+                run_policy=self.config.tool_policy,
+                shared_state=shared_state,
             )
-            current = merge_tool_policies(self.agent.tool_policy, self.config.tool_policy)
-            policy = merge_tool_policies(frozen, current)
-            assert policy is not None
-            if frozen.allowed_tools is not None and policy.allowed_tools is not None:
-                policy.allowed_tools = [n for n in frozen.allowed_tools if n in policy.allowed_tools]
-            if frozen.approval == "always":
-                policy.approval = "always"
-            from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
-
-            policy.disallowed_tools = list(
-                dict.fromkeys([*policy.disallowed_tools, *read_after_cycle_disallowed_tools(shared_state or {})])
-            )
-            _apply_tool_policy_metadata(metadata, policy)
-            metadata["_vv_agent_tool_policy_approval"] = policy.approval
-            metadata["_vv_agent_tool_policy_can_use_tool"] = policy.can_use_tool
         ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
         if approved:
             ctx._approved_tool_approval = SimpleNamespace(call=ToolCall.from_dict(copy_json(plan._payload["request"])))
