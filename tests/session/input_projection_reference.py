@@ -129,6 +129,10 @@ def reference(records):
         }
         messages = updated
 
+    def retain_compaction(state, record, history, **_ports):
+        state.compactions.append(record)
+        yield from ()
+
     for seq, row in enumerate(records, 1):
         p, kind = row.payload, row.kind
         if kind == "context_compacted" or (kind == "boundary_recorded" and p["stage"] == "before_memory"):
@@ -145,7 +149,7 @@ def reference(records):
                 require(condition, reason)
 
         with (
-            patch.object(reducer, "_compacted", lambda state, record, history, **_ports: state.compactions.append(record)),
+            patch.object(reducer, "_compacted", retain_compaction),
             patch.object(reducer, "require", lifecycle_require),
         ):
             fold.extend([plain_creation(row)], consumed_inputs=items)

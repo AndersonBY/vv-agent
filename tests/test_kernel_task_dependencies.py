@@ -26,7 +26,7 @@ def test_task_value_dependencies_without_site_packages(tmp_path, decode_task):
             def find_spec(self, fullname, path=None, target=None):
                 if fullname in {"vv_agent", "vv_agent.kernel"} or fullname.startswith("vv_agent.kernel."):
                     return None
-                if decode_task and fullname == "vv_agent.types":
+                if decode_task and fullname in {"vv_agent.types", "vv_agent.core_types"}:
                     return None
                 assert fullname.split(".")[0] in sys.stdlib_module_names, fullname
 
@@ -94,7 +94,7 @@ def test_task_value_dependencies_without_site_packages(tmp_path, decode_task):
             name for name in sys.modules if name.startswith("vv_agent")
             and name not in {"vv_agent", "vv_agent.kernel"}
             and not name.startswith("vv_agent.kernel.")
-        } == ({"vv_agent.types"} if decode_task else set())
+        } == ({"vv_agent.types", "vv_agent.core_types"} if decode_task else set())
     """)
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-B", "-c", script, str(root), str(decode_task)],

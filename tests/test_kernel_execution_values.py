@@ -26,7 +26,7 @@ def test_execution_values_without_site_packages(tmp_path, facade_first):
             def find_spec(self, fullname, path=None, target=None):
                 if fullname in {"vv_agent", "vv_agent.kernel"} or fullname.startswith("vv_agent.kernel."):
                     return None
-                if facade_first and fullname == "vv_agent.types":
+                if facade_first and fullname in {"vv_agent.types", "vv_agent.core_types"}:
                     return None
                 assert fullname.split(".")[0] in sys.stdlib_module_names, fullname
 
@@ -89,7 +89,7 @@ def test_execution_values_without_site_packages(tmp_path, facade_first):
             name for name in sys.modules if name.startswith("vv_agent")
             and name not in {"vv_agent", "vv_agent.kernel"}
             and not name.startswith("vv_agent.kernel.")
-        } == ({"vv_agent.types"} if facade_first else set())
+        } == ({"vv_agent.types", "vv_agent.core_types"} if facade_first else set())
     """)
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-B", "-c", script, str(root), str(facade_first)],
