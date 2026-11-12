@@ -8,6 +8,7 @@ import traceback
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -135,13 +136,16 @@ def _record_pg_connects(dsn, patch):
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
     expected = conninfo_to_dict(dsn)
+    expected_target = expected["host"], int(expected.get("port") or 5432)
     original = psycopg.Connection.connect.__func__
 
     def connect(cls, conninfo="", **kwargs):
         values = conninfo_to_dict(conninfo)
-        assert values["host"] == expected["host"] and values["port"] == expected["port"]
         kwargs.update(passfile="/dev/null", sslmode="disable", gssencmode="disable")
         connection = original(cls, conninfo, **kwargs)
+        if (connection.info.host, connection.info.port) != expected_target:
+            connection.close()
+            raise AssertionError("PostgreSQL connection changed its TCP target")
         print(
             "L1_CONNECT "
             + json.dumps(
@@ -153,6 +157,9 @@ def _record_pg_connects(dsn, patch):
                             | {k: kwargs[k] for k in ("passfile", "sslmode", "gssencmode")}
                         ),
                     ),
+                    "host": connection.info.host,
+                    "port": connection.info.port,
+                    "password_supplied": bool(connection.info.password),
                     "thread": threading.get_ident(),
                     "raw": id(connection.pgconn),
                 }
@@ -179,6 +186,13 @@ def _run_child(tmp_path, **params):
     }
     code = "import importlib,json,sys;importlib.import_module(sys.argv[1])._child(json.loads(sys.argv[2]))"
     argv = [sys.executable, "-B", "-W", "error", "-c", code, __name__, json.dumps(params)]
+    recorded_argv = argv.copy()
+    if params.get("postgres"):
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        connection_params = conninfo_to_dict(params["database"])
+        connection_params.pop("password", None)
+        recorded_argv[-1] = json.dumps(params | {"database": make_conninfo("", **connection_params)})
     with subprocess.Popen(
         argv, cwd=source, env=childenv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     ) as child:
@@ -198,7 +212,7 @@ def _run_child(tmp_path, **params):
             "L1_CHILD_RECEIPT "
             + json.dumps(
                 {
-                    "argv": argv,
+                    "argv": recorded_argv,
                     "cwd": str(source),
                     "env": childenv,
                     "identity": identity,
@@ -313,7 +327,7 @@ def _reverse_case(host, database, gate, patch):
         frame = sys._getframe(1)
         while frame and frame.f_code.co_filename != kernel.__file__:
             frame = frame.f_back
-        target = "step" if gate == "provider" else "drive"
+        target = "step" if gate == "provider" else "_drive"
         selected = frame is not None and frame.f_code.co_name == target and not armed.is_set()
         if selected:
             armed.set()
@@ -378,10 +392,106 @@ def test_admission_writer_does_not_wait_for_heartbeat_latch(tmp_path, layout):
 
 
 @pytest.mark.postgres
-def test_pg_admission_parent_lock_does_not_wait_for_heartbeat_latch(database, tmp_path):
-    _run_child(tmp_path, case="admission", database=database, postgres=True)
+@pytest.mark.parametrize("omit_default_port", [False, True], ids=["supplied-port", "default-port"])
+def test_pg_admission_parent_lock_does_not_wait_for_heartbeat_latch(database, tmp_path, capsys, omit_default_port):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    dsn = database
+    if omit_default_port:
+        with psycopg.connect(database, connect_timeout=3) as reference:
+            if reference.info.port != 5432:
+                pytest.skip("default-port proof requires PostgreSQL on port 5432")
+            assert reference.info.host and not reference.info.host.startswith("/")
+            assert reference.info.password
+        values = conninfo_to_dict(database)
+        values.pop("port", None)
+        dsn = make_conninfo("", **values)
+    _run_child(tmp_path, case="admission", database=dsn, postgres=True)
+    output = capsys.readouterr().out
+    receipts = [json.loads(line.split(" ", 1)[1]) for line in output.splitlines() if line.startswith("L1_CONNECT ")]
+    assert len(receipts) >= 2
+    assert all("password" not in conninfo_to_dict(receipt["dsn"]) for receipt in receipts)
+    if omit_default_port:
+        assert all(receipt["port"] == 5432 and receipt["password_supplied"] for receipt in receipts)
+    print(output, end="")
     with open_store(database) as observer:
         assert observer.list_sessions() == ("business", "l1-child", "s")
+
+
+@pytest.mark.parametrize(
+    "expected_port,passed_port,effective_port",
+    [(None, None, 5432), ("5432", None, 5432), ("55483", "55483", 55483), ("5432", None, 5433)],
+)
+def test_pg_connect_receipt_uses_effective_port_and_hides_password(
+    monkeypatch, capsys, expected_port, passed_port, effective_port
+):
+    psycopg = pytest.importorskip("psycopg")
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    values = {"host": "127.0.0.1", "dbname": "isolated", "user": "test", "password": "test 'password\\value"}
+    expected = make_conninfo("", **values, **({"port": expected_port} if expected_port else {}))
+    passed = make_conninfo("", **values, **({"port": passed_port} if passed_port else {}))
+    closed = []
+    connection = SimpleNamespace(
+        info=SimpleNamespace(host="127.0.0.1", port=effective_port, password=values["password"]),
+        pgconn=object(),
+        close=lambda: closed.append(True),
+    )
+    calls = []
+
+    def connect(cls, conninfo="", **kwargs):
+        calls.append((conninfo, kwargs))
+        return connection
+
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connect))
+    _record_pg_connects(expected, monkeypatch)
+    if effective_port != int(expected_port or 5432):
+        with pytest.raises(AssertionError, match="changed its TCP target"):
+            psycopg.connect(passed)
+        assert len(calls) == 1 and closed == [True]
+        assert not capsys.readouterr().out
+        return
+    assert psycopg.connect(passed) is connection
+    assert calls[0][0] == passed
+    assert conninfo_to_dict(calls[0][0])["password"] == values["password"]
+    receipt = json.loads(capsys.readouterr().out.removeprefix("L1_CONNECT "))
+    assert receipt["host"] == "127.0.0.1" and receipt["port"] == int(expected_port or 5432)
+    assert receipt["password_supplied"]
+    assert "password" not in conninfo_to_dict(receipt["dsn"])
+    assert conninfo_to_dict(receipt["dsn"])["passfile"] == "/dev/null"
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "host=127.0.0.1 dbname=isolated user=test password='test password'",
+        "postgresql://test:test%27password%5Cvalue@127.0.0.1/isolated",
+    ],
+)
+def test_child_receipt_redacts_password_without_changing_process_args(tmp_path, monkeypatch, capsys, dsn):
+    pytest.importorskip("psycopg")
+    from psycopg.conninfo import conninfo_to_dict
+
+    calls = []
+
+    @contextmanager
+    def child(argv, **kwargs):
+        calls.append(argv)
+        yield SimpleNamespace(pid=-1, returncode=0, communicate=lambda **_: ('L1_RESULT {"ok": true}\n', None))
+
+    monkeypatch.setattr(subprocess, "Popen", child)
+    _run_child(tmp_path, case="admission", database=dsn, postgres=True)
+    assert json.loads(calls[0][-1])["database"] == dsn
+    output = capsys.readouterr().out
+    receipt = json.loads(
+        next(line.removeprefix("L1_CHILD_RECEIPT ") for line in output.splitlines() if line.startswith("L1_CHILD_RECEIPT "))
+    )
+    recorded = json.loads(receipt["argv"][-1])
+    actual = conninfo_to_dict(dsn)
+    assert "password" in actual
+    assert conninfo_to_dict(recorded["database"]) == {key: value for key, value in actual.items() if key != "password"}
+    assert receipt["argv"][:-1] == calls[0][:-1]
 
 
 @pytest.mark.parametrize("gate", ["provider", "idle"])
