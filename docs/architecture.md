@@ -91,7 +91,11 @@ Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
 reducer imports the core renderer. `kernel/_microcompaction.py` owns candidate
 planning and Message replacement using the existing estimator callbacks.
-Workspace I/O, summary orchestration and token counting remain outside core.
+Pure summary planning, acceptance, prompt rendering and recovery-evidence
+handling live in `kernel/_summary_compaction.py`. It receives resolved settings
+and the existing message-count callable. `MemoryManager` retains defaults,
+counting, model callbacks, archive I/O and SessionMemory notification; accepted
+notifications reuse the count computed during validation.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
