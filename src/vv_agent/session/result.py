@@ -6,18 +6,15 @@ import json
 from copy import deepcopy
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.kernel._usage import project_model_usage
 from vv_agent.output_validation import coerce_output_type
 from vv_agent.result import RunResult
-from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
     CompletionReason,
     CycleRecord,
     Message,
-    ModelCallOperation,
-    ModelCallRecord,
-    ModelCallStatus,
     ToolCall,
     ToolExecutionResult,
 )
@@ -26,7 +23,7 @@ from .context import project_context
 from .projection import project_records
 from .records import copy_json
 from .reducer import ExecutionState, _fold_factory_for
-from .runtime import Runtime, model_usage
+from .runtime import Runtime
 from .store import SessionStore, StoredRecord
 
 
@@ -45,7 +42,7 @@ def project_result(
     through = next((i + 1 for i, r in enumerate(records) if r.record is terminal), len(records))
     records = records[:through]
     messages = project_context(records, state, _fold_factory=_fold_factory_for(store))
-    cycles, calls, ledger = [], [], []
+    cycles = []
     plan_seqs = {r.record.record_id: r.seq for r in records}
     compaction_seqs = [r.seq for r in records if r.record.kind == "context_compacted" and r.record.turn_id == turn_id]
     previous_primary_seq = plan_seqs[turn.start.record_id]
@@ -65,85 +62,34 @@ def project_result(
             continue
         if r._payload["context"] == "normal" and r._payload["shared_state"] is not None:
             shared = copy_json(r._payload["shared_state"])
-    for oid, op in state.operations.items():
-        if op.turn_id != turn_id or op.kind != "model":
+    usage, ledger = project_model_usage(state, turn_id)
+    for call in usage.model_calls:
+        oid, number = call.operation_id, call.attempt
+        op = state.operations[oid]
+        attempt = op.attempts[number]
+        purpose = attempt.plan._payload["purpose"]
+        cycle = call.cycle_index
+        error_code = call.error_code
+        if purpose != "primary" or op.selected_attempt != number or not attempt.result or error_code:
             continue
-        for number, attempt in op.attempts.items():
-            if not attempt.started:
-                continue
-            purpose = attempt.plan._payload["purpose"]
-            cycle = (
-                attempt.plan._payload["request"]["metadata"]
-                .get("vv_session", {})
-                .get("cycle_index", int(oid.rsplit("/", 1)[1]) if purpose in {"primary", "output_repair"} else 1)
+        response = attempt.result.payload["result"]
+        tool_results = []
+        for child in tools_by_model.get(oid, ()):
+            child_attempt = child.attempts[child.selected_attempt or max(child.attempts)]
+            if child_attempt.result:
+                tool_results.append(ToolExecutionResult.from_dict(child_attempt.result.payload["result"]))
+            elif child_attempt.wait and "interaction_result" in child_attempt.wait:
+                tool_results.append(ToolExecutionResult.from_dict(deepcopy(child_attempt.wait["interaction_result"])))
+        cycles.append(
+            CycleRecord(
+                cycle,
+                response.get("content") or "",
+                [ToolCall.from_dict(c) for c in response.get("tool_calls", [])],
+                tool_results,
+                memory_compacted=any(previous_primary_seq < seq < plan_seqs[attempt.plan.record_id] for seq in compaction_seqs),
             )
-            ledger.append(
-                {
-                    "purpose": purpose,
-                    "operation_id": oid,
-                    "attempt": number,
-                    "usage": model_usage(attempt.result._payload["usage"] if attempt.result else None).to_dict(),
-                    "status": "completed"
-                    if attempt.result and not attempt.result._payload["result"].get("error_code")
-                    else "failed"
-                    if attempt.result
-                    else "ambiguous",
-                }
-            )
-            error_code = attempt.result._payload["result"].get("error_code") if attempt.result else "model_outcome_unknown"
-            calls.append(
-                ModelCallRecord(
-                    call_id=f"{oid}/{number}",
-                    operation_id=oid,
-                    attempt=number,
-                    operation={
-                        "compaction": ModelCallOperation.MEMORY_COMPACTION,
-                        "session_memory": ModelCallOperation.SESSION_MEMORY,
-                        "output_repair": ModelCallOperation.OUTPUT_REPAIR,
-                    }.get(purpose, ModelCallOperation.AGENT_CYCLE),
-                    cycle_index=cycle,
-                    backend=attempt.plan._payload["request"]
-                    .get("metadata", {})
-                    .get("vv_session", {})
-                    .get(
-                        "model_binding",
-                        turn.start._payload["definition"]["model_binding"]
-                        .get("internal", {})
-                        .get(purpose, turn.start._payload["definition"]["model_binding"]),
-                    )["backend"],
-                    model=attempt.plan._payload["request"]["model"],
-                    status=ModelCallStatus.FAILED
-                    if attempt.result and error_code
-                    else ModelCallStatus.COMPLETED
-                    if attempt.result
-                    else ModelCallStatus.AMBIGUOUS,
-                    usage=model_usage(attempt.result.payload["usage"] if attempt.result else None),
-                    error_code=error_code,
-                )
-            )
-            if purpose != "primary" or op.selected_attempt != number or not attempt.result or error_code:
-                continue
-            response = attempt.result.payload["result"]
-            tool_results = []
-            for child in tools_by_model.get(oid, ()):
-                child_attempt = child.attempts[child.selected_attempt or max(child.attempts)]
-                if child_attempt.result:
-                    tool_results.append(ToolExecutionResult.from_dict(child_attempt.result.payload["result"]))
-                elif child_attempt.wait and "interaction_result" in child_attempt.wait:
-                    tool_results.append(ToolExecutionResult.from_dict(deepcopy(child_attempt.wait["interaction_result"])))
-            cycles.append(
-                CycleRecord(
-                    cycle,
-                    response.get("content") or "",
-                    [ToolCall.from_dict(c) for c in response.get("tool_calls", [])],
-                    tool_results,
-                    memory_compacted=any(
-                        previous_primary_seq < seq < plan_seqs[attempt.plan.record_id] for seq in compaction_seqs
-                    ),
-                )
-            )
-            previous_primary_seq = plan_seqs[attempt.plan.record_id]
-    usage = summarize_task_token_usage(calls)
+        )
+        previous_primary_seq = plan_seqs[attempt.plan.record_id]
     status, reason, output, error, budget_usage = AgentStatus.RUNNING, None, None, None, None
     completion_tool_name, wait_reason, exhaustion = None, None, None
     for (tid, stage, _), r in state.boundaries.items():

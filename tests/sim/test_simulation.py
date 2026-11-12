@@ -78,14 +78,14 @@ def test_empty_scan_cannot_claim_i4(sim_database):
 
 
 def test_accounting_oracle_rejects_lost_committed_measurement(sim_database, monkeypatch):
-    from vv_agent.session import result
+    from vv_agent.kernel import _usage
 
     from .world import InvariantViolation
 
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "model_result_precommit")
-        normalize = result.model_usage
-        monkeypatch.setattr(result, "model_usage", lambda _usage: normalize(None))
+        normalize = _usage.model_usage
+        monkeypatch.setattr(_usage, "model_usage", lambda _usage: normalize(None))
         with pytest.raises(InvariantViolation, match="I5: provider usage"):
             world.check_accounting()
 

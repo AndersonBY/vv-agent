@@ -30,6 +30,7 @@ from vv_agent.budget import (
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef, resolve_run_model
@@ -40,7 +41,6 @@ from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata, tool_is_enabled
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
-from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
@@ -640,11 +640,6 @@ def request_from_dict(value: dict[str, Any]) -> LlmRequest:
         prompt_bundle=PromptBundle.from_dict(value["prompt_bundle"]) if value["prompt_bundle"] else None,
         model_settings=ModelSettings.from_dict(value["model_settings"]) if value["model_settings"] else None,
     )
-
-
-def model_usage(value: dict[str, Any] | None):
-    # Framework receipt annotations are not provider token-usage fields.
-    return normalize_token_usage({k: v for k, v in (value or {}).items() if not k.startswith("session_")})
 
 
 def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:

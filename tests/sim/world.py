@@ -579,7 +579,7 @@ class SimWorld:
         self.check()
 
     def check_accounting(self):
-        from vv_agent.session.result import project_result
+        from vv_agent.kernel._usage import project_model_usage
 
         store = self.connection("observer")
         exercised = False
@@ -602,7 +602,7 @@ class SimWorld:
             require(state.usage_values == meters, "I5", "cumulative accounting did not retain exactly the latest value")
             exercised |= bool(meters)
             for tid in state.turns:
-                usage = project_result(store, sid, tid, snapshot=snapshot).token_usage
+                usage, _ = project_model_usage(state, tid)
                 calls = usage.model_calls
                 exercised |= bool(calls)
                 expected = {
