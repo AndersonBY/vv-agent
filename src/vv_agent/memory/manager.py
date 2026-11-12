@@ -33,8 +33,9 @@ from vv_agent.kernel._microcompaction import (
     replace_with_compacted_marker,
 )
 from vv_agent.kernel._summary_compaction import SummaryPlan as SummaryPlan
-from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
+from vv_agent.kernel._token_count import TokenCount
 from vv_agent.kernel._tool_values import ToolExecutionResult as ToolExecutionResult
+from vv_agent.memory._counting import _drain_counts
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.microcompaction import MicrocompactionPolicy
@@ -413,22 +414,12 @@ class MemoryManager:
         return updated_messages
 
     def _drain_counts[T](self, steps: Generator[TokenCount, int, T]) -> T:
-        count = None
-        try:
-            while True:
-                try:
-                    request = next(steps) if count is None else steps.send(count)
-                except StopIteration as done:
-                    return done.value
-                except _StopIterationTransport as transport:
-                    raise transport.original from transport.original.__cause__
-                count = (
-                    self._estimate_message_tokens(request.messages)
-                    if isinstance(request.messages, Message)
-                    else self._calculate_message_length(request.messages)
-                )
-        finally:
-            steps.close()
+        def count(request: TokenCount) -> int:
+            if isinstance(request.messages, Message):
+                return self._estimate_message_tokens(request.messages)
+            return self._calculate_message_length(request.messages)
+
+        return _drain_counts(steps, count)
 
     def _calculate_message_length(self, messages: list[Message]) -> int:
         if not messages:

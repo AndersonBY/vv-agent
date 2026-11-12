@@ -153,5 +153,5 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     assert core.ToolResultRetention is manager.ToolResultRetention is ToolResultRetention
     assert {name for name in vars(microcompact) if name.startswith("_") and not name.startswith("__")} == {
         "_plan_microcompact",
-        "_StopIterationTransport",
+        "_drain_counts",
     }

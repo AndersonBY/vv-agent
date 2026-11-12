@@ -23,8 +23,9 @@ from vv_agent.kernel._microcompaction import (
     plan_microcompact as _plan_microcompact,
 )
 from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
-from vv_agent.kernel._token_count import _StopIterationTransport
+from vv_agent.kernel._token_count import TokenCount
 from vv_agent.kernel._tool_metadata import ToolResultRetention
+from vv_agent.memory._counting import _drain_counts
 
 
 def plan_microcompact(
@@ -51,20 +52,13 @@ def plan_microcompact(
         excerpt_head_chars=excerpt_head_chars,
         excerpt_tail_chars=excerpt_tail_chars,
     )
-    count = None
-    try:
-        while True:
-            try:
-                request = next(steps) if count is None else steps.send(count)
-            except StopIteration as done:
-                return done.value
-            except _StopIterationTransport as transport:
-                raise transport.original from transport.original.__cause__
-            # This planner only requests estimates for individual messages.
-            assert isinstance(request.messages, Message)
-            count = estimate_message_tokens(request.messages)
-    finally:
-        steps.close()
+
+    def count(request: TokenCount) -> int:
+        # This planner only requests estimates for individual messages.
+        assert isinstance(request.messages, Message)
+        return estimate_message_tokens(request.messages)
+
+    return _drain_counts(steps, count)
 
 
 __all__ = [
