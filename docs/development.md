@@ -10,6 +10,10 @@ Install the package and its development dependencies:
 uv sync --dev
 ```
 
+The dev group includes native `httpx` for HTTP error/response test coverage.
+The runtime transport remains `httpx2`; the two packages are separate.
+Runtime-only installs can still skip the optional native-httpx cases.
+
 CI also installs the `s3` extra (`uv sync --dev --extra s3`).
 
 Real model calls need a local settings file. Create it from the checked-in

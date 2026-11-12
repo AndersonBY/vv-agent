@@ -29,6 +29,7 @@ s3 = ["boto3>=1.35"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1,<1",
     "psycopg[binary]>=3.2",
     "pytest>=8.4.0",
     "pytest-cov>=6.2.1",
