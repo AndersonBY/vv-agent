@@ -73,6 +73,11 @@ and reducer result validation import them directly from core. Unknown/null field
 metadata, status, recovery-pointer and byte-size rules remain part of this one
 implementation. Tool execution and artifact persistence remain outside core.
 
+Tool completion-policy application, image notifications and skipped-result
+construction live in `kernel/_tool_behavior.py`. `runtime/tool_results.py`
+exports the same functions, and context projection imports the image helper
+directly from core. Stop policies mutate the existing result directive.
+
 Model settings, tool choice, response format and retry settings are owned by
 `kernel/_model_settings.py`. Microcompaction policy and normalization are owned by
 `kernel/_microcompaction_policy.py`; tool metadata, its enums, normalization and
@@ -114,8 +119,14 @@ validation and UTF-16-sorted state updates use stdlib and core values only.
 `runtime/lifecycle.py` exports those same objects and retains the hook protocol
 and `AfterCycleHookManager`, including callback execution and decision composition.
 The reducer validates after-cycle and budget boundaries through core values;
-its remaining memory/tokenizer, context, event and store dependencies still
-prevent a core-only fold.
+its remaining memory/tokenizer, context and store dependencies still prevent
+a core-only fold.
+
+Shared event wire validation lives in `kernel/_event_validation.py`. The outer
+event classes retain construction, time and UUID defaults. Retained memory
+boundaries use the shared validator before checking their expected event kind,
+identities and matching start; cycle-aborted constructor checks retain their
+original position after wire validation.
 
 Record task decoding consumes core `AgentTask` and preserves its cached private
 value and detached public copies. Its private interning keys remain separate
