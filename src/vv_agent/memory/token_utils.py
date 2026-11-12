@@ -4,16 +4,13 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Callable
-from functools import lru_cache, partial
+from functools import lru_cache
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 from threading import Lock
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from vv_agent.kernel._compaction_threshold import _coerce_positive_int
-
-if TYPE_CHECKING:
-    from .prepared_tokens import PreparedTokenCounter
 
 logger = logging.getLogger(__name__)
 
@@ -96,26 +93,17 @@ def _count_local_text(text: str, model: str) -> int:
     for prefixes, fallback in _PROVIDER_LOCAL_FALLBACKS:
         if model.startswith(prefixes):
             if fallback == "int(len(text) / 1.33)":
-                return _count_minimax_text(text)
+                return int(len(text) / 1.33)
             encoding = utils.get_gpt_35_encoding() if fallback == "cl100k_base" else utils.get_gpt_4o_encoding()
             return len(encoding.encode(text))
     return utils.get_token_counts(text, model, use_token_server_first=False)
 
 
-def _count_minimax_text(text: str) -> int:
-    return int(len(text) / 1.33)
+def _message_token_parts(messages: list[dict[str, Any]], *, native_multimodal: bool) -> tuple[list[str], int]:
+    from vv_llm.chat_clients import utils
+    from vv_llm.types.enums import BackendType
 
-
-def _message_token_parts(
-    messages: list[dict[str, Any]], *, native_multimodal: bool, _prepared: PreparedTokenCounter | None = None
-) -> tuple[list[str], int]:
-    if _prepared is None:
-        from vv_llm.chat_clients import utils
-        from vv_llm.types.enums import BackendType
-
-        formatted = utils.format_messages(cast(Any, messages), backend=BackendType.OpenAI, native_multimodal=native_multimodal)
-    else:
-        formatted = _prepared.format_messages(messages, native_multimodal=native_multimodal)
+    formatted = utils.format_messages(cast(Any, messages), backend=BackendType.OpenAI, native_multimodal=native_multimodal)
     texts = []
     images = 0
     for message in formatted:
@@ -131,48 +119,28 @@ def _message_token_parts(
     return texts, images
 
 
-def _warn_incremental_fallback(family: str, reason: str) -> None:
-    if reason.startswith("unverified versions:"):
-        with _TOKEN_CACHE_LOCK:
-            first = family not in _VERSION_FALLBACK_LOGGED
-            _VERSION_FALLBACK_LOGGED.add(family)
-        if first:
-            logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
-
-
-def _count_incremental_messages(
-    messages: list[dict[str, Any]],
-    *,
-    model: str,
-    tools: Any,
-    native_multimodal: bool,
-    _prepared: PreparedTokenCounter | None = None,
-) -> int | None:
+def _count_incremental_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int | None:
     """Reuse exact newline-terminated counts; unsupported boundaries use a whole count."""
-    if _prepared is None:
-        enabled, reason = incremental_token_counting_status(model)
-        family = _local_tokenizer_family(model)
-        if not enabled:
-            _warn_incremental_fallback(family, reason)
-            return None
-        from vv_llm.chat_clients import utils
+    enabled, reason = incremental_token_counting_status(model)
+    family = _local_tokenizer_family(model)
+    if not enabled:
+        if reason.startswith("unverified versions:"):
+            with _TOKEN_CACHE_LOCK:
+                first = family not in _VERSION_FALLBACK_LOGGED
+                _VERSION_FALLBACK_LOGGED.add(family)
+            if first:
+                logger.warning("Incremental token counting disabled for %s; using whole conversation: %s", family, reason)
+        return None
+    from vv_llm.chat_clients import utils
 
-        if family == "deepseek":
-            from deepseek_tokenizer import deepseek_tokenizer
+    if family == "deepseek":
+        from deepseek_tokenizer import deepseek_tokenizer
 
-            encode = deepseek_tokenizer.encode
-        else:
-            encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
-            encode = encoding.encode
-        identity = (family, model, utils.get_token_counts, encode, utils.get_message_token_counts)
-        count_text = partial(_count_local_text, model=model)
+        encode = deepseek_tokenizer.encode
     else:
-        family = _prepared.family
-        if not _prepared.incremental_status[0]:
-            return None
-        identity = _prepared.cache_identity
-        count_text = _prepared.count_text
-    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal, _prepared=_prepared)
+        encoding = utils.get_gpt_35_encoding() if family == "cl100k_base" else utils.get_gpt_4o_encoding()
+        encode = encoding.encode
+    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal)
     if any(not isinstance(text, str) or not text for text in texts):
         return None
     # DeepSeek stops at the first newline run; tiktoken can span whitespace after it.
@@ -181,56 +149,38 @@ def _count_incremental_messages(
     # o200k's punctuation suffix can consume slashes after the separator as well.
     if family != "deepseek" and any(text[0].isspace() or (family == "o200k_base" and text[0] == "/") for text in texts):
         return None
+    identity = (family, model, utils.get_token_counts, encode, utils.get_message_token_counts)
     total = 0
     for index, text in enumerate(texts):
         plain, terminated = _cached_token_data(
             text,
             identity,
             lambda text=text: (
-                count_text(text),
-                count_text(text + "\n"),
+                _count_local_text(text, model),
+                _count_local_text(text + "\n", model),
             ),
         )
         # The verified pre-tokenizers cannot cross these guarded newline cuts.
         total += plain if index == len(texts) - 1 else terminated
     if images:
-        total += images * (
-            (_prepared.image_tokens if _prepared is not None else utils.calculate_image_tokens(2048, 2048, model))
-            if native_multimodal
-            else 1
-        )
+        total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
     if tools:
         tool_text = str(tools)
-        total += _cached_token_data(tool_text, (*identity, "tools"), lambda: (count_text(tool_text), 0))[0]
+        total += _cached_token_data(tool_text, (*identity, "tools"), lambda: (_count_local_text(tool_text, model), 0))[0]
     return total
 
 
-def _count_whole_local_messages(
-    messages: list[dict[str, Any]],
-    *,
-    model: str,
-    tools: Any,
-    native_multimodal: bool,
-    _prepared: PreparedTokenCounter | None = None,
-) -> int:
+def _count_whole_local_messages(messages: list[dict[str, Any]], *, model: str, tools: Any, native_multimodal: bool) -> int:
     """Use local text methods with vv-llm's message formatting and image estimate."""
-    if _prepared is None:
-        from vv_llm.chat_clients import utils
+    from vv_llm.chat_clients import utils
 
-        count_text = partial(_count_local_text, model=model)
-    else:
-        count_text = _prepared.count_text
-    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal, _prepared=_prepared)
+    texts, images = _message_token_parts(messages, native_multimodal=native_multimodal)
     combined_text = "\n".join(texts)
-    total = count_text(combined_text) if combined_text else 0
+    total = _count_local_text(combined_text, model) if combined_text else 0
     if images:
-        total += images * (
-            (_prepared.image_tokens if _prepared is not None else utils.calculate_image_tokens(2048, 2048, model))
-            if native_multimodal
-            else 1
-        )
+        total += images * (utils.calculate_image_tokens(2048, 2048, model) if native_multimodal else 1)
     if tools:
-        total += count_text(str(tools))
+        total += _count_local_text(str(tools), model)
     return total
 
 
@@ -264,23 +214,11 @@ def count_messages_tokens(
     native_multimodal: bool = True,
 ) -> int:
     """Estimate compaction context size locally, independent of provider endpoints."""
-    return _count_messages_tokens(messages, model=model, tools=tools, native_multimodal=native_multimodal)
-
-
-def _count_messages_tokens(
-    messages: list[dict[str, Any]],
-    *,
-    model: str,
-    tools: Any,
-    native_multimodal: bool,
-    _prepared: PreparedTokenCounter | None = None,
-) -> int:
     if not messages:
         return 0
 
     try:
-        if _prepared is None:
-            from vv_llm.chat_clients import utils
+        from vv_llm.chat_clients import utils
 
         kwargs: dict[str, Any] = {
             "messages": messages,
@@ -290,22 +228,19 @@ def _count_messages_tokens(
         if tools is not None:
             kwargs["tools"] = tools
 
-        count = _count_incremental_messages(
-            messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal, _prepared=_prepared
-        )
+        count = _count_incremental_messages(messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal)
         if count is None:
             # Preserve an explicitly replaced message counter instead of bypassing it.
-            if _prepared is not None or utils.get_message_token_counts.__module__ == utils.__name__:
+            if utils.get_message_token_counts.__module__ == utils.__name__:
                 count = _count_whole_local_messages(
-                    messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal, _prepared=_prepared
+                    messages, model=kwargs["model"], tools=tools, native_multimodal=native_multimodal
                 )
             else:
                 count = utils.get_message_token_counts(**kwargs)
         if isinstance(count, int) and count >= 0:
             return count
     except Exception:
-        if _prepared is None:
-            logger.debug("vv-llm message token counting unavailable; using local estimate", exc_info=True)
+        logger.debug("vv-llm message token counting unavailable; using local estimate", exc_info=True)
 
     # json.dumps(list) inserts two brackets and ", " between individual dumps.
     cjk_chars, ascii_chars = 0, 2 * len(messages)

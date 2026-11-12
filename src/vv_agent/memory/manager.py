@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vv_agent.tools.registry import ToolRegistry
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Literal
 
@@ -33,6 +33,7 @@ from vv_agent.kernel._microcompaction import (
     replace_with_compacted_marker,
 )
 from vv_agent.kernel._summary_compaction import SummaryPlan as SummaryPlan
+from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._tool_values import ToolExecutionResult as ToolExecutionResult
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import count_messages_tokens
@@ -366,14 +367,16 @@ class MemoryManager:
         self, plan: SummaryPlan, text: str, *, notify: bool = True, require_reduction: bool = True
     ) -> tuple[list[Message], bool]:
         """Validate a retained model result. Log owners defer notification until commit."""
-        result = _summary_compaction.accept_summary(
-            plan,
-            text,
-            protected_start=self.protected_start,
-            recovery_tool_available=self.recovery_tool_available,
-            effective_context_window=self.effective_context_window,
-            calculate_message_length=self._calculate_message_length,
-            require_reduction=require_reduction,
+        result = self._drain_counts(
+            _summary_compaction.accept_summary(
+                plan,
+                text,
+                protected_start=self.protected_start,
+                recovery_tool_available=self.recovery_tool_available,
+                effective_context_window=self.effective_context_window,
+                require_reduction=require_reduction,
+                model=self.model,
+            )
         )
         if result.accepted and notify and self.session_memory is not None:
             self.session_memory.on_compaction(current_tokens=result.current_tokens)
@@ -408,6 +411,24 @@ class MemoryManager:
         if updated_messages[0].role == "system" and updated_messages[0].content != self.base_system_prompt:
             updated_messages[0] = replace(updated_messages[0], content=self.base_system_prompt)
         return updated_messages
+
+    def _drain_counts[T](self, steps: Generator[TokenCount, int, T]) -> T:
+        count = None
+        try:
+            while True:
+                try:
+                    request = next(steps) if count is None else steps.send(count)
+                except StopIteration as done:
+                    return done.value
+                except _StopIterationTransport as transport:
+                    raise transport.original from transport.original.__cause__
+                count = (
+                    self._estimate_message_tokens(request.messages)
+                    if isinstance(request.messages, Message)
+                    else self._calculate_message_length(request.messages)
+                )
+        finally:
+            steps.close()
 
     def _calculate_message_length(self, messages: list[Message]) -> int:
         if not messages:
@@ -496,15 +517,19 @@ class MemoryManager:
         current_tokens: int,
         recovery_tool_available: bool | None = None,
     ) -> MicrocompactPlan | None:
-        return plan_memory_microcompact(
-            messages,
-            cycle_index=cycle_index,
-            current_tokens=current_tokens,
-            settings=self._definition_settings(),
-            protected_start=self.protected_start,
-            recovery_tool_available=self.recovery_tool_available if recovery_tool_available is None else recovery_tool_available,
-            artifact_path_estimate_for=estimate_tool_artifact_path,
-            estimate_message_tokens=self._estimate_message_tokens,
+        return self._drain_counts(
+            plan_memory_microcompact(
+                messages,
+                cycle_index=cycle_index,
+                current_tokens=current_tokens,
+                settings=self._definition_settings(),
+                protected_start=self.protected_start,
+                recovery_tool_available=self.recovery_tool_available
+                if recovery_tool_available is None
+                else recovery_tool_available,
+                artifact_path_estimate_for=estimate_tool_artifact_path,
+                model=self.model,
+            )
         )
 
     def apply_microcompaction(

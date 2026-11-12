@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
 from copy import copy
 from dataclasses import replace
 from hashlib import sha256
@@ -22,6 +22,7 @@ from vv_agent.kernel._microcompaction import (
 from vv_agent.kernel._records import InboxItem, Record, _MessageCache, copy_json, digest
 from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn, child_handles
 from vv_agent.kernel._store import StoredRecord
+from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 
 NormalizeMemorySettings = Callable[[dict[str, Any], int | None], dict[str, Any]]
 
@@ -510,8 +511,7 @@ def _compacted(
     history: list[StoredRecord],
     *,
     normalize_memory_settings: NormalizeMemorySettings,
-    count_messages: CountMessages,
-) -> None:
+) -> Generator[TokenCount, int, None]:
     p, tid = record._payload, record.turn_id
     require(tid == state.active_turn_id and tid in state.turns, "compaction outside active turn")
     assert tid is not None
@@ -522,14 +522,12 @@ def _compacted(
     ids = message_ids(source)
     definition = state.turns[tid].start._payload["definition"]
     protected = protected_start(history, state)
-    settings = normalize_memory_settings(definition["memory_settings"], protected)
+    try:
+        settings = normalize_memory_settings(definition["memory_settings"], protected)
+    except StopIteration as error:
+        raise _StopIterationTransport(error) from error
     retained_start(source, replacement, protected)
     can_recover = any(t["function"]["name"] == "read_file" for t in definition["tools"])
-
-    def calculate_message_length(messages: list[Message]) -> int:
-        if not messages:
-            return 0
-        return count_messages([m.to_openai_message() for m in messages], model=settings["model"])
 
     if p["mode"] == "micro":
         require(p["summary_operation_id"] is None and len(source) == len(replacement), "invalid micro replacement")
@@ -537,15 +535,16 @@ def _compacted(
         require(bool(removed), "empty micro replacement")
         if "micro_usage" in p:
             require(p["micro_usage"]["archived_count"] == len(removed), "micro archive count mismatch")
-        prune = plan_memory_microcompact(
+        current_tokens = yield TokenCount(source, settings["model"])
+        prune = yield from plan_memory_microcompact(
             source,
             cycle_index=1,
-            current_tokens=count_messages([m.to_openai_message() for m in source], model=settings["model"]),
+            current_tokens=current_tokens,
             settings=settings,
             protected_start=protected,
             recovery_tool_available=can_recover,
             artifact_path_estimate_for=estimate_tool_artifact_path,
-            estimate_message_tokens=lambda message: count_messages([message.to_openai_message()], model=settings["model"]),
+            model=settings["model"],
         )
         candidates = {c.message_index: c for c in prune.candidates} if prune else {}
         require(removed <= candidates.keys(), "micro changed ineligible messages")
@@ -599,13 +598,13 @@ def _compacted(
         require(plan is not None, "invalid summary prefix")
         assert plan is not None
         require(a.plan._payload["request"]["messages"] == [Message("user", plan.prompt).to_dict()], "summary prompt mismatch")
-        acceptance = _summary_compaction.accept_summary(
+        acceptance = yield from _summary_compaction.accept_summary(
             plan,
             a.result._payload["result"]["content"],
             protected_start=protected,
             recovery_tool_available=can_recover,
             effective_context_window=max(settings["model_context_window"] - settings["reserved_output_tokens"], 0),
-            calculate_message_length=calculate_message_length,
+            model=settings["model"],
             require_reduction=True,
         )
         expected, accepted = acceptance.messages, acceptance.accepted
@@ -711,15 +710,40 @@ class Fold:
     def extend(
         self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
     ) -> ExecutionState:
+        """Synchronous convenience for a CPU-only counter; SDK adapters drive steps outside core."""
+        steps = self.extend_steps(records, consumed_inputs=consumed_inputs, bodies=bodies)
+        count = None
+        try:
+            while True:
+                try:
+                    request = next(steps) if count is None else steps.send(count)
+                except StopIteration as done:
+                    return done.value
+                except _StopIterationTransport as transport:
+                    raise transport.original from transport.original.__cause__
+                messages = [request.messages] if isinstance(request.messages, Message) else request.messages
+                count = self._count_messages([m.to_openai_message() for m in messages], model=request.model)
+        finally:
+            steps.close()
+
+    def extend_steps(
+        self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
+    ) -> Generator[TokenCount, int, ExecutionState]:
         state, seen, consumed = self.state, self.seen, self.consumed
         for item in consumed_inputs:
             item.encode()
             require(item.input_id not in consumed, "duplicate consumed input identity")
             consumed[item.input_id] = item
         seq, history = len(self.history), self.history
-        encoded = iter(bodies) if bodies is not None else None
+        try:
+            encoded = iter(bodies) if bodies is not None else None
+        except StopIteration as error:
+            raise _StopIterationTransport(error) from error
         for record in records:
-            body = next(encoded) if encoded is not None else record.encode()
+            try:
+                body = next(encoded) if encoded is not None else record.encode()
+            except StopIteration as error:
+                raise _StopIterationTransport(error) from error
             if record.record_id in seen:
                 require(seen[record.record_id] == body, "record identity conflict")
                 continue
@@ -962,12 +986,11 @@ class Fold:
                         require((tid, "memory_started", p["boundary_id"]) in state.boundaries, "memory completion without start")
                 state.boundaries[key] = record
             elif kind == "context_compacted":
-                _compacted(
+                yield from _compacted(
                     state,
                     record,
                     history,
                     normalize_memory_settings=self._normalize_memory_settings,
-                    count_messages=self._count_messages,
                 )
             history.append(StoredRecord(record, seq, "", 0, 0))
             if state._protection is not None:

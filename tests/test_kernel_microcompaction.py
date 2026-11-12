@@ -63,13 +63,21 @@ def test_microcompaction_import_and_callbacks_without_outer_sdk(tmp_path, site_f
             estimates.append(message)
             return len(message.content)
 
-        plan = core.plan_microcompact(
+        steps = core.plan_microcompact(
             messages, current_cycle=9999, current_tokens=5000, target_tokens=3000,
             policy=MicrocompactionPolicy(keep_recent_cycles=1, min_result_chars=500),
             result_retentions={"preserved": ToolResultRetention.PRESERVE},
-            artifact_path_estimate_for=path_for, estimate_message_tokens=estimate,
+            artifact_path_estimate_for=path_for,
             excerpt_head_chars=2, excerpt_tail_chars=2,
         )
+        request = next(steps)
+        while True:
+            value = estimate(request.messages)
+            try:
+                request = steps.send(value)
+            except StopIteration as done:
+                plan = done.value
+                break
         assert type(plan) is core.MicrocompactPlan
         assert [candidate.message_index for candidate in plan.candidates] == [1, 3]
         assert [candidate.tool_call_id for candidate in plan.candidates] == ["existing", "new"]
@@ -102,7 +110,7 @@ def test_microcompaction_import_and_callbacks_without_outer_sdk(tmp_path, site_f
             "vv_agent.kernel._canonical_json", "vv_agent.kernel._microcompaction_policy",
             "vv_agent.kernel._tool_metadata", "vv_agent.kernel._summary_compaction",
             "vv_agent.kernel._compaction_threshold", "vv_agent.kernel._context_messages",
-            "vv_agent.kernel._tool_values",
+            "vv_agent.kernel._tool_values", "vv_agent.kernel._token_count",
         }
     """)
     result = subprocess.run(
@@ -127,10 +135,13 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     from vv_agent.session import kernel
 
     for name in microcompact.__all__:
+        if name == "plan_microcompact":
+            continue
         owner = text if hasattr(text, name) else core
         assert getattr(microcompact, name) is getattr(owner, name), name
     assert memory.MicrocompactPlan is core.MicrocompactPlan
-    assert memory.plan_microcompact is core.plan_microcompact
+    assert memory.plan_microcompact is microcompact.plan_microcompact
+    assert microcompact._plan_microcompact is core.plan_microcompact
     for name in ("MicrocompactCandidate", "MicrocompactPlan", "plan_memory_microcompact", "replace_with_compacted_marker"):
         value = getattr(core, name)
         assert value.__module__ == core.__name__, name
@@ -140,4 +151,7 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     assert kernel.is_microcompacted_tool_content is text.is_microcompacted_tool_content
     assert core.MicrocompactionPolicy is manager.MicrocompactionPolicy is MicrocompactionPolicy
     assert core.ToolResultRetention is manager.ToolResultRetention is ToolResultRetention
-    assert not any(name.startswith("_") and not name.startswith("__") for name in vars(microcompact))
+    assert {name for name in vars(microcompact) if name.startswith("_") and not name.startswith("__")} == {
+        "_plan_microcompact",
+        "_StopIterationTransport",
+    }

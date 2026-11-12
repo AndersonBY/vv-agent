@@ -50,11 +50,19 @@ def test_summary_core_import_and_canonical_producers_without_outer_sdk(tmp_path,
             def count(value):
                 counts.append(value)
                 return estimator["input_messages"] if value == messages else estimator["candidate_messages"]
-            result = core.accept_summary(
+            steps = core.accept_summary(
                 plan, inputs["summary_response"], protected_start=None,
                 recovery_tool_available=inputs.get("recovery_tool_available", True),
-                effective_context_window=10000, calculate_message_length=count, require_reduction=True,
+                effective_context_window=10000, require_reduction=True,
             )
+            request = next(steps)
+            while True:
+                value = count(request.messages)
+                try:
+                    request = steps.send(value)
+                except StopIteration as done:
+                    result = done.value
+                    break
             assert result.accepted is case["expected"]["changed"], case["name"]
             assert canonical_json_bytes([message.to_dict() for message in result.messages]) == canonical_json_bytes(
                 case["expected"]["messages"]
@@ -83,7 +91,7 @@ def test_summary_core_import_and_canonical_producers_without_outer_sdk(tmp_path,
             "vv_agent", "vv_agent.kernel", "vv_agent.kernel._summary_compaction",
             "vv_agent.kernel._canonical_json", "vv_agent.kernel._compaction_text",
             "vv_agent.kernel._context_messages", "vv_agent.kernel._message_values",
-            "vv_agent.kernel._tool_values", "vv_agent.kernel._message_codec",
+            "vv_agent.kernel._tool_values", "vv_agent.kernel._message_codec", "vv_agent.kernel._token_count",
         }
     """)
     result = subprocess.run(

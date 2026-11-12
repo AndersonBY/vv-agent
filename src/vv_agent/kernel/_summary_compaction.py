@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -12,6 +12,7 @@ from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._compaction_text import has_recovery_envelope
 from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages, retained_start
 from vv_agent.kernel._message_values import COMPACTION_METADATA_KEY, Message, validate_compaction_metadata
+from vv_agent.kernel._token_count import TokenCount
 from vv_agent.kernel._tool_values import ToolExecutionResult
 
 _MEMORY_SUMMARY_NAME = "memory_summary"
@@ -244,9 +245,9 @@ def accept_summary(
     protected_start: int | None,
     recovery_tool_available: bool,
     effective_context_window: int,
-    calculate_message_length: Callable[[list[Message]], int],
     require_reduction: bool,
-) -> _SummaryAcceptance:
+    model: str = "",
+) -> Generator[TokenCount, int, _SummaryAcceptance]:
     """Validate a retained model result. Log owners defer notification until commit."""
     messages, systems, previous, prefix, tail = plan.messages, plan.systems, plan.previous, plan.prefix, plan.tail
     summary = _normalize_summary_payload(_parse_summary_payload(_normalize_summary_output(text)))
@@ -281,8 +282,8 @@ def accept_summary(
         *tail,
     ]
     retained_start(messages, candidate, protected_start)
-    tokens = calculate_message_length(candidate)
-    if (require_reduction and tokens >= calculate_message_length(messages)) or tokens > effective_context_window:
+    tokens = yield TokenCount(candidate, model)
+    if (require_reduction and tokens >= (yield TokenCount(messages, model))) or tokens > effective_context_window:
         return _SummaryAcceptance(list(messages), False, None)
     return _SummaryAcceptance(candidate, True, tokens)
 

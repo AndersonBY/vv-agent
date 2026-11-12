@@ -1,8 +1,8 @@
-"""Pure microcompaction planning and Message replacement using host estimates."""
+"""Pure microcompaction planning requests host estimates while suspended."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -16,6 +16,7 @@ from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
 from vv_agent.kernel._context_messages import atomic_start
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
 from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
+from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._tool_metadata import ToolResultRetention
 
 EXCERPT_METADATA_KEY = "_vv_agent_microcompact_excerpt"
@@ -54,10 +55,10 @@ def plan_microcompact(
     policy: MicrocompactionPolicy,
     result_retentions: Mapping[str, ToolResultRetention],
     artifact_path_estimate_for: Callable[[str], str],
-    estimate_message_tokens: Callable[[Message], int],
     excerpt_head_chars: int = 200,
     excerpt_tail_chars: int = 200,
-) -> MicrocompactPlan:
+    model: str = "",
+) -> Generator[TokenCount, int, MicrocompactPlan]:
     if not messages or current_tokens <= target_tokens:
         return MicrocompactPlan(current_tokens=max(current_tokens, 0), target_tokens=max(target_tokens, 0))
 
@@ -84,7 +85,10 @@ def plan_microcompact(
             continue
         tool_call_id = str(message.tool_call_id or "").strip()
         existing_artifact = _existing_artifact(message)
-        artifact_path = existing_artifact.path if existing_artifact is not None else artifact_path_estimate_for(tool_call_id)
+        try:
+            artifact_path = existing_artifact.path if existing_artifact is not None else artifact_path_estimate_for(tool_call_id)
+        except StopIteration as error:
+            raise _StopIterationTransport(error) from error
         excerpt_value = message.metadata.get(EXCERPT_METADATA_KEY)
         excerpt_source = excerpt_value if isinstance(excerpt_value, str) else message.content
         marker = build_compacted_tool_content(
@@ -95,7 +99,9 @@ def plan_microcompact(
             excerpt_tail_chars=excerpt_tail_chars,
         )
         marker_message = replace(message, content=marker)
-        reclaimable = max(estimate_message_tokens(message) - estimate_message_tokens(marker_message), 0)
+        original_tokens = yield TokenCount(message, model)
+        marker_tokens = yield TokenCount(marker_message, model)
+        reclaimable = max(original_tokens - marker_tokens, 0)
         if reclaimable == 0:
             continue
         candidates.append(
@@ -212,8 +218,8 @@ def plan_memory_microcompact(
     protected_start: int | None,
     recovery_tool_available: bool,
     artifact_path_estimate_for: Callable[[str], str],
-    estimate_message_tokens: Callable[[Message], int],
-) -> MicrocompactPlan | None:
+    model: str = "",
+) -> Generator[TokenCount, int, MicrocompactPlan | None]:
     if not recovery_tool_available or cycle_index is None:
         return None
     threshold = compute_compaction_threshold(
@@ -228,7 +234,7 @@ def plan_memory_microcompact(
     trigger = int(threshold * policy.trigger_ratio)
     if trigger <= 0 or current_tokens <= trigger:
         return None
-    plan = plan_microcompact(
+    plan = yield from plan_microcompact(
         messages,
         current_cycle=cycle_index,
         current_tokens=current_tokens,
@@ -236,7 +242,7 @@ def plan_memory_microcompact(
         policy=policy,
         result_retentions=settings["tool_result_retentions"],
         artifact_path_estimate_for=artifact_path_estimate_for,
-        estimate_message_tokens=estimate_message_tokens,
+        model=model,
         excerpt_head_chars=settings["tool_result_excerpt_head"],
         excerpt_tail_chars=settings["tool_result_excerpt_tail"],
     )

@@ -91,7 +91,8 @@ def test_actual_value_exports_and_single_transition_implementation():
     assert reducer.TransitionError is _reducer.TransitionError
     assert context.InputProtection is _context.InputProtection
     assert sql.SQLSessionTx is _sql.SQLSessionTx
-    assert reducer.Fold.extend is _reducer.Fold.extend
+    assert reducer.Fold.extend_steps is _reducer.Fold.extend_steps
+    assert reducer.Fold.extend is not _reducer.Fold.extend
     assert reducer.Fold.fork is _reducer.Fold.fork
     receipt = store.CommitReceipt("c", (), 1)
     assert receipt == store.CommitReceipt(

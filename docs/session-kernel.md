@@ -86,9 +86,10 @@ settings defaults and normalization. Core compaction validation recomputes the
 accepted result; it does not trust a stored receipt or an outer acceptance flag.
 The SQL store, its cached prefixes, forked folds, driver and historical context
 rebuilds retain one fold-factory binding. Changing the factory clears both
-prefix caches. The default SDK counter retains its existing behavior; the
-prepared-counter adapter is an explicit assembly option, not a claim that
-default replay is free of tokenizer initialization I/O.
+prefix caches. Core compaction validation yields token-count requests. The SDK
+invokes its existing counter while the core generator chain is suspended, then
+resumes validation with the result. Counting may initialize resources in the
+outer SDK; the direct synchronous core entry requires a CPU-only counter.
 
 ### Record validation and identity
 

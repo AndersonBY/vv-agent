@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._records import InboxItem, Record
 from vv_agent.kernel._reducer import CountMessages, NormalizeMemorySettings
 from vv_agent.kernel._reducer import Fold as CoreFold
@@ -15,6 +16,7 @@ from vv_agent.kernel._state import Attempt as Attempt
 from vv_agent.kernel._state import ExecutionState as ExecutionState
 from vv_agent.kernel._state import Operation as Operation
 from vv_agent.kernel._state import Turn as Turn
+from vv_agent.kernel._token_count import _StopIterationTransport
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.memory.token_utils import count_messages_tokens
 
@@ -24,7 +26,7 @@ def _normalize_memory_settings(settings: dict[str, Any], protected_start: int | 
 
 
 class Fold(CoreFold):
-    """Outer defaults preserve legacy counting; explicit prepared bindings are opt-in."""
+    """SDK assembly resolves token counts outside suspended core transitions."""
 
     def __init__(
         self,
@@ -38,6 +40,24 @@ class Fold(CoreFold):
             else normalize_memory_settings,
             count_messages=count_messages_tokens if count_messages is None else count_messages,
         )
+
+    def extend(
+        self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
+    ) -> ExecutionState:
+        steps = self.extend_steps(records, consumed_inputs=consumed_inputs, bodies=bodies)
+        count = None
+        try:
+            while True:
+                try:
+                    request = next(steps) if count is None else steps.send(count)
+                except StopIteration as done:
+                    return done.value
+                except _StopIterationTransport as transport:
+                    raise transport.original from transport.original.__cause__
+                messages = [request.messages] if isinstance(request.messages, Message) else request.messages
+                count = self._count_messages([m.to_openai_message() for m in messages], model=request.model)
+        finally:
+            steps.close()
 
 
 def fold(records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = ()) -> ExecutionState:

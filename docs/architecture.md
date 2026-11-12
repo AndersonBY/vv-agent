@@ -105,19 +105,26 @@ import those budget objects directly from core without loading the evaluator.
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
 reducer imports the core renderer. `kernel/_microcompaction.py` owns candidate
-planning and Message replacement using the existing estimator callbacks.
-Pure summary planning, acceptance, prompt rendering and recovery-evidence
-handling live in `kernel/_summary_compaction.py`. It receives resolved settings
-and the existing message-count callable. `MemoryManager` retains defaults,
-counting, model callbacks, archive I/O and SessionMemory notification; accepted
-notifications reuse the count computed during validation.
+planning and Message replacement; its planners and summary acceptance in
+`kernel/_summary_compaction.py` yield internal `TokenCount` requests. The core
+fold delegates through these generators without invoking the SDK token counter.
+The synchronous SDK Fold and MemoryManager drivers call the existing counter
+while the core generator chain is suspended, then send the result back. Counts
+are requested only at the original decision points, without model pre-scanning,
+count-result caching or fold replay. MemoryManager retains its counting hooks,
+model callbacks, archive I/O and SessionMemory notification; accepted notifications
+reuse the count computed during validation. The public microcompaction planner
+remains synchronous, with one authoritative core generator algorithm.
 Compaction capacity and integer coercion are owned by
 `kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
 provides Runtime with the current settings projection; its constructor remains
 the single source of defaults and policy normalization.
-`memory/prepared_tokens.py` can bind a local encoder and formatter before
-counting. It shares the existing token-counting algorithm and is currently an
-opt-in assembly seam; the default replay path still uses the ordinary counter.
+The ordinary token counter retains its production model dispatch, incremental
+cache, formatting and per-call fallback behavior. CoreFold's synchronous
+convenience entry requires a CPU-only counter; the default SDK drives
+`extend_steps` outside core. This boundary does not complete W9 or P1; model
+execution and other SDK effects remain outside core, and later W9 public
+surfaces and staging obligations remain open.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together

@@ -1,4 +1,8 @@
-"""Public microcompaction bindings to the pure core planner and text helpers."""
+"""Synchronous public driver for the core planner and shared text helpers."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
 
 from vv_agent.kernel._compaction_text import (
     COMPACT_MARKER_CLOSING,
@@ -8,13 +12,60 @@ from vv_agent.kernel._compaction_text import (
     has_recovery_envelope,
     is_microcompacted_tool_content,
 )
+from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._microcompaction import (
     EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
     MicrocompactPlan,
-    plan_microcompact,
     replace_with_compacted_marker,
 )
+from vv_agent.kernel._microcompaction import (
+    plan_microcompact as _plan_microcompact,
+)
+from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
+from vv_agent.kernel._token_count import _StopIterationTransport
+from vv_agent.kernel._tool_metadata import ToolResultRetention
+
+
+def plan_microcompact(
+    messages: list[Message],
+    *,
+    current_cycle: int,
+    current_tokens: int,
+    target_tokens: int,
+    policy: MicrocompactionPolicy,
+    result_retentions: Mapping[str, ToolResultRetention],
+    artifact_path_estimate_for: Callable[[str], str],
+    estimate_message_tokens: Callable[[Message], int],
+    excerpt_head_chars: int = 200,
+    excerpt_tail_chars: int = 200,
+) -> MicrocompactPlan:
+    steps = _plan_microcompact(
+        messages,
+        current_cycle=current_cycle,
+        current_tokens=current_tokens,
+        target_tokens=target_tokens,
+        policy=policy,
+        result_retentions=result_retentions,
+        artifact_path_estimate_for=artifact_path_estimate_for,
+        excerpt_head_chars=excerpt_head_chars,
+        excerpt_tail_chars=excerpt_tail_chars,
+    )
+    count = None
+    try:
+        while True:
+            try:
+                request = next(steps) if count is None else steps.send(count)
+            except StopIteration as done:
+                return done.value
+            except _StopIterationTransport as transport:
+                raise transport.original from transport.original.__cause__
+            # This planner only requests estimates for individual messages.
+            assert isinstance(request.messages, Message)
+            count = estimate_message_tokens(request.messages)
+    finally:
+        steps.close()
+
 
 __all__ = [
     "COMPACT_MARKER_CLOSING",
