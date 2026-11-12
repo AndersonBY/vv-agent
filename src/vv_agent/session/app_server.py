@@ -14,9 +14,9 @@ from vv_agent.app_server.run_adapter import StartedTurn, TurnResumeError
 from vv_agent.app_server.run_adapter import _RunAdapterFormatting as RunAdapter
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadSnapshot, TurnRecord
 from vv_agent.app_server.usage_projection import task_token_usage_to_wire
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.types import AgentStatus, Message
 
 from .context_view import context_view

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from vv_agent import Agent, AgentTask, RunConfig, ScriptedModelProvider
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.session.surfaces import SessionDriver

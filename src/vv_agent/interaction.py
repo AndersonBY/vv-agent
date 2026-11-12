@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
+from vv_agent.kernel._canonical_json import canonical_json_bytes, canonical_json_sha256
 
 CONTROLLER_COMMAND_ID_SCHEMA = "vv-agent.controller-command-id.v1"
 CONTROLLER_COMMAND_ID_DOMAIN = "vv-agent.controller-command-id.v1"

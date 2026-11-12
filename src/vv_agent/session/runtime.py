@@ -27,9 +27,9 @@ from vv_agent.budget import (
     HostCostMeter,
     RunBudgetLimits,
 )
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef, resolve_run_model

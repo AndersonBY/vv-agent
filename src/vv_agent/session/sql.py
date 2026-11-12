@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 
 from .records import InboxItem, Record, SessionSpec, _MessageCache
 from .reducer import ExecutionState, Fold, fold

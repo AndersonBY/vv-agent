@@ -18,7 +18,7 @@ from vv_agent import (
     function_tool,
 )
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.outputs import ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.tools.registry import ToolRegistry

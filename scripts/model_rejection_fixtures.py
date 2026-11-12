@@ -21,7 +21,7 @@ from tests.session.test_model_rejection import adapter_error, context_http_error
 from tests.session.test_model_rejection_retry_policy import retry_transport
 from tests.session.test_model_response_completion import local_response_transport
 from tests.session.test_recovery_matrix import records_of, runtime
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.errors import ModelRequestRejected, ModelStreamInterrupted
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.output_validation import OutputValidationResult

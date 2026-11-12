@@ -14,7 +14,7 @@ from vv_agent.budget import (
     BudgetExhaustionReason,
     BudgetUsageSnapshot,
 )
-from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 
 if TYPE_CHECKING:

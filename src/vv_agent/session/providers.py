@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.orchestrator import ToolOrchestrator

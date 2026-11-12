@@ -13,7 +13,7 @@ from threading import Event
 
 from vv_agent import Accepted, Agent, Definitive, RunConfig, ScriptedModelProvider, Unknown, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.records import InboxItem, Record
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.metadata import ToolMetadata

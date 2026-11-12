@@ -410,7 +410,7 @@ class AcceptanceCut(BaseException):
 @pytest.mark.sqlite_file
 @pytest.mark.parametrize("declared", [False, True])
 def test_recovered_acceptance_preserves_original_declaration(store, database, declared, monkeypatch):
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     provider = YieldProvider(declared=declared, callback=True)
     # Authenticate every acceptance byte, including the declaration.
@@ -606,7 +606,7 @@ def acceptance_crash_worker(database, declared, pipe):
 def test_process_death_after_acceptance_before_park_restores_declaration(store, database, declared, monkeypatch):
     import multiprocessing
 
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     start(store)
     ctx = multiprocessing.get_context("spawn")
@@ -652,7 +652,7 @@ def test_process_death_after_acceptance_before_park_restores_declaration(store, 
 @pytest.mark.sqlite_file
 @pytest.mark.parametrize("declared", [False, True])
 def test_acceptance_authentication_binds_declaration_bytes(store, database, declared, monkeypatch):
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
     from vv_agent.session.records import digest
 
     start(store)
@@ -698,7 +698,7 @@ def test_acceptance_authentication_binds_declaration_bytes(store, database, decl
 def test_unselected_candidate_not_projected_and_same_body_reuses(store, database, tmp_path, monkeypatch):
     from pathlib import PurePosixPath
 
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
     from vv_agent.session.context import project_context
     from vv_agent.session.kernel import _Driver
     from vv_agent.session.tool_results import prepare_tool_resources, project_tool_result

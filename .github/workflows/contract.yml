@@ -66,8 +66,12 @@ jobs:
       - name: Verify repository documentation and capability contracts
         run: uv run python scripts/check_repository_contracts.py
 
-      - name: Test repository contract gate
-        run: uv run pytest -q --strict-markers tests/test_repository_contracts.py
+      - name: Test repository and kernel contract gates
+        run: |
+          uv run pytest -q --strict-markers \
+            tests/test_repository_contracts.py \
+            tests/test_kernel_boundaries.py \
+            tests/test_kernel_schema.py::test_kernel_schema_import_is_isolated_without_site_packages
 
       - name: Verify formatting
         run: uv run ruff format --check .

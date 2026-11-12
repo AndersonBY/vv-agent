@@ -12,8 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import _project_provider_stream_payload
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.errors import (
     ModelStreamInterrupted,
     is_prompt_too_long_error,

@@ -6,8 +6,8 @@ from threading import Event
 
 import pytest
 
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import ModelCallCompletedEvent
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive
 from vv_agent.session.projection import project_records
 from vv_agent.session.providers import Accepted, Definitive, Unknown

@@ -30,6 +30,50 @@ adapter when accessed. Model execution also loads it when the kernel checks
 endpoint bindings. These exports resolve to the same classes as direct imports
 from `vv_agent.llm.vv_llm_client`.
 
+Root SDK exports resolve lazily to the original objects in their owning
+modules. Importing `vv_agent.kernel` or `vv_agent.kernel._schema` through normal
+Python package imports loads only the package facade and the requested core
+modules, using the standard library alone. Accessing a root SDK export may load
+its outer SDK dependencies.
+The App Server package also resolves exports lazily, so importing its host or
+session adapter does not initialize the client and server through the package
+facade.
+
+Canonical JSON encoding, UTF-16 key ordering, canonical SHA-256 digests and
+digest validation are owned by `src/vv_agent/kernel/_canonical_json.py`. The
+implementation is shared by its active consumers and supports ordinary package
+imports using only the standard library.
+
+The extracted schema core owns the closed record, inbox, handle and boundary
+schema definitions and their compiled-check registry in
+`src/vv_agent/kernel/_record_schema.py`, using the standard-library-only compiler
+in `src/vv_agent/kernel/_schema.py`. Both modules support ordinary package imports
+without loading the outer SDK. `session/records.py` consumes these same schema
+objects and checks; its jsonschema validators provide the existing diagnostic
+errors over those objects. Outer schema imports still refer to the core objects
+while record-layer extraction remains incomplete.
+
+Message values, artifact references, cursors and compaction evidence validation
+are owned by `kernel/_message_values.py`; the strict Message decoder is owned by
+`kernel/_message_codec.py`. `types.py` and existing root exports resolve to these
+same objects. Both core modules use only the standard library and core canonical
+JSON helpers. Message metadata and tool arguments retain their signed-64 through
+unsigned-64 integer range; canonical digest encoding and artifact sizes/cursor
+offsets retain the narrower I-JSON safe-integer range.
+
+Pure compaction markers, rendering and recovery-envelope functions are owned by
+`kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
+reducer imports the core renderer. Compaction planning, Message mutation,
+workspace I/O, callbacks and token counting remain outside core.
+
+Record values, record-specific byte framing, jiter/orjson codecs, SDK task decoding
+and jsonschema diagnostics remain outside core. Record Message decoding still
+reaches the core values through `types.py`, which loads outer task/settings and
+prompt dependencies. The reducer still depends on context, memory/tokenizer,
+lifecycle, budget and event code; SQL stores and the execution driver remain
+under `session/`. These extractions do not establish a core-only simulation or
+complete W9. LocalWorker convergence belongs to W4/P3.
+
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply
 resumes the same turn. Resource budgets control what may start and how usage
@@ -105,7 +149,9 @@ cycle reported that metric.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
+| `src/vv_agent/kernel/_schema.py` | Standard-library-only compiler for the closed session-schema vocabulary; record codecs and validation diagnostics remain outside core. |
+| `src/vv_agent/kernel/_record_schema.py` | Authoritative closed session schemas and compiled checks; outer record diagnostics use these same objects. |
+| `src/vv_agent/kernel/_canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
 | `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
 | `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes, and validation of definitive results. The session store owns admission and receipts. |

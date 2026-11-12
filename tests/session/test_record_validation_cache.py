@@ -5,8 +5,11 @@ from copy import deepcopy
 from hashlib import sha256
 
 import pytest
+from jsonschema import ValidationError
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._record_schema import _CHECKS, HANDLE
+from vv_agent.kernel._schema import _compile_check
 from vv_agent.session import records
 from vv_agent.session.kernel import read_state
 from vv_agent.session.records import RecordError, SessionSpec
@@ -130,15 +133,27 @@ def example(schema):
 )
 def test_compiled_checks_match_jsonschema(validator):
     value = example(validator.schema)
-    check = records._CHECKS[id(validator.schema)]
+    check = _CHECKS[id(validator.schema)]
     for candidate in [value, *mutations(value)]:
-        assert check(candidate) == validator.is_valid(candidate), candidate
+        valid = validator.is_valid(candidate)
+        assert check(candidate) == valid, candidate
+        if not valid:
+            with pytest.raises(ValidationError) as reference:
+                validator.validate(candidate)
+            with pytest.raises(RecordError) as actual:
+                records.validate(candidate, validator.schema, canonical=False)
+            cause = actual.value.__cause__
+            assert isinstance(cause, ValidationError)
+            assert str(actual.value) == str(reference.value)
+            assert cause.schema is reference.value.schema
+            assert list(cause.path) == list(reference.value.path)
+            assert list(cause.schema_path) == list(reference.value.schema_path)
 
 
-@pytest.mark.parametrize("variant", records.HANDLE["oneOf"])
+@pytest.mark.parametrize("variant", HANDLE["oneOf"])
 def test_compiled_checks_match_all_nested_handles(variant):
     validator = records._StrictValidator(variant)
-    check = records._compile_check(variant)
+    check = _compile_check(variant)
     value = example(variant)
     for candidate in [value, *mutations(value)]:
         assert check(candidate) == validator.is_valid(candidate), candidate

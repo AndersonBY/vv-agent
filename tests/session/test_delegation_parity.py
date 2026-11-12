@@ -14,10 +14,10 @@ from test_workspace_backends import _FakeS3Client, _make_s3_backend
 
 from vv_agent import Agent, InteractionAnswer, RunConfig, Runner, handoff
 from vv_agent.budget import RunBudgetLimits
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import ToolPolicy
 from vv_agent.session.bindings import MissingHostBinding

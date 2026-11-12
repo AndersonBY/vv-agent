@@ -6,27 +6,14 @@ import json
 import math
 from typing import Any, cast
 
-from vv_agent.types import Message, Role, ToolArtifactRef, validate_compaction_metadata
+from ._message_values import _MESSAGE_FIELDS, Message, Role, ToolArtifactRef, validate_compaction_metadata
 
-_SESSION_MESSAGE_FIELDS = frozenset(
-    {
-        "role",
-        "content",
-        "name",
-        "tool_call_id",
-        "tool_calls",
-        "reasoning_content",
-        "image_url",
-        "metadata",
-        "artifact_ref",
-    }
-)
 _TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
 _TOOL_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 
 
 def _decode_canonical_message(data: dict[str, Any]) -> Message:
-    _reject_unknown_fields(data, _SESSION_MESSAGE_FIELDS, "Message")
+    _reject_unknown_fields(data, _MESSAGE_FIELDS, "Message")
     role = _required_string(data, "role")
     if role not in {"system", "user", "assistant", "tool"}:
         raise ValueError(f"unknown message role: {role}")

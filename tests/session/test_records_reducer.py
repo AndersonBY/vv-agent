@@ -3,7 +3,9 @@ from dataclasses import replace
 
 import pytest
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._record_schema import INPUT_PAYLOADS, PAYLOADS
+from vv_agent.kernel._schema import _compile_check
 from vv_agent.session.records import InboxItem, Record, RecordError, digest
 from vv_agent.session.reducer import TransitionError, fold
 
@@ -369,7 +371,7 @@ def test_started_attempt_retains_dispatch_identity_for_repair():
 
 @pytest.mark.parametrize("field", ["request_digest", "result_digest", "source_digest", "terminal_digest"])
 def test_hash_rejects_trailing_newline(field):
-    from vv_agent.session.records import INPUT_PAYLOADS, PAYLOADS, validate
+    from vv_agent.session.records import validate
 
     if field == "terminal_digest":
         schema = INPUT_PAYLOADS["child_result"]
@@ -380,7 +382,6 @@ def test_hash_rejects_trailing_newline(field):
         if field == "request_digest":
             schema = PAYLOADS["op_planned"]
     hash_schema = schema["properties"][field]
-    from vv_agent.session.records import RecordError, _compile_check
 
     assert not _compile_check(hash_schema)("a" * 64 + "\n")
     # Exercise both fast and diagnostic validator paths on real envelopes.

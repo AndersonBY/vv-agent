@@ -1,7 +1,7 @@
 """One retained-form builder and validation shared by admission, apply and replay."""
 
-from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
 from vv_agent.interaction import InteractionAnswer, InteractionAnswerSpec, InteractionReplyTarget
+from vv_agent.kernel._canonical_json import canonical_json_bytes, canonical_json_sha256
 
 
 class InteractionError(ValueError):

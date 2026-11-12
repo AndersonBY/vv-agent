@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import PurePosixPath
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.types import ToolArtifactRef, ToolExecutionResult
 from vv_agent.workspace.artifacts import (
     BOUNDED_TEXT_CHARS,

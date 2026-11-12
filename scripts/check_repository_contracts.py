@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 MATRIX = "docs/session-kernel-capability-matrix.md"
@@ -49,9 +51,120 @@ def definitions(body: list[ast.stmt], prefix: str = ""):
                 yield from definitions(node.body, name + ".")
 
 
+def check_kernel_boundaries(root: Path) -> list[str]:
+    """Check every kernel source, including unimported files and conditional imports.
+
+    Syntax boundary: imports, Name/Attribute calls, import aliases and simple
+    name-to-name/attribute assignments. Effectful stdlib API families are
+    conservatively rejected, including pure helpers within those families.
+    No scope/control-flow inference, reflection, re-export tracing, unlisted
+    API effect inference or arbitrary execution proof. This is a maintenance
+    gate, not a sandbox. There is no core store yet, so no I/O or lazy
+    third-party driver exception exists.
+    """
+    root = root.resolve()
+    core = "vv_agent.kernel"
+    effect_families = (
+        "_thread",
+        "threading",
+        "concurrent.futures",
+        "multiprocessing",
+        "subprocess",
+        "time",
+        "os",
+        "io",
+        "pathlib",
+        "shutil",
+        "tempfile",
+        "socket",
+        "socketserver",
+        "ssl",
+        "urllib.request",
+        "http.client",
+        "http.server",
+        "asyncio",
+        "sqlite3",
+    )
+    effect_calls = {
+        "open",
+        "builtins.open",
+        "print",
+        "builtins.print",
+        "sys.stdout.write",
+        "sys.stdout.writelines",
+        "sys.stderr.write",
+        "sys.stderr.writelines",
+        "datetime.datetime.now",
+        "datetime.datetime.utcnow",
+        "datetime.datetime.today",
+        "datetime.date.today",
+        "__import__",
+        "builtins.__import__",
+        "importlib.import_module",
+        "eval",
+        "exec",
+        "builtins.eval",
+        "builtins.exec",
+    }
+    errors = []
+    for file in sorted((root / "src/vv_agent/kernel").rglob("*.py")):
+        path = file.relative_to(root).as_posix()
+        if not file.resolve().is_relative_to(root):
+            errors.append(f"{path}: kernel source escapes repository root")
+            continue
+        try:
+            module = ast.parse(file.read_text(encoding="utf-8"), filename=path)
+        except (SyntaxError, UnicodeError, OSError) as exc:
+            errors.append(f"{path}: cannot parse kernel Python: {exc}")
+            continue
+        package = ".".join(file.parent.relative_to(root / "src").parts)
+        bindings: dict[str, str] = {}
+
+        def name(node: ast.AST, bindings=bindings) -> str:
+            if isinstance(node, ast.Name):
+                return bindings.get(node.id, node.id)
+            if isinstance(node, ast.Attribute) and (parent := name(node.value)):
+                return parent + "." + node.attr
+            return ""
+
+        def check_import(target: str, node: ast.Import | ast.ImportFrom, path=path) -> None:
+            if target == core or target.startswith(core + "."):
+                return
+            if target.split(".")[0] not in sys.stdlib_module_names:
+                errors.append(f"{path}:{node.lineno}: forbidden kernel import: {target}")
+
+        for node in sorted(ast.walk(module), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    check_import(alias.name, node)
+                    bindings[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else alias.name.split(".")[0]
+            elif isinstance(node, ast.ImportFrom):
+                try:
+                    target = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+                except ImportError:
+                    errors.append(f"{path}:{node.lineno}: kernel relative import escapes package")
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        errors.append(f"{path}:{node.lineno}: kernel wildcard import cannot be checked")
+                    check_import(target + "." + alias.name if target == "vv_agent" else target, node)
+                    bindings[alias.asname or alias.name] = target + "." + alias.name
+            elif isinstance(node, ast.Assign) and (target := name(node.value)):
+                for assigned in node.targets:
+                    if isinstance(assigned, ast.Name):
+                        bindings[assigned.id] = target
+            elif isinstance(node, ast.Call):
+                target = name(node.func)
+                if target in effect_calls or any(
+                    target == family or target.startswith(family + ".") for family in effect_families
+                ):
+                    errors.append(f"{path}:{node.lineno}: forbidden kernel effect call: {target}")
+    return sorted(set(errors))
+
+
 def check_repository(root: Path) -> list[str]:
     root = root.resolve()
-    errors: list[str] = []
+    errors: list[str] = check_kernel_boundaries(root)
     trees: dict[str, ast.Module | None] = {}
 
     def error(where: str, message: str):

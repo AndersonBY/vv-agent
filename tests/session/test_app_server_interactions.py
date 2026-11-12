@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from vv_agent import Agent, InteractionAnswer, InteractionReplyTarget
-from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.session.interactions import reply_content
 from vv_agent.session.kernel import drive
 from vv_agent.session.records import InboxItem
