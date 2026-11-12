@@ -987,15 +987,18 @@ class Fold:
                             "budget exhaustion contains unknown or incomplete fields",
                         )
                 elif p["stage"] in {"memory_started", "memory_completed"}:
-                    from vv_agent.events import event_from_dict
+                    from vv_agent.kernel._event_validation import validate_retained_event
 
-                    event = event_from_dict(p["data"]["event"])
+                    event = p["data"]["event"]
+                    validate_retained_event(event)
                     require(
-                        event.type
+                        event["type"]
                         == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),
                         "memory lifecycle type mismatch",
                     )
-                    require(event.run_id == tid and event.session_id == state.session_id, "memory lifecycle identity mismatch")
+                    require(
+                        event["run_id"] == tid and event["session_id"] == state.session_id, "memory lifecycle identity mismatch"
+                    )
                     if p["stage"] == "memory_completed":
                         require((tid, "memory_started", p["boundary_id"]) in state.boundaries, "memory completion without start")
                 state.boundaries[key] = record
