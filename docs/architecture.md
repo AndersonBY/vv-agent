@@ -103,6 +103,10 @@ handling live in `kernel/_summary_compaction.py`. It receives resolved settings
 and the existing message-count callable. `MemoryManager` retains defaults,
 counting, model callbacks, archive I/O and SessionMemory notification; accepted
 notifications reuse the count computed during validation.
+Compaction capacity and integer coercion are owned by
+`kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
+provides Runtime with the current settings projection; its constructor remains
+the single source of defaults and policy normalization.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together
