@@ -158,6 +158,16 @@ the driver use the same fold factory. The outer context adapter also uses that
 factory when a historical prefix must be rebuilt. Replacing a store's factory
 clears both validated-prefix caches.
 
+`kernel/_child_store.py` owns child admission, cancellation, terminal delivery,
+authenticity checks and ordinary child-result assembly over the store ports.
+`session/children.py` exports the same objects; configured-agent and handoff
+reconstruction remain in the SDK delegation adapter.
+
+`kernel/_usage.py` owns usage normalization and the model-attempt ledger. SDK
+result projection and the simulation's I5 checks consume that same function.
+Unselected receipts remain billable, and missing measurements remain distinct
+from reported zero usage.
+
 Shared event wire validation lives in `kernel/_event_validation.py`. The outer
 event classes retain construction, time and UUID defaults. Retained memory
 boundaries use the shared validator before checking their expected event kind,

@@ -14,6 +14,7 @@ from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskSna
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.config import project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME
+from vv_agent.kernel._child_store import ordinary_result_for_children
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -467,23 +468,7 @@ def result_for_children(
     first = store.read_state(handles[0]["session_id"])
     admission = first[1][0].record._payload["attributes"].get("child_admission")
     if admission is None:
-        from .children import child_outcome
-
-        results = []
-        for i, handle in enumerate(handles):
-            snapshot = first if i == 0 else store.read_state(handle["session_id"])
-            terminal = next(r for r in snapshot[1] if r.record.kind == "turn_ended" and r.record.turn_id == handle["turn_id"])
-            results.append(child_outcome(plan, terminal))
-        if len(results) == 1:
-            return results[0]
-        return ToolExecutionResult(
-            plan._payload["request"]["id"],
-            json.dumps([result.to_dict() for result in results]),
-            status_code=ToolResultStatus.ERROR
-            if any(r.status_code == ToolResultStatus.ERROR for r in results)
-            else ToolResultStatus.SUCCESS,
-            metadata={"children": [result.metadata for result in results]},
-        )
+        return ordinary_result_for_children(store, plan, handles, first_snapshot=first)
     mode = admission["mode"]
     if mode == "configured":
         outcomes = []

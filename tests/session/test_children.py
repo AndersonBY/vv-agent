@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from vv_agent.kernel._child_store import completion_input
 from vv_agent.session import children
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
@@ -205,7 +206,7 @@ def test_child_completion_rejects_untrusted_or_mismatched_identity(store, databa
     rt, _, handle = parked(store, database)
     complete_child(store, database)
     terminal = next(r for r in read_state(store, "child")[1] if r.record.kind == "turn_ended")
-    item = children.completion_input(handle, terminal)
+    item = completion_input(handle, terminal)
     item = (
         replace(item, **{field: value})
         if field in {"generation", "target_turn_id"}

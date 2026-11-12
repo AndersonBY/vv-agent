@@ -76,7 +76,8 @@ Paths below are relative to `src/vv_agent/`.
 | `kernel/_store.py`, `kernel/_sql.py` | Store protocols, receipts, leases and errors; shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
 | `session/postgres.py`, `session/sqlite.py` | Concrete PostgreSQL (lazy psycopg v3; install `[postgres]` or the dev group) and SQLite connections. |
 | `kernel/_context.py`, `session/context.py`, `session/compaction.py` | Aligned model-message projection and input protection; historical-prefix alignment and the MemoryManager adapter remain outer. |
-| `session/delegation.py`, `session/children.py` | Child admission, agent tools, background handles, handoffs and delivery. |
+| `kernel/_child_store.py`, `session/delegation.py` | Child ledger transactions and ordinary results; configured-agent and handoff reconstruction remain in the SDK. |
+| `kernel/_usage.py` | Shared usage normalization and model-attempt ledger for SDK results and simulation accounting. |
 | `session/bindings.py`, `session/lifecycle.py`, `session/memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
 | `session/projection.py`, `session/result.py`, `session/events.py`, `session/tracing.py` | Typed host projections. |
 | `session/surfaces.py`, `session/app_server.py` | Public entrypoint handles; App Server threads and timelines. |

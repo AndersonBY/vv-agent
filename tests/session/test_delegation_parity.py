@@ -18,10 +18,11 @@ from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._child_store import completion_input
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import ToolPolicy
 from vv_agent.session.bindings import MissingHostBinding
-from vv_agent.session.children import child_delivery, child_handles, completion_input
+from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, Record, RecordError, digest

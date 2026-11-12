@@ -6,7 +6,8 @@ import json
 from dataclasses import replace
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.session.children import ChildSession, child_delivery, completion_input
+from vv_agent.kernel._child_store import completion_input
+from vv_agent.session.children import ChildSession, child_delivery
 from vv_agent.session.providers import Accepted, Definitive, Unknown
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.store import LeaseLost
