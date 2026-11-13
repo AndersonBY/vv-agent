@@ -79,7 +79,7 @@ def test_batch_admission_waits_for_every_sibling_and_retains_order(store, databa
 
 @pytest.mark.parametrize("fault", ["host", "create"])
 def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, database, monkeypatch, fault):
-    from vv_agent.session import _driver_dispatch
+    from vv_agent.kernel import _driver_dispatch
 
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")

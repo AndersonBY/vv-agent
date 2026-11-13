@@ -342,6 +342,7 @@ def _threshold_probe(history, case, monkeypatch, property_owners):
     )
     for name in ("record", "boundary", "boundary_record", "_task", "task"):
         setattr(driver, name, MethodType(getattr(_Driver, name), driver))
+    driver._run_outcome_steps = MethodType(_Driver._run_outcome_steps, driver)
     driver.commit = lambda rows, *, guarded: trace.append("commit")
     for owner in property_owners:
         for name in ("effective_context_window", "autocompact_threshold"):

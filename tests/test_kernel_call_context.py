@@ -60,7 +60,12 @@ def test_call_facts_import_and_execute_with_only_core(tmp_path, flags):
         from vv_agent.kernel._execution_values import AgentTask
         from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
         from vv_agent.kernel._records import Record
-        task = AgentTask(prompt_bundle=PromptBundle((PromptSection("instructions", "Work."),)), user_prompt="work", task_id="task", model="m")
+        task = AgentTask(
+            prompt_bundle=PromptBundle((PromptSection("instructions", "Work."),)),
+            user_prompt="work",
+            task_id="task",
+            model="m",
+        )
         plan = Record("p", "op_planned", "s", None, "tool", 1, {
             "op_kind": "tool", "dependencies": ["model/2"], "idempotency_key": None,
             "request": {"id": "c", "name": "lookup", "arguments": {"nested": [1]},
@@ -168,11 +173,11 @@ def test_real_context_retains_host_order_and_aliases(tmp_path, monkeypatch, cut,
     from vv_agent.config import ResolvedModelConfig
     from vv_agent.llm.scripted import ScriptedLLM
     from vv_agent.runtime.cancellation import CancellationToken
-    from vv_agent.session import runtime
+    from vv_agent.session import _dispatch_context, runtime
     from vv_agent.tools import base
 
-    assert runtime.CompiledCallFacts is core.CompiledCallFacts
-    assert runtime.approved_tool_call is core.approved_tool_call
+    assert _dispatch_context.CompiledCallFacts is core.CompiledCallFacts
+    assert _dispatch_context.approved_tool_call is core.approved_tool_call
     assert base.matches_preapproved_call is core.matches_preapproved_call
     seen = []
     backend = object()

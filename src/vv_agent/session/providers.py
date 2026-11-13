@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from vv_agent.kernel import _driver_dispatch as dispatch
 from vv_agent.kernel._provider_outcomes import Accepted as Accepted
 from vv_agent.kernel._provider_outcomes import Definitive as Definitive
 from vv_agent.kernel._provider_outcomes import Outcome as Outcome
@@ -11,7 +12,6 @@ from vv_agent.kernel._provider_outcomes import ProviderResultInvalid as Provider
 from vv_agent.kernel._provider_outcomes import Unknown as Unknown
 from vv_agent.kernel._provider_outcomes import validate_acceptance as validate_acceptance
 from vv_agent.kernel._provider_outcomes import validate_provider_result as validate_provider_result
-from vv_agent.kernel._tool_admission import session_preflight_result
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.orchestrator import ToolOrchestrator
@@ -37,32 +37,15 @@ def _ready(_call: ToolCall) -> None:
 
 
 class FunctionProvider:
-    """The existing orchestrator owns validation, policy, approval and invocation."""
+    """Core admission owns decisions; the orchestrator supplies concrete tool leaves."""
 
     def __init__(self, orchestrator: ToolOrchestrator):
         self.orchestrator = orchestrator
 
     def preflight(self, plan: Record, context: ToolContext) -> ToolExecutionResult | None:
-        executor = self.orchestrator._resolve_executor(plan.payload["request"]["name"])
-        blocked = session_preflight_result(
-            plan, handler_managed=executor is not None and executor.metadata.get("policy_managed_by_handler")
-        )
-        if blocked is not None:
-            return blocked
-        context.metadata["_vv_agent_tool_dispatch_callback"] = _ready
-        try:
-            result = self.orchestrator.run_one(
-                ToolCall.from_dict(plan.payload["request"]),
-                context=context,
-                allowed_tool_names=context.metadata["session_tool_names"],
-            )
-        except DispatchReady:
-            return None
-        finally:
-            context.metadata.pop("_vv_agent_tool_dispatch_callback", None)
-        if not isinstance(result, ToolExecutionResult):
-            raise ValueError("preflight handler bypassed the dispatch boundary")
-        return result
+        from ._dispatch_tools import PreflightHost
+
+        return PreflightHost(self.orchestrator, context).run(dispatch.preflight(plan))
 
     def submit(self, plan: Record, *, context: ToolContext) -> Outcome:
         def check(_call: ToolCall) -> None:

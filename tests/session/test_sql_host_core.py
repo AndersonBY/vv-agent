@@ -6,7 +6,8 @@ from threading import RLock
 
 import pytest
 
-from vv_agent.session import _driver_dispatch, kernel
+from vv_agent.kernel import _driver_dispatch
+from vv_agent.session import kernel
 from vv_agent.session.children import ChildSession, ChildTool, InvalidChildBatch
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import SessionSpec

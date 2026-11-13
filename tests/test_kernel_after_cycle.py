@@ -98,29 +98,54 @@ def test_core_phase_and_cycle_projection_without_sdk(tmp_path, flags):
 
 def test_real_finish_skips_unexecuted_tool_and_shares_cycle_projector(monkeypatch, tmp_path):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
-    from vv_agent.session import lifecycle, result
+    from vv_agent.session import _recovery_phase, result
     from vv_agent.session.kernel import drive
     from vv_agent.session.records import InboxItem
     from vv_agent.session.surfaces import SessionDriver
     from vv_agent.types import LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
-    seen = []
+    phase_requests = []
+    host_requests = []
     snapshots = []
     projected = []
-    original = lifecycle._perform
+    original_after_cycle = phase.after_cycle
+    original_handle = _recovery_phase._Host.handle
+    original_projection = _recovery_phase.project_cycles
 
-    def perform(driver, manager, request):
-        seen.append(type(request))
-        return original(driver, manager, request)
+    def observe_requests(steps):
+        response = None
+        error = None
+        try:
+            while True:
+                try:
+                    request = steps.throw(error) if error is not None else steps.send(response)
+                except StopIteration as done:
+                    return done.value
+                phase_requests.append(request)
+                response, error = None, None
+                try:
+                    response = yield request
+                except BaseException as exc:
+                    error = exc
+        finally:
+            steps.close()
+
+    def observed_after_cycle(*args, **kwargs):
+        return (yield from observe_requests(original_after_cycle(*args, **kwargs)))
+
+    def handle(self, request):
+        host_requests.append(request)
+        return original_handle(self, request)
 
     def project(*args):
-        value = project_cycles(*args)
+        value = original_projection(*args)
         projected.append(value)
         return value
 
-    assert result.project_cycles is lifecycle.project_cycles is project_cycles
-    monkeypatch.setattr(lifecycle, "_perform", perform)
-    monkeypatch.setattr(lifecycle, "project_cycles", project)
+    assert result.project_cycles is _recovery_phase.project_cycles is project_cycles
+    monkeypatch.setattr(phase, "after_cycle", observed_after_cycle)
+    monkeypatch.setattr(_recovery_phase._Host, "handle", handle)
+    monkeypatch.setattr(_recovery_phase, "project_cycles", project)
     monkeypatch.setattr(result, "project_cycles", project)
 
     @function_tool
@@ -157,35 +182,64 @@ def test_real_finish_skips_unexecuted_tool_and_shares_cycle_projector(monkeypatc
         assert snapshots[0].cycle.to_dict() == output.raw_result.cycles[-1].to_dict()
         assert snapshots[0].native_outcome.completion_reason.value == "tool_finish"
         assert snapshots[0].cycle.tool_results[1].error_code == "skipped_due_to_finish"
-        assert seen.index(phase.CompleteSkippedTool) < seen.index(CommitRecords)
-        assert seen.index(CommitRecords) < seen.index(phase.ApplyAfterCycleHooks) < seen.index(phase.RecordAfterCycle)
+        host_request_types = [type(request) for request in host_requests]
+        phase_request_types = [type(request) for request in phase_requests]
+        assert phase.CompleteSkippedTool not in host_request_types
+        assert phase.RecordAfterCycle not in host_request_types
+        assert (
+            phase_request_types.index(phase.CompleteSkippedTool)
+            < phase_request_types.index(CommitRecords)
+            < phase_request_types.index(phase.ReadCycleProjection)
+            < phase_request_types.index(phase.ReadSharedState)
+            < phase_request_types.index(phase.ReadTranscript)
+            < phase_request_types.index(phase.ApplyAfterCycleHooks)
+            < phase_request_types.index(phase.RecordAfterCycle)
+        )
+        hook_index = next(i for i, request in enumerate(host_requests) if isinstance(request, phase.ApplyAfterCycleHooks))
+        skipped_commit = next(
+            i
+            for i, request in enumerate(host_requests[:hook_index])
+            if isinstance(request, CommitRecords)
+            and any(record._payload.get("result", {}).get("error_code") == "skipped_due_to_finish" for record in request.records)
+        )
+        assert skipped_commit < hook_index
         assert output.final_output == "finished"
     finally:
         surface.close()
 
 
-@pytest.mark.parametrize("failure_stage", [phase.ReadCycleProjection, phase.ReadTranscript, phase.RecordAfterCycle])
+@pytest.mark.parametrize("failure_stage", ["projection", "transcript", "record_commit"])
 def test_host_stop_iteration_is_not_phase_completion(monkeypatch, tmp_path, failure_stage):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider
-    from vv_agent.session import lifecycle
+    from vv_agent.session import _recovery_phase
     from vv_agent.session.kernel import drive
     from vv_agent.session.records import InboxItem
     from vv_agent.session.surfaces import SessionDriver
     from vv_agent.types import LLMResponse
 
-    original = lifecycle._perform
+    original = _recovery_phase._Host.handle
     failure = StopIteration("host failure")
 
-    def perform(driver, manager, request):
-        if isinstance(request, failure_stage):
+    def handle(self, request):
+        projection = failure_stage == "projection" and isinstance(request, phase.ReadCycleProjection)
+        transcript = failure_stage == "transcript" and isinstance(request, phase.ReadTranscript)
+        # RecordAfterCycle is composed by core._compose; fail at its concrete boundary commit.
+        record_commit = (
+            failure_stage == "record_commit"
+            and isinstance(request, CommitRecords)
+            and any(
+                record.kind == "boundary_recorded" and record._payload["stage"] == "after_cycle" for record in request.records
+            )
+        )
+        if projection or transcript or record_commit:
             raise failure
-        return original(driver, manager, request)
+        return original(self, request)
 
     class Hook:
         def after_cycle(self, snapshot):
             return None
 
-    monkeypatch.setattr(lifecycle, "_perform", perform)
+    monkeypatch.setattr(_recovery_phase._Host, "handle", handle)
     surface = SessionDriver()
     try:
         runtime = surface.runtime(

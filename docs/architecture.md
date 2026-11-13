@@ -30,12 +30,12 @@ heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;
 `session/_driver_scope.py` supplies synchronization primitives,
 heartbeat scheduling and the shared invocation boundary. Public
 `HeartbeatStopped` resolves to the same core exception class.
-`session/_driver_dispatch.py` owns operation execution and tool finalization.
-The driver keeps its synchronous method entry points and delegates to that one
-implementation. `session/_driver_inputs.py` owns input acceptance, child replies
-and turn admission. `session/_driver_planning.py` builds operation/model plans;
-`session/_driver_recovery.py` advances, recovers and closes turns. The driver
-keeps one state-owning instance and its synchronous method entry points.
+`kernel/_driver_dispatch.py` owns operation execution decisions and tool
+finalization. The core input, planning and recovery modules accept inputs,
+build plans, advance execution and close turns. Their synchronous `session/`
+entry points use the same algorithms. `session/_recovery_phase.py` and
+`session/_driver_dispatch.py` supply SDK observations and effects while those
+phase generators are suspended. One driver owns the retained state.
 
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
@@ -239,8 +239,12 @@ lease-fenced commit algorithm. The SDK driver inherits those same methods;
 store, fold, lease scope and watermark are not mirrored in another driver.
 Explicit clock, fold and observation callbacks preserve transaction timing,
 while the SDK owns cost-meter reads, hooks and log emission.
-`session/_driver_dispatch.py` and `session/_driver_recovery.py` retain dispatch
-and recovery orchestration.
+`kernel/_driver_dispatch.py` and `kernel/_driver_recovery.py` own dispatch,
+recovery and terminal decisions, composing the same input, output, compaction
+and receipt generators. `kernel/_child_summary.py` derives child summaries from
+the actual log and fold. `kernel/_child_delegation.py` owns handoff limits,
+child identities and inherited admission data; SDK leaves parse requests and
+compile the chosen child agent.
 `kernel/_driver_planning.py` owns operation/model plans and selected-model,
 fork, then frozen-task/default precedence. The SDK supplies route bindings,
 provider membership and callbacks at their original points. Retained fragments,

@@ -82,26 +82,8 @@ class ToolOrchestrator:
         if parse_error is not None:
             return parse_error
         normalized_call = ToolCall(id=call.id, name=call.name, arguments=arguments, extra_content=call.extra_content)
-        context_metadata = dict(context.metadata)
-        if allowed_tool_names is not None:
-            context_metadata[_PLANNED_TOOL_NAMES_METADATA_KEY] = frozenset(allowed_tool_names)
-        call_context = replace(
-            context,
-            tool_call_id=normalized_call.id,
-            tool_name=normalized_call.name,
-            arguments=dict(arguments),
-            metadata=context_metadata,
-        )
-
-        executor = self._resolve_executor(normalized_call.name)
-        tool_metadata = get_executor_tool_metadata(executor) if executor is not None else None
-        if tool_metadata is not None:
-            call_context.metadata[_TOOL_TYPED_METADATA_KEY] = tool_metadata
-        self._emit_planned(
-            normalized_call,
-            executor=executor,
-            context=call_context,
-            event_sink=event_sink,
+        call_context, executor = self._prepare_call(
+            normalized_call, arguments, context=context, allowed_tool_names=allowed_tool_names, event_sink=event_sink
         )
         if _precomputed_result is not None:
             result = _precomputed_result
@@ -147,6 +129,49 @@ class ToolOrchestrator:
                     error_code="tool_execution_failed",
                 )
 
+        return self._finish_call(normalized_call, result, call_context, event_sink=event_sink, result_finalizer=_result_finalizer)
+
+    def _prepare_call(
+        self,
+        normalized_call: ToolCall,
+        arguments: dict[str, Any],
+        *,
+        context: ToolContext,
+        allowed_tool_names: Collection[str] | None,
+        event_sink: ToolEventSink | None,
+    ):
+        context_metadata = dict(context.metadata)
+        if allowed_tool_names is not None:
+            context_metadata[_PLANNED_TOOL_NAMES_METADATA_KEY] = frozenset(allowed_tool_names)
+        call_context = replace(
+            context,
+            tool_call_id=normalized_call.id,
+            tool_name=normalized_call.name,
+            arguments=dict(arguments),
+            metadata=context_metadata,
+        )
+
+        executor = self._resolve_executor(normalized_call.name)
+        tool_metadata = get_executor_tool_metadata(executor) if executor is not None else None
+        if tool_metadata is not None:
+            call_context.metadata[_TOOL_TYPED_METADATA_KEY] = tool_metadata
+        self._emit_planned(
+            normalized_call,
+            executor=executor,
+            context=call_context,
+            event_sink=event_sink,
+        )
+        return call_context, executor
+
+    def _finish_call(
+        self,
+        normalized_call: ToolCall,
+        result: ToolExecutionResult | HostToolOutcome,
+        call_context: ToolContext,
+        *,
+        event_sink: ToolEventSink | None,
+        result_finalizer: ToolResultFinalizer | None,
+    ) -> ToolExecutionResult | HostToolOutcome:
         interaction_request = None
         if isinstance(result, HostToolOutcome):
             interaction_request = result.request
@@ -155,8 +180,8 @@ class ToolOrchestrator:
 
         self._capture_execution_duration(call_context)
 
-        if _result_finalizer is not None:
-            result = _result_finalizer(normalized_call, call_context, result)
+        if result_finalizer is not None:
+            result = result_finalizer(normalized_call, call_context, result)
 
         if _needs_tool_call_id(result.tool_call_id):
             result.tool_call_id = normalized_call.id
@@ -183,7 +208,7 @@ class ToolOrchestrator:
             call, original_call=original_call, executor_present=executor is not None, allowed_tool_names=allowed_tool_names
         )
         response = None
-        approval_metadata = {}
+        host = _ToolAdmissionHost(self, call, executor, context)
         try:
             while True:
                 try:
@@ -198,32 +223,7 @@ class ToolOrchestrator:
                     finally:
                         # Re-raising under the carrier must not replace the user's chain.
                         error.__context__ = original_context
-                if isinstance(request, _admission.SchemaCheck):
-                    response = _jsonschema.schema_issues(request)
-                elif request is _admission.Read.POLICY_METADATA:
-                    metadata = _runtime_metadata(context)
-                    response = {key: metadata[key] for key in _admission.POLICY_KEYS if key in metadata}
-                elif request is _admission.Read.APPROVAL_MODE:
-                    approval_metadata = _runtime_metadata(context)
-                    response = approval_metadata.get("_vv_agent_tool_policy_approval")
-                elif isinstance(request, _admission.ApprovedCall):
-                    approval = getattr(context.ctx, "_approved_tool_approval", None)
-                    response = getattr(approval, "call", None)
-                elif isinstance(request, _admission.PolicyPredicate):
-                    response = bool(request.predicate(request.tool_name, request.arguments))
-                else:
-                    assert executor is not None
-                    if request is _admission.Read.SCHEMA:
-                        response = executor.params_json_schema
-                    elif request is _admission.Read.HANDLER_MANAGED:
-                        response = bool(executor.metadata.get("policy_managed_by_handler"))
-                    elif request is _admission.Read.TOOL_METADATA:
-                        response = get_executor_tool_metadata(executor)
-                    elif isinstance(request, _admission.RequiresApproval):
-                        response = bool(executor.requires_approval(context, request.arguments))
-                    else:
-                        assert isinstance(request, _admission.RequestApproval)
-                        response = self._request_approval(executor, call=call, context=context, metadata=approval_metadata)
+                response = host.respond(request)
         finally:
             steps.close()
 
@@ -605,6 +605,43 @@ class ToolOrchestrator:
                 },
             )
         )
+
+
+class _ToolAdmissionHost:
+    """Live executor/context observations for the shared core admission generator."""
+
+    def __init__(self, orchestrator: ToolOrchestrator, call: ToolCall, executor: ToolExecutor | None, context: ToolContext):
+        self.orchestrator, self.call, self.executor, self.context = orchestrator, call, executor, context
+        self.approval_metadata: dict[str, Any] = {}
+
+    def respond(self, request: _admission.AdmissionRequest) -> Any:
+        call, executor, context = self.call, self.executor, self.context
+        if isinstance(request, _admission.SchemaCheck):
+            return _jsonschema.schema_issues(request)
+        elif request is _admission.Read.POLICY_METADATA:
+            metadata = _runtime_metadata(context)
+            return {key: metadata[key] for key in _admission.POLICY_KEYS if key in metadata}
+        elif request is _admission.Read.APPROVAL_MODE:
+            self.approval_metadata = _runtime_metadata(context)
+            return self.approval_metadata.get("_vv_agent_tool_policy_approval")
+        elif isinstance(request, _admission.ApprovedCall):
+            approval = getattr(context.ctx, "_approved_tool_approval", None)
+            return getattr(approval, "call", None)
+        elif isinstance(request, _admission.PolicyPredicate):
+            return bool(request.predicate(request.tool_name, request.arguments))
+        else:
+            assert executor is not None
+            if request is _admission.Read.SCHEMA:
+                return executor.params_json_schema
+            elif request is _admission.Read.HANDLER_MANAGED:
+                return bool(executor.metadata.get("policy_managed_by_handler"))
+            elif request is _admission.Read.TOOL_METADATA:
+                return get_executor_tool_metadata(executor)
+            elif isinstance(request, _admission.RequiresApproval):
+                return bool(executor.requires_approval(context, request.arguments))
+            else:
+                assert isinstance(request, _admission.RequestApproval)
+                return self.orchestrator._request_approval(executor, call=call, context=context, metadata=self.approval_metadata)
 
 
 def _runtime_metadata(context: ToolContext) -> dict[str, Any]:

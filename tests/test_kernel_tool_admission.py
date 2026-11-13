@@ -163,6 +163,55 @@ def test_preflight_and_submit_repeat_real_admission(tmp_path, monkeypatch):
     assert outcome.result["content"] == "done"
     assert effects == ["ran"] and len(predicates) == 2
     assert len(checks) == 3  # Preflight, submit admission, and the real FunctionToolExecutor.execute validation.
+    assert callable(context.metadata["_vv_agent_tool_dispatch_callback"])
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["error", "cancel"])
+def test_function_provider_preflight_cleans_up_core_error_boundaries(tmp_path, cancel):
+    from vv_agent import function_tool
+    from vv_agent.kernel._records import Record
+    from vv_agent.runtime.cancellation import CancelledError
+    from vv_agent.runtime.context import ExecutionContext
+    from vv_agent.session.providers import FunctionProvider
+    from vv_agent.tools.base import ToolContext
+    from vv_agent.tools.orchestrator import ToolOrchestrator
+    from vv_agent.workspace import LocalWorkspaceBackend
+
+    effects, formatted = [], []
+    error = CancelledError("cancelled in policy") if cancel else ValueError("policy failed")
+
+    def predicate(name, arguments):
+        raise error
+
+    def format_error(observed):
+        formatted.append(observed)
+        return "formatted preflight failure"
+
+    @function_tool(failure_error_function=format_error)
+    def effect() -> str:
+        effects.append("ran")
+        return "unexpected"
+
+    provider = FunctionProvider(ToolOrchestrator.from_tools([effect]))
+    context = ToolContext(
+        tmp_path,
+        {},
+        1,
+        LocalWorkspaceBackend(tmp_path),
+        ctx=ExecutionContext(metadata={"_vv_agent_tool_policy_can_use_tool": predicate}),
+        metadata={"session_tool_names": ["effect"]},
+    )
+    record = Record("p", "op_planned", "s", "t", "op", 1, {"request": {"id": "c", "name": "effect", "arguments": {}}})
+    if cancel:
+        with pytest.raises(CancelledError) as caught:
+            provider.preflight(record, context)
+        assert caught.value is error
+    else:
+        result = provider.preflight(record, context)
+        assert result is not None and result.error_code == "tool_execution_failed"
+        assert formatted == [error]
+    assert effects == []
+    assert "_vv_agent_tool_dispatch_callback" not in context.metadata
 
 
 def test_approval_metadata_snapshot_is_taken_after_policy_before_requires_callback(tmp_path):

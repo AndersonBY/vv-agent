@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from sim.world import SimWorld
 
@@ -14,7 +16,15 @@ from .test_yieldable_waits import YieldProvider
 
 
 def yield_fixture(world):
-    worker, plan, _ = receipt_fixture(world, kind="tool")
+    original = core.completed_steps
+
+    def completed(owner, plan, outcome):
+        if plan._payload["op_kind"] == "tool":
+            return (yield from owner.completed(plan, outcome))
+        return (yield from original(owner, plan, outcome))
+
+    with patch.object(core, "completed_steps", completed):
+        worker, plan, _ = receipt_fixture(world, kind="tool")
     provider = YieldProvider(callback=None)
     worker.runtime.providers[plan._payload["provider_binding"]] = provider
     accepted = provider.submit(plan, context=None)

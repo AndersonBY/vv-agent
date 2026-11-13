@@ -196,14 +196,14 @@ def test_root_cancel_terminates_started_child_and_grandchild(sim_database):
 
 
 def test_descendant_oracle_detects_missing_second_generation_cancel(sim_database, monkeypatch):
-    from vv_agent.session import _driver_recovery
+    from vv_agent.session import _recovery_phase
 
-    actual = _driver_recovery.cancel_children
+    actual = _recovery_phase.cancel_children
 
     def omit_grandchild(store, tx, state, sid, tid):
         return [] if sid == "child" else actual(store, tx, state, sid, tid)
 
-    monkeypatch.setattr(_driver_recovery, "cancel_children", omit_grandchild)
+    monkeypatch.setattr(_recovery_phase, "cancel_children", omit_grandchild)
     with SimWorld(sim_database, seed=17) as world:
         with pytest.raises(InvariantViolation, match="I7: cancellation did not propagate to grandchild"):
             run_scenario(world, "cancel_descendants")

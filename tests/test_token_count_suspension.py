@@ -6,8 +6,10 @@ import inspect
 import json
 import subprocess
 import sys
+from collections.abc import Callable, Generator
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 from session.test_cold_fold import snapshot_value
@@ -15,6 +17,7 @@ from session.test_compaction import SUMMARY, configured, start, tool_history
 from test_microcompact import _tool_turn
 
 from vv_agent.kernel._compaction_text import build_compacted_tool_content
+from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._microcompaction import estimate_tool_artifact_path
 from vv_agent.kernel._reducer import Fold as CoreFold
 from vv_agent.memory import MemoryManager, token_utils
@@ -22,6 +25,7 @@ from vv_agent.memory import manager as manager_module
 from vv_agent.memory.microcompact import plan_microcompact
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.session import reducer
+from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.context import project_context
 from vv_agent.session.kernel import drive
 from vv_agent.session.records import InboxItem, SessionSpec
@@ -31,21 +35,87 @@ from vv_agent.workspace import MemoryWorkspaceBackend
 
 
 def assert_core_suspended():
+    """Reject running core generators and require reached core generators to be suspended."""
     frame = inspect.currentframe()
     assert frame is not None
     frame = frame.f_back
-    suspended = set()
+    suspended: set[str] = set()
+    visited: set[int] = set()
+
+    def visit_generator(generator):
+        while inspect.isgenerator(generator) and id(generator) not in visited:
+            visited.add(id(generator))
+            generator_frame = generator.gi_frame
+            if generator_frame is None:
+                return
+            generator_module = generator_frame.f_globals.get("__name__", "")
+            if generator_module.startswith("vv_agent.kernel."):
+                assert inspect.getgeneratorstate(generator) == inspect.GEN_SUSPENDED, (
+                    generator_module,
+                    generator.gi_code.co_name,
+                )
+                suspended.add(generator.gi_code.co_name)
+            visit_generator(generator_frame.f_locals.get("steps"))
+            generator = generator.gi_yieldfrom
+
     while frame is not None:
         module = frame.f_globals.get("__name__", "")
-        assert not (module.startswith("vv_agent.kernel.") and module != "vv_agent.kernel._sql"), (module, frame.f_code.co_name)
-        steps = frame.f_locals.get("steps")
-        while inspect.isgenerator(steps):
-            assert inspect.getgeneratorstate(steps) == inspect.GEN_SUSPENDED
-            suspended.add(steps.gi_code.co_name)
-            steps = steps.gi_yieldfrom
+        assert not (module.startswith("vv_agent.kernel.") and frame.f_code.co_flags & inspect.CO_GENERATOR), (
+            module,
+            frame.f_code.co_name,
+        )
+        visit_generator(frame.f_locals.get("steps"))
         frame = frame.f_back
     assert suspended
     return suspended
+
+
+def test_core_suspension_probe_rejects_a_running_compaction_generator():
+    namespace: dict[str, object] = {
+        "__name__": "vv_agent.kernel._compaction_phase",
+        "assert_core_suspended": assert_core_suspended,
+    }
+    exec("def running_compaction_generator():\n    assert_core_suspended()\n    yield None\n", namespace)
+    probe = cast(Callable[[], Generator[object, object, object]], namespace["running_compaction_generator"])
+
+    with pytest.raises(AssertionError, match=r"vv_agent\.kernel\._compaction_phase"):
+        next(probe())
+
+
+def test_cold_core_driver_core_fold_replay_keeps_generators_suspended(produced_session):
+    store, *_ = produced_session
+    observed: set[str] = set()
+
+    def count(messages, *, model):
+        observed.update(assert_core_suspended())
+        return token_utils.count_messages_tokens(messages, model=model)
+
+    def fold_factory():
+        return CoreFold(
+            normalize_memory_settings=reducer._normalize_memory_settings,
+            count_messages=count,
+        )
+
+    store._fold_cache = store._previous_prefix = None
+    store.fold_factory = fold_factory
+    lease = store.acquire("s", owner="cold-replay", ttl_ms=15_000)
+    assert lease is not None
+    runtime = configured(store, [])
+    scope = _Scope(lease, runtime, now_ms=store._now())
+    try:
+        CoreDriver(
+            store,
+            "s",
+            scope,
+            fold_factory=fold_factory,
+            clock=store.clock,
+            observe_cost=lambda: None,
+            hook=lambda _point, _record: None,
+            emit_phase=lambda _duration, _payload: None,
+        )
+    finally:
+        assert store.release(lease)
+    assert observed
 
 
 @pytest.fixture(params=["summary", "micro"])

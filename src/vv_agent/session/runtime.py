@@ -21,11 +21,9 @@ from vv_agent.budget import (
 )
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
-from vv_agent.kernel._call_context import CompiledCallFacts, approved_tool_call
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
 from vv_agent.kernel._retained_budget import retained_budget_inputs
-from vv_agent.kernel._tool_policy import apply_tool_context_policy
 from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
@@ -35,7 +33,6 @@ from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.run_config import RunConfig, effective_run_config, merge_tool_policies
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler, tool_is_enabled
-from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
@@ -442,34 +439,9 @@ class Runtime:
         store: SessionStore | None = None,
         session_id: str | None = None,
     ) -> ToolContext:
-        metadata = dict(task.metadata)
-        if plan._payload["op_kind"] != "model":
-            apply_tool_context_policy(
-                metadata,
-                agent_policy=self.agent.tool_policy,
-                run_policy=self.config.tool_policy,
-                shared_state=shared_state,
-            )
-        ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
-        if approved:
-            ctx._approved_tool_approval = SimpleNamespace(call=approved_tool_call(plan))
-        workspace = Path(self.config.workspace or ".")
-        facts = CompiledCallFacts(task, plan)
-        return ToolContext(
-            workspace=workspace,
-            shared_state=shared_state if shared_state is not None else dict(task.initial_shared_state),
-            run_context=self.run_context(task.task_id),
-            cycle_index=facts.cycle_index,
-            workspace_backend=self.workspace_backend,
-            task_id=facts.task_id,
-            ctx=ctx,
-            task_metadata=metadata,
-            sub_task_manager=self.child_tasks(store, session_id)
-            if store and session_id and plan._payload["request"].get("name") == "sub_task_status"
-            else None,
-            idempotency_key=facts.idempotency_key,
-            metadata=facts.metadata(session_id),
-        )
+        from ._dispatch_context import context
+
+        return context(self, task, plan, token, approved=approved, shared_state=shared_state, store=store, session_id=session_id)
 
     # Admission borrows these cached fragments; DefinitionCache remains their sole owner.
     @property

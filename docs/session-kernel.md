@@ -74,11 +74,13 @@ Paths below are relative to `src/vv_agent/`.
 | `kernel/_records.py` | Record and inbox kinds with closed schemas; `session/records.py` exports the same objects. |
 | `kernel/_state.py`, `kernel/_reducer.py` | Execution state and complete log/consumed-input validation, with injected settings normalization and counting. |
 | `kernel/_store.py`, `kernel/_sql.py` | Store protocols, receipts, leases and errors; shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
-| `session/postgres.py`, `session/sqlite.py` | Concrete PostgreSQL (lazy psycopg v3; install `[postgres]` or the dev group) and SQLite connections. |
+| `kernel/_postgres.py`, `kernel/_sqlite.py` | Concrete PostgreSQL (lazy psycopg v3; install `[postgres]` or the dev group) and SQLite connections; `session/` subclasses supply SDK defaults. |
+| `kernel/_drive.py`, `kernel/_driver.py` | Lease and factory lifecycle, retained driver state and fenced commits. |
+| `kernel/_driver_dispatch.py`, `kernel/_driver_recovery.py` | Dispatch, recovery and turn closure using shared phase generators; `session/_recovery_phase.py` and SDK dispatch adapters supply host effects. |
 | `kernel/_context.py`, `session/context.py`, `session/compaction.py` | Aligned model-message projection and input protection; historical-prefix alignment and the MemoryManager adapter remain outer. |
-| `kernel/_child_store.py`, `session/delegation.py` | Child ledger transactions and ordinary results; configured-agent and handoff reconstruction remain in the SDK. |
+| `kernel/_child_store.py`, `kernel/_child_delegation.py`, `kernel/_child_summary.py` | Child transactions, admission rules, ordinary results and summary decisions; `session/delegation.py` supplies SDK agent reconstruction. |
 | `kernel/_usage.py` | Shared usage normalization and model-attempt ledger for SDK results and simulation accounting. |
-| `session/bindings.py`, `session/lifecycle.py`, `session/memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
+| `session/bindings.py`, `session/lifecycle.py`, `session/memory.py` | Host object bindings, after-cycle hook adapter and memory callbacks. |
 | `session/projection.py`, `session/result.py`, `session/events.py`, `session/tracing.py` | Typed host projections. |
 | `session/surfaces.py`, `session/app_server.py` | Public entrypoint handles; App Server threads and timelines. |
 

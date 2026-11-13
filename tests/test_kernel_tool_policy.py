@@ -59,14 +59,14 @@ def test_policy_facades_bind_the_actual_core_objects():
     import vv_agent
     from vv_agent import run_config
     from vv_agent.runtime import compiler
-    from vv_agent.session import runtime
+    from vv_agent.session import _dispatch_context
 
     assert vv_agent.ToolPolicy is run_config.ToolPolicy is core.ToolPolicy
     assert vv_agent.ApprovalPolicy is run_config.ApprovalPolicy is core.ApprovalPolicy
     for name in ("CanUseTool", "merge_tool_policies", "merge_tool_policy_layers"):
         assert getattr(run_config, name) is getattr(core, name)
     assert compiler._apply_tool_policy_metadata is core._apply_tool_policy_metadata
-    assert runtime.apply_tool_context_policy is core.apply_tool_context_policy
+    assert _dispatch_context.apply_tool_context_policy is core.apply_tool_context_policy
     assert core.ToolPolicy.__module__ == core.__name__
 
 
