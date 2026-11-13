@@ -171,6 +171,11 @@ scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
 resolve to the single core exception class. Invocation uses the real provider
 outcomes; no duplicate outcome or cancellation-error type is introduced.
 
+`kernel/_cancellation.py` owns cancellation state, callback ordering and
+parent-child propagation. The SDK supplies its existing Event, Lock and child
+factory, retaining the public token constructor, child return type and exception
+identity used by tool consumers.
+
 ScheduledLeaseKeeper runs the same core heartbeat step and transient-error budget
 as the SDK. Recoverable renewal errors retain the last confirmed lease without
 publishing readiness; terminal errors publish completion and cancel a scoped
