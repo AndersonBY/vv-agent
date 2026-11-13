@@ -24,8 +24,10 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
-`session/kernel.py` coordinates the drive loop. `kernel/_lease_scope.py` owns
-lease rules; `session/_driver_scope.py` supplies synchronization primitives,
+`kernel/_drive.py` owns lease acquisition, factory admission, the drive loop and
+idle/release ordering. `session/_drive_phase.py` constructs the SDK runtime,
+heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;
+`session/_driver_scope.py` supplies synchronization primitives,
 heartbeat scheduling and the shared invocation boundary. Public
 `HeartbeatStopped` resolves to the same core exception class.
 `session/_driver_dispatch.py` owns operation execution and tool finalization.

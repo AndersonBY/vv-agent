@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Generator
-from contextlib import ExitStack, suppress
+from contextlib import suppress
 from typing import Any
-from uuid import uuid4
 
 from vv_agent.budget import _DEFAULT_BUDGET_CLOCK_NS, BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
@@ -14,12 +13,12 @@ from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _Bud
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
-from vv_agent.kernel._sql import SQLStore
 from vv_agent.types import AgentTask, Message
 
-from . import _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
+from . import _drive_phase, _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
 from ._driver_scope import HeartbeatStopped as HeartbeatStopped
-from ._driver_scope import _LeaseHeartbeat, _Scope
+from ._driver_scope import _LeaseHeartbeat as _LeaseHeartbeat
+from ._driver_scope import _Scope
 from .bindings import MissingHostBinding
 from .context import project_context
 from .providers import (
@@ -28,17 +27,16 @@ from .providers import (
 )
 from .records import InboxItem, Record
 from .reducer import Attempt, ExecutionState, _fold_factory_for
-from .runtime import Runtime, RuntimeNotReady
-from .store import Lease, LeaseLost, SequenceConflict, SessionStore, StoredRecord
-from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
+from .runtime import Runtime
+from .runtime import RuntimeNotReady as RuntimeNotReady
+from .store import SessionStore, StoredRecord
+from .timing import Clock, LeaseKeeper
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
     return store.read_state(sid)
 
 
-FACTORY_LEASE_TTL_MS = 15000
-FACTORY_HEARTBEAT_SECONDS = 0.25
 logger = logging.getLogger(__name__)
 
 
@@ -272,15 +270,6 @@ class _Driver(CoreDriver):
         return _driver_recovery.step(self)
 
 
-def _defer_after_error(store: SessionStore, lease: Lease, retry_after_ms: int, error: Exception) -> None:
-    try:
-        store.defer_drive(lease, retry_after_ms=retry_after_ms)
-    except LeaseLost:
-        pass
-    except Exception as backoff_error:
-        raise error from backoff_error
-
-
 def drive(
     store: SessionStore,
     session_id: str,
@@ -313,107 +302,13 @@ def _drive(
     lease_keeper: LeaseKeeper | None = None,
 ) -> bool:
     """Drive with runtime bindings and optional factory-admission seams."""
-    if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
-        raise ValueError("failure_backoff_ms must be a positive integer")
-    scheduled = not isinstance(runtime, Runtime)
-    clock = clock if clock is not None else runtime.clock if isinstance(runtime, Runtime) else SystemClock()
-    lease_keeper = (
-        lease_keeper
-        if lease_keeper is not None
-        else runtime.lease_keeper
-        if isinstance(runtime, Runtime)
-        else ThreadLeaseKeeper()
+    return _drive_phase.drive_with_runtime(
+        store,
+        session_id,
+        runtime=runtime,
+        failure_backoff_ms=failure_backoff_ms,
+        one_turn=_one_turn,
+        wait_for_lease=_wait_for_lease,
+        clock=clock,
+        lease_keeper=lease_keeper,
     )
-    ttl_ms = runtime.ttl_ms if isinstance(runtime, Runtime) else FACTORY_LEASE_TTL_MS
-    lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
-    delay = 0.05
-    while lease is None and _wait_for_lease:
-        clock.sleep(delay)
-        delay = min(1.0, delay * 2)
-        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
-    if lease is None:
-        return False
-    if not isinstance(runtime, Runtime):
-        build = None
-        # Resolve store setup on the driving thread (host connections can be thread-bound).
-        try:
-            heartbeat = store.heartbeat_store()
-            build = _LeaseHeartbeat(
-                lease,
-                lambda: heartbeat,
-                ttl_ms,
-                FACTORY_HEARTBEAT_SECONDS,
-                clock=clock,
-                lease_keeper=lease_keeper,
-                now_ms=store._now() if isinstance(store, SQLStore) else None,
-            )
-            build.start()
-            try:
-                if not build.ready.wait(ttl_ms / 1000):
-                    raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
-                if build.lost or not build.successful_ready:
-                    raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
-                runtime = runtime(session_id)
-            finally:
-                build.close()
-                lease = build.lease
-            if build.lost:
-                raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
-            lease = store.renew(lease, ttl_ms=runtime.ttl_ms).lease
-        except RuntimeNotReady as exc:
-            try:
-                _defer_after_error(store, lease, exc.retry_after_ms, exc)
-            finally:
-                store.release(lease)
-            return True
-        except Exception as exc:
-            if build is not None and build.lease_keeper.is_alive(build):
-                raise
-            try:
-                _defer_after_error(store, lease, failure_backoff_ms, exc)
-            finally:
-                store.release(lease)
-            raise
-        except BaseException:
-            if build is None or not build.lease_keeper.is_alive(build):
-                with suppress(Exception):
-                    store.release(lease)
-            raise
-    scope = _Scope(lease, runtime, now_ms=store._now() if isinstance(store, SQLStore) else None)
-    scope.start()
-    try:
-        driver = _Driver(store, session_id, runtime, scope, one_turn=_one_turn)
-        while not scope.lost:
-            try:
-                if not driver.step():
-                    with ExitStack() as latch:
-                        if isinstance(store, SQLStore):
-                            store._defer_idle_drive(
-                                scope.lease,
-                                poll_ms=runtime.poll_ms,
-                                lease_guard=lambda: latch.enter_context(scope.committing()),
-                            )
-                        else:
-                            store.defer_idle_drive(latch.enter_context(scope.committing()), poll_ms=runtime.poll_ms)
-                    break
-                if _one_turn and driver.records[-1].record.kind == "turn_ended":
-                    break
-            except SequenceConflict:
-                continue
-        if scope.lost:
-            raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
-    except Exception as exc:
-        scope.close()
-        if scheduled:
-            _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
-        raise
-    finally:
-        scope.close()
-        with suppress(Exception):
-            store.release(scope.lease)
-        with suppress(Exception):
-            runtime.hook("after_drive", None)
-        with suppress(Exception):
-            if store.is_runnable(session_id):
-                runtime.wake(session_id)
-    return True
