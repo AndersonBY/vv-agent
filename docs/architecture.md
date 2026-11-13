@@ -158,6 +158,10 @@ Compaction capacity and integer coercion are owned by
 `kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
 provides Runtime with the current settings projection; its constructor remains
 the single source of defaults and policy normalization.
+`_token_counting.py` owns the actual host counter and token-request drain;
+`memory/token_utils.py` and `memory/_counting.py` export the same objects. This
+host leaf can load its real tokenizer dependencies without importing the SDK
+memory package. It stays outside the standard-library-only kernel.
 The ordinary token counter retains its production model dispatch, incremental
 cache, formatting and per-call fallback behavior. CoreFold's synchronous
 convenience entry requires a CPU-only counter; the default SDK drives
@@ -274,9 +278,9 @@ original position after wire validation.
 Record task decoding consumes core `AgentTask` and preserves its cached private
 value and detached public copies. Its private interning keys remain separate
 from canonical wire bytes, and future message validation is still deferred to
-its owning boundary. The execution driver and concrete database adapters remain
-under `session/`. The seeded simulation currently drives these SDK assembly
-paths over the real SQL stores with scripted external services.
+its owning boundary. The seeded simulation currently enters through the SDK
+driver and store assembly, which use the shared core state and SQL algorithms
+described above. Scripted services supply the external outcomes.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply

@@ -562,7 +562,7 @@ with real PostgreSQL, review the formatter, model routing and tokenizer
 boundaries, then add the exact version pair to the verified set. Versions are
 listed individually; a newer version is not assumed safe. The gates are
 `_VERIFIED_DEEPSEEK_VERSIONS` and `_VERIFIED_TIKTOKEN_VERSIONS` in
-`memory/token_utils.py`. The repository lock
+`src/vv_agent/_token_counting.py`. The repository lock
 uses vv-llm 0.8.5, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
 qwen-tokenizer 0.3.0.
 

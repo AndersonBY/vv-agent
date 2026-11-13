@@ -18,6 +18,7 @@ from support.token_counting import legacy_count as _legacy_count
 from vv_llm.chat_clients import utils
 from vv_llm.settings import Server
 
+from vv_agent import _token_counting as token_counting
 from vv_agent.memory import token_utils
 
 
@@ -51,10 +52,10 @@ def token_server_settings(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def empty_token_cache():
-    token_utils._TOKEN_CACHE.clear()
+    token_counting._TOKEN_CACHE.clear()
     utils._qwen_tokenizer_cache.clear()
     yield
-    token_utils._TOKEN_CACHE.clear()
+    token_counting._TOKEN_CACHE.clear()
     utils._qwen_tokenizer_cache.clear()
 
 
@@ -224,8 +225,8 @@ def test_replaced_functions_and_unreviewed_versions_keep_the_whole_local_path(mo
     assert token_utils.count_messages_tokens(messages, model=model) == len("hello\nworld") // 3
     assert seen == ["hello\nworld"]
     seen.clear()
-    monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("future", "0.3.0"))
-    monkeypatch.setattr(token_utils, "_tiktoken_versions", lambda: ("future", "0.14.0"))
+    monkeypatch.setattr(token_counting, "_deepseek_versions", lambda: ("future", "0.3.0"))
+    monkeypatch.setattr(token_counting, "_tiktoken_versions", lambda: ("future", "0.14.0"))
     assert token_utils.count_messages_tokens(messages, model=model) == len("hello\nworld") // 3
     assert seen == ["hello\nworld"]
 
@@ -237,8 +238,8 @@ def test_public_status_and_version_fallback_warning_once_per_family(monkeypatch,
         enabled, reason = incremental_token_counting_status(model)
         assert enabled, reason
     assert incremental_token_counting_status("qwen-plus") == (False, "local qwen; whole-conversation counting")
-    monkeypatch.setattr(token_utils, "_deepseek_versions", lambda: ("future", "0.3.0"))
-    monkeypatch.setattr(token_utils, "_VERSION_FALLBACK_LOGGED", set())
+    monkeypatch.setattr(token_counting, "_deepseek_versions", lambda: ("future", "0.3.0"))
+    monkeypatch.setattr(token_counting, "_VERSION_FALLBACK_LOGGED", set())
     enabled, reason = incremental_token_counting_status("deepseek-flash")
     assert not enabled and "future" in reason and "0.3.0" in reason
     for model in ("deepseek-flash", "deepseek-v4-pro", "deepseek-flash"):
@@ -320,8 +321,8 @@ def test_tiktoken_unsafe_boundaries_use_the_original_whole_call(monkeypatch, mod
 
 
 def test_tiktoken_unverified_versions_warn_once_for_each_encoder(monkeypatch, caplog):
-    monkeypatch.setattr(token_utils, "_tiktoken_versions", lambda: ("0.8.4", "0.15.0"))
-    monkeypatch.setattr(token_utils, "_VERSION_FALLBACK_LOGGED", set())
+    monkeypatch.setattr(token_counting, "_tiktoken_versions", lambda: ("0.8.4", "0.15.0"))
+    monkeypatch.setattr(token_counting, "_VERSION_FALLBACK_LOGGED", set())
     for model in ("gpt-4o", "o3-mini", "unknown", "gpt-3.5-turbo", "gpt-3.5-turbo"):
         enabled, reason = token_utils.incremental_token_counting_status(model)
         assert not enabled and "tiktoken=0.15.0" in reason
@@ -381,7 +382,7 @@ def test_provider_families_use_the_no_endpoint_count_without_http(monkeypatch, m
     with patch.object(utils.settings, "token_server", None):
         expected = utils.get_message_token_counts(messages, model=model, tools=tools, native_multimodal=native_multimodal)
     if unverified:
-        monkeypatch.setattr(token_utils, "_tiktoken_versions", lambda: ("future", "0.14.0"))
+        monkeypatch.setattr(token_counting, "_tiktoken_versions", lambda: ("future", "0.14.0"))
     setting.endpoints = ["fake-enabled"]
 
     def unexpected_http(request):
@@ -411,7 +412,7 @@ def test_provider_families_use_the_no_endpoint_count_without_http(monkeypatch, m
 
 @pytest.mark.parametrize("model", PROVIDER_MODELS)
 def test_provider_local_method_status_and_incremental_work(monkeypatch, model):
-    family = token_utils._local_tokenizer_family(model)
+    family = token_counting._local_tokenizer_family(model)
     enabled, reason = token_utils.incremental_token_counting_status(model)
     assert family in reason
     assert enabled is (not model.startswith(("MiniMax", "abab")))
@@ -459,7 +460,7 @@ def test_minimax_rounds_the_whole_text_and_tools_separately():
 def test_mapping_matches_installed_vv_llm_no_endpoint_branches(monkeypatch, model, method):
     backend, _, _ = provider_counting_settings(model)
     monkeypatch.setattr(type(utils.settings), "get_backend", lambda self, _: backend)
-    assert token_utils._local_tokenizer_family(model) == method
+    assert token_counting._local_tokenizer_family(model) == method
     for text in ("", "a", "Mixed 中文 facts.\n", " \r\n/leading", "😀e\u0301"):
         if method == "int(len(text) / 1.33)":
             expected = int(len(text) / 1.33)
@@ -467,7 +468,7 @@ def test_mapping_matches_installed_vv_llm_no_endpoint_branches(monkeypatch, mode
             encoding = utils.get_gpt_35_encoding() if method == "cl100k_base" else utils.get_gpt_4o_encoding()
             expected = len(encoding.encode(text))
         assert utils.get_token_counts(text, model, use_token_server_first=False) == expected
-        assert token_utils._count_local_text(text, model) == expected
+        assert token_counting._count_local_text(text, model) == expected
 
 
 def test_fallback_rounds_once_and_scans_only_new_serialized_messages(monkeypatch):
@@ -479,13 +480,13 @@ def test_fallback_rounds_once_and_scans_only_new_serialized_messages(monkeypatch
     expected = legacy_count(messages)
     assert token_utils.count_messages_tokens(messages) == expected
     visited = []
-    count = token_utils._estimate_characters
+    count = token_counting._estimate_characters
 
     def scanned(text):
         visited.append(len(text))
         return count(text)
 
-    monkeypatch.setattr(token_utils, "_estimate_characters", scanned)
+    monkeypatch.setattr(token_counting, "_estimate_characters", scanned)
     messages.append({"role": "user", "content": "你a"})
     expected = legacy_count(messages)
     visited.clear()
@@ -511,7 +512,7 @@ def test_cache_is_bounded_and_does_not_retain_message_bodies(monkeypatch):
     class Body(str):
         pass
 
-    monkeypatch.setattr(token_utils, "_TOKEN_CACHE_LIMIT", 4)
+    monkeypatch.setattr(token_counting, "_TOKEN_CACHE_LIMIT", 4)
     body = Body("unique body 中文")
     reference = weakref.ref(body)
     messages = [{"role": "user", "content": body}]
@@ -521,5 +522,5 @@ def test_cache_is_bounded_and_does_not_retain_message_bodies(monkeypatch):
     assert reference() is None
     for index in range(8):
         token_utils.count_messages_tokens([{"role": "user", "content": f"message {index}"}], model="deepseek-v4-pro")
-    assert len(token_utils._TOKEN_CACHE) == 4
-    assert all(isinstance(item, int) for value in token_utils._TOKEN_CACHE.values() for item in value)
+    assert len(token_counting._TOKEN_CACHE) == 4
+    assert all(isinstance(item, int) for value in token_counting._TOKEN_CACHE.values() for item in value)

@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from vv_agent import _token_counting
 from vv_agent.kernel import _compaction_threshold as core
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.memory import MemoryManager, token_utils
+from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
 
 
@@ -71,7 +72,7 @@ def test_threshold_actual_consumers_share_core_functions():
     from vv_agent.memory import manager
 
     assert manager.compute_compaction_threshold is core.compute_compaction_threshold
-    assert token_utils._coerce_positive_int is core._coerce_positive_int
+    assert _token_counting._coerce_positive_int is core._coerce_positive_int
 
 
 @pytest.mark.parametrize(
