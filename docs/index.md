@@ -35,6 +35,7 @@ place to start if you are new.
 | Document | Read it when you want to |
 | --- | --- |
 | [development.md](development.md) | Set up, test, lint and run live tests. |
+| [colab-simulation.md](colab-simulation.md) | Run pinned SQLite and PostgreSQL campaigns on Colab. |
 | [session-kernel.md](session-kernel.md) | Change the session kernel: log, inbox, leases, recovery, stores. |
 | [parity-contract.md](parity-contract.md) | Change behavior governed by `vv-agent-contract`. |
 | [session-kernel-capability-matrix.md](session-kernel-capability-matrix.md) | Find the module and test behind each runtime capability. |

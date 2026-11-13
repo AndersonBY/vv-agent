@@ -105,6 +105,8 @@ disposable database over TCP with password authentication. Reports record the
 actual temporary directory, filesystem type (or null when unavailable), and
 requested `TMPDIR` in `environment.sqlite_temporary_storage`. Full suites and
 the million-seed SQLite / 10,000-seed PostgreSQL campaigns run remotely.
+The [Colab entry point](colab-simulation.md) runs both campaigns from explicit
+source revisions and distinguishes small setup samples from full-size acceptance.
 
 ### Concurrency-fix seed reference
 
