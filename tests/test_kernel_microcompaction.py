@@ -127,13 +127,13 @@ def test_microcompaction_import_and_callbacks_without_outer_sdk(tmp_path, site_f
 def test_microcompaction_keeps_public_and_active_caller_identity():
     from vv_agent import memory
     from vv_agent.kernel import _compaction_text as text
+    from vv_agent.kernel import _driver_planning
     from vv_agent.kernel import _microcompaction as core
     from vv_agent.kernel import _microcompaction_apply as apply
     from vv_agent.kernel import _reducer as reducer
     from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
     from vv_agent.kernel._tool_metadata import ToolResultRetention
     from vv_agent.memory import manager, microcompact
-    from vv_agent.session import _driver_planning
 
     for name in microcompact.__all__:
         if name == "plan_microcompact":

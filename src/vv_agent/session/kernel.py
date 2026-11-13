@@ -127,21 +127,7 @@ class _Driver(CoreDriver):
         return self.state.turns[self.state.active_turn_id].start._task()
 
     def effective_model(self) -> dict[str, Any]:
-        selected = self.state.model_selection
-        if selected is not None:
-            selection = selected._payload["input"]["payload"]["selection"]
-            return selection | {"binding": selected._payload["model_binding"]}
-        fork = self.records[0].record._payload["attributes"].get("app_server_fork")
-        if fork is not None:
-            return copy_json(fork["effective_model"])
-        assert self.state.active_turn_id is not None
-        task = self.state.turns[self.state.active_turn_id].start._task()
-        return {
-            "model": task.model,
-            "model_settings": task.model_settings.to_dict() if task.model_settings else {},
-            "route": {},
-            "binding": self.runtime.model_binding(self.runtime.llm, self.runtime.resolved),
-        }
+        return _driver_planning.effective_model(self)
 
     def plan(
         self,
