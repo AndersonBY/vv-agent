@@ -6,6 +6,7 @@ from collections.abc import Callable, Collection, Iterable
 from dataclasses import replace
 from typing import Any, cast
 
+from vv_agent import _jsonschema
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
 from vv_agent.events import (
     ApprovalRequestedEvent,
@@ -15,9 +16,10 @@ from vv_agent.events import (
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
 )
-from vv_agent.tools.argument_validation import invalid_tool_arguments_result
-from vv_agent.tools.base import ToolContext, is_tool_call_preapproved
-from vv_agent.tools.dispatcher import _needs_tool_call_id, _parse_arguments
+from vv_agent.kernel import _tool_admission as _admission
+from vv_agent.kernel._tool_admission import _parse_arguments
+from vv_agent.tools.base import ToolContext
+from vv_agent.tools.dispatcher import _needs_tool_call_id
 from vv_agent.tools.executor import (
     RegistryToolExecutor,
     ToolExecutor,
@@ -25,7 +27,6 @@ from vv_agent.tools.executor import (
     is_tool_executor,
 )
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
-from vv_agent.tools.metadata import metadata_policy_denial_source
 from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -105,50 +106,31 @@ class ToolOrchestrator:
         if _precomputed_result is not None:
             result = _precomputed_result
         elif executor is None:
-            policy_result = self._policy_denial_result(
-                None,
-                call=normalized_call,
-                context=call_context,
-                allowed_tool_names=allowed_tool_names,
+            result = cast(
+                ToolExecutionResult,
+                self._run_admission(
+                    normalized_call,
+                    original_call=call,
+                    executor=None,
+                    context=call_context,
+                    allowed_tool_names=allowed_tool_names,
+                ),
             )
-            if policy_result is not None:
-                result = policy_result
-            else:
-                result = self._error_result(
-                    call.id,
-                    f"Unknown tool: {call.name}",
-                    error_code="tool_not_found",
-                )
         else:
             try:
-                validation_result = invalid_tool_arguments_result(
-                    tool_call_id=normalized_call.id,
-                    schema=executor.params_json_schema,
-                    arguments=normalized_call.arguments,
+                admission = self._run_admission(
+                    normalized_call,
+                    original_call=call,
+                    executor=executor,
+                    context=call_context,
+                    allowed_tool_names=allowed_tool_names,
                 )
-                if validation_result is not None:
-                    result = validation_result
+                if isinstance(admission, _admission.Dispatch):
+                    if admission.mark_started:
+                        mark_external_tool_execution_started(normalized_call, context=call_context, event_sink=event_sink)
+                    result = executor.execute(normalized_call, call_context)
                 else:
-                    policy_result = self._policy_denial_result(
-                        executor,
-                        call=normalized_call,
-                        context=call_context,
-                        allowed_tool_names=allowed_tool_names,
-                    )
-                    if policy_result is not None:
-                        result = policy_result
-                    else:
-                        approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
-                        if approval_result is not None:
-                            result = approval_result
-                        else:
-                            if not executor.metadata.get("policy_managed_by_handler"):
-                                mark_external_tool_execution_started(
-                                    normalized_call,
-                                    context=call_context,
-                                    event_sink=event_sink,
-                                )
-                            result = executor.execute(normalized_call, call_context)
+                    result = admission
             except ApprovalError:
                 raise
             except Exception as exc:
@@ -188,6 +170,63 @@ class ToolOrchestrator:
         self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
         return result
 
+    def _run_admission(
+        self,
+        call: ToolCall,
+        *,
+        original_call: ToolCall,
+        executor: ToolExecutor | None,
+        context: ToolContext,
+        allowed_tool_names: Collection[str] | None,
+    ) -> ToolExecutionResult | _admission.Dispatch:
+        steps = _admission.admit_steps(
+            call, original_call=original_call, executor_present=executor is not None, allowed_tool_names=allowed_tool_names
+        )
+        response = None
+        approval_metadata = {}
+        try:
+            while True:
+                try:
+                    request = steps.send(response)
+                except StopIteration as done:
+                    return done.value
+                except _admission._AdmissionStopIteration as transport:
+                    error = transport.original
+                    original_context = error.__context__
+                    try:
+                        raise error
+                    finally:
+                        # Re-raising under the carrier must not replace the user's chain.
+                        error.__context__ = original_context
+                if isinstance(request, _admission.SchemaCheck):
+                    response = _jsonschema.schema_issues(request)
+                elif request is _admission.Read.POLICY_METADATA:
+                    metadata = _runtime_metadata(context)
+                    response = {key: metadata[key] for key in _admission.POLICY_KEYS if key in metadata}
+                elif request is _admission.Read.APPROVAL_MODE:
+                    approval_metadata = _runtime_metadata(context)
+                    response = approval_metadata.get("_vv_agent_tool_policy_approval")
+                elif isinstance(request, _admission.ApprovedCall):
+                    approval = getattr(context.ctx, "_approved_tool_approval", None)
+                    response = getattr(approval, "call", None)
+                elif isinstance(request, _admission.PolicyPredicate):
+                    response = bool(request.predicate(request.tool_name, request.arguments))
+                else:
+                    assert executor is not None
+                    if request is _admission.Read.SCHEMA:
+                        response = executor.params_json_schema
+                    elif request is _admission.Read.HANDLER_MANAGED:
+                        response = bool(executor.metadata.get("policy_managed_by_handler"))
+                    elif request is _admission.Read.TOOL_METADATA:
+                        response = get_executor_tool_metadata(executor)
+                    elif isinstance(request, _admission.RequiresApproval):
+                        response = bool(executor.requires_approval(context, request.arguments))
+                    else:
+                        assert isinstance(request, _admission.RequestApproval)
+                        response = self._request_approval(executor, call=call, context=context, metadata=approval_metadata)
+        finally:
+            steps.close()
+
     @staticmethod
     def _capture_execution_duration(context: ToolContext) -> None:
         if context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is not True:
@@ -221,30 +260,9 @@ class ToolOrchestrator:
         )
 
     @staticmethod
-    def _approval_result(
-        executor: ToolExecutor,
-        *,
-        call: ToolCall,
-        context: ToolContext,
+    def _request_approval(
+        executor: ToolExecutor, *, call: ToolCall, context: ToolContext, metadata: dict[str, Any]
     ) -> ToolExecutionResult | None:
-        if executor.metadata.get("policy_managed_by_handler"):
-            return None
-        if is_tool_call_preapproved(
-            context,
-            tool_call_id=call.id,
-            tool_name=call.name,
-            arguments=dict(call.arguments),
-        ):
-            return None
-        metadata = _runtime_metadata(context)
-        approval_mode = str(metadata.get("_vv_agent_tool_policy_approval") or "default")
-        if approval_mode == "never":
-            return None
-        needs_approval = approval_mode == "always"
-        if not needs_approval:
-            needs_approval = executor.requires_approval(context, call.arguments)
-        if not needs_approval:
-            return None
         request = ApprovalRequest.create(
             tool_name=executor.name,
             tool_call_id=call.id,
@@ -298,73 +316,6 @@ class ToolOrchestrator:
                 "approval_interruption_id": request.request_id,
                 "request_id": request.request_id,
                 "tool_name": executor.name,
-                "arguments": dict(call.arguments),
-                "message": message,
-            },
-        )
-
-    @staticmethod
-    def _policy_denial_result(
-        executor: ToolExecutor | None,
-        *,
-        call: ToolCall,
-        context: ToolContext,
-        allowed_tool_names: Collection[str] | None,
-    ) -> ToolExecutionResult | None:
-        if executor is not None and executor.metadata.get("policy_managed_by_handler"):
-            return None
-        metadata = _runtime_metadata(context)
-        allowed_tools = metadata.get("_vv_agent_allowed_tools")
-        disallowed_tools = metadata.get("_vv_agent_disallowed_tools")
-        can_use_tool = metadata.get("_vv_agent_tool_policy_can_use_tool")
-
-        policy_source: str | None = None
-        if isinstance(allowed_tools, list) and call.name not in allowed_tools:
-            policy_source = "allowed_tools"
-        elif isinstance(disallowed_tools, list) and call.name in disallowed_tools:
-            policy_source = "disallowed_tools"
-        elif callable(can_use_tool) and not bool(can_use_tool(call.name, dict(call.arguments))):
-            policy_source = "can_use_tool"
-        elif executor is not None:
-            policy_source = metadata_policy_denial_source(
-                get_executor_tool_metadata(executor),
-                denied_side_effects=metadata.get("_vv_agent_denied_side_effects", []),
-                denied_capability_tags=metadata.get(
-                    "_vv_agent_denied_capability_tags",
-                    [],
-                ),
-                deny_terminal_tools=metadata.get("_vv_agent_deny_terminal_tools", False),
-                denied_cost_dimensions=metadata.get(
-                    "_vv_agent_denied_cost_dimensions",
-                    [],
-                ),
-            )
-        elif allowed_tool_names is not None and call.name not in allowed_tool_names:
-            policy_source = "planned_name"
-
-        if policy_source is None and allowed_tool_names is not None and call.name not in allowed_tool_names:
-            policy_source = "planned_name"
-
-        if policy_source is None:
-            return None
-        message = f"Tool {call.name} is not allowed for these arguments."
-        return ToolExecutionResult(
-            tool_call_id=call.id,
-            content=json.dumps(
-                {
-                    "ok": False,
-                    "error": message,
-                    "error_code": "tool_not_allowed",
-                    "tool_name": call.name,
-                },
-                ensure_ascii=False,
-            ),
-            status_code=ToolResultStatus.ERROR,
-            error_code="tool_not_allowed",
-            metadata={
-                "mode": "permission_denied",
-                "policy_source": policy_source,
-                "tool_name": call.name,
                 "arguments": dict(call.arguments),
                 "message": message,
             },

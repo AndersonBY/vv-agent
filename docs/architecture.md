@@ -461,6 +461,13 @@ read points and shares the original preapproval comparisons. SDK context
 construction still owns workspace, RunContext and child-manager bindings; the
 facts object carries none of those host objects.
 
+`kernel/_tool_admission.py` owns argument parsing and the ordered schema,
+policy and preapproval decisions before dispatch. The SDK resolves late reads,
+runs the existing JSON Schema primitive and invokes callbacks while that core
+generator is suspended. FunctionProvider uses the same admission path for both
+preflight and submit; a successful preflight does not bypass submit validation.
+Approval transport, events and executor effects remain with the SDK.
+
 `ToolPolicy` is checked twice: when the runtime builds the tool schema list
 for the model, and again when the executor dispatches a call. Besides
 `allowed_tools`, `disallowed_tools`, and `can_use_tool`, it can deny tools by

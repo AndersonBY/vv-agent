@@ -11,6 +11,7 @@ from vv_agent.kernel._provider_outcomes import ProviderResultInvalid as Provider
 from vv_agent.kernel._provider_outcomes import Unknown as Unknown
 from vv_agent.kernel._provider_outcomes import validate_acceptance as validate_acceptance
 from vv_agent.kernel._provider_outcomes import validate_provider_result as validate_provider_result
+from vv_agent.kernel._tool_admission import session_preflight_result
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.orchestrator import ToolOrchestrator
@@ -43,13 +44,11 @@ class FunctionProvider:
 
     def preflight(self, plan: Record, context: ToolContext) -> ToolExecutionResult | None:
         executor = self.orchestrator._resolve_executor(plan.payload["request"]["name"])
-        if executor is not None and executor.metadata.get("policy_managed_by_handler"):
-            return ToolExecutionResult(
-                tool_call_id=plan.payload["request"]["id"],
-                status_code=ToolResultStatus.ERROR,
-                content="Handler-managed dispatch requires an explicit session provider adapter.",
-                error_code="session_dispatch_boundary_required",
-            )
+        blocked = session_preflight_result(
+            plan, handler_managed=executor is not None and executor.metadata.get("policy_managed_by_handler")
+        )
+        if blocked is not None:
+            return blocked
         context.metadata["_vv_agent_tool_dispatch_callback"] = _ready
         try:
             result = self.orchestrator.run_one(
