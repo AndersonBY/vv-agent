@@ -493,7 +493,7 @@ def test_start_persists_explicit_chunk_sizes(tmp_path: Path):
 
     def run(arguments):
         calls.append(list(arguments))
-        if arguments[0] in {"new", "upload"}:
+        if arguments[0] in {"new", "upload", "status"}:
             return completed(arguments)
         marker = {"status": {"state": "running", "child_identity": CHILD}}
         return completed(arguments, stdout="LAUNCH_JSON=" + json.dumps(marker) + "\n")
@@ -507,6 +507,24 @@ def test_start_persists_explicit_chunk_sizes(tmp_path: Path):
         "2",
     ]
     assert [call[0] for call in calls].count("new") == 1
+    assert [call[0] for call in calls][-3:] == ["upload", "status", "exec"]
+
+
+def test_start_refresh_failure_does_not_exec_or_stop(tmp_path: Path):
+    job_dir = tmp_path / "job-1"
+    calls = []
+
+    def run(arguments):
+        calls.append(list(arguments))
+        if arguments[0] == "status":
+            return completed(arguments, code=1, stderr="refresh failed")
+        return completed(arguments)
+
+    with pytest.raises(RuntimeError, match="refresh session"):
+        campaign.start(job_dir, "session-1", CODE, CONTRACT, 2, 1, cli=run)
+    assert [call[0] for call in calls] == ["new", "upload", "upload", "status"]
+    assert not {"exec", "stop"} & {call[0] for call in calls}
+    assert campaign._json(job_dir / "state.json")["launch_identity"] is None
 
 
 def test_wait_max_observations_running_is_incomplete(tmp_path: Path):

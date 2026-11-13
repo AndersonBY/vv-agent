@@ -402,6 +402,7 @@ def start(
     supervisor_path.write_text(_render(SUPERVISOR, supervisor_config), encoding="utf-8")
     _check(cli(["upload", "--session", session, str(script), staged_script]), "upload simulation")
     _check(cli(["upload", "--session", session, str(supervisor_path), supervisor]), "upload supervisor")
+    _check(cli(["status", "--session", session]), "refresh session")
     launch_config = {"job_dir": remote_job, "supervisor_path": supervisor}
     launch_path = job_dir / "launch_cell.py"
     launch_path.write_text(_render(LAUNCH_CELL, launch_config), encoding="utf-8")
