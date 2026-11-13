@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, suppress
-from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -13,24 +12,21 @@ from vv_agent.budget import _DEFAULT_BUDGET_CLOCK_NS, BudgetEvaluator, BudgetExh
 from vv_agent.kernel import _driver_outcomes
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
-from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
 from vv_agent.kernel._sql import SQLStore
-from vv_agent.tools.outcomes import validate_definitive_result
-from vv_agent.types import AgentTask, Message, ToolDirective, ToolExecutionResult
+from vv_agent.types import AgentTask, Message
 
 from . import _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
 from ._driver_scope import HeartbeatStopped as HeartbeatStopped
 from ._driver_scope import _LeaseHeartbeat, _Scope
 from .bindings import MissingHostBinding
-from .children import child_handles
 from .context import project_context
 from .providers import (
     Accepted,
     Definitive,
 )
-from .records import InboxItem, Record, copy_json
+from .records import InboxItem, Record
 from .reducer import Attempt, ExecutionState, _fold_factory_for
 from .runtime import Runtime, RuntimeNotReady
 from .store import Lease, LeaseLost, SequenceConflict, SessionStore, StoredRecord
@@ -182,6 +178,18 @@ class _Driver(CoreDriver):
                 elif isinstance(request, _driver_outcomes.PrepareToolResources):
                     assert prepare_resources is not None
                     response = prepare_resources(request.plan, request.result, self.runtime.workspace_backend)
+                elif isinstance(request, _driver_outcomes.LookupYieldCallback):
+                    binding = (
+                        self.runtime.children.get(request.plan._payload["request"]["name"])
+                        if request.child
+                        else self.provider(request.plan)
+                    )
+                    response = getattr(binding, "on_yield", None)
+                elif isinstance(request, _driver_outcomes.InvokeYieldCallback):
+                    try:
+                        response = request.callback(request.plan, request.handles, "steer")
+                    except Exception as error:
+                        response = _driver_outcomes.YieldCallbackError(error)
                 elif isinstance(request, ProviderAvailable):
                     response = request.name in self.runtime.providers
                 else:
@@ -223,69 +231,14 @@ class _Driver(CoreDriver):
         return self._run_outcome_steps(_driver_outcomes.accepted_steps(self, plan, outcome))
 
     def yield_results(self, attempts: list[Attempt], item: InboxItem) -> list[Record]:
-        records = []
-        for a in attempts:
-            plan = a.execution_plan
-            assert plan.operation_id is not None and plan.attempt is not None
-            assert a.wait is not None
-            handle = a.wait["handle"]
-            handles = child_handles(handle) if a.child_handle else handle
-            binding = self.runtime.children.get(plan._payload["request"]["name"]) if a.child_handle else self.provider(plan)
-            callback = getattr(binding, "on_yield", None)
-            metadata: dict[str, Any] = {"yield_reason": "steer"}
-            if a.child_handle:
-                completed = self.state.child_completions or {}
-                handles = [
-                    h
-                    | {
-                        "status": (
-                            completed[key]._payload["input"]["payload"]["status"]
-                            if (key := (plan.operation_id, plan.attempt, h["session_id"])) in completed
-                            else "running"
-                        )
-                    }
-                    | (
-                        {k: completed[key]._payload["input"]["payload"][k] for k in ("result", "terminal_seq", "terminal_digest")}
-                        if key in completed
-                        else {}
-                    )
-                    for h in handles
-                ]
-                metadata["children"] = [{"session_id": h["session_id"], "status": h["status"]} for h in handles]
-                metadata["running_children"] = [
-                    h["session_id"] for h in handles if (plan.operation_id, plan.attempt, h["session_id"]) not in completed
-                ]
-            result = ToolExecutionResult(
-                plan._payload["request"]["id"],
-                "Wait interrupted by new input; observed work has not been stopped.",
-                metadata=metadata,
-            )
-            if a.child_handle:
-                result.content += "\n" + canonical_json_bytes(
-                    {"children": metadata["children"], "running_children": metadata["running_children"]}
-                ).decode("utf-8")
-            if callback is not None:
-                try:
-                    rendered = callback(plan, copy_json(handles), "steer")
-                    validate_definitive_result(rendered)
-                    from .tool_results import validate_output_body
+        def prepare_resources(plan: Record, result: dict[str, Any], backend: Any) -> dict[str, Any]:
+            from .tool_results import prepare_tool_resources
 
-                    validate_output_body(rendered)
-                    if rendered.tool_call_id != result.tool_call_id or rendered.directive != ToolDirective.CONTINUE:
-                        raise ValueError("invalid yield result")
-                    canonical_json_bytes(rendered.to_dict())
-                    result = rendered
-                except Exception:
-                    result.metadata["yield_callback_failed"] = True
-            evidence = (f"steer/{item.input_id}",)
-            if not a.child_handle:
-                evidence += (handle["evidence"],)
-            completed_records = self.completed(plan, Definitive(result.to_dict(), evidence))
-            records.extend(
-                replace(r, payload=r._payload | {"yielded_by": item.input_id}) if r.kind == "op_completed" else r
-                for r in completed_records
-            )
-        return records
+            return prepare_tool_resources(plan, result, backend)
+
+        return self._run_outcome_steps(
+            _driver_outcomes.yield_results_steps(self, attempts, item), prepare_resources=prepare_resources
+        )
 
     def apply_input(self) -> bool:
         return _driver_inputs.apply_input(self)

@@ -130,8 +130,9 @@ Task values import the core budget objects without loading the live adapter.
 `kernel/_retained_budget.py` reconstructs retained usage for both SDK budget
 views and core receipt decisions. `kernel/_driver_outcomes.py` owns definitive
 receipt classification, completion budget effects, bounded retries, unknown
-outcomes and parking decisions. The SDK supplies resource preparation, clock,
-meter and cancellation observations at their existing points.
+outcomes and parking decisions. It also builds yielded wait receipts from child
+and provider evidence. The SDK supplies callback lookup and invocation, resource
+preparation, clock, meter and cancellation observations at their existing points.
 
 Pure compaction markers, rendering and recovery-envelope functions are owned by
 `kernel/_compaction_text.py`. Memory code reuses those actual objects, and the

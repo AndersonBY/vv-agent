@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
 from vv_agent.kernel._budget import BudgetObservation, CoreBudgetEvaluator
 from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot, RunBudgetLimits
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import PlanningRequest
 from vv_agent.kernel._driver_planning import plan as plan_steps
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, validate_acceptance, validate_provider_result
-from vv_agent.kernel._records import Record, digest, make_record
+from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
 from vv_agent.kernel._retained_budget import retained_budget_inputs, retained_evaluator
+from vv_agent.kernel._state import Attempt, child_handles
+from vv_agent.kernel._tool_result_checks import validate_definitive_result, validate_output_body
+from vv_agent.kernel._tool_values import ToolDirective, ToolExecutionResult
 from vv_agent.kernel._usage import model_usage
 
 
@@ -35,12 +39,32 @@ class PrepareToolResources:
     result: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class LookupYieldCallback:
+    plan: Record
+    child: bool
+
+
+@dataclass(frozen=True, slots=True)
+class InvokeYieldCallback:
+    callback: Callable[[Record, Any, str], Any]
+    plan: Record
+    handles: Any
+
+
+@dataclass(frozen=True, slots=True)
+class YieldCallbackError:
+    error: Exception
+
+
 class _OutcomeStopIteration(Exception):
     def __init__(self, original: StopIteration):
         self.original = original
 
 
-OutcomeRequest = OutcomeRead | PrepareToolResources | BudgetObservation | PlanningRequest
+OutcomeRequest = (
+    OutcomeRead | PrepareToolResources | LookupYieldCallback | InvokeYieldCallback | BudgetObservation | PlanningRequest
+)
 MODEL_REJECTION_BACKOFF_SECONDS = 2
 
 
@@ -335,5 +359,76 @@ def completion_effects_steps(
                         )
                     )
         return records
+    except StopIteration as error:
+        raise _OutcomeStopIteration(error) from error
+
+
+def yield_results_steps(
+    self: CoreDriver, attempts: list[Attempt], item: InboxItem
+) -> Generator[OutcomeRequest, Any, list[Record]]:
+    try:
+        records = []
+        for a in attempts:
+            plan = a.execution_plan
+            assert plan.operation_id is not None and plan.attempt is not None
+            assert a.wait is not None
+            handle = a.wait["handle"]
+            handles = child_handles(handle) if a.child_handle else handle
+            callback = yield LookupYieldCallback(plan, bool(a.child_handle))
+            metadata: dict[str, Any] = {"yield_reason": "steer"}
+            if a.child_handle:
+                completed = self.state.child_completions or {}
+                handles = [
+                    h
+                    | {
+                        "status": (
+                            completed[key]._payload["input"]["payload"]["status"]
+                            if (key := (plan.operation_id, plan.attempt, h["session_id"])) in completed
+                            else "running"
+                        )
+                    }
+                    | (
+                        {k: completed[key]._payload["input"]["payload"][k] for k in ("result", "terminal_seq", "terminal_digest")}
+                        if key in completed
+                        else {}
+                    )
+                    for h in handles
+                ]
+                metadata["children"] = [{"session_id": h["session_id"], "status": h["status"]} for h in handles]
+                metadata["running_children"] = [
+                    h["session_id"] for h in handles if (plan.operation_id, plan.attempt, h["session_id"]) not in completed
+                ]
+            result = ToolExecutionResult(
+                plan._payload["request"]["id"],
+                "Wait interrupted by new input; observed work has not been stopped.",
+                metadata=metadata,
+            )
+            if a.child_handle:
+                result.content += "\n" + canonical_json_bytes(
+                    {"children": metadata["children"], "running_children": metadata["running_children"]}
+                ).decode("utf-8")
+            if callback is not None:
+                try:
+                    rendered = yield InvokeYieldCallback(callback, plan, copy_json(handles))
+                    if isinstance(rendered, YieldCallbackError):
+                        raise rendered.error
+                    validate_definitive_result(rendered)
+                    validate_output_body(rendered)
+                    if rendered.tool_call_id != result.tool_call_id or rendered.directive != ToolDirective.CONTINUE:
+                        raise ValueError("invalid yield result")
+                    canonical_json_bytes(rendered.to_dict())
+                    result = rendered
+                except Exception:
+                    result.metadata["yield_callback_failed"] = True
+            evidence = (f"steer/{item.input_id}",)
+            if not a.child_handle:
+                evidence += (handle["evidence"],)
+            completed_records = yield from completed_steps(self, plan, Definitive(result.to_dict(), evidence))
+            records.extend(
+                replace(r, payload=r._payload | {"yielded_by": item.input_id}) if r.kind == "op_completed" else r
+                for r in completed_records
+            )
+        return records
+
     except StopIteration as error:
         raise _OutcomeStopIteration(error) from error
