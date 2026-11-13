@@ -159,8 +159,9 @@ SessionMemory owns its extraction, merge and persistence implementation.
 Driver plan/commit/close still provide the ledger integration.
 Compaction capacity and integer coercion are owned by
 `kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
-provides Runtime with the current settings projection; its constructor remains
-the single source of defaults and policy normalization.
+provides Runtime with the current settings projection. `_memory_settings.py`
+owns the shared settings fields, defaults and policy normalization;
+`MemoryManager` inherits them and supplies its SDK-specific field types.
 `_token_counting.py` owns the actual host counter and token-request drain;
 `memory/token_utils.py` and `memory/_counting.py` export the same objects. This
 host leaf can load its real tokenizer dependencies without importing the SDK

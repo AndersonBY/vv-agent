@@ -84,8 +84,9 @@ Paths below are relative to `src/vv_agent/`.
 | `session/projection.py`, `session/result.py`, `session/events.py`, `session/tracing.py` | Typed host projections. |
 | `session/surfaces.py`, `session/app_server.py` | Public entrypoint handles; App Server threads and timelines. |
 
-The SDK fold adapter keeps MemoryManager's constructor as the single source of
-settings defaults and normalization. Core compaction validation recomputes the
+The SDK fold adapter and standalone core hosts use the same normalizer from
+`_memory_settings.py`. Its settings class also supplies MemoryManager's inherited
+defaults and policy normalization. Core compaction validation recomputes the
 accepted result; it does not trust a stored receipt or an outer acceptance flag.
 The SQL store, its cached prefixes, forked folds, driver and historical context
 rebuilds retain one fold-factory binding. Changing the factory clears both

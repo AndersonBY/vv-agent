@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Any
 
+from vv_agent._memory_settings import normalize_memory_settings as _normalize_memory_settings
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._records import InboxItem, Record
 from vv_agent.kernel._reducer import CountMessages, NormalizeMemorySettings
@@ -18,12 +18,7 @@ from vv_agent.kernel._state import Operation as Operation
 from vv_agent.kernel._state import Turn as Turn
 from vv_agent.kernel._token_count import TokenCount
 from vv_agent.memory._counting import _drain_counts
-from vv_agent.memory.manager import MemoryManager
 from vv_agent.memory.token_utils import count_messages_tokens
-
-
-def _normalize_memory_settings(settings: dict[str, Any], protected_start: int | None) -> dict[str, Any]:
-    return MemoryManager(**settings, protected_start=protected_start)._definition_settings()
 
 
 class Fold(CoreFold):

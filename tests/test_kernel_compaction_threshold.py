@@ -97,7 +97,8 @@ def test_memory_settings_projection_restores_defaults_and_sparse_values(settings
     }
     declared = fields(MemoryManager)
     assert len(declared) == 25
-    assert MemoryManager.__slots__ == tuple(f.name for f in declared)
+    slots = [getattr(base, "__slots__", ()) for base in MemoryManager.__mro__]
+    assert any(isinstance(values, tuple) and set(values) == {field.name for field in declared} for values in slots)
     parameters = inspect.signature(MemoryManager).parameters
     assert all(parameters[f.name].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for f in declared[:-1])
     assert parameters["protected_start"].kind is inspect.Parameter.KEYWORD_ONLY

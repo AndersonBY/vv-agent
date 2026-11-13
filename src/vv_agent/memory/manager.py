@@ -14,10 +14,13 @@ if TYPE_CHECKING:
     from vv_agent.tools.registry import ToolRegistry
 
 import logging
-from collections.abc import Callable, Generator
-from dataclasses import dataclass, field, fields, replace
+from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
+from vv_agent._memory_settings import SESSION_MEMORY_DEFAULT, WORKSPACE_BACKEND_DEFAULT, MemoryManagerSettings
+from vv_agent._memory_settings import ReservedOutputSource as ReservedOutputSource
+from vv_agent._memory_settings import SummaryCallback as SummaryCallback
 from vv_agent.kernel import _summary_compaction
 from vv_agent.kernel._compaction_text import has_recovery_envelope
 from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
@@ -38,7 +41,7 @@ from vv_agent.kernel._tool_values import ToolExecutionResult as ToolExecutionRes
 from vv_agent.memory._counting import _drain_counts
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import count_messages_tokens
-from vv_agent.microcompaction import MicrocompactionPolicy
+from vv_agent.microcompaction import MicrocompactionPolicy as MicrocompactionPolicy
 from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.workspace.artifacts import persist_text_artifact
 from vv_agent.workspace.base import WorkspaceBackend
@@ -57,7 +60,6 @@ _MEMORY_WARNING_PROMPTS = {
 }
 
 
-SummaryCallback = Callable[[str, str | None, str | None], str | None]
 CompactionMode = Literal["none", "micro", "structural", "summary", "emergency"]
 _COMPACTION_MODE_RANK: dict[CompactionMode, int] = {
     "none": 0,
@@ -72,14 +74,6 @@ def _strongest_compaction_mode(*modes: CompactionMode) -> CompactionMode:
     return max(modes, key=_COMPACTION_MODE_RANK.__getitem__, default="none")
 
 
-ReservedOutputSource = Literal[
-    "model_settings",
-    "task_metadata",
-    "framework_fallback",
-    "framework_fallback_capped_by_model_capability",
-]
-
-
 @dataclass(frozen=True, slots=True)
 class MemoryCompactionResult:
     messages: list[Message]
@@ -91,53 +85,11 @@ class MemoryCompactionResult:
 
 
 @dataclass(slots=True)
-class MemoryManager:
-    compact_threshold: int = 250_000
-    keep_recent_messages: int = 10
-    model: str = ""
-    model_context_window: int = 279_000
-    model_max_output_tokens: int | None = None
-    reserved_output_tokens: int = 16_000
-    reserved_output_source: ReservedOutputSource = "framework_fallback"
-    autocompact_buffer_tokens: int = 13_000
-    language: str = "zh-CN"
-    warning_threshold_percentage: int = 90
-    include_memory_warning: bool = False
-    tool_result_excerpt_head: int = 200
-    tool_result_excerpt_tail: int = 200
-    microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
-    tool_result_retentions: dict[str, ToolResultRetention] = field(default_factory=dict)
-    workspace_backend: WorkspaceBackend | None = None
-    recovery_tool_available: bool = False
-    artifact_scope: str | tuple[str, str] = "run"
-    summary_event_limit: int = 40
-    summary_backend: str | None = None
-    summary_model: str | None = None
-    summary_callback: SummaryCallback | None = None
-    base_system_prompt: str = ""
-    session_memory: SessionMemory | None = None
-    protected_start: int | None = field(default=None, kw_only=True)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.microcompaction_policy, MicrocompactionPolicy):
-            self.microcompaction_policy = MicrocompactionPolicy.from_dict(self.microcompaction_policy)
-
-    def _definition_settings(self) -> dict[str, Any]:
-        memory_settings = {
-            f.name: getattr(self, f.name)
-            for f in fields(self)
-            if f.name
-            not in {
-                "protected_start",
-                "workspace_backend",
-                "summary_callback",
-                "session_memory",
-                "microcompaction_policy",
-                "recovery_tool_available",
-            }
-        }
-        memory_settings["microcompaction_policy"] = self.microcompaction_policy.to_dict()
-        return memory_settings
+class MemoryManager(MemoryManagerSettings):
+    # Only the SDK-only field types are overridden. Their default objects are
+    # imported from the canonical host leaf and are excluded from projection.
+    workspace_backend: WorkspaceBackend | None = field(default=WORKSPACE_BACKEND_DEFAULT)
+    session_memory: SessionMemory | None = field(default=SESSION_MEMORY_DEFAULT)
 
     @property
     def effective_context_window(self) -> int:
