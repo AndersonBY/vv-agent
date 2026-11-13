@@ -7,8 +7,7 @@ from dataclasses import replace
 
 import pytest
 from sim.scenarios import Provider
-from sim.test_lease_gap_evidence import driver, until
-from sim.world import SimWorld
+from support.sdk_runtime import SDKWorld, sdk_driver, until
 
 import vv_agent.budget as budget_module
 from vv_agent.budget import BudgetEvaluator, HostCost, RunBudgetLimits
@@ -24,25 +23,24 @@ class AtReceipt(BaseException):
 
 def receipt_fixture(world, *, kind="model", limits=None, meter=None):
     world.create()
-    worker = driver(world)
+    worker = sdk_driver(world)
     if kind != "model":
         worker.runtime.providers["effect"] = Provider(world)
     worker.runtime.config = replace(worker.runtime.config, budget_limits=limits, host_cost_meter=meter)
-    original = worker.completed
+    original = core.completed_steps
     captured = []
 
-    def cut(plan, outcome):
+    def cut(owner, plan, outcome):
+        assert owner is worker
         if plan._payload["op_kind"] == kind:
             captured.append((plan, outcome))
             raise AtReceipt()
-        return original(plan, outcome)
+        return (yield from original(owner, plan, outcome))
 
-    worker.completed = cut
-    try:
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(core, "completed_steps", cut)
         with pytest.raises(AtReceipt):
             until(worker, lambda: False)
-    finally:
-        worker.completed = original
     plan, outcome = captured[0]
     assert worker.state.operations[plan.operation_id].attempts[plan.attempt].started
     return worker, plan, outcome
@@ -73,7 +71,7 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
             return HostCost("credits", self.amount)
 
     first, replacement = Meter("bound", 3), Meter("replacement", 1001)
-    with SimWorld(tmp_path / "clock.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "clock.sqlite", seed=17) as world:
         worker, plan, outcome = receipt_fixture(
             world, limits=RunBudgetLimits(max_total_tokens=100, max_host_cost=HostCost("credits", 100)), meter=first
         )
@@ -121,7 +119,7 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
 
 
 def test_resource_preparation_precedes_actual_durable_cancellation_audit(tmp_path, monkeypatch):
-    with SimWorld(tmp_path / "resource.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "resource.sqlite", seed=17) as world:
         worker, plan, outcome = receipt_fixture(world, kind="tool")
         original = tool_results.prepare_tool_resources
         calls = []
@@ -158,7 +156,7 @@ def test_resource_preparation_precedes_actual_durable_cancellation_audit(tmp_pat
 
 
 def test_tool_plans_are_built_by_the_shared_core_planner(tmp_path):
-    with SimWorld(tmp_path / "plans.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "plans.sqlite", seed=17) as world:
         worker, plan, outcome = receipt_fixture(world)
         steps = core.completed_steps(worker, plan, outcome)
         request = next(steps)
@@ -172,7 +170,7 @@ def test_tool_plans_are_built_by_the_shared_core_planner(tmp_path):
 
 
 def test_approval_timeout_and_provider_interval_are_sampled_around_actual_poll(tmp_path, monkeypatch):
-    with SimWorld(tmp_path / "parking.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "parking.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
         handle = {
             "kind": "provider",
@@ -204,7 +202,7 @@ def test_approval_timeout_and_provider_interval_are_sampled_around_actual_poll(t
 def test_invalid_acceptance_is_rejected_before_poll(tmp_path, monkeypatch):
     from vv_agent.kernel._provider_outcomes import Accepted, ProviderResultInvalid
 
-    with SimWorld(tmp_path / "invalid.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "invalid.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
 
         def unexpected(*args, **kwargs):
@@ -217,7 +215,7 @@ def test_invalid_acceptance_is_rejected_before_poll(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("timeout", [None, 1.25])
 def test_approval_timeout_is_bound_before_poll_and_none_skips_poll(tmp_path, monkeypatch, timeout):
-    with SimWorld(tmp_path / "approval-time.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "approval-time.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
         worker.runtime.config = replace(worker.runtime.config, approval_timeout_seconds=timeout)
         actual_poll = worker.scope.poll
@@ -249,7 +247,7 @@ def test_unknown_samples_the_actual_reason_only_after_retry_is_eligible(tmp_path
             self.reads += 1
             return super().reason
 
-    with SimWorld(tmp_path / "unknown-reason.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "unknown-reason.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
         token = Token()
         worker.scope.token = token
@@ -268,7 +266,7 @@ def test_resource_host_errors_preserve_identity_and_cause(tmp_path, monkeypatch,
     failure = error_type("resource observation")
     cause = StopIteration("original cause")
     failure.__cause__ = cause
-    with SimWorld(tmp_path / "resource-error.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "resource-error.sqlite", seed=17) as world:
         worker, plan, outcome = receipt_fixture(world, kind="tool")
 
         def fail(*args):

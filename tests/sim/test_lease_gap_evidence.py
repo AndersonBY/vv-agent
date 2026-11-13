@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import inspect
 import sys
+import threading
 
 import pytest
 
-from vv_agent.kernel._lease_scope import apply_controls
-from vv_agent.llm.scripted import ScriptedLLM
-from vv_agent.session import kernel
-from vv_agent.session.children import ChildSession
-from vv_agent.session.records import InboxItem, SessionSpec
-from vv_agent.session.store import LeaseLost
-from vv_agent.types import LLMResponse
+from vv_agent.kernel._child_store import ChildSession
+from vv_agent.kernel._execution_values import LLMResponse
+from vv_agent.kernel._lease_scope import LeaseOwnership, apply_controls
+from vv_agent.kernel._records import InboxItem, SessionSpec
+from vv_agent.kernel._store import LeaseLost
 
+from .assembly import Scope
 from .world import SimWorld
 
 # Replay identifiers for the cut schedules documented in lease-gap-evidence.md.
@@ -26,8 +26,8 @@ def driver(world, sid="s", participant="manual"):
     runtime = world.runtime(sid, participant)
     lease = store.acquire(sid, owner=participant, ttl_ms=runtime.ttl_ms)
     assert lease is not None
-    scope = kernel._Scope(lease, runtime, now_ms=store._now())
-    worker = kernel._Driver(store, sid, runtime, scope)
+    scope = Scope(lease, runtime, now_ms=store._now())
+    worker = runtime.driver(store, sid, scope)
     worker.refresh()
     return worker
 
@@ -54,13 +54,19 @@ def test_l2_stop_after_committed_renewal_preserves_fencing_and_control(tmp_path,
         control = InboxItem("l2-cancel", "control", {"action": "cancel"}, tid, 0)
         world.push("s", control)
         initial = worker.scope.lease
-        build = kernel._LeaseHeartbeat(
+        build = LeaseOwnership(
             initial,
-            worker.runtime.heartbeat_store,
             15000,
             0.25,
-            now_ms=world.clock.now_ms(),
             clock=world.clock,
+            stop=threading.Event(),
+            ready=threading.Event(),
+            lock=threading.Lock(),
+            poll_lock=threading.Lock(),
+            commit_lock=threading.Lock(),
+            latch_entry=threading.local(),
+            actor_identity=threading.get_ident,
+            now_ms=world.clock.now_ms(),
         )
         heartbeat_store = world.connection("manual/heartbeat")
         renew = heartbeat_store.renew
@@ -195,7 +201,7 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
             world.calls.append(("s", request.metadata["operation_id"], request.metadata["attempt"], "model", None))
             return LLMResponse("next completed")
 
-        worker.runtime.llm = ScriptedLLM([finish_next])
+        worker.runtime.model_callback = finish_next
         until(worker, lambda: worker.state.turns[new_tid].ended)
         assert terminal_status(worker.records, new_tid) == "completed"
         assert worker.scope.token is not new_token and not worker.scope.token.cancelled
@@ -220,7 +226,7 @@ def test_l4_opaque_wall_deadline_cannot_bypass_real_sql_fence(tmp_path, skew_ms)
 
         worker.runtime.clock = SkewClock()
         # Omit now_ms to exercise the opaque-store fallback, without a fake store.
-        worker.scope = kernel._Scope(lease, worker.runtime)
+        worker.scope = Scope(lease, worker.runtime)
         before = worker.store.read("deadline").records
         if skew_ms > 0:
             with pytest.raises(LeaseLost):

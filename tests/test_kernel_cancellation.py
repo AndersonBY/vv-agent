@@ -291,15 +291,15 @@ print(json.dumps(trace, ensure_ascii=False))
 
 
 def test_actual_sim_scope_uses_core_methods_on_sql_lease_loss(tmp_path):
-    from sim.test_scheduled_lease_keeper import make_scope
-    from sim.world import SimWorld
+    from support.sdk_runtime import SDKWorld, sdk_scope
 
     from vv_agent.kernel._cancellation import Cancellation
     from vv_agent.runtime.cancellation import CancellationToken
     from vv_agent.session.store import LeaseLost
 
-    with SimWorld(tmp_path / "cancellation.sqlite", seed=17) as world:
-        scope = make_scope(world)
+    with SDKWorld(tmp_path / "cancellation.sqlite", seed=17) as world:
+        world.create()
+        scope = sdk_scope(world, participant="owner")
         assert type(scope.token) is CancellationToken
         for name in ("cancel", "on_cancel", "check"):
             assert getattr(type(scope.token), name) is getattr(Cancellation, name)

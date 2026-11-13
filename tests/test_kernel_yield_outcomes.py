@@ -10,7 +10,7 @@ from session.test_batch_children import complete, deliver
 from session.test_core_yield_outcomes import yield_fixture
 from session.test_recovery_matrix import start
 from session.test_yieldable_waits import waiting_runtime
-from sim.world import SimWorld
+from support.sdk_runtime import SDKWorld
 
 from vv_agent.session import kernel
 from vv_agent.session.records import InboxItem
@@ -22,7 +22,7 @@ from vv_agent.session.sqlite import SQLiteStore
 def test_core_yield_receipt_matches_sdk_with_import_blocker(tmp_path, flags, kind):
     database = tmp_path / "prefix.sqlite"
     if kind == "provider":
-        with SimWorld(database, seed=17) as world:
+        with SDKWorld(database, seed=17) as world:
             worker, attempt, _, item = yield_fixture(world)
             expected = worker.yield_results([attempt], item)
             source = yield_facts(worker, attempt, item, expected, kind)

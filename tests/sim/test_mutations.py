@@ -4,13 +4,14 @@ import __future__
 
 import inspect
 import textwrap
+import threading
 
 import pytest
 
-from vv_agent.kernel import _driver_outcomes
-from vv_agent.session import _driver_recovery, kernel
-from vv_agent.session.records import make_record
-from vv_agent.session.sql import SQLSessionTx
+from vv_agent.kernel import _driver_outcomes, _driver_recovery
+from vv_agent.kernel._lease_scope import LeaseOwnership
+from vv_agent.kernel._records import make_record
+from vv_agent.kernel._sql import SQLSessionTx
 
 from .scenarios import run_scenario
 from .world import InvariantViolation, SimWorld, require
@@ -106,7 +107,19 @@ def lock_order_probe(world):
     driving = world.connection("driver")
     renewal = world.connection("renewal")
     lease = driving.acquire("s", owner="lock-probe", ttl_ms=15000)
-    heartbeat = kernel._LeaseHeartbeat(lease, lambda: world.heartbeat_connection("lock-probe"), 15000, 0.25, clock=world.clock)
+    heartbeat = LeaseOwnership(
+        lease,
+        15000,
+        0.25,
+        clock=world.clock,
+        stop=threading.Event(),
+        ready=threading.Event(),
+        lock=threading.Lock(),
+        poll_lock=threading.Lock(),
+        commit_lock=threading.Lock(),
+        latch_entry=threading.local(),
+        actor_identity=threading.get_ident,
+    )
     original = renewal.renew
     committed = []
 
@@ -140,14 +153,14 @@ def lock_order_probe(world):
 @pytest.mark.parametrize("mutated", [False, True])
 def test_l1_real_append_during_renewal(sim_database, monkeypatch, record_property, mutated):
     if mutated:
-        original = kernel._LeaseHeartbeat.poll
+        original = LeaseOwnership.poll
 
         def hold_commit_lock(self, store):
             with self.commit_lock:
                 return original(self, store)
 
         hold_commit_lock.__dict__["_sim_mutation"] = "hold_commit_lock_during_renewal"
-        monkeypatch.setattr(kernel._LeaseHeartbeat, "poll", hold_commit_lock)
+        monkeypatch.setattr(LeaseOwnership, "poll", hold_commit_lock)
     from .report import versions
 
     identity = versions()

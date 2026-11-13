@@ -5,10 +5,12 @@ from dataclasses import replace
 
 import pytest
 
+from vv_agent.kernel import _child_store, _driver_outcomes
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.session.records import Record
-from vv_agent.session.result import project_result
-from vv_agent.session.runtime import Runtime
+from vv_agent.kernel._definition import DefinitionCache
+from vv_agent.kernel._records import Record
+from vv_agent.kernel._reducer import TransitionError
+from vv_agent.kernel._usage import project_model_usage
 
 from .scenarios import Provider, run_scenario
 from .world import InvariantViolation, SimWorld
@@ -65,12 +67,12 @@ def test_frozen_definition_mismatch_fails_without_more_external_sends(sim_databa
 
 
 def test_definition_evidence_detects_bypassed_runtime_digest_check(sim_database, monkeypatch):
-    actual = Runtime.definition_digest
+    actual = DefinitionCache.definition_digest
 
-    def trust_retained_digest(self, task):
-        return task.payload["definition_digest"] if isinstance(task, Record) else actual(self, task)
+    def trust_retained_digest(self, task, bindings, catalog):
+        return task.payload["definition_digest"] if isinstance(task, Record) else actual(self, task, bindings, catalog)
 
-    monkeypatch.setattr(Runtime, "definition_digest", trust_retained_digest)
+    monkeypatch.setattr(DefinitionCache, "definition_digest", trust_retained_digest)
     with SimWorld(sim_database, seed=17) as world:
         with pytest.raises(InvariantViolation, match="definition:"):
             run_scenario(world, "definition_mismatch")
@@ -84,7 +86,8 @@ def test_precommit_model_result_recovers_as_meter_missing_then_one_retry(sim_dat
         state, rows, _ = store.read_state("s")
         model = next(operation for operation in state.operations.values() if operation.kind == "model")
         oid = model.attempts[1].plan.operation_id
-        calls = project_result(store, "s", model.turn_id).token_usage.model_calls
+        usage, _ledger = project_model_usage(state, model.turn_id)
+        calls = usage.model_calls
         attempts = {call.attempt: call for call in calls if call.operation_id == oid}
         assert set(attempts) == {1, 2}
         assert attempts[1].usage.usage_source.value == "accounting_missing"
@@ -164,7 +167,7 @@ def test_future_input_is_immutable_and_only_due_scanner_resumes(sim_database):
 
 
 def test_future_input_oracle_detects_removed_sql_readiness_filter(sim_database, monkeypatch):
-    from vv_agent.session.sql import SQLStore
+    from vv_agent.kernel._sql import SQLStore
 
     from .test_mutations import mutate
 
@@ -196,14 +199,12 @@ def test_root_cancel_terminates_started_child_and_grandchild(sim_database):
 
 
 def test_descendant_oracle_detects_missing_second_generation_cancel(sim_database, monkeypatch):
-    from vv_agent.session import _recovery_phase
-
-    actual = _recovery_phase.cancel_children
+    actual = _child_store.cancel_children
 
     def omit_grandchild(store, tx, state, sid, tid):
         return [] if sid == "child" else actual(store, tx, state, sid, tid)
 
-    monkeypatch.setattr(_recovery_phase, "cancel_children", omit_grandchild)
+    monkeypatch.setattr(_child_store, "cancel_children", omit_grandchild)
     with SimWorld(sim_database, seed=17) as world:
         with pytest.raises(InvariantViolation, match="I7: cancellation did not propagate to grandchild"):
             run_scenario(world, "cancel_descendants")
@@ -223,18 +224,15 @@ def test_participant_cases_replay_deterministically(tmp_path, scenario):
 
 
 def test_descendant_settlement_requires_real_terminal_receipt(sim_database, monkeypatch):
-    from vv_agent.session import kernel
-    from vv_agent.session.reducer import TransitionError
+    actual = _driver_outcomes.completed_steps
 
-    actual = kernel._Driver.completed
-
-    def false_terminal_receipt(self, plan, outcome):
-        attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
-        if self.sid == "child" and attempt.child_handle:
+    def false_terminal_receipt(driver, plan, outcome):
+        attempt = driver.state.operations[plan.operation_id].attempts[plan.attempt]
+        if driver.sid == "child" and attempt.child_handle:
             outcome = replace(outcome, evidence=("child/0/" + "0" * 64,))
-        return actual(self, plan, outcome)
+        return (yield from actual(driver, plan, outcome))
 
-    monkeypatch.setattr(kernel._Driver, "completed", false_terminal_receipt)
+    monkeypatch.setattr(_driver_outcomes, "completed_steps", false_terminal_receipt)
     with SimWorld(sim_database, seed=17) as world:
         with pytest.raises(TransitionError, match="child completion needs terminal input"):
             run_scenario(world, "cancel_descendants")

@@ -10,12 +10,11 @@ from pathlib import Path
 import pytest
 from session.test_yieldable_waits import YieldProvider
 from sim.scenarios import Provider
-from sim.test_lease_gap_evidence import driver, until
-from sim.world import SimWorld
+from support.sdk_runtime import SDKWorld, sdk_driver, until
 
 from vv_agent.kernel import _driver_outcomes as outcomes
 from vv_agent.kernel import _driver_recovery as core
-from vv_agent.session import _recovery_phase, kernel
+from vv_agent.session import _recovery_phase
 from vv_agent.session.records import InboxItem
 
 
@@ -84,10 +83,8 @@ def test_core_recovery_has_no_sdk_or_transport_effects():
     assert forbidden == []
 
 
-def test_extracted_recovery_runs_complete_real_sql_turn(tmp_path, monkeypatch):
-    monkeypatch.setattr(kernel._Driver, "step", _recovery_phase.step)
-    monkeypatch.setattr(kernel._Driver, "close", _recovery_phase.close)
-    with SimWorld(tmp_path / "recovery.sqlite", seed=17) as world:
+def test_extracted_recovery_runs_complete_real_sql_turn(tmp_path):
+    with SDKWorld(tmp_path / "recovery.sqlite", seed=17) as world:
         world.create()
         assert world.drive(provider=Provider(world))
         state, rows, _ = world.connection("observer").read_state("s")
@@ -106,9 +103,9 @@ def test_core_composes_actual_yield_results_owner(tmp_path, monkeypatch):
     class AtReceipt(BaseException):
         pass
 
-    with SimWorld(tmp_path / "yield.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "yield.sqlite", seed=17) as world:
         world.create()
-        worker = driver(world)
+        worker = sdk_driver(world)
         worker.runtime.providers["effect"] = Provider(world)
         captured = []
         original = outcomes.completed_steps

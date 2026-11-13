@@ -6,12 +6,11 @@ import json
 from dataclasses import replace
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._child_store import completion_input
-from vv_agent.session.children import ChildSession, child_delivery
-from vv_agent.session.providers import Accepted, Definitive, Unknown
-from vv_agent.session.records import InboxItem, SessionSpec
-from vv_agent.session.store import LeaseLost
-from vv_agent.types import ToolExecutionResult
+from vv_agent.kernel._child_store import ChildSession, child_delivery, completion_input
+from vv_agent.kernel._provider_outcomes import Accepted, Definitive, Unknown
+from vv_agent.kernel._records import InboxItem, SessionSpec
+from vv_agent.kernel._store import LeaseLost
+from vv_agent.kernel._tool_values import ToolExecutionResult
 
 from .world import FaultyStore, SimWorld, require
 
@@ -36,6 +35,7 @@ SCENARIOS = (
     "approval_reply",
     "future_input",
     "cancel_descendants",
+    "context_compacted",
 )
 
 
@@ -66,7 +66,8 @@ class Provider:
             "query_ref": "sim_effect",
             "cancel_ref": None,
         }
-        result = ToolExecutionResult(tool_call_id=plan.payload["request"]["id"], content="effect done").to_dict()
+        content = "effect done " * 500 if w.scenario == "context_compacted" else "effect done"
+        result = ToolExecutionResult(tool_call_id=plan.payload["request"]["id"], content=content).to_dict()
         with self.store.atomic():
             self.store._rows(
                 "INSERT INTO sim_effect VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
@@ -465,9 +466,26 @@ def cancel_descendants(w, provider):
     w.queue.clear()
 
 
-def run_scenario(world: SimWorld, scenario=None):
+def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
     w = world
     w.scenario = w.choices.choose("scenario", [scenario] if scenario else SCENARIOS)
+    if w.scenario == "context_compacted":
+        configured = {
+            "compact_threshold": 1,
+            "keep_recent_messages": 1,
+            "model_context_window": 2048,
+            "reserved_output_tokens": 8,
+            "autocompact_buffer_tokens": 0,
+            "microcompaction_policy": {
+                "trigger_ratio": 0.95,
+                "target_ratio": 0.90,
+                "keep_recent_cycles": 3,
+                "min_result_chars": 4_294_967_295,
+            },
+        }
+        if memory_settings is not None:
+            configured.update(memory_settings)
+        w.memory_settings = configured
     w.install_write_observer()
     w.create()
     w.push("s", InboxItem("initial", "user", {"content": "go"}))
@@ -600,12 +618,39 @@ def run_scenario(world: SimWorld, scenario=None):
         )
     if w.scenario == "metered_tool":
         check_metered_tool(w, provider)
+    if w.scenario == "context_compacted":
+        compactions = [r.record for r in rows if r.record.kind == "context_compacted"]
+        require(len(compactions) == 1, "I8", "real low-threshold context did not compact exactly once")
+        compacted = compactions[0]
+        require(compacted.payload["mode"] == "summary", "I8", "compaction did not use the summary algorithm")
+        summary = state.operations[compacted.payload["summary_operation_id"]]
+        require(
+            summary.kind == "model" and summary.attempts[summary.selected_attempt].plan.payload["purpose"] == "compaction",
+            "I8",
+            "compaction record does not bind the adopted summary receipt",
+        )
+        require(
+            compacted.payload["source_digest"]
+            and compacted.payload["prefix_ids"]
+            and compacted.payload["tail_ids"]
+            and compacted.payload["replacement"],
+            "I8",
+            "compaction audit identities are incomplete",
+        )
+        w.covered.add("I8")
     effects = provider.store._one("SELECT count(*) FROM sim_effect")[0]
     calls = sum(c[3] == "tool" for c in w.calls)
     if w.scenario == "unknown_idempotent":
         require(calls == 2 and effects == 1, "I1", "idempotent retry was not deduplicated by the external service")
     elif w.scenario == "model_unknown":
         require(len(w.calls) == 2 and effects == 0, "I1", "ambiguous model did not stop at retry bound")
+    elif w.scenario == "context_compacted":
+        tool_calls = [call for call in w.calls if call[3] == "tool"]
+        require(
+            calls == effects == 2 and len({call[1] for call in tool_calls}) == 2,
+            "I1",
+            "two-cycle compaction history was not dispatched exactly once per operation",
+        )
     elif w.scenario not in {"children", "cancel"}:
         require(calls == effects == 1, "I1", "completed or unsafe operation was redispatched")
     # Delayed duplicate broker deliveries really reach drive(), after completion.

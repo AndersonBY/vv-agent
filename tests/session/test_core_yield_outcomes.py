@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
-from sim.world import SimWorld
+from support.sdk_runtime import SDKWorld
 
 from vv_agent.kernel import _driver_outcomes as core
 from vv_agent.session.records import InboxItem
@@ -16,15 +14,7 @@ from .test_yieldable_waits import YieldProvider
 
 
 def yield_fixture(world):
-    original = core.completed_steps
-
-    def completed(owner, plan, outcome):
-        if plan._payload["op_kind"] == "tool":
-            return (yield from owner.completed(plan, outcome))
-        return (yield from original(owner, plan, outcome))
-
-    with patch.object(core, "completed_steps", completed):
-        worker, plan, _ = receipt_fixture(world, kind="tool")
+    worker, plan, _ = receipt_fixture(world, kind="tool")
     provider = YieldProvider(callback=None)
     worker.runtime.providers[plan._payload["provider_binding"]] = provider
     accepted = provider.submit(plan, context=None)
@@ -37,7 +27,7 @@ def yield_fixture(world):
 
 @pytest.mark.parametrize("mode", ["none", "valid", "wrong-id", "finish", "bad-body", "noncanonical", "stop", "error"])
 def test_provider_yield_validation_and_fallback_use_actual_completed_owner(tmp_path, monkeypatch, mode):
-    with SimWorld(tmp_path / "yield.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "yield.sqlite", seed=17) as world:
         worker, attempt, provider, item = yield_fixture(world)
         handle = dict(attempt.wait["handle"])
         calls, completions = [], []
@@ -91,7 +81,7 @@ def test_provider_yield_validation_and_fallback_use_actual_completed_owner(tmp_p
 
 @pytest.mark.parametrize("phase,error_type", [("lookup", RuntimeError), ("lookup", StopIteration), ("invoke", KeyboardInterrupt)])
 def test_yield_callback_lookup_and_base_errors_escape_unchanged(tmp_path, phase, error_type):
-    with SimWorld(tmp_path / "errors.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "errors.sqlite", seed=17) as world:
         worker, attempt, provider, item = yield_fixture(world)
         error = error_type("exact host error")
         cause = ValueError("original cause")
@@ -123,7 +113,7 @@ def test_yield_callback_lookup_and_base_errors_escape_unchanged(tmp_path, phase,
 def test_yield_prepares_resources_after_callback_with_current_leaf(tmp_path, monkeypatch):
     from vv_agent.session import tool_results
 
-    with SimWorld(tmp_path / "resources.sqlite", seed=17) as world:
+    with SDKWorld(tmp_path / "resources.sqlite", seed=17) as world:
         worker, attempt, provider, item = yield_fixture(world)
         events = []
         original = tool_results.prepare_tool_resources

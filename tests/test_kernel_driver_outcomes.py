@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from session.test_core_driver_outcomes import receipt_fixture
-from sim.world import SimWorld
+from support.sdk_runtime import SDKWorld
 
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.session import kernel
@@ -17,7 +17,7 @@ from vv_agent.session import kernel
 @pytest.mark.parametrize("budgeted", [False, True])
 def test_core_receipt_unknown_and_parking_use_real_storage_without_sdk_imports(tmp_path, flags, budgeted, monkeypatch):
     database = tmp_path / "prefix.sqlite"
-    with SimWorld(database, seed=17) as world:
+    with SDKWorld(database, seed=17) as world:
         worker, plan, outcome = receipt_fixture(world, limits=RunBudgetLimits(max_total_tokens=100) if budgeted else None)
         clock_observations = []
         original_clock = kernel._DEFAULT_BUDGET_CLOCK_NS

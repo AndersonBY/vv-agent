@@ -43,8 +43,7 @@ def test_simulation_smoke():
 
 @pytest.mark.parametrize("fault,invariant", [("external", "I1"), ("inbox", "I3")])
 def test_step_oracles_detect_changes_without_new_records(sim_database, fault, invariant):
-    from vv_agent.runtime.cancellation import CancellationToken
-
+    from .assembly import CallContext
     from .world import InvariantViolation
 
     with SimWorld(sim_database, seed=17) as world:
@@ -60,8 +59,7 @@ def test_step_oracles_detect_changes_without_new_records(sim_database, fault, in
             state, _, _ = store.read_state("s")
             operation = next(op for op in state.operations.values() if op.kind == "tool")
             plan = operation.attempts[1].execution_plan
-            task = state.turns[operation.turn_id].start._task()
-            context = rt.context(task, plan, CancellationToken(), store=store, session_id="s")
+            context = CallContext(plan._payload["idempotency_key"], plan)
             rt.providers["effect"].submit(plan, context=context)
         assert store._head("s")[:2] == before
         with pytest.raises(InvariantViolation, match=invariant):
@@ -99,6 +97,31 @@ def test_successful_world_summary_does_not_hash_source(tmp_path, monkeypatch):
     monkeypatch.setattr(report, "versions", forbidden)
     with SimWorld(tmp_path / "summary.sqlite", seed=17) as world:
         assert "code_digest" not in run_scenario(world, "tools")
+
+
+def test_context_compaction_calls_real_normalizer_and_token_counter(sim_database, monkeypatch):
+    from . import assembly
+
+    normalized, counted = [], []
+    actual_normalize = assembly.normalize_memory_settings
+    actual_count = assembly.count_messages_tokens
+
+    def normalize(settings, protected_start):
+        result = actual_normalize(settings, protected_start)
+        normalized.append(result)
+        return result
+
+    def count(messages, *, model):
+        result = actual_count(messages, model=model)
+        counted.append((len(messages), model, result))
+        return result
+
+    monkeypatch.setattr(assembly, "normalize_memory_settings", normalize)
+    monkeypatch.setattr(assembly, "count_messages_tokens", count)
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "context_compacted")
+    assert normalized and all(value["compact_threshold"] == 1 for value in normalized)
+    assert counted and all(result > 0 for _messages, _model, result in counted)
 
 
 def test_spawned_seeds_match_serial_real_driver_traces():
@@ -374,9 +397,11 @@ def test_report_identifies_actual_sqlite_file_filesystem(directory, monkeypatch)
     import tempfile
     from pathlib import Path
 
-    from vv_agent.session.sqlite import SQLiteStore
+    from vv_agent.kernel._sqlite import SQLiteStore
 
+    from .assembly import fold_factory
     from .report import database, temporary_storage
+    from .world import SystemClock
 
     if not Path(directory).is_dir() or shutil.which("stat") is None:
         pytest.skip("filesystem probe requires this temporary directory and stat")
@@ -385,7 +410,7 @@ def test_report_identifies_actual_sqlite_file_filesystem(directory, monkeypatch)
     metadata = temporary_storage()
     assert metadata["directory"] == str(Path(directory).resolve())
     assert metadata["requested_TMPDIR"] == directory
-    with database("sqlite") as path, SQLiteStore.standalone(str(path)) as store:
+    with database("sqlite") as path, SQLiteStore.standalone(str(path), fold_factory=fold_factory, clock=SystemClock()) as store:
         store.install_schema()
         assert path.is_file() and path.parent.parent.resolve() == Path(metadata["directory"])
         actual = subprocess.run(["stat", "-f", "-c", "%T", "--", str(path)], capture_output=True, text=True, check=False)

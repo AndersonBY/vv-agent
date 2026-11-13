@@ -10,29 +10,20 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
+import time
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from vv_agent.agent import Agent
-from vv_agent.config import ResolvedModelConfig
-from vv_agent.kernel._lease_scope import HeartbeatStopped, cancel_if_lost
-from vv_agent.llm.scripted import ScriptedLLM
-from vv_agent.run_config import RunConfig
-from vv_agent.session import kernel
-from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.providers import Unknown
-from vv_agent.session.records import InboxItem, SessionSpec, make_record
-from vv_agent.session.reducer import Fold, fold
-from vv_agent.session.runtime import Runtime, RuntimeNotReady
-from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.store import LeaseLost
-from vv_agent.session.timing import SystemClock
-from vv_agent.tools.function import FunctionTool
-from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata
-from vv_agent.tools.registry import ToolRegistry
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.kernel._execution_values import LLMResponse
+from vv_agent.kernel._postgres import PostgresStore
+from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
+from vv_agent.kernel._sqlite import SQLiteStore
+from vv_agent.kernel._store import LeaseLost
+from vv_agent.kernel._tool_values import ToolCall
+
+from .assembly import CoreRuntimeAssembly, SimRuntimeNotReady, fold_factory
 
 PENDING = {
     "I9": "W2c: chain_digest and chain verifier do not exist at the P1 baseline",
@@ -70,6 +61,20 @@ class SimClock:
 
     def sleep(self, seconds):
         self.milliseconds += max(1, int(seconds * 1000))
+
+
+class SystemClock:
+    def now_ms(self):
+        return time.time_ns() // 1_000_000
+
+    def monotonic(self):
+        return time.monotonic()
+
+    def monotonic_ns(self):
+        return time.monotonic_ns()
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
 
 
 class Choices:
@@ -156,67 +161,6 @@ class FaultyStore:
             self.die("after SQL commit")
 
 
-class ScheduledLeaseKeeper:
-    """Run the SDK heartbeat step in explicit seeded turns, without a thread.
-
-    SimWorld has no timed queue: start queues one turn; later turns remain
-    explicit. Self-requeueing here would prevent the ready queue from draining.
-    """
-
-    def __init__(self, world, participant):
-        self.world, self.participant = world, participant
-
-    def start(self, heartbeat):
-        self.poll(heartbeat)
-        if not heartbeat.stop.is_set() and not heartbeat.lost:
-            self.world.enqueue(f"renew/{self.participant}", lambda: self.poll(heartbeat))
-
-    def poll(self, heartbeat):
-        if heartbeat.stop.is_set() and not heartbeat.lost:
-            self.close(heartbeat)
-            return
-        try:
-            store = self.world.connection(f"{self.participant}/heartbeat")
-            transient_errors = (TimeoutError,)
-            if isinstance(store, PostgresStore):
-                from psycopg import OperationalError
-
-                transient_errors = (TimeoutError, OperationalError)
-            heartbeat.heartbeat_step(store, transient_errors)
-        except Exception as exc:
-            heartbeat.heartbeat_failed(exc)
-            self.close(heartbeat)
-            if hasattr(heartbeat, "token"):
-                cancel_if_lost(heartbeat)
-            # Preserve the simulator's explicit stale-owner fault observation.
-            if isinstance(exc, LeaseLost) and not isinstance(exc, HeartbeatStopped):
-                raise
-        else:
-            if heartbeat.stop.is_set() or heartbeat.lost:
-                self.close(heartbeat)
-
-    def close(self, heartbeat):
-        self.world.tasks.pop(f"renew/{self.participant}", None)
-        heartbeat.heartbeat_finished()
-
-    def is_alive(self, heartbeat):
-        return False
-
-
-class SynchronousInvoker:
-    def __init__(self, world):
-        self.world = world
-
-    def invoke(self, callback, *, timeout, token, cancellation_grace, clock):
-        self.world.checkpoint("invoke")
-        try:
-            return callback()
-        except InvariantViolation:
-            raise
-        except Exception as exc:
-            return Unknown(f"{type(exc).__name__}: scripted outcome unavailable")
-
-
 class SimWorld:
     def __init__(self, database, *, seed=0, replay=None):
         self.database, self.seed = database, seed
@@ -232,6 +176,7 @@ class SimWorld:
         self.after_external = None
         self.scenario = None
         self.covered = set()
+        self.memory_settings = {}
 
     def __enter__(self):
         self.connection("host").install_schema()
@@ -245,9 +190,9 @@ class SimWorld:
     def connection(self, participant):
         if participant not in self.connections:
             if isinstance(self.database, Path):
-                context = SQLiteStore.standalone(str(self.database), clock=self.clock)
+                context = SQLiteStore.standalone(str(self.database), clock=self.clock, fold_factory=fold_factory)
             else:
-                context = PostgresStore.standalone(self.database)
+                context = PostgresStore.standalone(self.database, fold_factory=fold_factory)
             store = self.stack.enter_context(context)
             if isinstance(store, SQLiteStore):
                 store._rows("PRAGMA busy_timeout=10")
@@ -260,7 +205,7 @@ class SimWorld:
         """Per-world patch restored by ExitStack; no production files are changed."""
         from unittest.mock import patch
 
-        from vv_agent.session.sql import SQLSessionTx
+        from vv_agent.kernel._sql import SQLSessionTx
 
         actual = SQLSessionTx._write
 
@@ -349,43 +294,50 @@ class SimWorld:
                 )
         self.events.append({"advance_ms": ms, "clock": type(self.clock).__name__})
 
-    def runtime(self, sid, participant, *, provider=None, children=None):
-        world = self
+    def scripted_model_callback(self, sid):
+        """Model replies owned by the scenario, independent of SDK or core assembly."""
 
         def model(request):
-            meta = request.metadata["vv_session"]
             op = request.metadata["operation_id"]
             attempt = request.metadata["attempt"]
-            world.calls.append((sid, op, attempt, "model", None))
-            if world.scenario == "model_unknown":
+            self.calls.append((sid, op, attempt, "model", None))
+            if self.scenario == "model_unknown":
                 raise TimeoutError("lost model response")
-            issues_tool = meta["cycle_index"] == 1 and (
-                sid == "s" or (world.scenario == "cancel_descendants" and sid in {"child", "grandchild"})
-            )
-            world.model_receipts[(sid, op, attempt)] = (11, 3) if issues_tool else (7, 1)
+            if request.metadata.get("purpose") == "compaction":
+                self.model_receipts[(sid, op, attempt)] = (5, 1)
+                return LLMResponse(
+                    json.dumps(
+                        {
+                            "summary_version": "2.0",
+                            "original_user_messages": ["go"],
+                            "user_constraints": [],
+                            "decisions": [],
+                            "files_examined_or_modified": [],
+                            "errors_and_fixes": [],
+                            "progress": ["scripted effect completed"],
+                            "key_facts": [],
+                            "open_issues": [],
+                            "current_work_state": "tool result summarized",
+                            "next_steps": [],
+                        }
+                    ),
+                    raw={"usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+                )
+            issues_tool = (
+                (self.scenario == "context_compacted" and request.metadata["vv_session"]["cycle_index"] in {1, 2})
+                or request.metadata["vv_session"]["cycle_index"] == 1
+            ) and (sid == "s" or (self.scenario == "cancel_descendants" and sid in {"child", "grandchild"}))
+            self.model_receipts[(sid, op, attempt)] = (11, 3) if issues_tool else (7, 1)
             if issues_tool:
                 return LLMResponse(
                     "", [ToolCall("job", "effect", {})], raw={"usage": {"prompt_tokens": 11, "completion_tokens": 3}}
                 )
             return LLMResponse("done", raw={"usage": {"prompt_tokens": 7, "completion_tokens": 1}})
 
-        class Model(ScriptedLLM):
-            def complete(self, request):
-                return model(request)
+        return model
 
-        def forbidden(_ctx, _args):
-            raise AssertionError("external effects must go through the scripted provider")
-
-        idempotent = self.scenario == "unknown_idempotent"
-        tool = FunctionTool(
-            name="effect",
-            description="scripted effect",
-            params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            on_invoke=forbidden,
-            needs_approval=self.scenario == "approval_reply" or (self.scenario == "cancel_descendants" and sid == "grandchild"),
-            tool_metadata=ToolMetadata(idempotency=ToolIdempotency.SUPPORTED if idempotent else ToolIdempotency.UNSUPPORTED),
-        )
-        keeper = self.keepers.setdefault(participant, ScheduledLeaseKeeper(self, participant))
+    def scripted_hook(self, participant):
+        """Durable observation hook shared by test-owned SDK and core runtimes."""
 
         def hook(point, record):
             if record is not None and point in {"after_commit", "before_external_call", "after_external_call"}:
@@ -397,26 +349,35 @@ class SimWorld:
                     callback(self.workers[participant])
                 self.checkpoint(point)
 
-        return Runtime(
-            agent=Agent(name="sim", instructions="Be precise.", tools=[tool]),
-            config=RunConfig(workspace=Path("/tmp"), session_memory_enabled=False, tool_registry_factory=ToolRegistry),
-            resolved=ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", []),
-            llm=Model(),
-            heartbeat_store=lambda: self.heartbeat_connection(participant),
-            providers={"effect": provider} if provider is not None and not children else {},
-            children=children or {},
-            clock=self.clock,
-            lease_keeper=keeper,
-            invoker=SynchronousInvoker(self),
+        return hook
+
+    def runtime(self, sid, participant, *, provider=None, children=None):
+        model = self.scripted_model_callback(sid)
+        hook = self.scripted_hook(participant)
+
+        assembly = CoreRuntimeAssembly(
+            self,
+            sid,
+            participant,
+            provider=provider,
+            children=children,
+            model_callback=model,
             hook=hook,
-            lease_retry_sleep=self.clock.sleep,
-            lease_retry_jitter=lambda a, b: a,
-            wake=self.queue.append,
+            scenario=self.scenario,
+            memory_settings=self.memory_settings,
         )
+        self.keepers[participant] = assembly.lease_keeper
+        return assembly
 
     @contextmanager
     def heartbeat_connection(self, participant):
         yield self.connection(f"{participant}/heartbeat")
+
+    def _drive_runtime(self, store, sid, *, runtime, factory):
+        """Call the explicitly selected runtime; SDK tests override only this seam."""
+        if factory is not None:
+            return runtime.drive_factory(store, sid, factory)
+        return runtime.drive(store, sid)
 
     def drive(self, sid="s", *, participant="worker-0", provider=None, children=None, fault=None, factory=None):
         require(participant not in self.running, "scheduler", "recursive use of one worker connection")
@@ -433,9 +394,7 @@ class SimWorld:
         rt = self.runtimes[key]
         self.running.add(participant)
         try:
-            if factory is not None:
-                return kernel._drive(proxy.store, sid, runtime=factory, clock=self.clock, lease_keeper=rt.lease_keeper)
-            return kernel.drive(proxy.store, sid, runtime=rt)
+            return self._drive_runtime(proxy.store, sid, runtime=rt, factory=factory)
         except (WorkerDeath, LeaseLost, TimeoutError):
             self.events.append({"worker_stopped": participant, "dead": proxy.dead})
         finally:
@@ -493,7 +452,7 @@ class SimWorld:
             for input_id, consumed in inputs:
                 require(applications[input_id] == int(consumed is not None), "I3", f"input {sid}/{input_id} consumption differs")
             require(set(applications) <= {key for key, _ in inputs}, "I3", "application has no inbox input")
-            current = self.folds.setdefault(sid, Fold())
+            current = self.folds.setdefault(sid, fold_factory())
             old = self.prefixes.get(sid, 0)
             for end in range(old + 1, len(records) + 1):
                 r = records[end - 1]
@@ -505,7 +464,7 @@ class SimWorld:
             if len(records) != old:
                 self.compare_prefix(records, current.state)
             if every_prefix:
-                replay = Fold()
+                replay = fold_factory()
                 for end, r in enumerate(records, 1):
                     consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
                     replay.extend([r], consumed_inputs=consumed)
@@ -566,7 +525,8 @@ class SimWorld:
     @staticmethod
     def compare_prefix(records, state):
         consumed = [InboxItem(**r.payload["input"]) for r in records if r.kind == "input_applied"]
-        require(fold(records, consumed_inputs=consumed) == state, "I8", "cold prefix replay differs from incremental fold")
+        replay = fold_factory().extend(records, consumed_inputs=consumed)
+        require(replay == state, "I8", "cold prefix replay differs from incremental fold")
 
     def stale_writer_probe(self):
         store = self.connection("stale-writer")
@@ -665,7 +625,7 @@ class SimWorld:
             self.covered.add("I5")
 
     def not_ready(self, sid):
-        raise RuntimeNotReady(1)
+        raise SimRuntimeNotReady(1)
 
     def summary(self):
         return {

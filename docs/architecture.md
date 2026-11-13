@@ -286,9 +286,12 @@ original position after wire validation.
 Record task decoding consumes core `AgentTask` and preserves its cached private
 value and detached public copies. Its private interning keys remain separate
 from canonical wire bytes, and future message validation is still deferred to
-its owning boundary. The seeded simulation currently enters through the SDK
-driver and store assembly, which use the shared core state and SQL algorithms
-described above. Scripted services supply the external outcomes.
+its owning boundary. The seeded simulation enters through `kernel/_drive.py`
+and the actual core phase generators and SQL stores. Its test host supplies
+scripted external outcomes and the real schema, token-counting and settings
+leaves. A fresh-process import check rejects other SDK modules. SDK producer
+tests use a separate SDK assembly over the same scheduler and SQL assertions;
+they still exercise the public runtime's callbacks and defaults.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply

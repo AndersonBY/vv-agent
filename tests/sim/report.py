@@ -127,16 +127,16 @@ def versions():
 
 def mutation_identity():
     """Identify the actual functions changed by the five implementation mutants."""
-    from vv_agent.kernel import _driver_outcomes
-    from vv_agent.session import _driver_recovery, kernel
-    from vv_agent.session.sql import SQLSessionTx
+    from vv_agent.kernel import _driver_outcomes, _driver_recovery
+    from vv_agent.kernel._lease_scope import LeaseOwnership
+    from vv_agent.kernel._sql import SQLSessionTx
 
     functions = {
-        "vv_agent.session.sql.SQLSessionTx.append": SQLSessionTx.append,
-        "vv_agent.session.sql.SQLSessionTx.push": SQLSessionTx.push,
-        "vv_agent.session._driver_recovery.step": _driver_recovery.step,
+        "vv_agent.kernel._sql.SQLSessionTx.append": SQLSessionTx.append,
+        "vv_agent.kernel._sql.SQLSessionTx.push": SQLSessionTx.push,
+        "vv_agent.kernel._driver_recovery.step": _driver_recovery.step,
         "vv_agent.kernel._driver_outcomes.unknown_steps": _driver_outcomes.unknown_steps,
-        "vv_agent.session.kernel._LeaseHeartbeat.poll": kernel._LeaseHeartbeat.poll,
+        "vv_agent.kernel._lease_scope.LeaseOwnership.poll": LeaseOwnership.poll,
     }
     return [
         {

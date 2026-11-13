@@ -1,11 +1,21 @@
 # Real-storage deterministic simulator (P1 first slice)
 
-`SimWorld` schedules named participants on one thread. It calls the production
-`drive`, heartbeat `poll`, `SQLSessionTx`, reducer, child delivery and result
-projection. Factory-bootstrap injection uses the same private `_drive` called
-by the unchanged public `drive` facade. Every worker, heartbeat, host, provider, scanner and observer owns a
-separate connection. SQLite uses a real WAL file with the production FULL
-synchronous setting. No `SimStore` or replacement execution state machine exists.
+`SimWorld` schedules named participants on one thread. It enters through the
+actual `vv_agent.kernel._drive.drive_core` and drains the real `CoreDriver`,
+`_driver_recovery.step/close`, dispatch, planning, input, output, after-cycle,
+compaction and outcome generators. SQLite/PostgreSQL stores, `SQLSessionTx`,
+Fold, `LeaseOwnership`, child delivery, usage and admission rules remain the
+shared core implementations. The assembly imports no Agent, Runtime, ToolRegistry
+or `vv_agent.session` module. It supplies only concrete bindings, scripted model
+and tool effects, cancellation and host observations.
+
+Memory defaults come from the actual `vv_agent._memory_settings` leaf. Token
+counts use the actual `vv_agent._token_counting` leaf and tool schema checks use
+the actual `vv_agent._jsonschema` leaf. The assembly does not copy defaults,
+prewarm a counter or substitute a prepared terminal. Every worker, heartbeat,
+host, provider, scanner and observer owns a separate connection. SQLite uses a
+real WAL file with the production FULL synchronous setting. No `SimStore` or
+replacement execution state machine exists.
 
 The injected invoker executes scripted callbacks synchronously. Scheduling can
 occur at safe kernel hooks, invocation boundaries and explicit participant steps;
@@ -22,6 +32,7 @@ uv run python scripts/session_simulation.py --seeds 5 --workers 2
 uv run python scripts/session_simulation.py --seed 17 --seeds 1 --scenario accepted_lost
 uv run pytest tests/sim/test_simulation.py tests/sim/test_mutations.py -k sqlite
 TMPDIR=/dev/shm VV_AGENT_SIM_SEEDS=5 uv run pytest tests/sim -k simulation_smoke -s
+uv run pytest tests/sim/test_import_boundary.py -q -s
 ```
 
 The unqualified CLI and smoke gate run 1,000 seeds. The smoke gate asserts at
@@ -58,6 +69,13 @@ requested `TMPDIR`, so tmpfs evidence is distinguishable from disk evidence.
 CLI timing also includes its harness imports;
 an external stopwatch includes interpreter startup and exit.
 No warmup seed is excluded or counted as a campaign seed.
+
+`test_import_boundary.py` starts a fresh `-I -S` process, installs its meta-path
+guard before simulation imports, and runs all 21 directed scenarios. Only the
+kernel package, `_jsonschema`, `_memory_settings`, `_token_counting` and their
+real external dependencies are permitted. The test then inspects `sys.modules`
+to reject session, Agent, Runtime and tool-registry imports. This is process
+isolation, not a loaded-module-cache exemption.
 
 For PostgreSQL set `VV_AGENT_TEST_POSTGRES_DSN` to a local/disposable **admin**
 database before running `--backend postgres` or the parametrized tests. The
@@ -102,7 +120,7 @@ reply, accepted handles, acceptance before ledger commit, authenticated late
 results/redelivery, child delivery, cancellation, `RuntimeNotReady`, competing
 claims, scheduled actual renewal, expiry/takeover at three driver cuts, frozen
 runtime-definition mismatch, rolled-back model results and metered tool receipts.
-The original 17 cases remain, with three additional participant cases:
+The original 17 cases remain, with four additional participant cases:
 
 - `approval_reply`: wrong request ID, request digest, scope, target turn and
   generation are rejected without dispatch. A valid reply authorizes exactly
@@ -112,10 +130,15 @@ The original 17 cases remain, with three additional participant cases:
 - `cancel_descendants`: a fixed two-level chain has real active turns and pending
   work before root cancellation reaches both descendants. The grandchild waits
   for approval, so the test cannot pass through already-finished descendants.
+- `context_compacted`: explicit low-threshold memory settings flow through the
+  actual normalizer, token counter and real summary operation. Two bounded tool
+  cycles create a reducible prefix; the accepted `context_compacted` record binds
+  its adopted summary receipt, source digest, prefix/tail identities and
+  replacement. I9/I11 remain deferred.
 
-Negative checks remove the actual SQL readiness filter, suppress the actual
+Negative checks remove the actual SQL readiness filter, suppress the actual core
 child-to-grandchild cancellation helper, and submit a false child terminal
-receipt through the real driver. The first two fail the corresponding oracle;
+receipt through the real core outcome generator. The first two fail the corresponding oracle;
 the existing reducer rejects the false receipt and its real transaction rolls
 back without consuming the child-result input.
 Child receipt verification uses the driver's literal `child/<seq>/<digest>`
@@ -131,9 +154,10 @@ multi-session ordering coverage. L2-L4 evidence belongs to
 
 ## Mutation evidence and failures
 
-The mutation tests recompile and patch the actual production functions in memory:
-append fences, input replay/dedupe, the kernel's retry key, and the kernel's unsafe
-unknown retry decision. They retain real SQL and reducer constraints. In
+The mutation tests recompile and patch the actual shared-core functions in memory:
+`SQLSessionTx` append fences and input replay/dedupe, `_driver_recovery.step`'s
+retry key, `_driver_outcomes.unknown_steps`' retry decision, and
+`LeaseOwnership.poll`'s lock ordering. They retain real SQL and reducer constraints. In
 particular, removing input replay reaches the database unique constraint; the
 harness rejects that failed duplicate push as an I3 violation rather than
 claiming duplicate durable rows were created.
