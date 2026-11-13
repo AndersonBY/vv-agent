@@ -32,8 +32,12 @@ def baseline_module(name, monkeypatch):
     expected = BASELINE_BLOBS[name]
     actual = sha1(b"blob %d\0" % len(data) + data).hexdigest()
     assert actual == expected, f"Baseline Git blob SHA-1 mismatch for {path.name}: expected {expected}, got {actual}"
-    # Only relocate the dependency import after verifying the pinned source bytes.
-    source = data.decode("utf-8").replace("from vv_agent.canonical_json import", "from vv_agent.kernel._canonical_json import")
+    # Only relocate dependency imports after verifying the pinned source bytes.
+    source = (
+        data.decode("utf-8")
+        .replace("from vv_agent.canonical_json import", "from vv_agent.kernel._canonical_json import")
+        .replace("from .providers import (", "from vv_agent.kernel._provider_outcomes import (")
+    )
     module = ModuleType(f"vv_agent.session._baseline_{name}")
     module.__package__ = "vv_agent.session"
     monkeypatch.setitem(sys.modules, module.__name__, module)
