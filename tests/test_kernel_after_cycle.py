@@ -12,6 +12,7 @@ import pytest
 
 from vv_agent.kernel import _after_cycle as phase
 from vv_agent.kernel._cycles import project_cycles
+from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.runtime.lifecycle import AfterCycleDecision
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -156,8 +157,8 @@ def test_real_finish_skips_unexecuted_tool_and_shares_cycle_projector(monkeypatc
         assert snapshots[0].cycle.to_dict() == output.raw_result.cycles[-1].to_dict()
         assert snapshots[0].native_outcome.completion_reason.value == "tool_finish"
         assert snapshots[0].cycle.tool_results[1].error_code == "skipped_due_to_finish"
-        assert seen.index(phase.CompleteSkippedTool) < seen.index(phase.CommitSkippedTools)
-        assert seen.index(phase.CommitSkippedTools) < seen.index(phase.ApplyAfterCycleHooks) < seen.index(phase.RecordAfterCycle)
+        assert seen.index(phase.CompleteSkippedTool) < seen.index(CommitRecords)
+        assert seen.index(CommitRecords) < seen.index(phase.ApplyAfterCycleHooks) < seen.index(phase.RecordAfterCycle)
         assert output.final_output == "finished"
     finally:
         surface.close()

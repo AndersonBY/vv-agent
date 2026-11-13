@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from vv_agent.kernel import _after_cycle as phase
 from vv_agent.kernel._cycles import project_cycles, turn_result_prefix
+from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._usage import project_model_usage
 from vv_agent.runtime.lifecycle import AfterCycleHookError, AfterCycleHookManager
 
@@ -40,7 +41,7 @@ def after_cycle(driver: _Driver) -> bool:
 def _perform(driver: _Driver, manager: AfterCycleHookManager, request: phase.AfterCycleRequest) -> Any:
     if isinstance(request, phase.CompleteSkippedTool):
         return driver.completed(request.plan, Definitive(request.result))
-    if isinstance(request, phase.CommitSkippedTools):
+    if isinstance(request, CommitRecords):
         return driver.commit(request.records, guarded=True)
     if isinstance(request, phase.CloseAfterCycle):
         return driver.close("failed", "agent_failed", request.error)

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from typing import Any, Protocol
 
-from vv_agent.kernel._records import Record
+from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._state import ExecutionState
 
 
@@ -61,25 +61,6 @@ class ValidationError:
 @dataclass(frozen=True, slots=True)
 class SerializeOutput:
     value: Any
-
-
-@dataclass(frozen=True, slots=True)
-class CreateBoundary:
-    stage: str
-    identity: str
-    data: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class PlanModel:
-    oid: str
-    request: dict[str, Any]
-    purpose: str
-
-
-@dataclass(frozen=True, slots=True)
-class CommitRecords:
-    records: list[Record]
 
 
 type OutputRequest = (

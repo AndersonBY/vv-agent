@@ -207,6 +207,9 @@ validators at the original observation points; mutable output settings are read
 when their branches need them. Session output and RunResult share one serializer.
 Serialization can invoke model_dump or dataclass callbacks; the host handles
 that request while the output phase generator is suspended.
+The compaction, output and after-cycle phases share ledger request types from
+`kernel/_driver_requests.py`; their existing adapters retain the same planning,
+boundary and guarded-commit calls.
 `kernel/_state.py`, `kernel/_context.py` and `kernel/_reducer.py` own execution
 state, aligned context projection, input protection and all record transitions.
 The fold receives settings normalization and message-counting callables. It

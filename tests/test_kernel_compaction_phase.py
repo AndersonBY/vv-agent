@@ -41,6 +41,7 @@ from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._context import project_context
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput, compaction_excerpt
+from vv_agent.kernel._driver_requests import CommitRecords, PlanModel
 from vv_agent.kernel._records import Record, InboxItem, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._token_count import TokenCount
@@ -83,7 +84,7 @@ for case in data['cuts']:
         elif isinstance(request,phase.ModelRoute):
             assert request.purpose=='compaction'
             response=target._payload['request']['model']
-        elif isinstance(request,phase.PlanModel):
+        elif isinstance(request,PlanModel):
             assert request.oid==target.operation_id and request.purpose=='compaction'
             expected=target._payload['request']
             for key in ('model','messages','tools','prompt_bundle','model_settings'):
@@ -107,7 +108,7 @@ for case in data['cuts']:
             proposed=response
         elif isinstance(request,phase.MicroArtifacts):
             assert request.record.encode()==target.encode()
-        elif isinstance(request,phase.CommitRecords):
+        elif isinstance(request,CommitRecords):
             assert len(request.records)==1
             assert request.records[0].encode()==target.encode()
             proposed=request.records[0]

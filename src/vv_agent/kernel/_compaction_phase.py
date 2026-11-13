@@ -11,6 +11,7 @@ from vv_agent.kernel import _summary_compaction
 from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
 from vv_agent.kernel._context import message_ids
 from vv_agent.kernel._context_messages import UnseenInputCapacityError, retained_start
+from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._microcompaction import MicrocompactPlan, estimate_tool_artifact_path, plan_memory_microcompact
 from vv_agent.kernel._microcompaction_apply import apply_microcompaction
@@ -70,26 +71,6 @@ class ModelRoute:
 class CreateRecord:
     kind: str
     payload: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class CreateBoundary:
-    stage: str
-    identity: str
-    data: dict[str, Any]
-    source_operation_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PlanModel:
-    oid: str
-    request: dict[str, Any]
-    purpose: str
-
-
-@dataclass(frozen=True, slots=True)
-class CommitRecords:
-    records: list[Record]
 
 
 @dataclass(frozen=True, slots=True)

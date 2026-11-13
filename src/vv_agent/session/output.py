@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from vv_agent.kernel import _output_phase as phase
+from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._output_phase import serializable_output as serializable_output
 from vv_agent.output_validation import (
     OutputValidationContext,
@@ -75,11 +76,11 @@ def prepare_output(driver: _Driver, value: Any) -> tuple[str, str | None, Any] |
                 response = output_validation_error(cast(OutputValidationResult, request.validation))
             elif isinstance(request, phase.SerializeOutput):
                 response = serializable_output(request.value)
-            elif isinstance(request, phase.CreateBoundary):
+            elif isinstance(request, CreateBoundary):
                 response = driver.boundary_record(request.stage, request.identity, request.data)
-            elif isinstance(request, phase.PlanModel):
+            elif isinstance(request, PlanModel):
                 response = driver.plan(request.oid, request.request, "model", purpose=request.purpose)
-            elif isinstance(request, phase.CommitRecords):
+            elif isinstance(request, CommitRecords):
                 driver.commit(request.records, guarded=True)
             else:
                 raise TypeError(f"unsupported output observation: {type(request).__name__}")

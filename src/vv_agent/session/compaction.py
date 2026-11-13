@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from vv_agent.kernel import _compaction_phase as phase
 from vv_agent.kernel._compaction_phase import memory_settings as memory_settings
+from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.llm.errors import MAX_PTL_RETRIES
@@ -83,13 +84,13 @@ def _drain[T](driver: _Driver, steps: Generator[object, Any, T], manager: Memory
                 host_memory.save_projection(driver)
             elif isinstance(request, phase.CreateRecord):
                 response = driver.record(request.kind, request.payload)
-            elif isinstance(request, phase.CreateBoundary):
+            elif isinstance(request, CreateBoundary):
                 response = driver.boundary_record(
                     request.stage, request.identity, request.data, source_operation_id=request.source_operation_id
                 )
-            elif isinstance(request, phase.PlanModel):
+            elif isinstance(request, PlanModel):
                 response = driver.plan(request.oid, request.request, "model", purpose=request.purpose)
-            elif isinstance(request, phase.CommitRecords):
+            elif isinstance(request, CommitRecords):
                 driver.commit(request.records, guarded=True)
             elif isinstance(request, phase.CloseCompaction):
                 driver.close("failed", request.reason)

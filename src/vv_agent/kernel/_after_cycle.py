@@ -16,6 +16,7 @@ from ._cycle_values import (
     persist_after_cycle_disallowed_tools,
     read_after_cycle_disallowed_tools,
 )
+from ._driver_requests import CommitRecords
 from ._execution_values import CompletionReason
 from ._records import Record
 from ._state import ExecutionState
@@ -27,11 +28,6 @@ from ._tool_values import ToolCall, ToolDirective
 class CompleteSkippedTool:
     plan: Record
     result: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class CommitSkippedTools:
-    records: list[Record]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +63,7 @@ class RecordAfterCycle:
 
 AfterCycleRequest = (
     CompleteSkippedTool
-    | CommitSkippedTools
+    | CommitRecords
     | CloseAfterCycle
     | ReadCycleProjection
     | ReadSharedState
@@ -129,7 +125,7 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
                 )
                 skipped.extend((yield CompleteSkippedTool(a.execution_plan, value.to_dict())))
         if skipped:
-            yield CommitSkippedTools(skipped)
+            yield CommitRecords(skipped)
             return True
     waits = [
         a.wait

@@ -198,6 +198,7 @@ class OnlyCore(importlib.abc.MetaPathFinder):
                 or fullname.split('.')[0] in sys.stdlib_module_names), fullname
 sys.meta_path.insert(0, OnlyCore())
 from vv_agent.kernel import _output_phase as phase, _event_validation, _message_codec
+from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._records import Record, InboxItem, make_record
 from vv_agent.kernel._reducer import Fold
 records = [Record(**value) for value in data['records']]
@@ -249,14 +250,14 @@ for target in boundaries or [terminal]:
             response = observation['error']
         elif isinstance(request, phase.SerializeOutput):
             response = phase.serializable_output(request.value)
-        elif isinstance(request, phase.CreateBoundary):
+        elif isinstance(request, CreateBoundary):
             response = make_record('boundary_recorded', session_id='s', turn_id='s/turn/initial', payload={
                 'stage': request.stage, 'boundary_id': request.identity, 'source_operation_id': None,
                 'source_digest': None, 'data': request.data,
             })
             assert response.encode() == expected[0].encode()
             proposed.append(response)
-        elif isinstance(request, phase.PlanModel):
+        elif isinstance(request, PlanModel):
             saved = expected[1]
             assert request.oid == saved.operation_id and request.purpose == 'output_repair'
             expected_request = saved.payload['request']
@@ -265,7 +266,7 @@ for target in boundaries or [terminal]:
             assert request.request == expected_request and request.request['tools'] == []
             response = saved
             proposed.append(saved)
-        elif isinstance(request, phase.CommitRecords):
+        elif isinstance(request, CommitRecords):
             assert [r.encode() for r in request.records] == [r.encode() for r in expected]
         else:
             raise AssertionError(type(request).__name__)
@@ -299,10 +300,10 @@ if data['settings']['has_output_type'] and len(boundaries) == 2:
             else: raise AssertionError('orphan output repair boundary accepted')
         else:
             request = steps.send(True)
-            assert isinstance(request, phase.CreateBoundary) and request.identity == 'final'
+            assert isinstance(request, CreateBoundary) and request.identity == 'final'
             assert request.data == {'status': 'failed', 'reason': 'output_validation_failed',
                 'value': 'output_validation_failed: repair_provider_error', 'partial_output': 'invalid'}
-            assert isinstance(steps.send(boundaries[1]), phase.CommitRecords)
+            assert isinstance(steps.send(boundaries[1]), CommitRecords)
             try: steps.send(None)
             except StopIteration as done:
                 assert done.value == ('failed', 'output_validation_failed', 'output_validation_failed: repair_provider_error')
