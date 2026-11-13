@@ -157,32 +157,47 @@ class FaultyStore:
 
 
 class ScheduledLeaseKeeper:
-    """Schedule the real heartbeat.poll; never create a heartbeat thread."""
+    """Run the SDK heartbeat step in explicit seeded turns, without a thread.
+
+    SimWorld has no timed queue: start queues one turn; later turns remain
+    explicit. Self-requeueing here would prevent the ready queue from draining.
+    """
 
     def __init__(self, world, participant):
         self.world, self.participant = world, participant
 
     def start(self, heartbeat):
         self.poll(heartbeat)
-        if not heartbeat.stop.is_set():
+        if not heartbeat.stop.is_set() and not heartbeat.lost:
             self.world.enqueue(f"renew/{self.participant}", lambda: self.poll(heartbeat))
 
     def poll(self, heartbeat):
+        if heartbeat.stop.is_set() and not heartbeat.lost:
+            self.close(heartbeat)
+            return
         try:
-            heartbeat.poll(self.world.connection(f"{self.participant}/heartbeat"))
-        except LeaseLost as exc:
+            store = self.world.connection(f"{self.participant}/heartbeat")
+            transient_errors = (TimeoutError,)
+            if isinstance(store, PostgresStore):
+                from psycopg import OperationalError
+
+                transient_errors = (TimeoutError, OperationalError)
+            heartbeat.heartbeat_step(store, transient_errors)
+        except Exception as exc:
             heartbeat.heartbeat_failed(exc)
+            self.close(heartbeat)
             if hasattr(heartbeat, "token"):
                 cancel_if_lost(heartbeat)
-            if not isinstance(exc, HeartbeatStopped):
+            # Preserve the simulator's explicit stale-owner fault observation.
+            if isinstance(exc, LeaseLost) and not isinstance(exc, HeartbeatStopped):
                 raise
-        finally:
-            heartbeat.heartbeat_finished()
+        else:
             if heartbeat.stop.is_set() or heartbeat.lost:
                 self.close(heartbeat)
 
     def close(self, heartbeat):
         self.world.tasks.pop(f"renew/{self.participant}", None)
+        heartbeat.heartbeat_finished()
 
     def is_alive(self, heartbeat):
         return False

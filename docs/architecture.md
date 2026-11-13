@@ -171,10 +171,13 @@ scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
 resolve to the single core exception class. Invocation uses the real provider
 outcomes; no duplicate outcome or cancellation-error type is introduced.
 
-ScheduledLeaseKeeper shares the core normal-stop/loss classification and removes
-stopped renewal work. Normal stopping does not imply lease loss or cancellation.
-Its waiting and transient/error-budget scheduling still differ from the SDK;
-normal-stop parity alone does not establish complete scheduling equivalence.
+ScheduledLeaseKeeper runs the same core heartbeat step and transient-error budget
+as the SDK. Recoverable renewal errors retain the last confirmed lease without
+publishing readiness; terminal errors publish completion and cancel a scoped
+token. Normal stop drains queued renewal work without implying lease loss.
+Renewal turns are explicitly scheduled by seeded scenarios. SimWorld has no timed
+queue, and a synchronous factory readiness wait does not pump queued retries;
+recurring scheduling and factory-wait equivalence are not established.
 
 Execution statuses, tasks and child configuration, usage accounting, cycle/model
 call records and final results are owned by `kernel/_execution_values.py`, together

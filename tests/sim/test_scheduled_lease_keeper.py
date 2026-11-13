@@ -1,4 +1,4 @@
-"""Scheduled normal-stop classification against the actual SDK/core lease rules."""
+"""Seeded renewal, error-budget and stop checks against the actual SDK loop."""
 
 import sqlite3
 
@@ -11,9 +11,11 @@ from vv_agent.session.store import LeaseLost
 from .world import SimWorld
 
 
-def make_scope(world):
+def make_scope(world, *, ttl_ms=None):
     world.create()
     runtime = world.runtime("s", "owner")
+    if ttl_ms is not None:
+        runtime.ttl_ms = ttl_ms
     store = world.connection("owner")
     lease = store.acquire("s", owner="owner", ttl_ms=runtime.ttl_ms)
     assert lease is not None
@@ -181,21 +183,129 @@ def test_enqueue_failure_is_not_swallowed_or_reclassified(tmp_path, monkeypatch)
         assert scope.heartbeat_error is None and not world.tasks
 
 
-def test_blocked_renew_then_stop_drains_existing_retry(tmp_path, monkeypatch):
-    with SimWorld(tmp_path / "blocked.sqlite") as world:
+@pytest.mark.parametrize("adapter", ["sim", "sdk"])
+def test_seeded_real_sqlite_busy_is_terminal_like_sdk(tmp_path, adapter):
+    with SimWorld(tmp_path / f"blocked-{adapter}.sqlite", seed=17) as world:
         scope = make_scope(world)
+        keeper = world.keepers["owner"]
+        blocker = world.connection("blocker")
+        with blocker.atomic():
+            blocker._rows("UPDATE sk_session SET drive_retry_at_ms=1 WHERE session_id='s'")
+            if adapter == "sim":
+                world.enqueue("renew/owner", lambda: keeper.poll(scope))
+                assert world.step()
+            else:
+                scope._heartbeat()
+        assert isinstance(scope.heartbeat_error, sqlite3.OperationalError)
+        assert "locked" in str(scope.heartbeat_error)
+        assert scope.lost and scope.token.cancelled and scope.token.reason == "lease_lost"
+        assert scope.ready.is_set() and not scope.successful_ready
+        assert not world.tasks and not world.step()
+        assert not any("blocked" in event for event in world.events)
+
+
+def renewal_case(path, monkeypatch, *, adapter, seed, mode):
+    """Run SDK waits or explicit seeded turns against identical real SQLite renewals."""
+    with SimWorld(path, seed=seed) as world:
+        fault = world.choices.choose("renewal/fault", ["before_sql", "after_sql_commit"])
+        scope = make_scope(world, ttl_ms=2000)
+        keeper = world.keepers["owner"]
         store = world.connection("owner/heartbeat")
-        calls = []
+        renew = store.renew
+        failure = TimeoutError("renewal response unavailable")
+        calls, observations, finished = [], [], []
 
-        def busy(*args, **kwargs):
-            calls.append(1)
-            raise sqlite3.OperationalError("database is locked")
+        def snapshot():
+            row = world.connection("observer")._one(
+                "SELECT lease_owner,lease_epoch,lease_until_ms FROM sk_session WHERE session_id='s'"
+            )
+            return outcome(scope) | {
+                "time": world.clock.now_ms(),
+                "lease_until": scope.lease.expires_at_ms,
+                "deadline": scope.expires_deadline,
+                "sql_lease": row,
+                "original_error": scope.heartbeat_error is failure,
+            }
 
-        monkeypatch.setattr(store, "renew", busy)
-        world.enqueue("renew/owner", lambda: world.keepers["owner"].poll(scope))
-        assert world.step()
-        assert {"blocked": "renew/owner"} in world.events and "renew/owner" in world.tasks
-        scope.request_stop()
-        assert world.step()
-        assert calls == [1] and not world.tasks and not world.step()
-        assert not scope.lost and not scope.token.cancelled and scope.heartbeat_error is None
+        def injected(lease, *, ttl_ms):
+            calls.append(world.clock.now_ms())
+            if mode == "recover" and len(calls) > 1:
+                return renew(lease, ttl_ms=ttl_ms)
+            if fault == "after_sql_commit":
+                renew(lease, ttl_ms=ttl_ms)  # Lose an actual committed renewal response.
+            raise failure
+
+        real_step, real_finished = scope.heartbeat_step, scope.heartbeat_finished
+
+        def step(connection, transient_errors):
+            assert transient_errors == (TimeoutError,)
+            try:
+                return real_step(connection, transient_errors)
+            finally:
+                observations.append(snapshot())
+
+        def finish():
+            real_finished()
+            finished.append(snapshot())
+
+        def wait(seconds):
+            assert seconds == scope.heartbeat_seconds
+            if mode == "recover" and scope.successful_ready:
+                scope.request_stop()
+                return True
+            if mode == "stop":
+                world.clock.sleep(scope.ttl_ms / 1000)
+                scope.request_stop()
+                return True
+            world.clock.sleep(seconds)
+            return False
+
+        monkeypatch.setattr(store, "renew", injected)
+        monkeypatch.setattr(scope, "heartbeat_step", step)
+        monkeypatch.setattr(scope, "heartbeat_finished", finish)
+        if adapter == "sdk":
+            monkeypatch.setattr(scope.stop, "wait", wait)
+            scope._heartbeat()  # Actual SDK loop, with controlled wait time; no thread.
+        else:
+            scope.start()
+            for _ in range(10):
+                if scope.lost:
+                    break
+                if wait(scope.heartbeat_seconds):
+                    if scope.successful_ready:
+                        scope.close()
+                    else:
+                        assert world.step()  # A queued poll observes normal stop.
+                    break
+                assert world.step()
+                if not scope.lost and not scope.successful_ready:
+                    # SimWorld has no timers. Later renewal turns are explicit.
+                    world.enqueue("renew/owner", lambda: keeper.poll(scope))
+            else:
+                raise AssertionError(f"seed {seed}: renewal schedule did not terminate")
+        assert not world.tasks and not world.step()
+        assert not observations[0]["ready"] and not observations[0]["successful_ready"]
+        assert observations[0]["original_error"] and not observations[0]["lost"]
+        assert len(finished) == 1
+        final = snapshot()
+        if mode == "recover":
+            assert len(calls) == 2 and final["successful_ready"] and not final["lost"]
+            assert final["error"] is None and final["lease_until"] > observations[0]["lease_until"]
+        elif mode == "expire":
+            assert final["lost"] and final["original_error"] and final["reason"] == "lease_lost"
+            assert world.clock.monotonic() < scope.expires_deadline
+            assert final["sql_lease"][2] > world.clock.now_ms()
+            assert len(observations) == len(calls) + 1  # Budget rejects before another SQL attempt.
+        else:
+            assert final["original_error"] and not final["lost"] and not final["cancelled"]
+        return {"fault": fault, "calls": calls, "steps": observations, "finished": finished, "final": final}
+
+
+@pytest.mark.parametrize("seed", [1, 17])
+@pytest.mark.parametrize("mode", ["recover", "expire", "stop"])
+def test_seeded_transient_renewal_matches_actual_sdk_loop(tmp_path, monkeypatch, seed, mode):
+    with monkeypatch.context() as patch:
+        expected = renewal_case(tmp_path / "sdk.sqlite", patch, adapter="sdk", seed=seed, mode=mode)
+    with monkeypatch.context() as patch:
+        observed = renewal_case(tmp_path / "sim.sqlite", patch, adapter="sim", seed=seed, mode=mode)
+    assert observed == expected, f"seed {seed}, {mode}"
