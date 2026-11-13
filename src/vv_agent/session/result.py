@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.kernel._cycles import project_cycles, turn_result_prefix
 from vv_agent.kernel._usage import project_model_usage
 from vv_agent.output_validation import coerce_output_type
 from vv_agent.result import RunResult
@@ -13,10 +14,7 @@ from vv_agent.types import (
     AgentResult,
     AgentStatus,
     CompletionReason,
-    CycleRecord,
     Message,
-    ToolCall,
-    ToolExecutionResult,
 )
 
 from .context import project_context
@@ -38,19 +36,8 @@ def project_result(
     state, records, _ = snapshot if snapshot is not None else store.read_state(session_id)
     turn = state.turns[turn_id]
     task = turn.start._task()
-    terminal = next((r.record for r in reversed(records) if r.record.kind == "turn_ended" and r.record.turn_id == turn_id), None)
-    through = next((i + 1 for i, r in enumerate(records) if r.record is terminal), len(records))
-    records = records[:through]
+    terminal, records = turn_result_prefix(records, turn_id)
     messages = project_context(records, state, _fold_factory=_fold_factory_for(store))
-    cycles = []
-    plan_seqs = {r.record.record_id: r.seq for r in records}
-    compaction_seqs = [r.seq for r in records if r.record.kind == "context_compacted" and r.record.turn_id == turn_id]
-    previous_primary_seq = plan_seqs[turn.start.record_id]
-    tools_by_model = {}
-    for child in state.operations.values():
-        dependencies = child.attempts[1].plan._payload["dependencies"]
-        if child.kind != "model" and len(dependencies) == 1:
-            tools_by_model.setdefault(dependencies[0], []).append(child)
     shared = deepcopy(task.initial_shared_state)
     for stored in records:
         r = stored.record
@@ -63,33 +50,7 @@ def project_result(
         if r._payload["context"] == "normal" and r._payload["shared_state"] is not None:
             shared = copy_json(r._payload["shared_state"])
     usage, ledger = project_model_usage(state, turn_id)
-    for call in usage.model_calls:
-        oid, number = call.operation_id, call.attempt
-        op = state.operations[oid]
-        attempt = op.attempts[number]
-        purpose = attempt.plan._payload["purpose"]
-        cycle = call.cycle_index
-        error_code = call.error_code
-        if purpose != "primary" or op.selected_attempt != number or not attempt.result or error_code:
-            continue
-        response = attempt.result.payload["result"]
-        tool_results = []
-        for child in tools_by_model.get(oid, ()):
-            child_attempt = child.attempts[child.selected_attempt or max(child.attempts)]
-            if child_attempt.result:
-                tool_results.append(ToolExecutionResult.from_dict(child_attempt.result.payload["result"]))
-            elif child_attempt.wait and "interaction_result" in child_attempt.wait:
-                tool_results.append(ToolExecutionResult.from_dict(deepcopy(child_attempt.wait["interaction_result"])))
-        cycles.append(
-            CycleRecord(
-                cycle,
-                response.get("content") or "",
-                [ToolCall.from_dict(c) for c in response.get("tool_calls", [])],
-                tool_results,
-                memory_compacted=any(previous_primary_seq < seq < plan_seqs[attempt.plan.record_id] for seq in compaction_seqs),
-            )
-        )
-        previous_primary_seq = plan_seqs[attempt.plan.record_id]
+    cycles = project_cycles(state, records, turn_id, usage)
     status, reason, output, error, budget_usage = AgentStatus.RUNNING, None, None, None, None
     completion_tool_name, wait_reason, exhaustion = None, None, None
     for (tid, stage, _), r in state.boundaries.items():

@@ -193,6 +193,11 @@ validation and UTF-16-sorted state updates use stdlib and core values only.
 `runtime/lifecycle.py` exports those same objects and retains the hook protocol
 and `AfterCycleHookManager`, including callback execution and decision composition.
 The reducer validates after-cycle and budget boundaries through core values.
+`kernel/_cycles.py` owns selected-cycle projection, shared by SDK results and
+`kernel/_after_cycle.py`. The after-cycle phase builds snapshots and records
+hook decisions; the SDK invokes user hooks and supplies bound shared state.
+Before hooks, the SDK also projects retained events to enforce their descriptor
+bounds. It does not rebuild the full SDK result merely to read cycles and usage.
 `kernel/_state.py`, `kernel/_context.py` and `kernel/_reducer.py` own execution
 state, aligned context projection, input protection and all record transitions.
 The fold receives settings normalization and message-counting callables. It
