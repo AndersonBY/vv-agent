@@ -82,6 +82,22 @@ old-version session.
 
 ## Version notes
 
+### 0.36.0 — Unreleased
+
+The core and concrete session stores move under `vv_agent.kernel`; the existing
+`vv_agent.session` exports and facades plus public SDK entry points remain.
+Record schema 1, inbox schema 3, SQL layouts, canonical bytes, IDs, and digests
+are unchanged. Existing sessions need no migration, drain, decoder selection,
+or byte rewrite.
+
+Contract 39 narrows failed closed-session diagnostics to
+`invalid session schema`. This is a public diagnostic change, but accepted and
+rejected values, validation order, and execution behavior do not change. Do not
+parse complete `jsonschema.ValidationError` text, paths, or schema dumps. P1 adds
+no backend DDL, `Principal`, or provider work; upgrade the dependency and rely
+on the stable invalid-schema text. Contract adoption is pending and the
+canonical lock remains 38.0.0. See the [release notes](releases/0.36.0.md).
+
 ### 0.35.0 — 2026-11-12
 
 Compared with 0.34.1, the SQL core can yield declared child or provider

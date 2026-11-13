@@ -10,6 +10,11 @@ vv-agent ships no Celery or Redis code and no integration extra. The Celery
 example below lives in the host. A single-process host can use SQLite instead
 of PostgreSQL.
 
+The core relocation to `vv_agent.kernel` does not require host SQL or API
+changes. Contract 39 changes a failed closed-session diagnostic to exactly
+`invalid session schema`; stored formats and canonical bytes remain unchanged.
+Do not parse complete `jsonschema.ValidationError` text or schema dumps.
+
 A few terms used throughout:
 
 - A session's inbox holds inputs waiting to be applied: user messages, replies,

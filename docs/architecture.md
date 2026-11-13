@@ -169,9 +169,9 @@ memory package. It stays outside the standard-library-only kernel.
 The ordinary token counter retains its production model dispatch, incremental
 cache, formatting and per-call fallback behavior. CoreFold's synchronous
 convenience entry requires a CPU-only counter; the default SDK drives
-`extend_steps` outside core. This boundary does not complete W9 or P1; model
-execution and other SDK effects remain outside core, and later W9 public
-surfaces and staging obligations remain open.
+`extend_steps` outside core. Model execution and other SDK effects remain on
+the host side. Public surfaces have not converged on `LocalWorker`; that
+convergence is deferred to P3.
 
 Lease ownership, renewal publication, expiry checks, commit/poll latch ordering,
 heartbeat error-budget decisions and control matching live in

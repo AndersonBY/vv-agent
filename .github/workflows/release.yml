@@ -74,8 +74,11 @@ jobs:
       - name: Require centrally verified contract adoption
         run: python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Run full tests
+        run: TMPDIR=/tmp uv run pytest -k 'not simulation_smoke'
+
+      - name: Run simulation smoke
+        run: TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
 
       - name: Verify formatting
         run: uv run ruff format --check .
