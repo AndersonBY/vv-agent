@@ -5,10 +5,10 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import replace
 
+from vv_agent.kernel._sql import SQLStore
 from vv_agent.tracing import Span, TraceProcessor
 
 from .records import copy_json, digest
-from .sql import SQLStore
 from .store import SessionStore, StoredRecord
 
 

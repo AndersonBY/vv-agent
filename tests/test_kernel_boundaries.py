@@ -177,3 +177,61 @@ def test_repository_gate_cli_enforces_kernel_rules(tmp_path):
     result = subprocess.run([sys.executable, str(script)], cwd=tmp_path, capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 1
     assert "src/vv_agent/kernel/unimported.py:2: forbidden kernel effect call: socket.socket" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "filename,text",
+    [
+        (
+            "_sqlite.py",
+            "import sqlite3\nfrom threading import RLock\ndef connect(path):\n    return sqlite3.connect(path), RLock()\n",
+        ),
+        (
+            "_postgres.py",
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from psycopg import Connection\n"
+            "def connect(dsn):\n    import psycopg\n    from threading import RLock\n"
+            "    from psycopg.conninfo import make_conninfo\n    return psycopg.connect(make_conninfo(dsn)), RLock()\n",
+        ),
+    ],
+)
+def test_exact_storage_owners_allow_only_their_connection_and_latch_calls(tmp_path, filename, text):
+    source(tmp_path, text, filename)
+    assert check_kernel_boundaries(tmp_path) == []
+
+
+@pytest.mark.parametrize("filename", ["_sqlite.py", "_postgres.py"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "import threading\ndef run():\n    return threading.Thread()\n",
+        "import time\ndef run():\n    return time.monotonic()\n",
+        "import socket\ndef run():\n    return socket.socket()\n",
+        "import sqlite3\nconnection = sqlite3.connect(':memory:')\n",
+        "import sqlite3\ndef run(connection=sqlite3.connect(':memory:')):\n    pass\n",
+        "import psycopg\n",
+        "from vv_agent.session.reducer import Fold\n",
+    ],
+)
+def test_storage_exception_does_not_admit_threads_clocks_network_eager_io_or_sdk(tmp_path, filename, text):
+    source(tmp_path, text, filename)
+    assert check_kernel_boundaries(tmp_path)
+
+
+def test_postgres_driver_permission_does_not_extend_to_sqlite_or_nested_names(tmp_path):
+    for name in ("_sqlite.py", "nested/_postgres.py"):
+        source(tmp_path, "def connect():\n    import psycopg\n    return psycopg.connect('')\n", name)
+    assert len(check_kernel_boundaries(tmp_path)) == 4
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from psycopg import connect",
+        "from psycopg import Connection, connect",
+        "import psycopg",
+        "from psycopg.rows import tuple_row",
+    ],
+)
+def test_storage_type_only_exception_is_exact_connection_type(tmp_path, statement):
+    source(tmp_path, "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    " + statement + "\n", "_postgres.py")
+    assert check_kernel_boundaries(tmp_path)

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._sql import SQLStore
 from vv_agent.tools.outcomes import validate_definitive_result
 from vv_agent.types import AgentTask, Message, ToolDirective, ToolExecutionResult
 
@@ -29,7 +30,7 @@ from .providers import (
 from .records import InboxItem, Record, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, _fold_factory_for
 from .runtime import Runtime, RuntimeNotReady, budget, model_usage
-from .sql import SQLSessionTx, SQLStore
+from .sql import SQLSessionTx
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
 

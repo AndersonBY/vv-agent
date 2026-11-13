@@ -201,9 +201,13 @@ and evidence; the outer adapter supplies values, not an acceptance decision.
 `MemoryManager` and replay share the high-level microcompaction planner.
 
 `kernel/_store.py` owns store protocols, receipts, leases and errors;
-`kernel/_sql.py` owns the shared SQL transaction and scheduling rules. Concrete
-SQLite/PostgreSQL connections stay in `session/`. SQL prefixes, forked folds and
-the driver use the same fold factory. The outer context adapter also uses that
+`kernel/_sql.py` owns the shared SQL transaction and scheduling rules.
+`kernel/_sqlite.py` and `kernel/_postgres.py` own the concrete connections, DDL
+and transactions. These two adapters are the explicit storage-I/O exception;
+PostgreSQL imports its driver lazily. Core stores require a fold factory, and
+SQLite also requires a Clock. Thin `session/` subclasses provide the existing
+SDK defaults and public constructors. SQL prefixes, forked folds and the driver
+use the same fold factory. The outer context adapter also uses that
 factory when a historical prefix must be rebuilt. Replacing a store's factory
 clears both validated-prefix caches.
 

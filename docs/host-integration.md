@@ -63,8 +63,9 @@ Rules for host writes:
 ### Schema
 
 `PostgresStore.install_schema()` runs the current DDL, which is the `DDL`
-string in `vv_agent/session/postgres.py`. A host that manages its own DDL must
-copy that literal from the installed release. SQLite files carry
+string owned by `src/vv_agent/kernel/_postgres.py` and exported by
+`src/vv_agent/session/postgres.py`. A host that manages its own DDL must copy
+that literal from the installed release. SQLite files carry
 `PRAGMA user_version` 3, and the store refuses to open any other version.
 
 vv-agent has no schema migrator. Finish old sessions with the release that

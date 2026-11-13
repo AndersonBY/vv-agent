@@ -12,6 +12,11 @@ for older versions and no in-place migrations. When a release bumps the record
 or inbox schema, the new runtime rejects rows written by the old one with
 `RecordError`. That covers finished sessions too, not only running ones.
 
+The concrete SQLite/PostgreSQL adapters live under `vv_agent.kernel`; the
+`vv_agent.session` store imports retain their SDK constructors and defaults.
+That internal move preserves the DDL, stored bytes and version checks and
+requires no database migration.
+
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
 call that already has a receipt, and prove which inputs were applied. Keeping

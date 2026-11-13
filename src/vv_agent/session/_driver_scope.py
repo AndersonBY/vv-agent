@@ -9,9 +9,9 @@ from typing import cast
 
 from vv_agent.kernel._lease_scope import HeartbeatStopped as HeartbeatStopped
 from vv_agent.kernel._lease_scope import LatchEntry, LeaseOwnership, apply_controls, cancel_if_lost
+from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.runtime.cancellation import CancellationToken
 
-from .postgres import PostgresStore
 from .providers import Outcome
 from .runtime import Runtime
 from .store import Lease, SessionStore

@@ -59,8 +59,9 @@ def check_kernel_boundaries(root: Path) -> list[str]:
     conservatively rejected, including pure helpers within those families.
     No scope/control-flow inference, reflection, re-export tracing, unlisted
     API effect inference or arbitrary execution proof. This is a maintenance
-    gate, not a sandbox. There is no core store yet, so no I/O or lazy
-    third-party driver exception exists.
+    gate, not a sandbox. Only the two concrete storage adapters may open
+    connections/create synchronous RLocks; PostgreSQL driver imports must be
+    function-local or type-only. Other core modules retain the pure boundary.
     """
     root = root.resolve()
     core = "vv_agent.kernel"
@@ -84,6 +85,7 @@ def check_kernel_boundaries(root: Path) -> list[str]:
         "http.server",
         "asyncio",
         "sqlite3",
+        "psycopg",
     )
     effect_calls = {
         "open",
@@ -106,6 +108,16 @@ def check_kernel_boundaries(root: Path) -> list[str]:
         "builtins.eval",
         "builtins.exec",
     }
+    storage_calls = {
+        "src/vv_agent/kernel/_sqlite.py": {"sqlite3.connect", "threading.RLock"},
+        "src/vv_agent/kernel/_postgres.py": {
+            "threading.RLock",
+            "psycopg.connect",
+            "psycopg.conninfo.make_conninfo",
+            "psycopg.conninfo.conninfo_to_dict",
+        },
+    }
+    postgres_imports = {"psycopg", "psycopg.conninfo", "psycopg.rows", "psycopg.pq"}
     errors = []
     for file in sorted((root / "src/vv_agent/kernel").rglob("*.py")):
         path = file.relative_to(root).as_posix()
@@ -118,6 +130,22 @@ def check_kernel_boundaries(root: Path) -> list[str]:
             errors.append(f"{path}: cannot parse kernel Python: {exc}")
             continue
         package = ".".join(file.parent.relative_to(root / "src").parts)
+        parents = {child: node for node in ast.walk(module) for child in ast.iter_child_nodes(node)}
+
+        def in_function(node: ast.AST, parents=parents) -> bool:
+            while node in parents:
+                child, node = node, parents[node]
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and child in node.body:
+                    return True
+            return False
+
+        def type_only(node: ast.AST, parents=parents) -> bool:
+            while node in parents:
+                child, node = node, parents[node]
+                if isinstance(node, ast.If) and name(node.test) == "typing.TYPE_CHECKING" and child in node.body:
+                    return True
+            return False
+
         bindings: dict[str, str] = {}
 
         def name(node: ast.AST, bindings=bindings) -> str:
@@ -129,6 +157,20 @@ def check_kernel_boundaries(root: Path) -> list[str]:
 
         def check_import(target: str, node: ast.Import | ast.ImportFrom, path=path) -> None:
             if target == core or target.startswith(core + "."):
+                return
+            if (
+                path == "src/vv_agent/kernel/_postgres.py"
+                and target in postgres_imports
+                and (
+                    in_function(node)
+                    or (
+                        isinstance(node, ast.ImportFrom)
+                        and target == "psycopg"
+                        and all(alias.name == "Connection" for alias in node.names)
+                        and type_only(node)
+                    )
+                )
+            ):
                 return
             if target.split(".")[0] not in sys.stdlib_module_names:
                 errors.append(f"{path}:{node.lineno}: forbidden kernel import: {target}")
@@ -155,9 +197,10 @@ def check_kernel_boundaries(root: Path) -> list[str]:
                         bindings[assigned.id] = target
             elif isinstance(node, ast.Call):
                 target = name(node.func)
-                if target in effect_calls or any(
-                    target == family or target.startswith(family + ".") for family in effect_families
-                ):
+                if (
+                    target in effect_calls
+                    or any(target == family or target.startswith(family + ".") for family in effect_families)
+                ) and not (target in storage_calls.get(path, set()) and in_function(node)):
                     errors.append(f"{path}:{node.lineno}: forbidden kernel effect call: {target}")
     return sorted(set(errors))
 
