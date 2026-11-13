@@ -208,6 +208,13 @@ still recomputes compaction eligibility, prompts, replacements, protected tails
 and evidence; the outer adapter supplies values, not an acceptance decision.
 `MemoryManager` and replay share the high-level microcompaction planner.
 
+`kernel/_driver.py` owns the driver's retained state, record construction and
+lease-fenced commit algorithm. The SDK driver inherits those same methods;
+store, fold, lease scope and watermark are not mirrored in another driver.
+Explicit clock, fold and observation callbacks preserve transaction timing,
+while the SDK owns cost-meter reads, hooks and log emission. Plan, dispatch,
+input and recovery orchestration remain the next driver integration boundary.
+
 `kernel/_store.py` owns store protocols, receipts, leases and errors;
 `kernel/_sql.py` owns the shared SQL transaction and scheduling rules.
 `kernel/_sqlite.py` and `kernel/_postgres.py` own the concrete connections, DDL

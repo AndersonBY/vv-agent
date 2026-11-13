@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.tools.outcomes import validate_definitive_result
 from vv_agent.types import AgentTask, Message, ToolDirective, ToolExecutionResult
@@ -30,8 +31,7 @@ from .providers import (
 from .records import InboxItem, Record, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, _fold_factory_for
 from .runtime import Runtime, RuntimeNotReady, budget, model_usage
-from .sql import SQLSessionTx
-from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
+from .store import Lease, LeaseLost, SequenceConflict, SessionStore, StoredRecord
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
 
 MODEL_REJECTION_BACKOFF_SECONDS = 2
@@ -46,196 +46,41 @@ FACTORY_HEARTBEAT_SECONDS = 0.25
 logger = logging.getLogger(__name__)
 
 
-class _Driver:
+class _Driver(CoreDriver):
+    scope: _Scope
+
     def __init__(self, store: SessionStore, sid: str, runtime: Runtime, scope: _Scope, *, one_turn: bool = False):
-        self.store, self.sid, self.runtime, self.scope = store, sid, runtime, scope
-        self.one_turn = one_turn
-        self.load_state()
-        self.polled: set[tuple[str, int]] = set()
-        self.active_since = self.runtime.clock.monotonic_ns()
-        self.active_tid: str | None = None
+        self.runtime, self.one_turn = runtime, one_turn
 
-    def load_state(self) -> None:
-        self.state, self.records, self.watermark = read_state(self.store, self.sid)
-        self.fold = _fold_factory_for(self.store)()
-        self.fold.state = self.state
-        self.fold.history = list(self.records)
-        self.fold.seen = {r.record.record_id: r.record.encode() for r in self.records}
-        self.fold.consumed = {key: InboxItem(**r._payload["input"]) for key, r in self.state.applied_inputs.items()}
-
-    def refresh(self) -> None:
-        page = self.store.read(self.sid, after_seq=self.records[-1].seq)
-        head = page.head_seq
-        if head < self.records[-1].seq:
-            self.load_state()
-        else:
-            self.watermark = page.inbox_seq
-            self.extend(page.records)
-            while self.records[-1].seq < head:
-                if not page.records:
-                    raise Conflict("log sequence gap")
-                page = self.store.read(self.sid, after_seq=self.records[-1].seq, through_seq=head)
-                self.extend(page.records)
-        self.bind_turn()
-
-    def extend(self, records: tuple[StoredRecord, ...]) -> None:
-        if not records:
-            return
-        if any(r.seq != self.records[-1].seq + index for index, r in enumerate(records, 1)):
-            raise Conflict("log sequence gap")
-        self.state = self.fold.extend(
-            (r.record for r in records),
-            consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
-        )
-        self.records += records
-
-    def bind_turn(self) -> None:
-        tid = self.state.active_turn_id
-        if tid != self.active_tid:
-            self.active_since = self.runtime.clock.monotonic_ns()
-            self.active_tid = tid
-        self.scope.turn_id = tid
-        self.scope.generation = self.state.turns[tid].start._payload["generation"] if tid else None
-
-    def record(self, kind: str, payload: dict[str, Any], plan: Record | None = None, *, tid: str | None = None) -> Record:
-        return make_record(
-            kind,
-            session_id=self.sid,
-            turn_id=plan.turn_id if plan else tid or self.state.active_turn_id,
-            operation_id=plan.operation_id if plan else None,
-            attempt=plan.attempt if plan else None,
-            payload=payload,
-        )
-
-    def commit(
-        self,
-        records: list[Record],
-        consumed: tuple[str, ...] = (),
-        *,
-        guarded: bool = False,
-        prepare: Callable[[SessionTx], list[Record]] | None = None,
-    ) -> None:
-        tid = self.state.active_turn_id
-        if tid is not None:
-            meter = f"active/{tid}/{self.scope.lease.epoch}"
+        def observe_cost() -> dict[str, Any] | None:
             cost = None
-            if self.runtime.config.host_cost_meter is not None:
+            if runtime.config.host_cost_meter is not None:
                 with suppress(Exception):
-                    observed = self.runtime.config.host_cost_meter.read()
+                    observed = runtime.config.host_cost_meter.read()
                     cost = observed.to_dict() if observed else None
-            records = [
-                self.record(
-                    "usage_observed",
-                    {
-                        "meter_id": meter,
-                        "observation": self.state.usage_observations.get(meter, 0) + 1,
-                        "mode": "cumulative",
-                        "source": "kernel-active-scope",
-                        "usage": {
-                            "elapsed_ms": (self.runtime.clock.monotonic_ns() - self.active_since) // 1000000,
-                            "host_cost": cost,
-                        },
-                    },
-                ),
-                *records,
-            ]
-        timings: list[tuple[str, float, str, str | None]] = []
-        atomic_start = self.runtime.clock.monotonic_ns()
-        atomic_error = None
+            return cost
 
-        @contextmanager
-        def phase(name: str):
-            begin = self.runtime.clock.monotonic_ns()
-            error = None
-            try:
-                yield
-            except BaseException as exc:
-                error = type(exc).__name__
-                raise
-            finally:
-                timings.append((name, (self.runtime.clock.monotonic_ns() - begin) / 1_000_000, "error" if error else "ok", error))
+        def emit_phase(duration: float, fields: dict[str, Any]) -> None:
+            logger.log(
+                logging.WARNING if duration >= runtime.ttl_ms / 2 else logging.DEBUG,
+                "session transaction phase",
+                extra=fields,
+            )
 
-        try:
-            with ExitStack() as latch, self.store.atomic() as tx:
-                if prepare is not None:
-                    with phase("prepare"):
-                        records.extend(prepare(tx))
-                with phase("before_commit"):
-                    self.runtime.hook("before_commit", records[-1] if records else None)
-                # SQL append calls this only after encoding and immutable history
-                # preparation. Keep the latch through the outer atomic exit.
-                if isinstance(tx, SQLSessionTx):
-                    tx._lease_guard = lambda: latch.enter_context(self.scope.committing())
-                with phase("append"):
-                    receipt = tx.append(
-                        self.sid,
-                        lease=self.scope.lease if isinstance(tx, SQLSessionTx) else latch.enter_context(self.scope.committing()),
-                        expected_seq=self.records[-1].seq,
-                        commit_id=digest({"record_ids": [r.record_id for r in records], "consumed": list(consumed)}),
-                        records=tuple(records),
-                        consume_input_ids=consumed,
-                        expected_inbox_seq=self.watermark if guarded else None,
-                    )
-        except BaseException as exc:
-            atomic_error = type(exc).__name__
-            raise
-        finally:
-            atomic_ms = (self.runtime.clock.monotonic_ns() - atomic_start) / 1_000_000
-            source = next((r for r in reversed(records) if r.operation_id), None)
-            request_digest = source._payload.get("request_digest") if source else None
-            if source and source.operation_id in self.state.operations:
-                operation = self.state.operations[source.operation_id]
-                attempt = operation.attempts.get(source.attempt or 1)
-                if attempt is not None:
-                    request_digest = attempt.execution_plan._payload["request_digest"]
-            for name, duration, outcome, error in timings:
-                logger.log(
-                    logging.WARNING if duration >= self.runtime.ttl_ms / 2 else logging.DEBUG,
-                    "session transaction phase",
-                    extra={
-                        "session_id": self.sid,
-                        "turn_id": tid,
-                        "operation_id": source.operation_id if source else None,
-                        "request_digest": request_digest,
-                        "epoch": self.scope.lease.epoch,
-                        "phase": name,
-                        "callback_ms": duration if name != "append" else 0,
-                        "append_ms": duration if name == "append" else 0,
-                        "kernel_atomic_ms": atomic_ms,
-                        "outcome": "error" if atomic_error else outcome,
-                        "exception_type": error or atomic_error,
-                    },
-                )
-        self.runtime.hook("after_commit", records[-1] if records else None)
-        if receipt.replayed:
-            self.refresh()
-        else:
-            self.extend(receipt.records)
-            self.watermark = receipt.inbox_seq
-            self.bind_turn()
-
-    def boundary(self, stage: str, identity: str) -> Record | None:
-        return self.state.boundaries.get((self.state.active_turn_id or "", stage, identity))
-
-    def boundary_record(
-        self,
-        stage: str,
-        identity: str,
-        data: dict[str, Any],
-        *,
-        source_operation_id: str | None = None,
-        source_digest: str | None = None,
-    ) -> Record:
-        return self.record(
-            "boundary_recorded",
-            {
-                "stage": stage,
-                "boundary_id": identity,
-                "source_operation_id": source_operation_id,
-                "source_digest": source_digest,
-                "data": data,
-            },
+        super().__init__(
+            store,
+            sid,
+            scope,
+            fold_factory=lambda: _fold_factory_for(store)(),
+            clock=runtime.clock,
+            observe_cost=observe_cost,
+            hook=lambda point, record: runtime.hook(point, record),
+            emit_phase=emit_phase,
         )
+
+    @property
+    def clock(self) -> Clock:
+        return self.runtime.clock
 
     def live_budget(self) -> BudgetEvaluator | None:
         tid = self.state.active_turn_id
@@ -499,17 +344,6 @@ class _Driver:
             parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
         return parked
 
-    def pending_batch(self) -> bool:
-        return any(
-            op.turn_id == self.state.active_turn_id
-            and (
-                a.state in {"planned", "started", "parked"}
-                or (a.state == "unknown" and a.unknown is not None and a.unknown._payload["retry"] == "retry")
-            )
-            for op in self.state.operations.values()
-            for a in [op.attempts[max(op.attempts)]]
-        )
-
     def yieldable_batch(self) -> list[Attempt]:
         """Return the whole remaining batch only when every observation can yield."""
         tid = self.state.active_turn_id
@@ -615,22 +449,6 @@ class _Driver:
 
     def transcript(self) -> list[Message]:
         return project_context(self.records, self.state, _fold_factory=_fold_factory_for(self.store))
-
-    def durable_shared_state(self) -> dict[str, Any]:
-        for stored in reversed(self.records):
-            r = stored.record
-            if r.turn_id != self.state.active_turn_id:
-                continue
-            if r.kind == "boundary_recorded" and "shared_state" in r._payload["data"]:
-                return copy_json(r._payload["data"]["shared_state"])
-            if r.kind == "op_prepared":
-                return copy_json(r._payload["shared_state"])
-            if r.kind == "op_completed" and r._payload["context"] == "normal":
-                snapshot = r._payload["shared_state"]
-                if snapshot is not None:
-                    return copy_json(snapshot)
-        assert self.state.active_turn_id is not None
-        return copy_json(self.state.turns[self.state.active_turn_id].start._task().initial_shared_state)
 
     def shared_state(self) -> dict[str, Any]:
         assert self.state.active_turn_id is not None

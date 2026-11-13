@@ -457,17 +457,17 @@ def test_retained_definition_checks_live_bindings_without_serializing_task(datab
 
 
 def test_recovered_completion_does_not_construct_a_second_receipt(store, database, monkeypatch):
-    from vv_agent.session import kernel
+    from vv_agent.kernel import _driver as core_driver
 
     completed = []
-    make = kernel.make_record
+    make = core_driver.make_record
 
     def counted(kind, **kwargs):
         if kind == "op_completed":
             completed.append(kwargs["operation_id"])
         return make(kind, **kwargs)
 
-    monkeypatch.setattr(kernel, "make_record", counted)
+    monkeypatch.setattr(core_driver, "make_record", counted)
     start(store)
     rt = runtime(database, [LLMResponse("done")])
     drive(store, "s", runtime=rt)
