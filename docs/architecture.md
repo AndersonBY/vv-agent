@@ -438,6 +438,10 @@ emits `HandoffStartedEvent` and `HandoffCompletedEvent`.
 projection and frozen/current context-policy composition. Compiler and Runtime
 use these same implementations; execution context and user callback bindings
 remain with their SDK owners.
+`kernel/_call_context.py` supplies task/plan-derived call facts at the existing
+read points and shares the original preapproval comparisons. SDK context
+construction still owns workspace, RunContext and child-manager bindings; the
+facts object carries none of those host objects.
 
 `ToolPolicy` is checked twice: when the runtime builds the tool schema list
 for the model, and again when the executor dispatches a call. Besides

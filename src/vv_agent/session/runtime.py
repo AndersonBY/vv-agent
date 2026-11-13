@@ -27,6 +27,7 @@ from vv_agent.budget import (
 )
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
+from vv_agent.kernel._call_context import CompiledCallFacts, approved_tool_call
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
 from vv_agent.kernel._tool_policy import apply_tool_context_policy
@@ -47,7 +48,7 @@ from vv_agent.tools.executor import ToolExposure, is_tool_executor
 from vv_agent.tools.function import FunctionTool, adapt_tool
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.tools.registry import ToolRegistry
-from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentTask, LLMResponse, Message
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .bindings import bind_shared_state, durable_shared_state
@@ -456,34 +457,23 @@ class Runtime:
             )
         ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
         if approved:
-            ctx._approved_tool_approval = SimpleNamespace(call=ToolCall.from_dict(copy_json(plan._payload["request"])))
+            ctx._approved_tool_approval = SimpleNamespace(call=approved_tool_call(plan))
         workspace = Path(self.config.workspace or ".")
-        source = plan.operation_id if plan._payload["op_kind"] == "model" else plan._payload["dependencies"][0]
-        assert source is not None
+        facts = CompiledCallFacts(task, plan)
         return ToolContext(
             workspace=workspace,
             shared_state=shared_state if shared_state is not None else dict(task.initial_shared_state),
             run_context=self.run_context(task.task_id),
-            cycle_index=(
-                plan._payload["request"]["metadata"]["vv_session"]["cycle_index"]
-                if plan._payload["op_kind"] == "model"
-                and "cycle_index" in plan._payload["request"].get("metadata", {}).get("vv_session", {})
-                else int(source.rsplit("/", 1)[1])
-            ),
+            cycle_index=facts.cycle_index,
             workspace_backend=self.workspace_backend,
-            task_id=plan.turn_id or task.task_id,
+            task_id=facts.task_id,
             ctx=ctx,
             task_metadata=metadata,
             sub_task_manager=self.child_tasks(store, session_id)
             if store and session_id and plan._payload["request"].get("name") == "sub_task_status"
             else None,
-            idempotency_key=plan._payload["idempotency_key"],
-            metadata={
-                "session_id": session_id,
-                "operation_id": plan.operation_id,
-                "attempt": plan.attempt,
-                "session_tool_names": [s["function"]["name"] for s in plan._payload["request"].get("tools", [])],
-            },
+            idempotency_key=facts.idempotency_key,
+            metadata=facts.metadata(session_id),
         )
 
     # Admission borrows these cached fragments; DefinitionCache remains their sole owner.

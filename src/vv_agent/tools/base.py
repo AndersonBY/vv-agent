@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.kernel._call_context import matches_preapproved_call
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.types import (
@@ -105,12 +106,7 @@ def is_tool_call_preapproved(context: ToolContext, *, tool_call_id: str, tool_na
     execution_context = context.ctx
     approval = getattr(execution_context, "_approved_tool_approval", None)
     call = getattr(approval, "call", None)
-    return bool(
-        call is not None
-        and getattr(call, "id", None) == tool_call_id
-        and getattr(call, "name", None) == tool_name
-        and getattr(call, "arguments", None) == arguments
-    )
+    return matches_preapproved_call(call, tool_call_id=tool_call_id, tool_name=tool_name, arguments=arguments)
 
 
 @dataclass(slots=True)
