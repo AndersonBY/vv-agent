@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.events import RunEvent
+from vv_agent.kernel._output_phase import serializable_output as _serializable_output
 from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message, TaskTokenUsage
 
 if TYPE_CHECKING:
@@ -104,14 +105,7 @@ class RunResult:
             "endpoint": endpoint,
         }
 
-    @staticmethod
-    def _serializable_output(value: Any) -> Any:
-        if is_dataclass(value) and not isinstance(value, type):
-            return asdict(value)
-        model_dump = getattr(value, "model_dump", None)
-        if callable(model_dump):
-            return model_dump()
-        return value
+    _serializable_output = staticmethod(_serializable_output)
 
 
 __all__ = ["RunResult"]

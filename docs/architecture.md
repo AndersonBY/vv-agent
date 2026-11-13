@@ -201,6 +201,12 @@ The reducer validates after-cycle and budget boundaries through core values.
 hook decisions; the SDK invokes user hooks and supplies bound shared state.
 Before hooks, the SDK also projects retained events to enforce their descriptor
 bounds. It does not rebuild the full SDK result merely to read cycles and usage.
+`kernel/_output_phase.py` owns output receipt reuse, validation outcomes and the
+single logged, tools-free repair plan. The SDK invokes guardrails, coercion and
+validators at the original observation points; mutable output settings are read
+when their branches need them. Session output and RunResult share one serializer.
+Serialization can invoke model_dump or dataclass callbacks; the host handles
+that request while the output phase generator is suspended.
 `kernel/_state.py`, `kernel/_context.py` and `kernel/_reducer.py` own execution
 state, aligned context projection, input protection and all record transitions.
 The fold receives settings normalization and message-counting callables. It
