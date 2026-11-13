@@ -221,6 +221,145 @@ def test_public_run_waits_from_running_to_terminal_and_stops_after_collect(tmp_p
     assert campaign._json(job_dir / "released.json")["acceptance"]["accepted"] is True
 
 
+@pytest.mark.parametrize("timeout_action", ["status", "exec"])
+def test_public_run_retries_one_observation_timeout_for_the_same_job(tmp_path: Path, monkeypatch, capsys, timeout_action):
+    monkeypatch.setattr(campaign.time, "sleep", lambda interval: None)
+    job_dir = tmp_path / "job-1"
+    files = payloads()
+    running_files = {name: body for name, body in files.items() if name.startswith("reports/sqlite-")}
+    running = observation(running_files, state="running")
+    terminal = observation(files)
+    calls = []
+    initial_launches = 0
+    observation_status_calls = 0
+    observer_calls = 0
+    successful_observations = 0
+    timeout_injected = False
+
+    def run(arguments):
+        nonlocal initial_launches, observation_status_calls, observer_calls, successful_observations, timeout_injected
+        calls.append(list(arguments))
+        if arguments[0] in {"new", "upload", "stop"}:
+            return completed(arguments)
+        if arguments[0] == "exec" and Path(arguments[arguments.index("--file") + 1]).name == "launch_cell.py":
+            initial_launches += 1
+            marker = {"status": {"state": "running", "child_identity": CHILD}}
+            return completed(arguments, stdout="LAUNCH_JSON=" + json.dumps(marker) + "\n")
+        if arguments[0] == "status":
+            if initial_launches:
+                observation_status_calls += 1
+            if timeout_action == "status" and initial_launches and not timeout_injected:
+                timeout_injected = True
+                raise subprocess.TimeoutExpired(arguments, 90)
+            return completed(arguments, stdout="[session-1] Status: IDLE\n")
+        if arguments[0] == "exec":
+            observer_calls += 1
+            if timeout_action == "exec" and not timeout_injected:
+                timeout_injected = True
+                raise subprocess.TimeoutExpired(arguments, 90)
+            successful_observations += 1
+            current = running if successful_observations == 1 else terminal
+            return completed(arguments, stdout="OBSERVE_JSON=" + json.dumps(current) + "\n")
+        if arguments[0] == "download":
+            remote = arguments[arguments.index("--session") + 2]
+            relative = remote.removeprefix("/content/vv-agent-campaigns/job-1/")
+            Path(arguments[-1]).write_bytes(files[relative])
+            return completed(arguments)
+        raise AssertionError(arguments)
+
+    code = campaign.main(
+        [
+            "run",
+            "--job-dir",
+            str(job_dir),
+            "--session",
+            "session-1",
+            "--vv-agent-revision",
+            CODE,
+            "--contract-revision",
+            CONTRACT,
+            "--sqlite-seeds",
+            "2",
+            "--postgres-seeds",
+            "1",
+            "--interval",
+            "1",
+            "--max-observations",
+            "3",
+        ],
+        cli=run,
+    )
+    assert code == 0
+    assert initial_launches == 1
+    assert successful_observations == 2
+    assert observation_status_calls == 3
+    assert observer_calls == (3 if timeout_action == "exec" else 2)
+    names = [call[0] for call in calls]
+    assert names[-1] == "stop" and names.count("stop") == 1
+    assert '"retrying": true' in capsys.readouterr().out
+    assert (job_dir / "evidence/reports/result.json").is_file()
+
+
+def test_wait_timeout_at_max_observations_exits_unknown_without_stop(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(campaign.time, "sleep", lambda interval: None)
+    job_dir = tmp_path / "job-1"
+    write_state(job_dir)
+    calls = []
+
+    def run(arguments):
+        calls.append(list(arguments))
+        if arguments[0] == "status":
+            raise subprocess.TimeoutExpired(arguments, 90)
+        raise AssertionError(arguments)
+
+    code = campaign.main(
+        ["wait", "--job-dir", str(job_dir), "--max-observations", "1", "--interval", "1"],
+        cli=run,
+    )
+    assert code == 2
+    assert [call[0] for call in calls] == ["status"]
+    assert "stop" not in [call[0] for call in calls]
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["state"] == "unknown" and result["terminal"] is False
+
+
+@pytest.mark.parametrize("failure", ["status-error", "observer-error", "identity-mismatch", "session-not-found"])
+def test_wait_does_not_retry_non_timeout_unknown(tmp_path: Path, capsys, failure):
+    job_dir = tmp_path / "job-1"
+    write_state(job_dir)
+    running_files = {name: body for name, body in payloads().items() if name.startswith("reports/sqlite-")}
+    running = observation(running_files, state="running")
+    if failure == "identity-mismatch":
+        running["identity_matches"] = False
+    calls = []
+
+    def run(arguments):
+        calls.append(list(arguments))
+        if arguments[0] == "status":
+            if failure == "status-error":
+                return completed(arguments, code=1, stderr="connection lost")
+            if failure == "session-not-found":
+                return completed(arguments, stdout="Session 'session-1' not found\n")
+            return completed(arguments, stdout="[session-1] Status: IDLE\n")
+        if arguments[0] == "exec":
+            if failure == "observer-error":
+                return completed(arguments, code=1, stderr="observer failed")
+            return completed(arguments, stdout="OBSERVE_JSON=" + json.dumps(running) + "\n")
+        raise AssertionError(arguments)
+
+    code = campaign.main(
+        ["wait", "--job-dir", str(job_dir), "--max-observations", "2", "--interval", "1"],
+        cli=run,
+    )
+    assert code == 2
+    names = [call[0] for call in calls]
+    assert names.count("status") == 1
+    assert names.count("exec") == (0 if failure in {"status-error", "session-not-found"} else 1)
+    assert "stop" not in names
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["state"] == "unknown" and result["terminal"] is False
+
+
 def test_wait_unknown_never_reuses_previous_live_observation_or_stops(tmp_path: Path):
     job_dir = tmp_path / "job-1"
     write_state(job_dir)

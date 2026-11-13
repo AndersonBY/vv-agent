@@ -72,9 +72,9 @@ identity. `wait` collects immutable parts while running and returns success only
 after a fresh terminal observation has been followed by successful evidence
 collection and VM release.
 
-An observation failure or a download failure returns unknown with exit code
-`2`; it does not stop the VM, restart the job, or reuse an earlier live
-observation. The job and local state remain for a later call:
+A non-timeout observation failure or a download failure returns unknown with
+exit code `2`; it does not stop the VM, restart the job, or reuse an earlier
+live observation. The job and local state remain for a later call:
 
 ```bash
 uv run python scripts/colab_campaign.py status \
@@ -85,9 +85,19 @@ uv run python scripts/colab_campaign.py wait \
   --job-dir /tmp/vv-agent-colab/five-seed --interval 60
 ```
 
+The only automatic retry is for a read-only `colab status` or observer CLI
+`TimeoutExpired` during `wait`. `wait` prints an unknown retrying record with
+the reason, waits the existing interval, and observes the same job again while
+it remains below the observation limit. Each timed-out observation stays
+unknown and nonterminal, and `status` or `collect` still makes one attempt and
+exits `2`. This does not make an unknown execution result safe to repeat: the
+retry never restarts, recreates, uploads, launches, or replays any campaign
+part.
+
 `wait --max-observations` can stop an automatic loop while the process is still
-running. That result and a later unknown observation both exit `2`, allowing a
-supervisor to resume the same job later. No cron is installed.
+running. Every observation attempt, including a timed-out one, counts toward
+this strict total. That result and a later unknown observation both exit `2`,
+allowing a supervisor to resume the same job later. No cron is installed.
 
 ## Acceptance
 

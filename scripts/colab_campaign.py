@@ -452,6 +452,8 @@ def observe(job_dir: Path, *, cli=run_cli) -> dict:
         result = cli(["exec", "--session", state["session"], "--file", str(observer), "--timeout", "30"])
         if result.returncode:
             return _unknown("observer exec failed")
+    except subprocess.TimeoutExpired as error:
+        return {**_unknown(f"observation failed: {type(error).__name__}"), "retry_observation": True}
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
         return _unknown(f"observation failed: {type(error).__name__}")
     observed = _marker(result.stdout, "OBSERVE_JSON=")
@@ -718,7 +720,22 @@ def wait(job_dir: Path, *, interval: float = 60.0, max_observations: int = 0, cl
                 return {"state": "unknown", "terminal": True, "reason": f"terminal collection failed: {error}"}
             return result
         if observation.get("state") == "unknown":
-            return observation
+            if observation.get("retry_observation") is not True or count >= max_observations > 0:
+                return observation
+            print(
+                json.dumps(
+                    {
+                        "reason": observation.get("reason"),
+                        "retrying": True,
+                        "state": "unknown",
+                        "terminal": False,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            time.sleep(interval)
+            continue
         if observation.get("state") != "running":
             return observation
         if observation.get("state") == "running":
