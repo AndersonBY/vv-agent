@@ -42,6 +42,10 @@ def baseline_module(name, monkeypatch):
     module.__package__ = "vv_agent.session"
     monkeypatch.setitem(sys.modules, module.__name__, module)
     exec(compile(source, f"{BASELINE}/{name}.py", "exec"), module.__dict__)
+    if name == "kernel":
+        # 0.34.1 predates this observation executor. Adapt its pinned decisions to the
+        # dependencies exposed by the current shared host without replacing pinned code.
+        module._Driver._run_outcome_steps = kernel._Driver._run_outcome_steps
     return module
 
 

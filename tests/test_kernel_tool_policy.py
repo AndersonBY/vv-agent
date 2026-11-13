@@ -127,7 +127,7 @@ def test_real_compiler_and_context_call_the_shared_helpers(tmp_path, monkeypatch
     from vv_agent.llm.scripted import ScriptedLLM
     from vv_agent.runtime import compiler
     from vv_agent.runtime.cancellation import CancellationToken
-    from vv_agent.session import runtime
+    from vv_agent.session import _dispatch_context, runtime
     from vv_agent.session.records import digest, make_record
 
     compiled, composed = [], []
@@ -141,7 +141,7 @@ def test_real_compiler_and_context_call_the_shared_helpers(tmp_path, monkeypatch
         return core.apply_tool_context_policy(metadata, **kwargs)
 
     monkeypatch.setattr(compiler, "_apply_tool_policy_metadata", compile_metadata)
-    monkeypatch.setattr(runtime, "apply_tool_context_policy", context_policy)
+    monkeypatch.setattr(_dispatch_context, "apply_tool_context_policy", context_policy)
     agent = Agent("policy", "Work.")
     config = RunConfig(workspace=tmp_path, tool_policy=core.ToolPolicy(allowed_tools=["lookup"], approval="always"))
     resolved = ResolvedModelConfig("test", "m", "m", "m", [])

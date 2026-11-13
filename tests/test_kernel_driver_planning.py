@@ -212,6 +212,7 @@ def test_core_owns_protected_tail_and_recovery_decisions(mode):
 def test_sdk_passes_the_actual_core_driver_state_owner(monkeypatch):
     from vv_agent.kernel._driver import CoreDriver
     from vv_agent.session import _driver_planning as adapter
+    from vv_agent.session import _recovery_phase
     from vv_agent.session.kernel import _Driver
 
     assert issubclass(_Driver, CoreDriver)
@@ -230,7 +231,7 @@ def test_sdk_passes_the_actual_core_driver_state_owner(monkeypatch):
         return scripted_host(steps, owner)[0]
 
     monkeypatch.setattr(core, "plan", planning)
-    monkeypatch.setattr(adapter, "_drain", drain)
+    monkeypatch.setattr(_recovery_phase, "run", drain)
     first = adapter.plan(driver, "tool", {"id": "c", "name": "evidence", "arguments": {}}, "tool")
     replacement = folded_view(Path(__file__).resolve().parents[1])
     driver.state, driver.records, driver.fold = replacement.state, tuple(replacement.records), replacement.fold

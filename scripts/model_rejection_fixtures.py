@@ -154,7 +154,10 @@ def produce() -> dict:
             completion_cases[name] = (provider, case, status)
             cases.append((name, None, False, False))
     for name, error, succeeds, compaction in cases:
-        with SQLiteStore.standalone(":memory:") as store, patch("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0):
+        with (
+            SQLiteStore.standalone(":memory:") as store,
+            patch("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0),
+        ):
             store.install_schema()
             calls = []
             endpoint_calls = []

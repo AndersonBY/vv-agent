@@ -325,10 +325,10 @@ def _reverse_case(host, database, gate, patch):
     @contextmanager
     def latch(scope):
         frame = sys._getframe(1)
-        while frame and frame.f_code.co_filename != kernel.__file__:
+        target = kernel._Driver.step.__code__ if gate == "provider" else kernel._drive.__code__
+        while frame and frame.f_code is not target:
             frame = frame.f_back
-        target = "step" if gate == "provider" else "_drive"
-        selected = frame is not None and frame.f_code.co_name == target and not armed.is_set()
+        selected = frame is not None and not armed.is_set()
         if selected:
             armed.set()
             assert writer.wait(5), "native HB did not acquire the real writer"
