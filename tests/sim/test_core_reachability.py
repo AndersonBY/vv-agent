@@ -27,8 +27,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-
-from tests.support.contract import fixture_root
+from support.contract import fixture_root
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src"
@@ -80,6 +79,7 @@ CORE_EXECUTION_PATHS = tuple(f"{module}.{qualname}" for module, qualname in EXEC
 
 CHILD_DELIVERY_PATH = "vv_agent.kernel._child_store.child_delivery"
 PROMPT_FLATTEN_PATH = "vv_agent.kernel._prompt_values.PromptBundle.flatten"
+CLASSMETHOD_PATH = "vv_agent.kernel._interaction_values.AppServerUserInteraction.from_dict"
 INTERACTION_PRODUCER = "tests/test_kernel_input_dependencies.py"
 CONTRACT_PROFILE_FUNCTIONS = (
     ("vv_agent.kernel._child_store", "child_delivery"),
@@ -331,7 +331,7 @@ for domain in manifest["domains"]:
         if path is None:
             continue
         value = resolve(path)
-        if inspect.isfunction(value) and value.__module__.startswith("vv_agent.kernel"):
+        if (inspect.isfunction(value) or inspect.ismethod(value)) and value.__module__.startswith("vv_agent.kernel"):
             key = f"capability:{domain['id']}:{capability['id']}"
             assert key not in discovered, key
             discovered[key] = origin(value)
@@ -347,7 +347,7 @@ for surface in manifest["surfaces"]:
                 continue
             owner = resolve(python.get("target", surface_target))
             value = getattr(owner, python["name"])
-            if inspect.isfunction(value) and value.__module__.startswith("vv_agent.kernel"):
+            if (inspect.isfunction(value) or inspect.ismethod(value)) and value.__module__.startswith("vv_agent.kernel"):
                 key = f"surface:{surface['id']}.{member['id']}"
                 assert key not in discovered, key
                 discovered[key] = origin(value)
@@ -496,6 +496,44 @@ def test_gate_rejects_new_core_entry_in_supporting_operations(tmp_path):
         no_site=False,
     )
     with pytest.raises(AssertionError, match=r"unexpected=.*prompt_bundle.to_dict"):
+        _require_exact("contract core-origin callables", CONTRACT_ORIGINS, evidence["discovered"])
+
+
+@pytest.mark.parametrize("declaration", ("capability", "surface"))
+def test_gate_rejects_unmapped_core_classmethod(tmp_path, declaration):
+    manifest = json.loads(CONTRACT_PUBLIC_API.read_text())
+    if declaration == "capability":
+        domain = next(domain for domain in manifest["domains"] if domain["id"] == "app_server")
+        domain["capabilities"].append({"id": "future_classmethod", "python": CLASSMETHOD_PATH})
+        contract_key = "capability:app_server:future_classmethod"
+    else:
+        manifest["surfaces"].append(
+            {
+                "id": "future_core_classmethod",
+                "python_target": "vv_agent.AppServerUserInteraction",
+                "members": [
+                    {
+                        "id": "from_dict",
+                        "python": {"kind": "method", "name": "from_dict"},
+                    }
+                ],
+            }
+        )
+        contract_key = "surface:future_core_classmethod.from_dict"
+
+    fixture_copy = tmp_path / "public_api.json"
+    fixture_copy.write_text(json.dumps(manifest))
+
+    evidence = _run_probe(
+        textwrap.dedent(CONTRACT_DISCOVERY_PROBE),
+        SOURCE,
+        fixture_copy,
+        tmp_path=tmp_path,
+        no_site=False,
+    )
+    assert evidence["discovered"][contract_key] == CLASSMETHOD_PATH
+    assert set(evidence["discovered"]) == {*CONTRACT_ORIGINS, contract_key}
+    with pytest.raises(AssertionError, match=r"unexpected=.*future"):
         _require_exact("contract core-origin callables", CONTRACT_ORIGINS, evidence["discovered"])
 
 
