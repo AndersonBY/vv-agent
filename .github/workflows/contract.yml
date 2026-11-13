@@ -80,6 +80,7 @@ jobs:
             tests/test_repository_contracts.py \
             tests/test_kernel_boundaries.py \
             tests/test_kernel_storage_boundary.py \
+            tests/test_kernel_dispatch_boundary.py \
             tests/test_kernel_schema.py::test_kernel_schema_import_is_isolated_without_site_packages
 
       - name: Verify formatting

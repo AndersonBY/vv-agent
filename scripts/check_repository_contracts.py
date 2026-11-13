@@ -14,6 +14,12 @@ INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 REPOSITORY_PATH = re.compile(r"(?:src|tests|scripts|docs|examples)/[\w./-]*\Z")
 SYMBOL = re.compile(r"((?:src|tests|scripts)/[\w/-]+\.py)::([A-Za-z_]\w*(?:(?:::|\.)[A-Za-z_]\w*)*)\Z")
 EXCLUDED_DOC_ROOTS = {"releases"}
+DISPATCH_SOURCE = "src/vv_agent/kernel/_driver_dispatch.py"
+DISPATCH_MODULE = "vv_agent.kernel._driver_dispatch"
+DISPATCH_CLASS = "InvokeOperation"
+DISPATCH_FUNCTION = "dispatch"
+INVOKER_SOURCE = "src/vv_agent/session/_driver_scope.py"
+INVOKER_FUNCTION = "_invoke"
 
 
 def markdown_lines(text: str):
@@ -49,6 +55,176 @@ def definitions(body: list[ast.stmt], prefix: str = ""):
             yield name, node
             if isinstance(node, ast.ClassDef):
                 yield from definitions(node.body, name + ".")
+
+
+def resolved_name(node: ast.AST, bindings: dict[str, str]) -> str:
+    """Resolve the same narrow Name/Attribute and assignment aliases as the kernel gate."""
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, node.id)
+    if isinstance(node, ast.Attribute) and (parent := resolved_name(node.value, bindings)):
+        return parent + "." + node.attr
+    return ""
+
+
+def _module_bindings(module: ast.Module, package: str, initial: dict[str, str]) -> dict[str, str]:
+    """Collect one flat import/simple-assignment map; shadowing and control flow are out of scope."""
+    bindings = dict(initial)
+    nodes = [node for node in ast.walk(module) if isinstance(node, ast.Import | ast.ImportFrom | ast.Assign | ast.AnnAssign)]
+    for node in sorted(nodes, key=lambda item: (item.lineno, item.col_offset)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                try:
+                    module_name = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+                except ImportError:
+                    continue
+            else:
+                module_name = node.module or ""
+            if not module_name or module_name == "__future__":
+                continue
+            for alias in node.names:
+                if alias.name != "*":
+                    bindings[alias.asname or alias.name] = module_name + "." + alias.name
+        elif isinstance(node, ast.Assign) and (target := resolved_name(node.value, bindings)):
+            for assigned in node.targets:
+                if isinstance(assigned, ast.Name):
+                    bindings[assigned.id] = target
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and isinstance(node.target, ast.Name)
+            and (target := resolved_name(node.value, bindings))
+        ):
+            bindings[node.target.id] = target
+    return bindings
+
+
+def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    ancestor = parents.get(node)
+    while ancestor is not None:
+        if isinstance(ancestor, ast.FunctionDef | ast.AsyncFunctionDef):
+            return ancestor
+        ancestor = parents.get(ancestor)
+    return None
+
+
+def check_dispatch_boundaries(root: Path) -> list[str]:
+    """Require unique producer and invoker calls using only lexical source aliases.
+
+    The scan resolves import and simple assignment aliases across every Python
+    source file. It does not model control flow, parameter types, descriptors,
+    re-exports, reflection or arbitrary callbacks. This checks these two
+    dispatch leaves, not all host side effects.
+    """
+    root = root.resolve()
+    errors: list[str] = []
+    source_files = sorted((root / "src/vv_agent").rglob("*.py"))
+    parsed: dict[str, tuple[ast.Module, str, dict[str, str]]] = {}
+    for file in source_files:
+        path = file.relative_to(root).as_posix()
+        if not file.resolve().is_relative_to(root):
+            errors.append(f"{path}: dispatch boundary source escapes repository root")
+            continue
+        try:
+            module = ast.parse(file.read_text(encoding="utf-8"), filename=path)
+        except (SyntaxError, UnicodeError, OSError) as exc:
+            errors.append(f"{path}: cannot parse dispatch boundary Python: {exc}")
+            continue
+        relative = file.relative_to(root / "src").with_suffix("")
+        parts = list(relative.parts)
+        is_package = file.name == "__init__.py"
+        if is_package:
+            parts.pop()
+        module_name = ".".join(parts)
+        package = module_name if is_package else module_name.rpartition(".")[0]
+        initial = {
+            node.name: module_name + "." + node.name
+            for node in module.body
+            if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        parsed[path] = module, package, initial
+
+    producer: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    dispatch_file = parsed.get(DISPATCH_SOURCE)
+    if dispatch_file is None:
+        errors.append(f"{DISPATCH_SOURCE}: missing dispatch boundary source")
+    else:
+        module, _, _ = dispatch_file
+        classes = [node for node in module.body if isinstance(node, ast.ClassDef) and node.name == DISPATCH_CLASS]
+        producers = [
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == DISPATCH_FUNCTION
+        ]
+        if len(classes) != 1:
+            errors.append(f"{DISPATCH_SOURCE}: expected one {DISPATCH_CLASS} definition, found {len(classes)}")
+        if len(producers) != 1:
+            errors.append(f"{DISPATCH_SOURCE}: expected one {DISPATCH_FUNCTION} definition, found {len(producers)}")
+        else:
+            producer = producers[0]
+
+    leaf: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    invoker_file = parsed.get(INVOKER_SOURCE)
+    if invoker_file is None:
+        errors.append(f"{INVOKER_SOURCE}: missing invoker boundary source")
+    else:
+        module, _, _ = invoker_file
+        leaves = [
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == INVOKER_FUNCTION
+        ]
+        if len(leaves) != 1:
+            errors.append(f"{INVOKER_SOURCE}: expected one {INVOKER_FUNCTION} definition, found {len(leaves)}")
+        else:
+            leaf = leaves[0]
+
+    operation_calls: list[tuple[str, int, ast.FunctionDef | ast.AsyncFunctionDef | None]] = []
+    invoker_calls: list[tuple[str, int, ast.FunctionDef | ast.AsyncFunctionDef | None]] = []
+    operation_target = DISPATCH_MODULE + "." + DISPATCH_CLASS
+    for path, (module, package, initial) in parsed.items():
+        bindings = _module_bindings(module, package, initial)
+        parents = {child: node for node in ast.walk(module) for child in ast.iter_child_nodes(node)}
+        for call in ast.walk(module):
+            if not isinstance(call, ast.Call):
+                continue
+            target = resolved_name(call.func, bindings)
+            enclosing = _enclosing_function(call, parents)
+            if target == operation_target:
+                operation_calls.append((path, call.lineno, enclosing))
+            if target == "invoker.invoke" or target.endswith(".invoker.invoke"):
+                invoker_calls.append((path, call.lineno, enclosing))
+
+    operation_expected = [
+        call for call in operation_calls if producer is not None and call[0] == DISPATCH_SOURCE and call[2] is producer
+    ]
+    if len(operation_calls) != 1 or len(operation_expected) != 1:
+        errors.append(
+            f"{DISPATCH_SOURCE}::{DISPATCH_FUNCTION}: expected exactly one {DISPATCH_CLASS} construction, "
+            f"found {len(operation_calls)} total and {len(operation_expected)} at the producer"
+        )
+    for path, line, enclosing in operation_calls:
+        if path != DISPATCH_SOURCE or enclosing is not producer:
+            where = f"{path}:{line}"
+            if enclosing is not None:
+                where += f" in {enclosing.name}"
+            errors.append(f"{where}: {DISPATCH_CLASS} construction outside {DISPATCH_SOURCE}::{DISPATCH_FUNCTION}")
+
+    invoker_expected = [call for call in invoker_calls if leaf is not None and call[0] == INVOKER_SOURCE and call[2] is leaf]
+    if len(invoker_calls) != 1 or len(invoker_expected) != 1:
+        errors.append(
+            f"{INVOKER_SOURCE}::{INVOKER_FUNCTION}: expected exactly one .invoker.invoke call, "
+            f"found {len(invoker_calls)} total and {len(invoker_expected)} at the leaf"
+        )
+    for path, line, enclosing in invoker_calls:
+        if leaf is None or path != INVOKER_SOURCE or enclosing is not leaf:
+            where = f"{path}:{line}"
+            if enclosing is not None:
+                where += f" in {enclosing.name}"
+            errors.append(f"{where}: .invoker.invoke call outside {INVOKER_SOURCE}::{INVOKER_FUNCTION}")
+    return sorted(set(errors))
 
 
 def check_kernel_boundaries(root: Path) -> list[str]:
@@ -149,6 +325,7 @@ def check_kernel_boundaries(root: Path) -> list[str]:
             continue
         package = ".".join(file.parent.relative_to(root / "src").parts)
         parents = {child: node for node in ast.walk(module) for child in ast.iter_child_nodes(node)}
+        bindings: dict[str, str] = {}
 
         def in_function(node: ast.AST, parents=parents) -> bool:
             while node in parents:
@@ -157,21 +334,16 @@ def check_kernel_boundaries(root: Path) -> list[str]:
                     return True
             return False
 
-        def type_only(node: ast.AST, parents=parents) -> bool:
+        def type_only(node: ast.AST, parents=parents, bindings=bindings) -> bool:
             while node in parents:
                 child, node = node, parents[node]
-                if isinstance(node, ast.If) and name(node.test) == "typing.TYPE_CHECKING" and child in node.body:
+                if (
+                    isinstance(node, ast.If)
+                    and resolved_name(node.test, bindings) == "typing.TYPE_CHECKING"
+                    and child in node.body
+                ):
                     return True
             return False
-
-        bindings: dict[str, str] = {}
-
-        def name(node: ast.AST, bindings=bindings) -> str:
-            if isinstance(node, ast.Name):
-                return bindings.get(node.id, node.id)
-            if isinstance(node, ast.Attribute) and (parent := name(node.value)):
-                return parent + "." + node.attr
-            return ""
 
         def check_import(target: str, node: ast.Import | ast.ImportFrom, path=path) -> None:
             if target == core or target.startswith(core + "."):
@@ -209,16 +381,16 @@ def check_kernel_boundaries(root: Path) -> list[str]:
                         errors.append(f"{path}:{node.lineno}: kernel wildcard import cannot be checked")
                     check_import(target + "." + alias.name if target == "vv_agent" else target, node)
                     bindings[alias.asname or alias.name] = target + "." + alias.name
-            elif isinstance(node, ast.Assign) and (target := name(node.value)):
+            elif isinstance(node, ast.Assign) and (target := resolved_name(node.value, bindings)):
                 for assigned in node.targets:
                     if isinstance(assigned, ast.Name):
                         bindings[assigned.id] = target
             elif isinstance(node, ast.Attribute):
-                target = name(node)
+                target = resolved_name(node, bindings)
                 if path not in storage_owners and node.attr in storage_api_names:
                     errors.append(f"{path}:{node.lineno}: forbidden kernel storage API: {target}")
             elif isinstance(node, ast.Call):
-                target = name(node.func)
+                target = resolved_name(node.func, bindings)
                 if path not in storage_owners and target.endswith(".cursor"):
                     errors.append(f"{path}:{node.lineno}: forbidden kernel storage API: {target}")
                 if (
@@ -231,7 +403,7 @@ def check_kernel_boundaries(root: Path) -> list[str]:
 
 def check_repository(root: Path) -> list[str]:
     root = root.resolve()
-    errors: list[str] = check_kernel_boundaries(root)
+    errors: list[str] = [*check_kernel_boundaries(root), *check_dispatch_boundaries(root)]
     trees: dict[str, ast.Module | None] = {}
 
     def error(where: str, message: str):

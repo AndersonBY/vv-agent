@@ -22,6 +22,14 @@ TABLE = f"""| Capability ID | Tests |
 | --- | --- |
 | `kept` | `{REFERENCE}` |
 """
+DISPATCH_SOURCE = """class InvokeOperation: pass
+
+def dispatch():
+    return InvokeOperation()
+"""
+INVOKER_SOURCE = """def _invoke(scope):
+    return scope.runtime.invoker.invoke()
+"""
 
 
 def write(root: Path, path: str, text: str) -> Path:
@@ -35,6 +43,8 @@ def write(root: Path, path: str, text: str) -> Path:
 def repository(tmp_path: Path) -> Path:
     write(tmp_path, MATRIX, TABLE)
     write(tmp_path, "tests/test_sample.py", TEST)
+    write(tmp_path, "src/vv_agent/kernel/_driver_dispatch.py", DISPATCH_SOURCE)
+    write(tmp_path, "src/vv_agent/session/_driver_scope.py", INVOKER_SOURCE)
     return tmp_path
 
 
@@ -179,7 +189,7 @@ def test_symbol_reference_cannot_read_outside_the_repository(repository, tmp_pat
     outside = tmp_path_factory.mktemp("outside") / "source.py"
     outside.write_text("class Secret: pass\n")
     link = repository / "src/link.py"
-    link.parent.mkdir()
+    link.parent.mkdir(exist_ok=True)
     link.symlink_to(outside)
     write(repository, "docs/reference.md", "`py:src/link.py::Secret`\n")
     assert any("repository path escapes root" in error for error in check_repository(repository))

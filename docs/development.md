@@ -135,6 +135,34 @@ The check catches direct calls and simple captured aliases to storage APIs.
 It does not prove every mutation path: reflection, arbitrary callbacks and
 disguised aliases still require review against the storage protocol.
 
+### Operation dispatch boundary
+
+`py:src/vv_agent/kernel/_driver_dispatch.py::dispatch` is the only core producer of an
+`InvokeOperation` request. `py:src/vv_agent/session/_driver_scope.py::_invoke` is the only SDK
+leaf that calls the runtime invoker. The repository gate scans every Python
+file under `src/vv_agent` and requires exactly one construction and one
+`.invoker.invoke` call at the located top-level function nodes. A nested or
+class method with the same name does not count. Missing files or definitions
+are failures; there is no fixture-only or disabled mode.
+
+The check flattens imports, `from ... import ... as ...` aliases, and simple
+name-to-name/attribute assignments found anywhere in a module into one lexical
+alias map. It rejects additional, wrong-node, and straightforward aliased
+calls. The invoker shape is lexical: the resolved callee must end in
+`.invoker.invoke`, independent of the receiver's variable name. It does not
+follow control flow or assignment order, resolve scope shadowing, infer
+parameter or descriptor types, follow re-exports, or analyze computed names,
+dynamic `getattr`, arbitrary reflection or callbacks. Scheduler wake, database
+persistence, callbacks, provider query/cancel methods and trusted host
+admission are different ports and are outside this structural claim. The
+result covers these two dispatch leaves; it does not prove that every possible
+host side effect is confined.
+
+```bash
+uv run python scripts/check_repository_contracts.py
+uv run pytest tests/test_kernel_dispatch_boundary.py tests/test_repository_contracts.py tests/test_kernel_boundaries.py
+```
+
 ### App Server changes
 
 Also check the CLI entry points and schema generation:
