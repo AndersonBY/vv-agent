@@ -91,6 +91,12 @@ provider/request/attempt identity and evidence checks. Existing outer imports
 resolve to these actual objects. FunctionProvider, host-interaction outcomes and
 workspace preparation remain in the SDK.
 
+`kernel/_tool_schema.py` emits schema-check requests and owns issue normalization
+and rejection results. The explicit host leaf `_jsonschema.py` uses the existing
+Draft202012 validator and cache. Core imports do not load this leaf or jsonschema;
+SDK and host-side simulation adapters use the same real validator, without
+preloading the tools package or substituting a second validation algorithm.
+
 Tool completion-policy application, image notifications and skipped-result
 construction live in `kernel/_tool_behavior.py`. `runtime/tool_results.py`
 exports the same functions, and context projection imports the image helper
