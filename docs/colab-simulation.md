@@ -108,3 +108,43 @@ ordinary non-tmpfs SQLite storage evidence, exact full totals, and
 Only after all evidence is retained and validated does `collect` stop an owned
 session. A known terminal failure may then be released, but never reported as a
 pass.
+
+## Nightly entry
+
+`scripts/colab_nightly.py` is a thin serial entry for one nightly full campaign.
+It takes one nonblocking lock for the whole invocation. With no current job it
+records the job name before starting the controller. While that job has no
+valid terminal `released.json`, every later invocation only resumes the same
+job with `wait`; even a successful wait does not start another campaign in that
+invocation. A later invocation may start a new full campaign only after the
+controller has written a terminal release with `acceptance.accepted`.
+`terminal_failed` with `accepted: false` is also a released terminal outcome,
+so it allows a new campaign on a later invocation without a same-invocation
+retry.
+
+This change does not install a scheduler. Install cron only after the first full
+campaign has completed and released. Keep the existing user crontab and add one
+entry such as the following, replacing the paths and full public Git hashes.
+Include the installed `colab` executable directory in cron's `PATH`; an absolute
+Python path alone does not make the Colab CLI available.
+
+```cron
+17 2 * * * cd /absolute/path/to/vv-agent && PATH=/absolute/path/to/colab-bin:/usr/local/bin:/usr/bin:/bin /absolute/path/to/venv/bin/python scripts/colab_nightly.py --state-dir /absolute/path/to/colab-nightly-state --vv-agent-revision REPLACE_WITH_FULL_SOURCE_REVISION --contract-revision REPLACE_WITH_FULL_CONTRACT_REVISION
+```
+
+The wrapper applies the approved nightly chunk sizes (`10000` SQLite and
+`1000` PostgreSQL) and leaves the 1,000,000/10,000 totals and eight workers at
+the controller defaults. Controller output is retained in a unique file under
+`<state-dir>/logs`, and the entry prints that path. Its nonzero exit status is
+the controller's status, including `2` for unknown.
+
+To resume manually, rerun the entry with the same state directory. An
+unreleased current job is passed only to `wait`, so changed revision arguments
+cannot replace it:
+
+```bash
+uv run python scripts/colab_nightly.py \
+  --state-dir /absolute/path/to/colab-nightly-state \
+  --vv-agent-revision REPLACE_WITH_FULL_SOURCE_REVISION \
+  --contract-revision REPLACE_WITH_FULL_CONTRACT_REVISION
+```
