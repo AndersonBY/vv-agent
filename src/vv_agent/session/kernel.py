@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, suppress
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
+from vv_agent.budget import _DEFAULT_BUDGET_CLOCK_NS, BudgetEvaluator, BudgetExhaustion
+from vv_agent.kernel import _driver_outcomes
+from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
+from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._driver import CoreDriver
+from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.tools.outcomes import validate_definitive_result
 from vv_agent.types import AgentTask, Message, ToolDirective, ToolExecutionResult
@@ -25,16 +29,12 @@ from .context import project_context
 from .providers import (
     Accepted,
     Definitive,
-    validate_acceptance,
-    validate_provider_result,
 )
-from .records import InboxItem, Record, copy_json, digest, make_record
+from .records import InboxItem, Record, copy_json
 from .reducer import Attempt, ExecutionState, _fold_factory_for
-from .runtime import Runtime, RuntimeNotReady, budget, model_usage
+from .runtime import Runtime, RuntimeNotReady
 from .store import Lease, LeaseLost, SequenceConflict, SessionStore, StoredRecord
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
-
-MODEL_REJECTION_BACKOFF_SECONDS = 2
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -83,21 +83,11 @@ class _Driver(CoreDriver):
         return self.runtime.clock
 
     def live_budget(self) -> BudgetEvaluator | None:
-        tid = self.state.active_turn_id
-        assert tid is not None
-        evaluator = budget(self.state, tid)
-        if evaluator is None:
+        inputs = self._run_outcome_steps(_driver_outcomes.live_budget_inputs_steps(self))
+        if inputs is None:
             return None
-        current_meter = f"active/{tid}/{self.scope.lease.epoch}"
-        saved = self.state.usage_values.get(current_meter)
-        retained_ms = saved._payload["usage"].get("elapsed_ms", 0) if saved else 0
-        initial = evaluator.snapshot()
-        initial = replace(
-            initial,
-            elapsed_ms=initial.elapsed_ms
-            + max(0, (self.runtime.clock.monotonic_ns() - self.active_since) // 1000000 - retained_ms),
-        )
-        return BudgetEvaluator(evaluator.limits, initial_usage=initial, host_cost_meter=self.runtime.config.host_cost_meter)
+        limits, initial = inputs
+        return BudgetEvaluator(limits, initial_usage=initial, host_cost_meter=self.runtime.config.host_cost_meter)
 
     def budget_record(
         self,
@@ -107,16 +97,7 @@ class _Driver(CoreDriver):
         names: list[str] | None = None,
         source: str | None = None,
     ) -> Record:
-        return self.boundary_record(
-            "budget",
-            identity,
-            {
-                "usage": evaluator.snapshot().to_dict(),
-                "exhaustion": exhaustion.to_dict() if exhaustion else None,
-                "tool_names": names or [],
-            },
-            source_operation_id=source,
-        )
+        return _driver_outcomes.budget_record(self, identity, evaluator, exhaustion, names, source)
 
     def task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
@@ -144,153 +125,82 @@ class _Driver(CoreDriver):
             self, oid, request, kind, number=number, dependencies=dependencies, capability=capability, purpose=purpose
         )
 
+    def _run_outcome_steps[T](
+        self,
+        steps: Generator[_driver_outcomes.OutcomeRequest, Any, T],
+        *,
+        prepare_resources: Callable[[Record, dict[str, Any], Any], dict[str, Any]] | None = None,
+    ) -> T:
+        response = None
+        budget_meter = None
+        try:
+            while True:
+                try:
+                    request = steps.send(response)
+                except StopIteration as done:
+                    return done.value
+                except _BudgetStopIteration as transport:
+                    raise transport.original from transport.original.__cause__
+                except (_driver_outcomes._OutcomeStopIteration, _PlanningStopIteration) as transport:
+                    error = transport.original
+                    original_context = error.__context__
+                    try:
+                        raise error
+                    finally:
+                        error.__context__ = original_context
+                response = None
+                if request is _driver_outcomes.OutcomeRead.CANCELLATION_REASON:
+                    response = self.scope.token.reason
+                elif request is _driver_outcomes.OutcomeRead.SCOPE_CANCELLED:
+                    response = self.scope.token.cancelled
+                elif request is _driver_outcomes.OutcomeRead.HOST_CANCELLED:
+                    response = (
+                        self.runtime.config.cancellation_token is not None and self.runtime.config.cancellation_token.cancelled
+                    )
+                elif request is _driver_outcomes.OutcomeRead.APPROVAL_TIMEOUT:
+                    response = self.runtime.config.approval_timeout_seconds
+                elif request is _driver_outcomes.OutcomeRead.POLL_LEASE:
+                    response = self.scope.poll(self.store)
+                elif request is _driver_outcomes.OutcomeRead.POLL_INTERVAL:
+                    response = self.runtime.poll_ms
+                elif request is _driver_outcomes.OutcomeRead.ACTIVE_INTERVAL_NS:
+                    response = self.runtime.clock.monotonic_ns()
+                elif request is _driver_outcomes.OutcomeRead.BIND_BUDGET_METER:
+                    budget_meter = self.runtime.config.host_cost_meter
+                elif request is BudgetObservation.CLOCK_NS:
+                    response = _DEFAULT_BUDGET_CLOCK_NS()
+                elif request is BudgetObservation.HOST_COST:
+                    if budget_meter is None:
+                        response = HostCostObservation(unavailable_reason=BudgetUnavailableReason.METER_MISSING)
+                    else:
+                        try:
+                            reading = budget_meter.read()
+                        except Exception:
+                            response = HostCostObservation(unavailable_reason=BudgetUnavailableReason.METER_ERROR)
+                        else:
+                            response = HostCostObservation(reading=reading)
+                elif isinstance(request, _driver_outcomes.PrepareToolResources):
+                    assert prepare_resources is not None
+                    response = prepare_resources(request.plan, request.result, self.runtime.workspace_backend)
+                elif isinstance(request, ProviderAvailable):
+                    response = request.name in self.runtime.providers
+                else:
+                    raise AssertionError(f"Unknown receipt observation: {request!r}")
+        finally:
+            steps.close()
+
     def compaction_intent(self, plan: Record, result: dict[str, Any]) -> dict[str, Any]:
-        if plan._payload["op_kind"] == "model" or result.get("metadata", {}).get("request_compaction") is not True:
-            return result
-        source = self.state.operations[plan._payload["dependencies"][0]]
-        source_plan = source.attempts[source.selected_attempt or 1].plan
-        return result | {
-            "metadata": result["metadata"]
-            | {
-                "compaction_source": {
-                    "operation_id": plan.operation_id,
-                    "context_digest": digest(source_plan._payload["request"]["messages"]),
-                }
-            }
-        }
+        return _driver_outcomes.compaction_intent(self, plan, result)
 
     def completed(self, plan: Record, outcome: Definitive) -> list[Record]:
         from .tool_results import prepare_tool_resources
 
-        result = self.compaction_intent(plan, outcome.result)
-        if plan._payload["op_kind"] != "model":
-            result = prepare_tool_resources(plan, result, self.runtime.workspace_backend)
-        outcome = replace(outcome, result=result)
-        assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
-        op = self.state.operations[plan.operation_id]
-        attempt = op.attempts[plan.attempt]
-        turn = self.state.turns[plan.turn_id]
-        audit = turn.cancelled or turn.ended or any(a.started for n, a in op.attempts.items() if n > plan.attempt)
-        context = "audit" if audit else "correction" if attempt.unknown_consumed else "normal"
-        result = self.record(
-            "op_completed",
-            {
-                "result": outcome.result,
-                "result_digest": digest(outcome.result),
-                "usage": outcome.usage,
-                "shared_state": outcome.shared_state,
-                "evidence": list(outcome.evidence),
-                "execution_started": attempt.started,
-                "context": context,
-                "request_digest": plan._payload["request_digest"],
-                "provider_binding": plan._payload["provider_binding"],
-            },
-            plan,
+        return self._run_outcome_steps(
+            _driver_outcomes.completed_steps(self, plan, outcome), prepare_resources=prepare_tool_resources
         )
-        records = [result, *self.completion_effects(plan, outcome, context)]
-        rejection = outcome.result.get("rejection", {})
-        order = plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
-        if (
-            op.kind == "model"
-            and context == "normal"
-            and outcome.result.get("error_code") == "model_request_rejected"
-            and rejection.get("retryable") is True
-            and plan._payload["purpose"] != "output_repair"
-            and plan.attempt < max(2, len(order))
-            and not self.scope.token.cancelled
-            and not self.state.cancel_requested
-            and not any(r.kind == "boundary_recorded" and r._payload["data"].get("exhaustion") for r in records[1:])
-        ):
-            delay = (
-                0 if rejection.get("status_code") in {401, 403, 404} else MODEL_REJECTION_BACKOFF_SECONDS * 1000 * plan.attempt
-            )
-            due = self.scope.poll(self.store).db_now_ms + delay if delay else 0
-            records.append(
-                make_record(
-                    "op_planned",
-                    session_id=self.sid,
-                    turn_id=plan.turn_id,
-                    operation_id=plan.operation_id,
-                    attempt=plan.attempt + 1,
-                    payload=plan._payload | {"not_before_ms": due},
-                )
-            )
-        return records
 
     def completion_effects(self, plan: Record, outcome: Definitive, context: str) -> list[Record]:
-        assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
-        records = []
-        op = self.state.operations[plan.operation_id]
-        turn = self.state.turns[plan.turn_id]
-        if op.kind == "model" and context == "normal":
-            if not op.attempts[plan.attempt].started:
-                return records
-            if any(
-                r._payload["data"]["exhaustion"]
-                for (tid, stage, _), r in self.state.boundaries.items()
-                if tid == plan.turn_id and stage == "budget"
-            ):
-                return records
-            evaluator = self.live_budget()
-            if evaluator and self.boundary("budget", f"{plan.operation_id}/complete/{plan.attempt}") is None:
-                exhaustion = evaluator.model_call_complete(model_usage(outcome.usage))
-                if self.scope.token.cancelled or (
-                    self.runtime.config.cancellation_token is not None and self.runtime.config.cancellation_token.cancelled
-                ):
-                    exhaustion = None
-                records.append(
-                    self.budget_record(
-                        f"{plan.operation_id}/complete/{plan.attempt}", evaluator, exhaustion, source=plan.operation_id
-                    )
-                )
-                if exhaustion:
-                    return records
-                if plan._payload["purpose"] != "primary":
-                    return records
-                names = [call["name"] for call in outcome.result.get("tool_calls", [])]
-                if names:
-                    exhaustion = evaluator.preflight_tools(names)
-                    records.append(
-                        self.budget_record(
-                            f"{plan.operation_id}/tool_batch",
-                            evaluator,
-                            exhaustion,
-                            names if exhaustion is None else [],
-                            source=plan.operation_id,
-                        )
-                    )
-                    if exhaustion:
-                        return records
-            if plan._payload["purpose"] != "primary":
-                return records
-            definition = turn.start._payload["definition"]
-            for i, call in enumerate(outcome.result.get("tool_calls", [])):
-                oid = f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}"
-                if oid not in self.state.operations:
-                    planned = self.plan(
-                        oid,
-                        call,
-                        "interaction" if call["name"] == "ask_user" else "tool",
-                        dependencies=[plan.operation_id],
-                        capability=definition["capabilities"].get(call["name"], {}),
-                    )
-                    records.append(planned)
-        elif op.kind != "model" and context == "normal":
-            evaluator = self.live_budget()
-            if evaluator is not None:
-                before = evaluator.snapshot()
-                exhaustion = evaluator.tool_batch_complete(operation_failed=outcome.result.get("status_code") == "ERROR")
-                if self.scope.token.cancelled or (
-                    self.runtime.config.cancellation_token is not None and self.runtime.config.cancellation_token.cancelled
-                ):
-                    exhaustion = None
-                if evaluator.snapshot() != before or exhaustion:
-                    records.append(
-                        self.budget_record(
-                            f"{plan.operation_id}/tool_complete/{plan.attempt}", evaluator, exhaustion, source=plan.operation_id
-                        )
-                    )
-        return records
+        return self._run_outcome_steps(_driver_outcomes.completion_effects_steps(self, plan, outcome, context))
 
     def unknown(self, plan: Record, reason: str) -> Record:
         return _driver_recovery.unknown(self, plan, reason)
@@ -304,31 +214,13 @@ class _Driver(CoreDriver):
         return self.runtime.providers[binding]
 
     def check_provider_result(self, plan: Record, outcome: Definitive) -> None:
-        assert plan.operation_id is not None and plan.attempt is not None
-        attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
-        handle = attempt.wait["handle"] if attempt.wait and attempt.wait["handle"]["kind"] == "provider" else None
-        validate_provider_result(plan, outcome, handle)
+        return _driver_outcomes.check_provider_result(self, plan, outcome)
 
     def parked(self, plan: Record, handle: dict[str, Any], *, after: bool) -> Record:
-        timeout = self.runtime.config.approval_timeout_seconds if handle["kind"] == "approval" else None
-        now = self.scope.poll(self.store).db_now_ms if handle["kind"] == "provider" or timeout is not None else 0
-        return self.record(
-            "op_parked",
-            {
-                "phase": "after_dispatch" if after else "before_dispatch",
-                "handle": handle,
-                "poll_at_ms": now + self.runtime.poll_ms if handle["kind"] == "provider" else None,
-                "deadline_ms": now + max(0, int(timeout * 1000)) if timeout is not None else None,
-            },
-            plan,
-        )
+        return self._run_outcome_steps(_driver_outcomes.parked_steps(self, plan, handle, after=after))
 
     def accepted(self, plan: Record, outcome: Accepted) -> Record:
-        validate_acceptance(plan, outcome)
-        parked = self.parked(plan, outcome.handle, after=True)
-        if outcome.yield_on_steer:
-            parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
-        return parked
+        return self._run_outcome_steps(_driver_outcomes.accepted_steps(self, plan, outcome))
 
     def yield_results(self, attempts: list[Attempt], item: InboxItem) -> list[Record]:
         records = []

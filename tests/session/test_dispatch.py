@@ -451,13 +451,15 @@ def test_accepted_provider_poll_cadence_and_zero_immediate_rewakes(transport, cl
 @pytest.mark.capability("provider-polling")
 def test_provider_deadline_caps_idle_deferral(transport, clock, provider_wait, monkeypatch):
     provider_wait.deadline = 1_001_250
-    parked = _Driver.parked
+    from vv_agent.kernel import _driver_outcomes
+
+    parked = _driver_outcomes.parked_steps
 
     def with_deadline(self, plan, handle, *, after):
-        value = parked(self, plan, handle, after=after)
+        value = yield from parked(self, plan, handle, after=after)
         return replace(value, payload=value.payload | {"deadline_ms": provider_wait.deadline})
 
-    monkeypatch.setattr(_Driver, "parked", with_deadline)
+    monkeypatch.setattr(_driver_outcomes, "parked_steps", with_deadline)
     transport.push("s", prompt())
     transport.drain()
     clock(1000)

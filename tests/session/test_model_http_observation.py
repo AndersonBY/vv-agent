@@ -59,6 +59,6 @@ def local_vendor_transport(case, *, rejection=None):
         patch.object(httpx2.Client, "__init__", local_client),
         patch("openai._base_client.SyncAPIClient._sleep_for_retry", lambda *a, **k: None),
         patch("anthropic._base_client.SyncAPIClient._sleep_for_retry", lambda *a, **k: None),
-        patch("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0),
+        patch("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0),
     ):
         yield requests, clients

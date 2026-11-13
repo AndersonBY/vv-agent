@@ -20,6 +20,8 @@ from vv_agent.kernel._budget_values import (
     UnavailableMetricPolicy,
 )
 
+_DEFAULT_BUDGET_CLOCK_NS = time.monotonic_ns
+
 
 class BudgetEvaluator(CoreBudgetEvaluator):
     def __init__(
@@ -28,7 +30,7 @@ class BudgetEvaluator(CoreBudgetEvaluator):
         *,
         host_cost_meter: HostCostMeter | None = None,
         initial_usage: BudgetUsageSnapshot | None = None,
-        clock_ns: Callable[[], int] = time.monotonic_ns,
+        clock_ns: Callable[[], int] = _DEFAULT_BUDGET_CLOCK_NS,
     ) -> None:
         self._host_cost_meter = host_cost_meter
         self._clock_ns = clock_ns

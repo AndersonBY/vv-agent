@@ -7,6 +7,7 @@ import textwrap
 
 import pytest
 
+from vv_agent.kernel import _driver_outcomes
 from vv_agent.session import _driver_recovery, kernel
 from vv_agent.session.records import make_record
 from vv_agent.session.sql import SQLSessionTx
@@ -76,10 +77,10 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
         )
     else:
         monkeypatch.setattr(
-            _driver_recovery,
-            "unknown",
+            _driver_outcomes,
+            "unknown_steps",
             mutate(
-                _driver_recovery.unknown,
+                _driver_outcomes.unknown_steps,
                 'and (is_model or (plan._payload["tool"] or {}).get("idempotency") == "supported")',
                 "and True",
             ),

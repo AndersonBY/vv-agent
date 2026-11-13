@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.kernel import _driver_outcomes
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.tool_results import build_skipped_result
 from vv_agent.types import Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -25,40 +26,7 @@ if TYPE_CHECKING:
 
 
 def unknown(self: _Driver, plan: Record, reason: str) -> Record:
-    assert plan.operation_id is not None and plan.attempt is not None
-    attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
-    is_model = plan._payload["op_kind"] == "model"
-    retry = (
-        plan._payload["purpose"] != "output_repair"
-        and plan.attempt
-        < max(2, len(plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])))
-        and (is_model or (plan._payload["tool"] or {}).get("idempotency") == "supported")
-    )
-    retry = (
-        retry
-        and reason != "provider_result_invalid"
-        and self.scope.token.reason not in {"cancel", "abort", "close", "lease_lost"}
-        and not self.state.cancel_requested
-    )
-    assert attempt.dispatch is not None
-    return self.record(
-        "op_unknown",
-        {
-            "reason": reason,
-            "dispatch_evidence": [attempt.dispatch.record_id],
-            "observation": {
-                "code": "duplicate_model_request_and_cost" if is_model else "tool_outcome_unknown",
-                "retryable": retry,
-                "usage": None,
-                "active_interval_missing": reason == "worker lost before durable result",
-            },
-            "retry": "retry" if retry else "stop",
-            "retry_at_ms": 0 if retry else None,
-            "duplicate_cost_risk": is_model,
-            "measurement_missing": True,
-        },
-        plan,
-    )
+    return self._run_outcome_steps(_driver_outcomes.unknown_steps(self, plan, reason))
 
 
 def step(self: _Driver) -> bool:
