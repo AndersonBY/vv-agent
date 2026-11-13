@@ -16,22 +16,22 @@ if TYPE_CHECKING:
 import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field, fields, replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from vv_agent.kernel import _summary_compaction
-from vv_agent.kernel._compaction_text import build_compacted_tool_content, has_recovery_envelope
+from vv_agent.kernel._compaction_text import has_recovery_envelope
 from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
-from vv_agent.kernel._context_messages import atomic_start, filter_empty_assistant_messages
+from vv_agent.kernel._context_messages import filter_empty_assistant_messages
 from vv_agent.kernel._context_messages import retained_start as retained_start
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
 from vv_agent.kernel._microcompaction import (
-    EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
     MicrocompactPlan,
     estimate_tool_artifact_path,
     plan_memory_microcompact,
-    replace_with_compacted_marker,
 )
+from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput, apply_microcompaction, compaction_excerpt
+from vv_agent.kernel._microcompaction_apply import MicrocompactionApplyResult as MicrocompactionApplyResult
 from vv_agent.kernel._summary_compaction import SummaryPlan as SummaryPlan
 from vv_agent.kernel._token_count import TokenCount
 from vv_agent.kernel._tool_values import ToolExecutionResult as ToolExecutionResult
@@ -85,14 +85,6 @@ class MemoryCompactionResult:
     messages: list[Message]
     mode: CompactionMode
     changed: bool
-    archived_count: int = 0
-    reclaimed_tokens: int = 0
-    artifact_failure_count: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class MicrocompactionApplyResult:
-    messages: list[Message]
     archived_count: int = 0
     reclaimed_tokens: int = 0
     artifact_failure_count: int = 0
@@ -529,51 +521,31 @@ class MemoryManager:
         *,
         plan: MicrocompactPlan,
     ) -> MicrocompactionApplyResult:
-        updated_messages = list(messages)
-        remaining_tokens = plan.current_tokens
-        archived_count = 0
-        reclaimed_tokens = 0
-        artifact_failure_count = 0
-        protected = atomic_start(messages, self.protected_start) if self.protected_start is not None else len(messages)
-        for candidate in plan.candidates:
-            if candidate.message_index >= protected:
-                continue
-            if remaining_tokens <= plan.target_tokens:
-                break
-            message = updated_messages[candidate.message_index]
-            artifact = self._archive_tool_message(message, candidate)
-            if artifact is None:
-                artifact_failure_count += 1
-                continue
-            marker = build_compacted_tool_content(
-                self._compaction_excerpt(message),
-                artifact_path=artifact.path,
-                tool_name=candidate.tool_name,
-                excerpt_head_chars=self.tool_result_excerpt_head,
-                excerpt_tail_chars=self.tool_result_excerpt_tail,
-            )
-            replacement = replace_with_compacted_marker(
-                message,
-                candidate,
-                artifact=artifact,
-                marker=marker,
-            )
-            actual_reclaimed = max(
-                self._estimate_message_tokens(message) - self._estimate_message_tokens(replacement),
-                0,
-            )
-            if actual_reclaimed == 0:
-                continue
-            updated_messages[candidate.message_index] = replacement
-            archived_count += 1
-            reclaimed_tokens += actual_reclaimed
-            remaining_tokens = max(remaining_tokens - actual_reclaimed, 0)
-        return MicrocompactionApplyResult(
-            messages=updated_messages,
-            archived_count=archived_count,
-            reclaimed_tokens=reclaimed_tokens,
-            artifact_failure_count=artifact_failure_count,
+        steps = apply_microcompaction(
+            messages,
+            plan=plan,
+            protected_start=self.protected_start,
+            model=self.model,
         )
+        response = None
+        try:
+            while True:
+                try:
+                    request = steps.send(response)
+                except StopIteration as done:
+                    return done.value
+                if isinstance(request, ArchiveToolMessage):
+                    response = self._archive_tool_message(request.message, request.candidate)
+                elif isinstance(request, ToolMarkerInput):
+                    response = (
+                        self._compaction_excerpt(request.message),
+                        self.tool_result_excerpt_head,
+                        self.tool_result_excerpt_tail,
+                    )
+                else:
+                    response = self._estimate_message_tokens(cast(Message, request.messages))
+        finally:
+            steps.close()
 
     def _estimate_message_tokens(self, message: Message) -> int:
         return count_messages_tokens([message.to_openai_message()], model=self.model)
@@ -665,10 +637,7 @@ class MemoryManager:
                 raise
             return None
 
-    @staticmethod
-    def _compaction_excerpt(message: Message) -> str:
-        excerpt = message.metadata.get(EXCERPT_METADATA_KEY)
-        return excerpt if isinstance(excerpt, str) else message.content
+    _compaction_excerpt = staticmethod(compaction_excerpt)
 
     def _artifact_is_intact(self, artifact: ToolArtifactRef) -> bool:
         backend = self.workspace_backend

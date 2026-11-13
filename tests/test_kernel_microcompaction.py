@@ -128,6 +128,7 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     from vv_agent import memory
     from vv_agent.kernel import _compaction_text as text
     from vv_agent.kernel import _microcompaction as core
+    from vv_agent.kernel import _microcompaction_apply as apply
     from vv_agent.kernel import _reducer as reducer
     from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
     from vv_agent.kernel._tool_metadata import ToolResultRetention
@@ -145,8 +146,8 @@ def test_microcompaction_keeps_public_and_active_caller_identity():
     for name in ("MicrocompactCandidate", "MicrocompactPlan", "plan_memory_microcompact", "replace_with_compacted_marker"):
         value = getattr(core, name)
         assert value.__module__ == core.__name__, name
-        assert getattr(manager, name) is value, name
-    assert manager.EXCERPT_METADATA_KEY is reducer.EXCERPT_METADATA_KEY is core.EXCERPT_METADATA_KEY
+        assert getattr(apply if name == "replace_with_compacted_marker" else manager, name) is value, name
+    assert apply.EXCERPT_METADATA_KEY is reducer.EXCERPT_METADATA_KEY is core.EXCERPT_METADATA_KEY
     assert reducer.replace_with_compacted_marker is core.replace_with_compacted_marker
     assert _driver_planning.is_microcompacted_tool_content is text.is_microcompacted_tool_content
     assert core.MicrocompactionPolicy is manager.MicrocompactionPolicy is MicrocompactionPolicy

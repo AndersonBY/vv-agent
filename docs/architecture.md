@@ -141,6 +141,14 @@ count-result caching or fold replay. MemoryManager retains its counting hooks,
 model callbacks, archive I/O and SessionMemory notification; accepted notifications
 reuse the count computed during validation. The public microcompaction planner
 remains synchronous, with one authoritative core generator algorithm.
+`kernel/_compaction_phase.py` owns compaction scheduling, protected-tail and
+PTL decisions, summary receipt adoption and extraction ledger decisions.
+`kernel/_microcompaction_apply.py` owns microcompaction application. The SDK
+resolves counting, archive, routing and memory callbacks at their existing
+points. The phase keeps one settings mapping and derives capacity and threshold
+only when each branch needs them. MemoryManager owns defaults and normalization;
+SessionMemory owns its extraction, merge and persistence implementation.
+Driver plan/commit/close still provide the ledger integration.
 Compaction capacity and integer coercion are owned by
 `kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
 provides Runtime with the current settings projection; its constructor remains

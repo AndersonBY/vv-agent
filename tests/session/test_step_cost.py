@@ -46,6 +46,7 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     from vv_llm.chat_clients import utils
     from vv_llm.settings import Server
 
+    from vv_agent.kernel import _compaction_phase as phase
     from vv_agent.memory import manager as memory_manager
     from vv_agent.memory import session_memory
 
@@ -62,28 +63,30 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     monkeypatch.setattr(SQLiteStore, "clock_sql", "100000")
     monkeypatch.setattr("vv_agent.session.timing.time.monotonic_ns", lambda: 100_000_000)
     decisions = []
-    micro = MemoryManager.plan_microcompaction
-    summary = MemoryManager.plan_summary
-    extract = compaction.extract_memory
+    micro = phase.plan_memory_microcompact
+    summary = phase._summary_compaction.plan_summary
+    extract = phase.extract_memory
 
-    def plan_micro(self, messages, **kwargs):
-        result = micro(self, messages, **kwargs)
-        decisions.append(("micro", self.autocompact_threshold, kwargs, snapshot_value(result)))
+    def plan_micro(messages, **kwargs):
+        result = yield from micro(messages, **kwargs)
+        decisions.append(
+            ("micro", {k: v for k, v in kwargs.items() if k != "artifact_path_estimate_for"}, snapshot_value(result))
+        )
         return result
 
-    def plan_summary(self, messages, **kwargs):
-        result = summary(self, messages, **kwargs)
-        decisions.append(("summary", self.autocompact_threshold, kwargs, snapshot_value(result)))
+    def plan_summary(messages, **kwargs):
+        result = summary(messages, **kwargs)
+        decisions.append(("summary", kwargs, snapshot_value(result)))
         return result
 
     def extract_memory(*args):
-        result = extract(*args)
+        result = yield from extract(*args)
         decisions.append(("extract", args[2:], result))
         return result
 
-    monkeypatch.setattr(MemoryManager, "plan_microcompaction", plan_micro)
-    monkeypatch.setattr(MemoryManager, "plan_summary", plan_summary)
-    monkeypatch.setattr(compaction, "extract_memory", extract_memory)
+    monkeypatch.setattr(phase, "plan_memory_microcompact", plan_micro)
+    monkeypatch.setattr(phase._summary_compaction, "plan_summary", plan_summary)
+    monkeypatch.setattr(phase, "extract_memory", extract_memory)
 
     @function_tool
     def more() -> str:
@@ -166,7 +169,7 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
         monkeypatch.setattr(utils.httpx2, "post", post)
         bodies, commits = execute(store, database)
     assert utils.settings.token_server is server
-    assert decisions == expected_decisions
+    assert decisions and decisions == expected_decisions
     assert bodies == expected_bodies
     assert commits == expected_commits
     _, rows, _ = store.read_state("s")
