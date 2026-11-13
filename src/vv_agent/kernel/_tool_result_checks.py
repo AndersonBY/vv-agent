@@ -80,3 +80,16 @@ def validate_output_body(result):
         or type(body["retryable"]) is not bool
     ):
         raise ValueError("invalid error body")
+
+
+def provider_result_identity(raw):
+    """Retention is kernel-owned enrichment, not part of the provider's original receipt."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("metadata"), dict):
+        return raw
+    result = dict(raw)
+    metadata = {k: v for k, v in raw["metadata"].items() if k not in {"app_server_resources", "vv_artifact"}}
+    if metadata:
+        result["metadata"] = metadata
+    else:
+        result.pop("metadata", None)
+    return result

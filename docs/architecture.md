@@ -226,12 +226,18 @@ and evidence; the outer adapter supplies values, not an acceptance decision.
 lease-fenced commit algorithm. The SDK driver inherits those same methods;
 store, fold, lease scope and watermark are not mirrored in another driver.
 Explicit clock, fold and observation callbacks preserve transaction timing,
-while the SDK owns cost-meter reads, hooks and log emission. Dispatch, input
-and recovery orchestration remain the next driver integration boundary.
+while the SDK owns cost-meter reads, hooks and log emission.
+`session/_driver_dispatch.py` and `session/_driver_recovery.py` retain dispatch
+and recovery orchestration.
 `kernel/_driver_planning.py` owns operation/model plans and selected-model,
 fork, then frozen-task/default precedence. The SDK supplies route bindings,
 provider membership and callbacks at their original points. Retained fragments,
 idempotency keys and consumed unknowns are constructed by the shared planner.
+`kernel/_driver_inputs.py` owns inbox ordering, input identity/disposition and
+turn admission, using the same CoreDriver and DefinitionCache. Interaction values
+and reply validation, summary intent helpers and provider-result identity also
+have single core owners. The SDK supplies compilation, authentication and resource
+observations; input consumption and guarded commits keep their original ordering.
 
 `kernel/_store.py` owns store protocols, receipts, leases and errors;
 `kernel/_sql.py` owns the shared SQL transaction and scheduling rules.

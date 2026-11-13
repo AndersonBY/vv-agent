@@ -7,6 +7,7 @@ import json
 from pathlib import PurePosixPath
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._tool_result_checks import provider_result_identity as provider_result_identity
 from vv_agent.kernel._tool_result_checks import result_kind
 from vv_agent.kernel._tool_result_checks import validate_output_body as validate_output_body
 from vv_agent.types import ToolArtifactRef, ToolExecutionResult
@@ -170,19 +171,6 @@ def prepare_tool_resources(record, raw, backend):
         resources.append(entry)
     metadata["app_server_resources"] = resources
     return raw | {"metadata": metadata}
-
-
-def provider_result_identity(raw):
-    """Retention is kernel-owned enrichment, not part of the provider's original receipt."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("metadata"), dict):
-        return raw
-    result = dict(raw)
-    metadata = {k: v for k, v in raw["metadata"].items() if k not in {"app_server_resources", "vv_artifact"}}
-    if metadata:
-        result["metadata"] = metadata
-    else:
-        result.pop("metadata", None)
-    return result
 
 
 def resource_entries(result):

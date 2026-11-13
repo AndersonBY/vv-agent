@@ -330,35 +330,6 @@ class _Driver(CoreDriver):
             parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
         return parked
 
-    def yieldable_batch(self) -> list[Attempt]:
-        """Return the whole remaining batch only when every observation can yield."""
-        tid = self.state.active_turn_id
-        # shortcut: local drivers keep normal waits; enable yielding with local scheduling.
-        if self.one_turn or tid is None:
-            return []
-        turn = self.state.turns[tid]
-        if turn.cancelled or turn.suspended or turn.wait or self.scope.token.cancelled:
-            return []
-        pending = []
-        for op in self.state.operations.values():
-            a = op.attempts[max(op.attempts)]
-            if op.turn_id != tid or a.state == "completed":
-                continue
-            if a.state == "unknown" and a.unknown and a.unknown._payload["retry"] != "retry":
-                continue
-            if a.state != "parked" or not a.wait or not a.wait.get("yield_on_steer"):
-                return []
-            if a.child_handle:
-                completed = self.state.child_completions or {}
-                if any(
-                    h["session_id"] not in a.wait["yieldable_children"]
-                    and (a.plan.operation_id, a.plan.attempt, h["session_id"]) not in completed
-                    for h in child_handles(a.child_handle)
-                ):
-                    return []
-            pending.append(a)
-        return pending
-
     def yield_results(self, attempts: list[Attempt], item: InboxItem) -> list[Record]:
         records = []
         for a in attempts:
