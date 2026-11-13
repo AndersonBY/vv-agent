@@ -11,6 +11,9 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
+import traceback
+from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote
@@ -19,11 +22,23 @@ VV_AGENT_REPOSITORY = "https://github.com/AndersonBY/vv-agent.git"
 CONTRACT_REPOSITORY = "https://github.com/AndersonBY/vv-agent-contract.git"
 SQLITE_FULL_SEEDS = 1_000_000
 POSTGRES_FULL_SEEDS = 10_000
+SQLITE_CHUNK_SIZE = 100_000
+POSTGRES_CHUNK_SIZE = 1_000
 MAX_WORKERS = 8
 UV_VERSION = "0.10.4"
 REQUIRED_COVERED = frozenset({"I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I10"})
 EXPECTED_PENDING = frozenset({"I9", "I11"})
+SCENARIO_COUNT = 21
 FULL_REVISION = re.compile(r"[0-9a-f]{40}")
+REPORT_NAME = re.compile(r"^(sqlite|postgres)-([0-9]{10})-([0-9]{10})\.json$")
+RESULT_NAME = "result.json"
+IDENTITY_FIELDS = (
+    "vv_agent_revision",
+    "contract_revision",
+    "code_digest",
+    "contract_manifest_sha256",
+    "in_memory_mutations",
+)
 
 
 def parse_args(argv=None):
@@ -44,8 +59,11 @@ def parse_args(argv=None):
     parser.add_argument("--contract-revision", required=True, type=revision)
     parser.add_argument("--sqlite-seeds", type=positive, default=SQLITE_FULL_SEEDS)
     parser.add_argument("--postgres-seeds", type=positive, default=POSTGRES_FULL_SEEDS)
+    parser.add_argument("--sqlite-chunk-size", type=positive, default=SQLITE_CHUNK_SIZE)
+    parser.add_argument("--postgres-chunk-size", type=positive, default=POSTGRES_CHUNK_SIZE)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, choices=range(1, MAX_WORKERS + 1), default=MAX_WORKERS)
+    parser.add_argument("--report-dir", required=True, type=Path)
     return parser.parse_args(argv)
 
 
@@ -53,6 +71,51 @@ def scrub(text, sensitive=()):
     for value in sorted((item for item in sensitive if item), key=len, reverse=True):
         text = text.replace(value, "[REDACTED]")
     return text
+
+
+def scrub_json(value, sensitive=()):
+    if isinstance(value, str):
+        return scrub(value, sensitive)
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            clean_key = scrub_json(key, sensitive)
+            if clean_key in cleaned:
+                raise ValueError("redaction produced duplicate JSON keys")
+            cleaned[clean_key] = scrub_json(item, sensitive)
+        return cleaned
+    if isinstance(value, list):
+        return [scrub_json(item, sensitive) for item in value]
+    return value
+
+
+def prepare_report_dir(path):
+    path = Path(path)
+    if path.exists():
+        if not path.is_dir():
+            raise ValueError("report directory path is not a directory")
+        if any(path.iterdir()):
+            raise ValueError("report directory must be empty; resume and replay are not supported")
+    else:
+        path.mkdir(parents=True)
+    return path.resolve()
+
+
+def atomic_write_json(path, value):
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite retained evidence: {path.name}")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(value, output, indent=2, sort_keys=True, allow_nan=False)
+            output.write("\n")
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def emit(*, identity, event, **values):
@@ -144,7 +207,10 @@ def source_expectations(python, *, source, env):
     pending = frozenset(payload["pending"])
     if pending != EXPECTED_PENDING:
         raise RuntimeError(f"selected source has unexpected pending invariants: {sorted(pending)}")
-    return frozenset(payload["scenarios"]), EXPECTED_PENDING
+    scenarios = frozenset(payload["scenarios"])
+    if len(scenarios) != SCENARIO_COUNT:
+        raise RuntimeError(f"selected source has {len(scenarios)} scenarios; expected {SCENARIO_COUNT}")
+    return scenarios
 
 
 def quote_ident(value):
@@ -183,7 +249,7 @@ def pg_admin(psql, runuser, *, port, query, env):
     return result.stdout.strip()
 
 
-def prepare_postgres(root, *, env):
+def prepare_postgres(root, *, env, sensitive):
     run(["apt-get", "update"], cwd=root, env=env)
     run(["apt-get", "install", "-y", "postgresql"], cwd=root, env=env)
     psql = shutil.which("psql", path=env["PATH"])
@@ -199,13 +265,13 @@ def prepare_postgres(root, *, env):
         secrets.token_urlsafe(32),
         secrets.token_urlsafe(32),
     )
+    sensitive.extend((password, wrong_password))
     state = {
         "role": role,
         "port": port,
         "dsn": None,
         "psql": psql,
         "runuser": runuser,
-        "sensitive": (password, wrong_password, ""),
         "runtime": {
             "package_major": server_version.split(".", 1)[0],
             "server_version": server_version,
@@ -269,7 +335,7 @@ def prepare_postgres(root, *, env):
             f"postgresql://{quote(role, safe='')}:{quote(password, safe='')}@127.0.0.1:{port}/"
             f"{quote(database, safe='')}?sslmode=disable&gssencmode=disable"
         )
-        state["sensitive"] = (password, wrong_password, state["dsn"])
+        sensitive.append(state["dsn"])
         return state
     except Exception:
         cleanup_postgres(state, env=env)
@@ -329,7 +395,7 @@ def campaign_command(python, *, backend, seed, seeds, workers, report):
     ]
 
 
-def stream_campaign(command, *, cwd, env, sensitive=()):
+def stream_campaign(command, *, cwd, env, sensitive=(), diagnostics=None):
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -344,8 +410,11 @@ def stream_campaign(command, *, cwd, env, sensitive=()):
         raise RuntimeError("campaign stdout is unavailable")
     try:
         for line in process.stdout:
-            sys.stdout.write(scrub(line, sensitive))
+            cleaned = scrub(line, sensitive)
+            sys.stdout.write(cleaned)
             sys.stdout.flush()
+            if diagnostics is not None:
+                diagnostics["tail"] = (diagnostics.get("tail", "") + cleaned)[-20_000:]
         return process.wait()
     except BaseException:
         process.terminate()
@@ -353,7 +422,18 @@ def stream_campaign(command, *, cwd, env, sensitive=()):
         raise
 
 
-def validate_report(report, *, backend, seed, seeds, identity, tempdir, scenarios, pending, contract_source=None):
+def validate_report(
+    report,
+    *,
+    backend,
+    seed,
+    seeds,
+    identity,
+    tempdir,
+    scenarios,
+    workers,
+    contract_source,
+):
     def require(condition, message):
         if not condition:
             raise ValueError(message)
@@ -366,62 +446,126 @@ def validate_report(report, *, backend, seed, seeds, identity, tempdir, scenario
     require(report.get("contract_revision") == identity["contract_revision"], "actual contract revision mismatch")
     require(report.get("dirty") is False, "actual code checkout is dirty or unknown")
     require(report.get("contract_dirty") is False, "actual contract checkout is dirty or unknown")
-    if contract_source is not None:
-        require(report.get("contract_selection") == "local", "canonical contract was not selected")
-        require(report.get("contract_source") == str(contract_source), "canonical contract source mismatch")
+    require(report.get("in_memory_mutations") == [], "in-memory source mutations must be empty")
+    require(report.get("workers") == workers, "actual worker count mismatch")
+    require(report.get("contract_selection") == "local", "canonical contract was not selected")
+    require(report.get("contract_source") == str(contract_source), "canonical contract source mismatch")
     actual_pending = report.get("pending")
-    if not isinstance(actual_pending, dict):
-        raise ValueError("pending metadata is missing")
-    require(frozenset(actual_pending) == pending, "actual pending set mismatch")
+    require(isinstance(actual_pending, dict) and frozenset(actual_pending) == EXPECTED_PENDING, "actual pending set mismatch")
     counts = report.get("scenarios")
-    require(isinstance(counts, dict), "scenario counts are missing")
-    if isinstance(counts, dict):
-        require(set(counts).issubset(scenarios), "unknown scenario in report")
-        require(all(isinstance(count, int) and count > 0 for count in counts.values()), "invalid scenario count")
-        require(sum(counts.values()) == seeds, "scenario seed total mismatch")
-        if seeds >= (SQLITE_FULL_SEEDS if backend == "sqlite" else POSTGRES_FULL_SEEDS):
-            require(set(counts) == scenarios, "full campaign did not run every source scenario")
+    require(isinstance(counts, dict) and set(counts).issubset(scenarios), "scenario counts are missing or unknown")
+    require(all(isinstance(count, int) and count > 0 for count in counts.values()), "invalid scenario count")
+    require(sum(counts.values()) == seeds, "scenario seed total mismatch")
     covered = report.get("covered")
-    require(isinstance(covered, list), "covered invariants are missing")
-    full = seeds >= (SQLITE_FULL_SEEDS if backend == "sqlite" else POSTGRES_FULL_SEEDS)
-    if full:
-        require(isinstance(covered, list) and REQUIRED_COVERED.issubset(covered), "required invariants are not covered")
+    require(isinstance(covered, list) and all(isinstance(item, str) for item in covered), "covered invariants are missing")
     storage = (report.get("environment") or {}).get("sqlite_temporary_storage")
     require(isinstance(storage, dict), "SQLite storage evidence is missing")
-    if backend == "sqlite" and isinstance(storage, dict):
+    assert isinstance(storage, dict)
+    if backend == "sqlite":
         observations = storage.get("observations")
-        require(isinstance(observations, list) and bool(observations), "SQLite storage observations are missing")
-        if isinstance(observations, list):
-            require(
-                all(
-                    isinstance(item, dict)
-                    and item.get("requested_TMPDIR") == str(tempdir)
-                    and Path(item.get("directory", "/")).is_relative_to("/tmp")
-                    for item in observations
-                ),
-                "SQLite campaign TMPDIR does not match the selected /tmp directory",
+        require(isinstance(observations, list) and observations, "SQLite storage observations are missing")
+        require(
+            all(
+                isinstance(item, dict)
+                and item.get("requested_TMPDIR") == str(tempdir)
+                and Path(item.get("directory", "/")).is_relative_to("/tmp")
+                for item in observations
+            ),
+            "SQLite campaign TMPDIR does not match the selected /tmp directory",
+        )
+    else:
+        require(storage == {"verified": False, "observations": []}, "PostgreSQL storage evidence is invalid")
+
+
+def aggregate_campaign(report_dir, *, backend, seed, total, chunk_size, scenarios, identity, tempdir, workers, contract_source):
+    paths = sorted(Path(report_dir).glob(f"{backend}-*.json"))
+    cursor = seed
+    actual_identity = None
+    actual_pending = None
+    scenario_counts = Counter()
+    covered = set()
+    reports = []
+    storage_verified = backend == "sqlite"
+    regular_filesystem = backend == "sqlite"
+    for path in paths:
+        match = REPORT_NAME.fullmatch(path.name)
+        if match is None or match.group(1) != backend:
+            raise ValueError(f"retained report has an invalid basename: {path.name}")
+        report_seed, report_seeds = int(match.group(2)), int(match.group(3))
+        planned_seeds = min(chunk_size, seed + total - cursor)
+        if report_seed != cursor or report_seeds != planned_seeds:
+            raise ValueError(f"campaign parts are missing, overlapping or non-contiguous at {cursor}")
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"retained report is not readable JSON: {path.name}") from exc
+        validate_report(
+            report,
+            backend=backend,
+            seed=cursor,
+            seeds=planned_seeds,
+            identity=identity,
+            tempdir=tempdir,
+            scenarios=scenarios,
+            workers=workers,
+            contract_source=contract_source,
+        )
+        report_identity = {
+            "vv_agent_revision": report.get("code_revision"),
+            **{field: report.get(field) for field in IDENTITY_FIELDS if field != "vv_agent_revision"},
+        }
+        if actual_identity is None:
+            actual_identity = report_identity
+            actual_pending = report["pending"]
+        elif report_identity != actual_identity or report["pending"] != actual_pending:
+            raise ValueError("campaign identity or pending metadata is inconsistent")
+        scenario_counts.update(report["scenarios"])
+        covered.update(report["covered"])
+        reports.append(path.name)
+        if backend == "sqlite":
+            observations = report["environment"]["sqlite_temporary_storage"]["observations"]
+            regular_filesystem &= bool(observations) and all(
+                item.get("filesystem") not in {None, "tmpfs"} for item in observations
             )
-        if full:
-            require(storage.get("verified") is True, "full SQLite storage is unverified")
-            require(
-                isinstance(observations, list)
-                and all(isinstance(item, dict) and item.get("filesystem") not in {None, "tmpfs"} for item in observations),
-                "full SQLite campaign did not verify regular filesystem storage",
-            )
-    elif isinstance(storage, dict):
-        require(storage.get("verified") is False, "PostgreSQL storage should have no SQLite verification")
-        require(storage.get("observations") == [], "PostgreSQL campaign unexpectedly has SQLite observations")
+            storage_verified &= report["environment"]["sqlite_temporary_storage"]["verified"] is True
+        cursor += planned_seeds
+    if actual_identity is None:
+        raise ValueError(f"{backend} campaign has no completed part reports")
+    if cursor != seed + total:
+        raise ValueError(f"{backend} campaign is missing completed part reports")
+    if sum(scenario_counts.values()) != total:
+        raise ValueError("aggregate scenario counts do not equal completed seeds")
+    return {
+        "seed": seed,
+        "seeds": cursor - seed,
+        "scenarios": dict(sorted(scenario_counts.items())),
+        "covered": sorted(covered),
+        "pending": actual_pending,
+        "reports": reports,
+        "storage": {
+            "verified": storage_verified,
+            "regular_filesystem": regular_filesystem,
+        },
+        "identity": actual_identity,
+    }
 
 
 def execute(args):
+    report_dir = None
+    root = None
+    postgres = {}
+    runtime = {}
+    sensitive = []
     identity = {
         "vv_agent_repository": VV_AGENT_REPOSITORY,
         "vv_agent_revision": args.vv_agent_revision,
         "contract_repository": CONTRACT_REPOSITORY,
         "contract_revision": args.contract_revision,
     }
-    campaign_returncode, sensitive = 0, []
     try:
+        if args.seed < 0:
+            raise ValueError("seed must be nonnegative")
+        report_dir = prepare_report_dir(args.report_dir)
         with TemporaryDirectory(prefix="vv-agent-colab-", dir="/tmp") as directory:
             root = Path(directory)
             env = environment(root)
@@ -430,69 +574,176 @@ def execute(args):
                 "vv_agent_revision": clone_exact(VV_AGENT_REPOSITORY, args.vv_agent_revision, source, env=env),
                 "contract_revision": clone_exact(CONTRACT_REPOSITORY, args.contract_revision, contract, env=env),
             }
+            contract_source = contract.resolve()
             python, python_runtime = prepare_python(source, env=env)
+            runtime = {"python": python_runtime, "postgres": {}, "temporary_directory_removed": False}
             campaign_env = env | {
                 "PYTHONPATH": f"{source / 'src'}:{source}",
                 "VV_AGENT_CONTRACT_SOURCE": str(contract),
             }
-            expected_scenarios, expected_pending = source_expectations(python, source=source, env=campaign_env)
-            postgres = prepare_postgres(root, env=env)
-            sensitive = list(postgres["sensitive"])
-            runtime = python_runtime | {"postgres": postgres["runtime"]}
+            expected_scenarios = source_expectations(python, source=source, env=campaign_env)
+            postgres = prepare_postgres(root, env=env, sensitive=sensitive)
+            runtime["postgres"] = postgres["runtime"]
             try:
-                for backend, seeds in (("sqlite", args.sqlite_seeds), ("postgres", args.postgres_seeds)):
-                    report_path = root / f"{backend}-report.json"
+                for backend, total, chunk_size in (
+                    ("sqlite", args.sqlite_seeds, args.sqlite_chunk_size),
+                    ("postgres", args.postgres_seeds, args.postgres_chunk_size),
+                ):
                     child_env = campaign_env.copy()
                     if backend == "postgres":
                         child_env["VV_AGENT_TEST_POSTGRES_DSN"] = postgres["dsn"]
-                    campaign_returncode = stream_campaign(
-                        campaign_command(
-                            python,
-                            backend=backend,
-                            seed=args.seed,
-                            seeds=seeds,
-                            workers=args.workers,
-                            report=report_path,
-                        ),
-                        cwd=source,
-                        env=child_env,
-                        sensitive=sensitive,
-                    )
-                    if campaign_returncode:
+                    for part_seed in range(args.seed, args.seed + total, chunk_size):
+                        part_seeds = min(chunk_size, args.seed + total - part_seed)
+                        basename = f"{backend}-{part_seed:010d}-{part_seeds:010d}.json"
+                        retained = report_dir / basename
+                        temporary_report = root / basename
+                        diagnostics = {"tail": ""}
                         emit(
                             identity=identity,
-                            event="failed",
+                            event="part_started",
                             backend=backend,
-                            returncode=campaign_returncode,
-                            message="simulation CLI failed; inspect the redacted streamed report without automatic retry",
+                            seed=part_seed,
+                            seeds=part_seeds,
+                            report=basename,
                         )
-                        return campaign_returncode
-                    report = json.loads(report_path.read_text())
-                    validate_report(
-                        report,
-                        backend=backend,
-                        seed=args.seed,
-                        seeds=seeds,
-                        identity=identity,
-                        tempdir=root / "tmp",
-                        scenarios=expected_scenarios,
-                        pending=expected_pending,
-                        contract_source=contract,
-                    )
+                        report = None
+                        returncode = 0
+                        try:
+                            returncode = stream_campaign(
+                                campaign_command(
+                                    python,
+                                    backend=backend,
+                                    seed=part_seed,
+                                    seeds=part_seeds,
+                                    workers=args.workers,
+                                    report=temporary_report,
+                                ),
+                                cwd=source,
+                                env=child_env,
+                                sensitive=sensitive,
+                                diagnostics=diagnostics,
+                            )
+                            try:
+                                report = json.loads(temporary_report.read_text())
+                            except (OSError, json.JSONDecodeError) as exc:
+                                raise ValueError(f"simulation CLI report is missing or invalid: {exc}") from exc
+                            if returncode:
+                                raise ValueError(f"simulation CLI exited with status {returncode}")
+                            if "error" in report:
+                                raise ValueError("simulation CLI report contains an error")
+                            validate_report(
+                                report,
+                                backend=backend,
+                                seed=part_seed,
+                                seeds=part_seeds,
+                                identity=identity,
+                                tempdir=root / "tmp",
+                                scenarios=expected_scenarios,
+                                workers=args.workers,
+                                contract_source=contract_source,
+                            )
+                            atomic_write_json(retained, scrub_json(report, sensitive))
+                        except Exception as exc:
+                            failure = {"backend": backend, "seed": part_seed, "seeds": part_seeds} | (
+                                report if isinstance(report, dict) else {}
+                            )
+                            failure.setdefault("error", f"{type(exc).__name__}: {exc}")
+                            failure.setdefault("trace", diagnostics["tail"] or traceback.format_exc())
+                            failure.setdefault("returncode", returncode)
+                            if not retained.exists():
+                                atomic_write_json(retained, scrub_json(failure, sensitive))
+                            emit(
+                                identity=identity,
+                                event="part_failed",
+                                backend=backend,
+                                seed=part_seed,
+                                seeds=part_seeds,
+                                report=basename,
+                                returncode=returncode,
+                                message=scrub(str(exc), sensitive)[:1000],
+                            )
+                            raise ValueError(f"{basename}: {exc}") from exc
+                        emit(
+                            identity=identity,
+                            event="part_completed",
+                            backend=backend,
+                            seed=part_seed,
+                            seeds=part_seeds,
+                            report=basename,
+                        )
             finally:
                 cleanup_postgres(postgres, env=env)
-            full_acceptance = args.sqlite_seeds >= SQLITE_FULL_SEEDS and args.postgres_seeds >= POSTGRES_FULL_SEEDS
-            emit(
+        runtime["temporary_directory_removed"] = not root.exists()
+        campaigns = {
+            backend: aggregate_campaign(
+                report_dir,
+                backend=backend,
+                seed=args.seed,
+                total=total,
+                chunk_size=args.sqlite_chunk_size if backend == "sqlite" else args.postgres_chunk_size,
+                scenarios=expected_scenarios,
                 identity=identity,
-                event="complete",
-                full_acceptance=full_acceptance,
-                runtime=runtime,
+                tempdir=root / "tmp",
+                workers=args.workers,
+                contract_source=contract_source,
             )
-            return 0
+            for backend, total in (("sqlite", args.sqlite_seeds), ("postgres", args.postgres_seeds))
+        }
+        sqlite, postgres_campaign = campaigns["sqlite"], campaigns["postgres"]
+        postgres_runtime = runtime["postgres"]
+        accepted = (
+            sqlite["seeds"] == args.sqlite_seeds >= SQLITE_FULL_SEEDS
+            and postgres_campaign["seeds"] == args.postgres_seeds >= POSTGRES_FULL_SEEDS
+            and all(
+                set(campaign["scenarios"]) == set(expected_scenarios)
+                and all(campaign["scenarios"].values())
+                and REQUIRED_COVERED.issubset(campaign["covered"])
+                and set(campaign["pending"]) == EXPECTED_PENDING
+                for campaign in (sqlite, postgres_campaign)
+            )
+            and sqlite["storage"]["verified"]
+            and sqlite["storage"]["regular_filesystem"]
+            and postgres_runtime.get("password_authentication_verified") is True
+            and postgres_runtime.get("temporary_role_removed") is True
+            and postgres_runtime.get("temporary_databases_removed") is True
+            and runtime.get("temporary_directory_removed") is True
+            and sqlite["identity"] == {field: postgres_campaign["identity"].get(field) for field in IDENTITY_FIELDS}
+        )
+        full_requested = args.sqlite_seeds >= SQLITE_FULL_SEEDS and args.postgres_seeds >= POSTGRES_FULL_SEEDS
+        status = "complete" if accepted or not full_requested else "failed"
+        report_identity = next(iter(campaigns.values()))["identity"]
+        result_identity = identity | report_identity
+        result = {
+            "status": status,
+            "full_acceptance": accepted,
+            "identity": result_identity,
+            "campaigns": campaigns,
+            "runtime": runtime,
+        }
+        if status == "failed":
+            result["error"] = {"message": "configured full campaign did not satisfy acceptance evidence"}
+        atomic_write_json(report_dir / RESULT_NAME, scrub_json(result, sensitive))
+        emit(identity=result_identity, event=status, full_acceptance=accepted, runtime=runtime)
+        return 0 if status == "complete" else 1
     except Exception as exc:
-        code = campaign_returncode or 1
-        emit(identity=identity, event="failed", returncode=code, message=scrub(str(exc), sensitive)[:1000])
-        return code
+        if root is not None and runtime:
+            runtime["temporary_directory_removed"] = not root.exists()
+        error = {
+            "message": scrub(str(exc), sensitive)[:1000],
+            "trace": scrub(traceback.format_exc(), sensitive)[-20_000:],
+        }
+        if report_dir is not None and not (report_dir / RESULT_NAME).exists():
+            saved_reports = sorted(path.name for path in report_dir.iterdir() if REPORT_NAME.fullmatch(path.name) is not None)
+            result = {
+                "status": "failed",
+                "full_acceptance": False,
+                "error": error,
+                "runtime": runtime,
+                "reports": saved_reports,
+            }
+            atomic_write_json(report_dir / RESULT_NAME, scrub_json(result, sensitive))
+        emit(identity=identity, event="failed", returncode=1, message=error["message"])
+        return 1
 
 
 def main(argv=None):
