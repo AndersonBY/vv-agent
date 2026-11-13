@@ -37,34 +37,58 @@ from vv_agent.kernel._tool_result_checks import provider_result_identity
 from vv_agent.kernel._records import InboxItem
 from types import SimpleNamespace
 
-form = user_interaction("s", "t", 1, {"question": "雪 / ~", "interaction_id": "wait"})
-target = InteractionReplyTarget.from_dict(
-    {k: form[k] for k in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")}
-)
-assert AppServerUserInteraction.from_dict(form).to_dict() == form
-answer = InteractionAnswer("text", text="answer")
-state = SimpleNamespace(
-    active_turn_id="t",
-    closed=False,
-    archived=False,
-    turns={
-        "t": SimpleNamespace(
-            start=SimpleNamespace(_payload={"generation": 1}),
-            wait=SimpleNamespace(_payload={"question": "雪 / ~", "interaction_id": "wait"}),
-        )
-    },
-    waits={},
-)
-item = InboxItem("reply", "user", {"content": reply_content(target, answer)}, "t", 1)
-t, a = validate_inbox_reply(state, "s", item)
-assert t == target and a == answer
-item.payload["content"]["text"] = "forged"
+to_dict_functions = {
+    "InteractionReplyTarget.to_dict": InteractionReplyTarget.to_dict,
+    "InteractionAnswerSpec.to_dict": InteractionAnswerSpec.to_dict,
+    "InteractionAnswer.to_dict": InteractionAnswer.to_dict,
+    "AppServerUserInteraction.to_dict": AppServerUserInteraction.to_dict,
+}
+to_dict_codes = {function.__code__: name for name, function in to_dict_functions.items()}
+assert len(to_dict_codes) == len(to_dict_functions)
+to_dict_hits = set()
+
+
+def profiler(frame, event, arg):
+    del arg
+    if event == "call" and frame.f_code in to_dict_codes:
+        to_dict_hits.add(to_dict_codes[frame.f_code])
+
+
+# Imports and class lookup are not producer evidence.
+assert not to_dict_hits
+sys.setprofile(profiler)
 try:
-    validate_inbox_reply(state, "s", item)
-except InteractionError as exc:
-    assert exc.reason == "invalid_interaction_answer"
-else:
-    raise AssertionError("forged reply accepted")
+    form = user_interaction("s", "t", 1, {"question": "雪 / ~", "interaction_id": "wait"})
+    target = InteractionReplyTarget.from_dict(
+        {k: form[k] for k in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")}
+    )
+    assert AppServerUserInteraction.from_dict(form).to_dict() == form
+    answer = InteractionAnswer("text", text="answer")
+    state = SimpleNamespace(
+        active_turn_id="t",
+        closed=False,
+        archived=False,
+        turns={
+            "t": SimpleNamespace(
+                start=SimpleNamespace(_payload={"generation": 1}),
+                wait=SimpleNamespace(_payload={"question": "雪 / ~", "interaction_id": "wait"}),
+            )
+        },
+        waits={},
+    )
+    item = InboxItem("reply", "user", {"content": reply_content(target, answer)}, "t", 1)
+    t, a = validate_inbox_reply(state, "s", item)
+    assert t == target and a == answer
+    item.payload["content"]["text"] = "forged"
+    try:
+        validate_inbox_reply(state, "s", item)
+    except InteractionError as exc:
+        assert exc.reason == "invalid_interaction_answer"
+    else:
+        raise AssertionError("forged reply accepted")
+finally:
+    sys.setprofile(None)
+assert to_dict_hits == set(to_dict_functions), to_dict_hits
 raw = {"metadata": {"vv_artifact": {"private": "locator"}, "keep": [True, 1]}, "content": "ok"}
 assert provider_result_identity(raw) == {"metadata": {"keep": [True, 1]}, "content": "ok"}
 assert "vv_artifact" in raw["metadata"]

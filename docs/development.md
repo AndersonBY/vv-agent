@@ -163,6 +163,21 @@ uv run python scripts/check_repository_contracts.py
 uv run pytest tests/test_kernel_dispatch_boundary.py tests/test_repository_contracts.py tests/test_kernel_boundaries.py
 ```
 
+### Core entrypoint evidence
+
+`tests/sim/test_core_reachability.py` tracks the actual code objects of 29
+cross-module execution entrypoints during fixed SQLite scenarios. A projection
+consumer also fails, backs off, retries the same batch and acknowledges it
+through the real store. Importing an entrypoint without executing it fails.
+
+The gate separately discovers explicit core-origin functions and methods from
+the selected public API contract. Each needs an execution or value-producer
+mapping; a new unmapped entry fails. Public interaction values are exercised by
+`tests/test_kernel_input_dependencies.py` under an SDK import guard. Host-only
+protocols are classified separately rather than counted as core implementations.
+This checks declared public behavior and the listed execution entrypoints; it is
+not coverage of every private helper or every possible scheduler interleaving.
+
 ### App Server changes
 
 Also check the CLI entry points and schema generation:
