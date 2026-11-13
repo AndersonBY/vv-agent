@@ -61,7 +61,9 @@ def check_kernel_boundaries(root: Path) -> list[str]:
     API effect inference or arbitrary execution proof. This is a maintenance
     gate, not a sandbox. Only the two concrete storage adapters may open
     connections/create synchronous RLocks; PostgreSQL driver imports must be
-    function-local or type-only. Other core modules retain the pure boundary.
+    function-local or type-only. Raw connection, cursor and SQL execution
+    names are limited to the exact storage implementations. Other core
+    modules retain the pure boundary.
     """
     root = root.resolve()
     core = "vv_agent.kernel"
@@ -116,6 +118,22 @@ def check_kernel_boundaries(root: Path) -> list[str]:
             "psycopg.conninfo.make_conninfo",
             "psycopg.conninfo.conninfo_to_dict",
         },
+    }
+    storage_owners = {
+        "src/vv_agent/kernel/_sql.py",
+        "src/vv_agent/kernel/_sqlite.py",
+        "src/vv_agent/kernel/_postgres.py",
+    }
+    storage_api_names = {
+        "connection",
+        "_conn",
+        "_one",
+        "_rows",
+        "_transaction",
+        "execute",
+        "executemany",
+        "executescript",
+        "transaction",
     }
     postgres_imports = {"psycopg", "psycopg.conninfo", "psycopg.rows", "psycopg.pq"}
     errors = []
@@ -195,8 +213,14 @@ def check_kernel_boundaries(root: Path) -> list[str]:
                 for assigned in node.targets:
                     if isinstance(assigned, ast.Name):
                         bindings[assigned.id] = target
+            elif isinstance(node, ast.Attribute):
+                target = name(node)
+                if path not in storage_owners and node.attr in storage_api_names:
+                    errors.append(f"{path}:{node.lineno}: forbidden kernel storage API: {target}")
             elif isinstance(node, ast.Call):
                 target = name(node.func)
+                if path not in storage_owners and target.endswith(".cursor"):
+                    errors.append(f"{path}:{node.lineno}: forbidden kernel storage API: {target}")
                 if (
                     target in effect_calls
                     or any(target == family or target.startswith(family + ".") for family in effect_families)

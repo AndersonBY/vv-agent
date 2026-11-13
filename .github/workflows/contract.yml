@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -63,14 +65,21 @@ jobs:
       - name: Verify vendored contract snapshot
         run: python3 scripts/contract_snapshot.py check
 
+      - name: Verify concurrency fixes cite simulation seeds
+        env:
+          CONCURRENCY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check_concurrency_seeds.py --base "$CONCURRENCY_BASE_SHA" --head "$GITHUB_SHA"
+
       - name: Verify repository documentation and capability contracts
         run: uv run python scripts/check_repository_contracts.py
 
       - name: Test repository and kernel contract gates
         run: |
           uv run pytest -q --strict-markers \
+            tests/test_concurrency_seed_gate.py \
             tests/test_repository_contracts.py \
             tests/test_kernel_boundaries.py \
+            tests/test_kernel_storage_boundary.py \
             tests/test_kernel_schema.py::test_kernel_schema_import_is_isolated_without_site_packages
 
       - name: Verify formatting

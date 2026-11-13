@@ -106,6 +106,35 @@ actual temporary directory, filesystem type (or null when unavailable), and
 requested `TMPDIR` in `environment.sqlite_temporary_storage`. Full suites and
 the million-seed SQLite / 10,000-seed PostgreSQL campaigns run remotely.
 
+### Concurrency-fix seed reference
+
+Classify a concurrency bug fix with a `fix(concurrency): ...` commit subject and
+cite at least one reproducing simulation seed on its own line in the commit body:
+
+```text
+fix(concurrency): preserve stale lease fencing
+
+Simulation-Seed: 17
+```
+
+Ordinary refactors and tests do not need the trailer. CI checks commits in the
+selected pull-request or push `base..HEAD` set, including merge and force-update
+history. This convention cannot identify a fix that was not classified as
+`fix(concurrency)` and does not prove that the cited seed reproduces the bug;
+reviewers still own those judgments.
+
+### Kernel storage boundary
+
+Raw connection, cursor and SQL execution APIs belong only in
+`src/vv_agent/kernel/_sql.py`, `src/vv_agent/kernel/_sqlite.py`, and
+`src/vv_agent/kernel/_postgres.py`. Other kernel code uses `SessionStore` and
+`SessionTx` methods such as `append`, `ack`, and lease operations.
+`scripts/check_repository_contracts.py` enforces this source boundary.
+
+The check catches direct calls and simple captured aliases to storage APIs.
+It does not prove every mutation path: reflection, arbitrary callbacks and
+disguised aliases still require review against the storage protocol.
+
 ### App Server changes
 
 Also check the CLI entry points and schema generation:
