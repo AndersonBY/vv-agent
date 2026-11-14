@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from support.contract import fixture_root
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Definitive
 from vv_agent.session.records import InboxItem, digest

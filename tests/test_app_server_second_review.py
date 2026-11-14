@@ -7,7 +7,6 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Event
-from types import SimpleNamespace
 
 import pytest
 from support.interactions import displayed_target
@@ -365,7 +364,7 @@ def test_foreground_child_lease_unavailable_propagates_and_recovers(tmp_path, mo
 
     # All SQLite connections share controlled database time, including heartbeats.
     now_ms = [time.time_ns() // 1_000_000]
-    monkeypatch.setattr("vv_agent.session.sqlite.time", SimpleNamespace(time_ns=lambda: now_ms[0] * 1_000_000))
+    monkeypatch.setattr("vv_agent.session.timing.SystemClock.now_ms", lambda self: now_ms[0])
     scopes = {}
     poll = _Scope.poll
 

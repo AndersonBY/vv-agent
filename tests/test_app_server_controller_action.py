@@ -51,6 +51,7 @@ def test_turn_action_rejects_respond_unknown_fields_before_durable_lookup(surfac
         )
 
 
+@pytest.mark.capability("app-server-turns")
 @pytest.mark.parametrize("terminal_action", ["cancel", "abort"])
 def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp_path, terminal_action):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider

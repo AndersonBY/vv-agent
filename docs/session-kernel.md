@@ -67,17 +67,33 @@ inbox schema change, the new runtime rejects old rows, including those of
 finished sessions, so hosts keep their own product copy of what they need. See
 [session data and upgrades](upgrading.md#session-data-and-upgrades).
 
+Paths below are relative to `src/vv_agent/`.
+
 | Module | Role |
 | --- | --- |
-| `records.py` | Record and inbox kinds with closed schemas. |
-| `reducer.py` | Folds the log and consumed inputs into execution state. No clock, no persistence. |
-| `store.py`, `sql.py` | Store protocols, receipts, leases and errors; the shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
-| `postgres.py`, `sqlite.py` | The PostgreSQL reference store (psycopg v3, imported lazily; install the `[postgres]` extra or the dev group) and the single-host SQLite store. |
-| `context.py`, `compaction.py` | Model-message projection and the MemoryManager adapter. |
-| `delegation.py`, `children.py` | Child admission, agent tools, background handles, handoffs and delivery. |
-| `bindings.py`, `lifecycle.py`, `memory.py` | Host object bindings, after-cycle decisions, memory callbacks. |
-| `projection.py`, `result.py`, `events.py`, `tracing.py` | Typed host projections. |
-| `surfaces.py`, `app_server.py` | Public entrypoint handles; App Server threads and timelines. |
+| `kernel/_records.py` | Record and inbox kinds with closed schemas; `session/records.py` exports the same objects. |
+| `kernel/_state.py`, `kernel/_reducer.py` | Execution state and complete log/consumed-input validation, with injected settings normalization and counting. |
+| `kernel/_store.py`, `kernel/_sql.py` | Store protocols, receipts, leases and errors; shared SQL rules for appends, CAS, leases, scheduling and acknowledgements. |
+| `kernel/_postgres.py`, `kernel/_sqlite.py` | Concrete PostgreSQL (lazy psycopg v3; install `[postgres]` or the dev group) and SQLite connections; `session/` subclasses supply SDK defaults. |
+| `kernel/_drive.py`, `kernel/_driver.py` | Lease and factory lifecycle, retained driver state and fenced commits. |
+| `kernel/_driver_dispatch.py`, `kernel/_driver_recovery.py` | Dispatch, recovery and turn closure using shared phase generators; `session/_recovery_phase.py` and SDK dispatch adapters supply host effects. |
+| `kernel/_context.py`, `session/context.py`, `session/compaction.py` | Aligned model-message projection and input protection; historical-prefix alignment and the MemoryManager adapter remain outer. |
+| `kernel/_child_store.py`, `kernel/_child_delegation.py`, `kernel/_child_summary.py` | Child transactions, admission rules, ordinary results and summary decisions; `session/delegation.py` supplies SDK agent reconstruction. |
+| `kernel/_usage.py` | Shared usage normalization and model-attempt ledger for SDK results and simulation accounting. |
+| `session/bindings.py`, `session/lifecycle.py`, `session/memory.py` | Host object bindings, after-cycle hook adapter and memory callbacks. |
+| `session/projection.py`, `session/result.py`, `session/events.py`, `session/tracing.py` | Typed host projections. |
+| `session/surfaces.py`, `session/app_server.py` | Public entrypoint handles; App Server threads and timelines. |
+
+The SDK fold adapter and standalone core hosts use the same normalizer from
+`_memory_settings.py`. Its settings class also supplies MemoryManager's inherited
+defaults and policy normalization. Core compaction validation recomputes the
+accepted result; it does not trust a stored receipt or an outer acceptance flag.
+The SQL store, its cached prefixes, forked folds, driver and historical context
+rebuilds retain one fold-factory binding. Changing the factory clears both
+prefix caches. Core compaction validation yields token-count requests. The SDK
+invokes its existing counter while the core generator chain is suspended, then
+resumes validation with the result. Counting may initialize resources in the
+outer SDK; the direct synchronous core entry requires a CPU-only counter.
 
 ### Record validation and identity
 

@@ -13,8 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from vv_agent import Agent, RunConfig, function_tool
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Definitive

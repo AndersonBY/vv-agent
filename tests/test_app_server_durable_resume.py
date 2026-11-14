@@ -170,6 +170,7 @@ def _kernel_process(path: str, cut: str):
     raise AssertionError(f"Process did not reach the {cut} crash boundary")
 
 
+@pytest.mark.capability("app-server-turns")
 @pytest.mark.parametrize("cut", ["model", "tool", "approval"])
 def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(tmp_path: Path, cut: str):
     import os

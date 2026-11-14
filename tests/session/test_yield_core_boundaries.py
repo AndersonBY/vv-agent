@@ -9,7 +9,8 @@ from types import ModuleType
 
 import pytest
 
-from vv_agent.session import kernel, sql
+from vv_agent.kernel import _sql as sql
+from vv_agent.session import kernel
 from vv_agent.session.children import SummaryChildTool
 from vv_agent.session.providers import Accepted, ProviderResultInvalid, validate_acceptance
 from vv_agent.session.records import InboxItem, RecordError
@@ -31,11 +32,20 @@ def baseline_module(name, monkeypatch):
     expected = BASELINE_BLOBS[name]
     actual = sha1(b"blob %d\0" % len(data) + data).hexdigest()
     assert actual == expected, f"Baseline Git blob SHA-1 mismatch for {path.name}: expected {expected}, got {actual}"
-    source = data.decode("utf-8")
+    # Only relocate dependency imports after verifying the pinned source bytes.
+    source = (
+        data.decode("utf-8")
+        .replace("from vv_agent.canonical_json import", "from vv_agent.kernel._canonical_json import")
+        .replace("from .providers import (", "from vv_agent.kernel._provider_outcomes import (")
+    )
     module = ModuleType(f"vv_agent.session._baseline_{name}")
     module.__package__ = "vv_agent.session"
     monkeypatch.setitem(sys.modules, module.__name__, module)
     exec(compile(source, f"{BASELINE}/{name}.py", "exec"), module.__dict__)
+    if name == "kernel":
+        # 0.34.1 predates this observation executor. Adapt its pinned decisions to the
+        # dependencies exposed by the current shared host without replacing pinned code.
+        module._Driver._run_outcome_steps = kernel._Driver._run_outcome_steps
     return module
 
 
@@ -161,7 +171,7 @@ class FixedDatetime(datetime):
 @pytest.mark.parametrize("provider_wait", [False, True])
 def test_undeclared_wait_log_is_byte_identical_to_0341(monkeypatch, provider_wait):
     old = baseline_module("kernel", monkeypatch)
-    monkeypatch.setattr(kernel.time, "monotonic_ns", lambda: 100_000_000)
+    monkeypatch.setattr("vv_agent.session.timing.time.monotonic_ns", lambda: 100_000_000)
     monkeypatch.setattr("vv_agent.prompt.builder.datetime", FixedDatetime)
 
     def produce(driver):

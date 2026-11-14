@@ -420,6 +420,7 @@ def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path) -> N
         )
 
 
+@pytest.mark.capability("interactive")
 def test_interactive_real_same_turn_user_reply(surface, tmp_path):
     provider = ScriptedModelProvider.new(
         "test",
@@ -470,6 +471,7 @@ def test_interactive_reply_uses_the_last_displayed_question_not_the_current_wait
     assert fresh.continue_run("second answer").final_output == "done"
 
 
+@pytest.mark.capability("interactive")
 def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
     import threading
 
@@ -515,6 +517,7 @@ def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
     assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "follow_up" for r in records)
 
 
+@pytest.mark.capability("interactive")
 def test_interactive_child_wait_reply_keeps_child_identity(surface, tmp_path):
     from vv_agent.types import ToolDirective, ToolExecutionResult
 
@@ -603,6 +606,7 @@ def test_interactive_background_child_runs_independently(surface, tmp_path):
     assert any(r.record.kind == "turn_ended" and r.record._payload["result"] == "child done" for r in records)
 
 
+@pytest.mark.capability("interactive")
 def test_interactive_close_during_model_call_is_idempotent(surface, tmp_path):
     import threading
 

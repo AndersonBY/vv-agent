@@ -79,7 +79,7 @@ def test_batch_admission_waits_for_every_sibling_and_retains_order(store, databa
 
 @pytest.mark.parametrize("fault", ["host", "create"])
 def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, database, monkeypatch, fault):
-    import vv_agent.session.kernel as kernel
+    from vv_agent.kernel import _driver_dispatch
 
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
@@ -94,7 +94,7 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
         return callback(plan)
 
     rt.children["child_task"] = admit
-    create = kernel.create_child
+    create = _driver_dispatch.create_child
 
     def create_child(tx, child, plan, generation):
         handle = create(tx, child, plan, generation)
@@ -103,7 +103,7 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
         return handle
 
     if fault == "create":
-        monkeypatch.setattr(kernel, "create_child", create_child)
+        monkeypatch.setattr(_driver_dispatch, "create_child", create_child)
     with pytest.raises(RuntimeError, match="2 failed"):
         drive(store, "s", runtime=rt)
     assert store.list_sessions() == ("s",)
@@ -111,7 +111,7 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
     assert rows(store, kind="op_parked") == []
     assert not any("/tool/" in r.record.operation_id for r in rows(store, kind="op_started"))
     rt.children["child_task"] = callback
-    monkeypatch.setattr(kernel, "create_child", create)
+    monkeypatch.setattr(_driver_dispatch, "create_child", create)
     drive(store, "s", runtime=rt)
     assert len(store.list_sessions()) == 4
 

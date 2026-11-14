@@ -119,6 +119,7 @@ def finish(text: str) -> ToolExecutionResult:
     return ToolExecutionResult("", content=text, directive=ToolDirective.FINISH)
 
 
+@pytest.mark.capability("hidden-tools")
 @pytest.mark.parametrize("visible", [False, True])
 def test_hidden_tool_exposure_parity(tmp_path, visible):
     @function_tool(exposure=ToolExposure.DIRECT if visible else ToolExposure.HIDDEN)
@@ -137,6 +138,7 @@ def test_hidden_tool_exposure_parity(tmp_path, visible):
         assert "not allowed" in new["tools"][0][1]
 
 
+@pytest.mark.capability("hidden-tools")
 def test_dynamic_schema_new_turn_parity(store, database, tmp_path):
     schema_seen = []
 
@@ -171,6 +173,7 @@ def changed_registry(registry):
     return registry
 
 
+@pytest.mark.capability("hidden-tools")
 def test_dynamic_schema_active_turn_rejected(store, database, tmp_path):
     config = RunConfig(workspace=tmp_path)
     admit(store, config)
@@ -188,6 +191,8 @@ def test_dynamic_schema_active_turn_rejected(store, database, tmp_path):
     assert records(store, kind="turn_ended")[0].payload["reason"] == "handler_schema_or_capability_mismatch"
 
 
+@pytest.mark.capability("ask-user")
+@pytest.mark.capability("no-tool-wait")
 @pytest.mark.parametrize("no_tools", [False, True], ids=["ask_user", "no_tool"])
 @pytest.mark.parametrize("pending", [False, True])
 def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pending):
@@ -245,6 +250,7 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
     assert records(store, kind="input_applied")[-1].payload["disposition"] == "noop"
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize(
     "policy",
     [
@@ -276,6 +282,7 @@ def test_tool_policy_matrix_parity(tmp_path, policy, text):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize("frozen_denied", [False, True])
 @pytest.mark.parametrize(
     "denial,source",
@@ -340,6 +347,7 @@ class Decisions:
         return self.decision
 
 
+@pytest.mark.capability("approval-modes")
 @pytest.mark.parametrize("mode", ["default", "always", "never", "on_request"])
 @pytest.mark.parametrize("needs", [False, True])
 @pytest.mark.parametrize("action", ["allow", "deny", "allow_session", "timeout"])
@@ -367,6 +375,7 @@ def test_approval_mode_provider_parity(tmp_path, mode, needs, action):
     assert run(True) == run(False)
 
 
+@pytest.mark.capability("approval-modes")
 def test_approval_broker_restart_session_and_conflicting_answer(store, database, tmp_path):
     @function_tool(needs_approval=True)
     def approved(text: str) -> str:
@@ -432,6 +441,7 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
     assert [r.payload["disposition"] for r in records(store, kind="input_applied")[-2:]] == ["noop", "rejected"]
 
 
+@pytest.mark.capability("approval-modes")
 def test_approval_timeout_restart_parity(store, database, tmp_path, database_clock):
     @function_tool(needs_approval=True)
     def approved() -> str:
@@ -456,6 +466,7 @@ def test_approval_timeout_restart_parity(store, database, tmp_path, database_clo
     assert records(store, kind="turn_ended")[0].payload["result"] == old["output"]
 
 
+@pytest.mark.capability("tool-hooks")
 @pytest.mark.parametrize("short", [False, True])
 @pytest.mark.parametrize("approval", [False, True])
 @pytest.mark.parametrize("cut_kind", ["op_prepared", "op_completed"])
@@ -517,6 +528,7 @@ def test_tool_hooks_state_approval_restart_parity(store, database, tmp_path, sho
     assert records(store, kind="op_completed")[-1].payload["shared_state"] == old["shared"]
 
 
+@pytest.mark.capability("tool-stop")
 @pytest.mark.parametrize("behavior", ["run_llm_again", "stop_on_first_tool", "stop_at_tool_names"])
 @pytest.mark.parametrize("native_finish", [False, True])
 def test_tool_stop_pending_batch_native_finish_parity(tmp_path, behavior, native_finish):
@@ -534,6 +546,9 @@ def test_tool_stop_pending_batch_native_finish_parity(tmp_path, behavior, native
     assert new == old
 
 
+@pytest.mark.capability("background-ownership")
+@pytest.mark.capability("check-background")
+@pytest.mark.capability("stop-background")
 @pytest.mark.parametrize("terminal", [False, True])
 def test_background_process_restart_owner_parity(store, database, tmp_path, terminal):
     from vv_agent.runtime.background_sessions import background_session_manager as manager
@@ -616,6 +631,7 @@ def test_background_process_restart_owner_parity(store, database, tmp_path, term
     assert scenario(True) == scenario(False)
 
 
+@pytest.mark.capability("check-background")
 @pytest.mark.parametrize("operation", ["check_background_command", "stop_background_command"])
 def test_background_forbidden_owner_parity(tmp_path, operation):
     from vv_agent.runtime.background_sessions import background_session_manager as manager
@@ -634,6 +650,7 @@ def test_background_forbidden_owner_parity(tmp_path, operation):
         assert manager.stop_for_tool(sid, backend, "another-task", "cleanup", workspace=tmp_path)["status"] == "stopped"
 
 
+@pytest.mark.capability("stop-background")
 def test_background_unknown_stop_is_not_confirmed_parity(tmp_path, monkeypatch):
     import vv_agent.runtime.background_sessions as background
 
@@ -675,6 +692,7 @@ def test_background_unknown_stop_is_not_confirmed_parity(tmp_path, monkeypatch):
     assert run(True) == run(False)
 
 
+@pytest.mark.capability("cancellation")
 @pytest.mark.parametrize("cooperative", [False, True], ids=["unknown", "cooperative"])
 def test_cancellation_control_result_event_parity(store, database, tmp_path, cooperative):
     def setup():
@@ -776,6 +794,7 @@ def background_registry():
     return registry
 
 
+@pytest.mark.capability("cancellation")
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("child_started", [False, True])
 def test_cancellation_descendant_control_result_events_parity(store, database, tmp_path, background, child_started):
@@ -885,6 +904,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
     assert not store.peek_inbox("control")
 
 
+@pytest.mark.capability("approval-modes")
 @pytest.mark.parametrize("action", ["allow", "deny", "allow_session", "timeout"])
 def test_provider_decision_receipt_events_restart(store, database, tmp_path, action):
     @function_tool(needs_approval=True)
@@ -917,6 +937,7 @@ def test_provider_decision_receipt_events_restart(store, database, tmp_path, act
     assert approvals[-1].metadata["decision_metadata"] == {"policy": "host"}
 
 
+@pytest.mark.capability("tool-stop")
 @pytest.mark.parametrize("success", [False, True])
 @pytest.mark.parametrize("native_finish", [False, True])
 @pytest.mark.parametrize("behavior", ["run_llm_again", "stop_on_first_tool", "stop_at_tool_names"])
@@ -1070,6 +1091,7 @@ def test_rejected_broker_session_grant_cannot_authorize_next_tool(store, databas
     assert not [r for r in records(store, kind="op_started") if "/tool/" in (r.operation_id or "")]
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize("initially_allowed", [False, True])
 def test_current_policy_predicate_rechecked_after_restart(store, database, tmp_path, initially_allowed):
     effects = []
@@ -1145,6 +1167,8 @@ def test_approval_absolute_deadline_includes_provider_time(store, database, tmp_
     assert approvals[-1].to_dict()["action"] == "timeout"
 
 
+@pytest.mark.capability("hidden-tools")
+@pytest.mark.capability("tool-hooks")
 @pytest.mark.parametrize("visible", [False, True])
 def test_hook_patch_preserves_hidden_tool_boundary(store, database, tmp_path, visible):
     def setup():

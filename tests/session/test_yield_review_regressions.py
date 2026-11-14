@@ -157,8 +157,8 @@ def test_invalid_structured_renderer_should_fall_back(store, database, kind, bod
 
 @pytest.mark.sqlite_file
 def test_pure_long_renderer_retry_should_retain_the_committed_body(store, database, tmp_path, monkeypatch):
+    from vv_agent.session import _recovery_phase
     from vv_agent.session.children import child_delivery
-    from vv_agent.session.kernel import _Driver
     from vv_agent.types import ToolArtifactRef
     from vv_agent.workspace.artifacts import verify_text_artifact
     from vv_agent.workspace.local import LocalWorkspaceBackend
@@ -179,19 +179,24 @@ def test_pure_long_renderer_retry_should_retain_the_committed_body(store, databa
     drive(store, "s", runtime=rt)
     complete(store, database, "yield-child-0")
     steer(store)
-    completed_original = _Driver.completed
+    prepare_original = _recovery_phase.prepare_tool_resources
     injected = []
 
-    def completed_and_arrival(driver, plan, outcome):
-        result = completed_original(driver, plan, outcome)
-        if driver.sid == "s" and outcome.result.get("content", "").startswith("running|running") and not injected:
+    def prepared_and_arrival(plan, raw, backend):
+        result = prepare_original(plan, raw, backend)
+        if (
+            plan.payload["request"]["name"] == "child_task"
+            and raw.get("content", "").startswith("running|running")
+            and result.get("artifact") is not None
+            and not injected
+        ):
             injected.append(1)
             # First artifact has already been prepared; child arrives before guarded append.
             with open_store(database) as other, other.atomic() as tx:
                 child_delivery(other, tx, "yield-child-0")
         return result
 
-    monkeypatch.setattr(_Driver, "completed", completed_and_arrival)
+    monkeypatch.setattr(_recovery_phase, "prepare_tool_resources", prepared_and_arrival)
     drive(store, "s", runtime=rt)
     assert len(calls) == 2
     result = yielded_rows(store)[0].record.payload["result"]
@@ -410,7 +415,7 @@ class AcceptanceCut(BaseException):
 @pytest.mark.sqlite_file
 @pytest.mark.parametrize("declared", [False, True])
 def test_recovered_acceptance_preserves_original_declaration(store, database, declared, monkeypatch):
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     provider = YieldProvider(declared=declared, callback=True)
     # Authenticate every acceptance byte, including the declaration.
@@ -606,7 +611,7 @@ def acceptance_crash_worker(database, declared, pipe):
 def test_process_death_after_acceptance_before_park_restores_declaration(store, database, declared, monkeypatch):
     import multiprocessing
 
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     start(store)
     ctx = multiprocessing.get_context("spawn")
@@ -652,7 +657,7 @@ def test_process_death_after_acceptance_before_park_restores_declaration(store, 
 @pytest.mark.sqlite_file
 @pytest.mark.parametrize("declared", [False, True])
 def test_acceptance_authentication_binds_declaration_bytes(store, database, declared, monkeypatch):
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
     from vv_agent.session.records import digest
 
     start(store)
@@ -698,27 +703,28 @@ def test_acceptance_authentication_binds_declaration_bytes(store, database, decl
 def test_unselected_candidate_not_projected_and_same_body_reuses(store, database, tmp_path, monkeypatch):
     from pathlib import PurePosixPath
 
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
+    from vv_agent.session import _recovery_phase
     from vv_agent.session.context import project_context
-    from vv_agent.session.kernel import _Driver
     from vv_agent.session.tool_results import prepare_tool_resources, project_tool_result
 
-    original = _Driver.completed
+    original = _recovery_phase.prepare_tool_resources
     candidates = []
 
-    def capture(driver, plan, outcome):
-        receipts = original(driver, plan, outcome)
-        if driver.sid == "s" and len(outcome.result.get("content", "")) > 12000:
-            candidates.append((driver.runtime.workspace_backend, plan, outcome.result, receipts[0].payload["result"]))
-        return receipts
+    def capture(plan, raw, backend):
+        prepared = original(plan, raw, backend)
+        if plan.payload["request"]["name"] == "child_task" and len(raw.get("content", "")) > 12000:
+            candidates.append((backend, plan, raw, prepared))
+        return prepared
 
-    monkeypatch.setattr(_Driver, "completed", capture)
+    monkeypatch.setattr(_recovery_phase, "prepare_tool_resources", capture)
     test_pure_long_renderer_retry_should_retain_the_committed_body(store, database, tmp_path, monkeypatch)
     assert len(candidates) == 2
     backend, plan, raw, selected = candidates[1]
     orphan = candidates[0][3]["artifact"]
     state, retained, _ = read_state(store, "s")
     completion = next(r for r in retained if r.record.kind == "op_completed" and "yielded_by" in r.record.payload)
+    assert completion.record.payload["result"] == selected
     descriptor = project_tool_result(completion)
     model_context = [m.to_dict() for m in project_context(retained, state)]
     projections = canonical_json_bytes(

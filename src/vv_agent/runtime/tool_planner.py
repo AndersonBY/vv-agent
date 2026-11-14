@@ -4,19 +4,10 @@ import hashlib
 import json
 from typing import Any
 
-from vv_agent.constants import (
-    ACTIVATE_SKILL_TOOL_NAME,
-    ASK_USER_TOOL_NAME,
-    BASH_TOOL_NAME,
-    CHECK_BACKGROUND_COMMAND_TOOL_NAME,
-    CREATE_SUB_TASK_TOOL_NAME,
-    READ_IMAGE_TOOL_NAME,
-    STOP_BACKGROUND_COMMAND_TOOL_NAME,
-    SUB_TASK_STATUS_TOOL_NAME,
-    WORKSPACE_TOOLS,
-)
+from vv_agent.constants import BASH_TOOL_NAME
+from vv_agent.kernel._tool_planner import plan_tool_names as plan_tool_names
+from vv_agent.kernel._tool_planner import plan_tool_schemas as _plan_tool_schemas
 from vv_agent.runtime.shell import resolve_shell_invocation
-from vv_agent.tools.metadata import metadata_policy_denial_source
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask
 
@@ -113,55 +104,6 @@ def _patch_dynamic_tool_schemas(
     return tool_schemas
 
 
-def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = None) -> list[str]:
-    del memory_usage_percentage
-    tool_names: list[str] = []
-
-    if task.allow_interruption:
-        tool_names.append(ASK_USER_TOOL_NAME)
-
-    if task.use_workspace:
-        tool_names.extend(WORKSPACE_TOOLS)
-
-    if task.agent_type == "computer":
-        tool_names.extend([BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME, STOP_BACKGROUND_COMMAND_TOOL_NAME])
-
-    if task.sub_agents_enabled:
-        tool_names.extend([CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME])
-
-    if task.metadata.get("available_skills"):
-        tool_names.append(ACTIVATE_SKILL_TOOL_NAME)
-
-    if task.native_multimodal:
-        tool_names.append(READ_IMAGE_TOOL_NAME)
-
-    if task.extra_tool_names:
-        tool_names.extend(task.extra_tool_names)
-
-    if task.exclude_tools:
-        excluded = set(task.exclude_tools)
-        tool_names = [name for name in tool_names if name not in excluded]
-
-    allowed_tools = task.metadata.get("_vv_agent_allowed_tools")
-    if isinstance(allowed_tools, list):
-        allowed = {str(name) for name in allowed_tools}
-        tool_names = [name for name in tool_names if name in allowed]
-
-    disallowed_tools = task.metadata.get("_vv_agent_disallowed_tools")
-    if isinstance(disallowed_tools, list):
-        disallowed = {str(name) for name in disallowed_tools}
-        tool_names = [name for name in tool_names if name not in disallowed]
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for tool_name in tool_names:
-        if tool_name in seen:
-            continue
-        seen.add(tool_name)
-        deduped.append(tool_name)
-    return deduped
-
-
 def plan_tool_schemas(
     *,
     registry: ToolRegistry,
@@ -169,28 +111,7 @@ def plan_tool_schemas(
     memory_usage_percentage: int | None = None,
     include_dynamic_hints: bool = True,
 ) -> list[dict[str, Any]]:
-    tool_names = plan_tool_names(task, memory_usage_percentage=memory_usage_percentage)
-    available_names = [
-        name
-        for name in tool_names
-        if registry.has_tool(name)
-        and registry.has_schema(name)
-        and metadata_policy_denial_source(
-            registry.tool_metadata(name),
-            denied_side_effects=task.metadata.get("_vv_agent_denied_side_effects", []),
-            denied_capability_tags=task.metadata.get(
-                "_vv_agent_denied_capability_tags",
-                [],
-            ),
-            deny_terminal_tools=task.metadata.get("_vv_agent_deny_terminal_tools", False),
-            denied_cost_dimensions=task.metadata.get(
-                "_vv_agent_denied_cost_dimensions",
-                [],
-            ),
-        )
-        is None
-    ]
-    schemas = registry.list_openai_schemas(tool_names=available_names)
+    schemas = _plan_tool_schemas(registry=registry, task=task, memory_usage_percentage=memory_usage_percentage)
     if not include_dynamic_hints:
         return schemas
     return _patch_dynamic_tool_schemas(task=task, tool_schemas=schemas)

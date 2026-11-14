@@ -10,6 +10,10 @@ Install the package and its development dependencies:
 uv sync --dev
 ```
 
+The dev group includes native `httpx` for HTTP error/response test coverage.
+The runtime transport remains `httpx2`; the two packages are separate.
+Runtime-only installs can still skip the optional native-httpx cases.
+
 CI also installs the `s3` extra (`uv sync --dev --extra s3`).
 
 Real model calls need a local settings file. Create it from the checked-in
@@ -65,12 +69,115 @@ uv run ruff check .
 uv run ty check
 ```
 
-Before you report a broad change as complete, run the full test suite. Live
-tests are skipped by default:
+Before you report a broad change as complete, run the full checks remotely.
+Keep correctness tests on their regular temporary filesystem and run the Linux
+simulator performance gate separately. Live tests are skipped by default:
 
 ```bash
-uv run pytest
+uv run pytest -k "not simulation_smoke"
+TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
 ```
+
+### Deterministic session simulation
+
+`tests/sim/` schedules the real driver and SQL stores with scripted external
+services. See its README for covered invariants, replay reports and limits.
+Use a small explicit sample during local development:
+
+```bash
+uv run python scripts/session_simulation.py --seeds 5 --workers 2
+uv run pytest tests/sim/test_mutations.py -k sqlite -q
+```
+
+The PR smoke gate runs 1,000 independent SQLite-file seeds within 60 seconds,
+including process startup, tokenizer initialization and process shutdown. Each
+world uses one thread; the selected implementation uses the original bounded
+batcher with spawned processes and at most `2 * workers` jobs per batch. The CI
+smoke step alone sets `TMPDIR=/dev/shm`.
+These are real SQLite files on a RAM-backed filesystem, with WAL, FULL
+synchronous mode and every invariant check retained. This evidence covers SQL
+transactions and worker-process recovery; it does not prove durability through
+host power loss.
+
+Do not export that setting for the full suite. Keep disk-directed process and
+transaction tests on regular paths and retain PostgreSQL acceptance through a
+disposable database over TCP with password authentication. Reports record the
+actual temporary directory, filesystem type (or null when unavailable), and
+requested `TMPDIR` in `environment.sqlite_temporary_storage`. Full suites and
+large acceptance campaigns use a separate internal harness with explicit source
+revisions; that harness is kept outside the public repository.
+
+### Concurrency-fix seed reference
+
+Classify a concurrency bug fix with a `fix(concurrency): ...` commit subject and
+cite at least one reproducing simulation seed on its own line in the commit body:
+
+```text
+fix(concurrency): preserve stale lease fencing
+
+Simulation-Seed: 17
+```
+
+Ordinary refactors and tests do not need the trailer. CI checks commits in the
+selected pull-request or push `base..HEAD` set, including merge and force-update
+history. This convention cannot identify a fix that was not classified as
+`fix(concurrency)` and does not prove that the cited seed reproduces the bug;
+reviewers still own those judgments.
+
+### Kernel storage boundary
+
+Raw connection, cursor and SQL execution APIs belong only in
+`src/vv_agent/kernel/_sql.py`, `src/vv_agent/kernel/_sqlite.py`, and
+`src/vv_agent/kernel/_postgres.py`. Other kernel code uses `SessionStore` and
+`SessionTx` methods such as `append`, `ack`, and lease operations.
+`scripts/check_repository_contracts.py` enforces this source boundary.
+
+The check catches direct calls and simple captured aliases to storage APIs.
+It does not prove every mutation path: reflection, arbitrary callbacks and
+disguised aliases still require review against the storage protocol.
+
+### Operation dispatch boundary
+
+`py:src/vv_agent/kernel/_driver_dispatch.py::dispatch` is the only core producer of an
+`InvokeOperation` request. `py:src/vv_agent/session/_driver_scope.py::_invoke` is the only SDK
+leaf that calls the runtime invoker. The repository gate scans every Python
+file under `src/vv_agent` and requires exactly one construction and one
+`.invoker.invoke` call at the located top-level function nodes. A nested or
+class method with the same name does not count. Missing files or definitions
+are failures; there is no fixture-only or disabled mode.
+
+The check flattens imports, `from ... import ... as ...` aliases, and simple
+name-to-name/attribute assignments found anywhere in a module into one lexical
+alias map. It rejects additional, wrong-node, and straightforward aliased
+calls. The invoker shape is lexical: the resolved callee must end in
+`.invoker.invoke`, independent of the receiver's variable name. It does not
+follow control flow or assignment order, resolve scope shadowing, infer
+parameter or descriptor types, follow re-exports, or analyze computed names,
+dynamic `getattr`, arbitrary reflection or callbacks. Scheduler wake, database
+persistence, callbacks, provider query/cancel methods and trusted host
+admission are different ports and are outside this structural claim. The
+result covers these two dispatch leaves; it does not prove that every possible
+host side effect is confined.
+
+```bash
+uv run python scripts/check_repository_contracts.py
+uv run pytest tests/test_kernel_dispatch_boundary.py tests/test_repository_contracts.py tests/test_kernel_boundaries.py
+```
+
+### Core entrypoint evidence
+
+`tests/sim/test_core_reachability.py` tracks the actual code objects of 29
+cross-module execution entrypoints during fixed SQLite scenarios. A projection
+consumer also fails, backs off, retries the same batch and acknowledges it
+through the real store. Importing an entrypoint without executing it fails.
+
+The gate separately discovers explicit core-origin functions and methods from
+the selected public API contract. Each needs an execution or value-producer
+mapping; a new unmapped entry fails. Public interaction values are exercised by
+`tests/test_kernel_input_dependencies.py` under an SDK import guard. Host-only
+protocols are classified separately rather than counted as core implementations.
+This checks declared public behavior and the listed execution entrypoints; it is
+not coverage of every private helper or every possible scheduler interleaving.
 
 ### App Server changes
 

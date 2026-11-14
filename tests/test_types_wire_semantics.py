@@ -188,3 +188,57 @@ def test_agent_task_from_dict_accepts_unsigned_wire_boundaries() -> None:
     assert task.max_cycles == (1 << 32) - 1
     assert task.memory_compact_threshold == (1 << 64) - 1
     assert task.memory_threshold_percentage == 255
+
+
+def test_message_values_preserve_real_public_bindings() -> None:
+    import vv_agent
+    from vv_agent import types
+    from vv_agent.kernel import _message_values as core
+
+    for name in ("Message", "ToolArtifactRef", "ToolResultCursor"):
+        assert getattr(vv_agent, name) is getattr(types, name) is getattr(core, name)
+    for name in ("Role", "_MESSAGE_FIELDS", "COMPACTION_METADATA_KEY", "validate_compaction_metadata"):
+        assert getattr(types, name) is getattr(core, name)
+
+
+@pytest.mark.parametrize("value", [-(1 << 63), -(1 << 53), 1 << 53, (1 << 64) - 1])
+def test_message_wire_integers_remain_distinct_from_digest_integers(value: int) -> None:
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
+    from vv_agent.types import Message
+
+    arguments = '{"value":' + str(value) + "}"
+    payload = {
+        "role": "assistant",
+        "content": "",
+        "metadata": {"value": value},
+        "tool_calls": [{"id": "call", "type": "function", "function": {"name": "tool", "arguments": arguments}}],
+    }
+    assert Message.from_dict(payload).to_dict() == payload
+    with pytest.raises(ValueError, match="I-JSON"):
+        canonical_json_bytes({"value": value})
+
+
+@pytest.mark.parametrize("value", [-(1 << 63) - 1, 1 << 64])
+@pytest.mark.parametrize("field", ["metadata", "arguments"])
+def test_message_wire_rejects_integers_outside_64_bit_range(value: int, field: str) -> None:
+    from vv_agent.types import Message
+
+    payload: dict[str, Any] = {"role": "assistant", "content": ""}
+    if field == "metadata":
+        payload[field] = {"value": value}
+    else:
+        payload["tool_calls"] = [
+            {"id": "call", "type": "function", "function": {"name": "tool", "arguments": '{"value":' + str(value) + "}"}}
+        ]
+    with pytest.raises(ValueError, match=f'"{field}" contains an integer outside the JSON wire range'):
+        Message.from_dict(payload)
+
+
+@pytest.mark.parametrize("value", [True, -1, 1 << 53])
+def test_message_artifact_and_cursor_keep_json_safe_sizes(value: int) -> None:
+    from vv_agent.types import ToolArtifactRef, ToolResultCursor
+
+    with pytest.raises(ValueError, match="artifact size_bytes must be a JSON-safe non-negative integer"):
+        ToolArtifactRef(".vv-agent/artifacts/result.txt", "text/plain", "utf-8", value, "a" * 64)
+    with pytest.raises(ValueError, match="cursor offset_chars must be a JSON-safe non-negative integer"):
+        ToolResultCursor("read_file", "result.txt", value, "a" * 64)

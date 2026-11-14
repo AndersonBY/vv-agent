@@ -91,7 +91,7 @@ def retry_transport(provider, case="complete", status=429, headers=None, observe
         stack.enter_context(patch.object(httpx2.Client, "__init__", init))
         stack.enter_context(patch.object(native._base_client.SyncAPIClient, "_sleep_for_retry", sleep))
         stack.enter_context(patch.object(native._base_client, "random", lambda: 0.5))
-        stack.enter_context(patch("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0))
+        stack.enter_context(patch("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0))
         stack.enter_context(patch.object(VvLlmClient, "_sleep_backoff", lambda *args: None))
         if not observed:
             symbol = "ObservedHttpClient" if provider == "openai" else "ObservedAnthropicHttpClient"

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from vv_agent import Agent, AppServerUserInteraction, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
-from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
+from vv_agent.kernel._canonical_json import canonical_json_bytes, canonical_json_sha256
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools import build_default_registry
 from vv_agent.tools.registry import RegistryToolExecutor

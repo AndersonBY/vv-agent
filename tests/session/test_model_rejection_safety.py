@@ -95,7 +95,7 @@ def test_rollback_precheck_reads_all_history_without_writes(store, database, mon
             else ModelRequestRejected(429 if case.startswith("retry") else 400, "Rejected")
         )
         step = fail(error, [])
-        monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+        monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
         with suppress(WorkerDeath):
             drive(store, "s", runtime=runtime(database, [step, step], hook=cut))
 

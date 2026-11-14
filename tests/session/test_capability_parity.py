@@ -87,6 +87,7 @@ def cut_boundary(stage):
     return cut
 
 
+@pytest.mark.capability("memory-hook")
 def test_before_memory_hook_replacement_restart_parity(store, database, tmp_path):
     seen = []
 
@@ -110,6 +111,7 @@ def test_before_memory_hook_replacement_restart_parity(store, database, tmp_path
     assert len([r for r in records(store, kind="boundary_recorded") if r.payload["stage"] == "before_memory"]) == 1
 
 
+@pytest.mark.capability("after-cycle")
 @pytest.mark.parametrize("action", ["continue", "steer", "deny", "stop", "invalid", "raise"])
 def test_after_cycle_decision_snapshot_restart_parity(store, database, tmp_path, action):
     def setup():
@@ -163,6 +165,7 @@ def test_after_cycle_decision_snapshot_restart_parity(store, database, tmp_path,
     assert len(decided) == len(new_snapshots)
 
 
+@pytest.mark.capability("after-cycle")
 @pytest.mark.parametrize("wait", [False, True])
 def test_after_cycle_steering_boundary_parity(store, database, tmp_path, wait):
     class Hook:
@@ -215,6 +218,7 @@ def paired_memory_manager(monkeypatch, threshold=1000, keep=1):
     return MemoryManager(compact_threshold=threshold, keep_recent_messages=keep)
 
 
+@pytest.mark.capability("memory-provider")
 @pytest.mark.parametrize("stage", ["memory_started", "memory_completed"])
 @pytest.mark.parametrize("accepted", [True, False])
 def test_memory_provider_logged_callbacks_restart_parity(store, database, tmp_path, monkeypatch, stage, accepted):
@@ -251,6 +255,7 @@ def test_memory_provider_logged_callbacks_restart_parity(store, database, tmp_pa
     assert lifecycle[1].changed == accepted
 
 
+@pytest.mark.capability("microcompaction")
 @pytest.mark.parametrize("mode", ["summary", "micro", "prompt_too_long"])
 def test_memory_compaction_runner_producer_parity(store, database, tmp_path, monkeypatch, mode):
     threshold = 999999 if mode == "prompt_too_long" else 1000
@@ -308,6 +313,7 @@ def test_memory_compaction_runner_producer_parity(store, database, tmp_path, mon
     assert new.raw_cycles[-1].memory_compacted == old.raw_cycles[-1].memory_compacted
 
 
+@pytest.mark.capability("token-budget")
 @pytest.mark.parametrize("metric", ["total", "uncached"])
 @pytest.mark.parametrize("limit", [0, 5, 6, 7, 9, 10, 14, 15, 16, 100])
 def test_token_budget_boundaries_parity(store, database, tmp_path, metric, limit):
@@ -320,6 +326,7 @@ def test_token_budget_boundaries_parity(store, database, tmp_path, metric, limit
     same_result(new_run(store, database, agent, config, steps), old_run(agent, config, steps))
 
 
+@pytest.mark.capability("token-budget")
 @pytest.mark.parametrize("policy", list(UnavailableMetricPolicy))
 @pytest.mark.parametrize("usage", [None, {"prompt_tokens": 10, "completion_tokens": 5}, USAGE])
 def test_missing_usage_budget_parity(store, database, tmp_path, policy, usage):
@@ -336,6 +343,7 @@ def test_missing_usage_budget_parity(store, database, tmp_path, policy, usage):
     ]
 
 
+@pytest.mark.capability("tool-budget")
 @pytest.mark.parametrize("per_name", [False, True])
 @pytest.mark.parametrize("limit", [0, 1, 2, 3])
 def test_tool_batch_admission_restart_parity(store, database, tmp_path, per_name, limit):
@@ -372,6 +380,7 @@ def test_tool_batch_admission_restart_parity(store, database, tmp_path, per_name
     assert new.budget_usage.tool_calls == (2 if limit >= 2 else 0)
 
 
+@pytest.mark.capability("host-budget")
 @pytest.mark.parametrize(
     "reading", [None, HostCost("credits", 0), HostCost("credits", 10), HostCost("credits", 11), HostCost("wrong", 1)]
 )
@@ -396,6 +405,7 @@ def test_host_cost_and_unavailable_metrics_parity(store, database, tmp_path, rea
     ]
 
 
+@pytest.mark.capability("host-budget")
 @pytest.mark.parametrize("limit", [0, 100000])
 def test_wall_time_budget_parity(store, database, tmp_path, limit):
     config = RunConfig(workspace=tmp_path, budget_limits=RunBudgetLimits(max_wall_time_ms=limit))
@@ -406,6 +416,7 @@ def test_wall_time_budget_parity(store, database, tmp_path, limit):
     )
 
 
+@pytest.mark.capability("host-budget")
 @pytest.mark.parametrize("policy", list(UnavailableMetricPolicy))
 def test_lost_active_interval_is_unavailable_after_restart(store, database, tmp_path, policy):
     from vv_agent.budget import BudgetDimension, BudgetExhaustionReason, BudgetUnavailableReason
@@ -448,6 +459,7 @@ class Answer:
     value: int
 
 
+@pytest.mark.capability("typed-output")
 @pytest.mark.parametrize("output_type", [dict, list, Answer])
 @pytest.mark.parametrize("repair", [False, True])
 def test_typed_output_repair_ledger_restart_parity(store, database, tmp_path, output_type, repair):
@@ -497,6 +509,7 @@ def test_typed_output_repair_ledger_restart_parity(store, database, tmp_path, ou
         assert ledger[-1]["usage"]["usage_source"] == "accounting_missing"
 
 
+@pytest.mark.capability("typed-output")
 @pytest.mark.parametrize("failure", ["repair_exception", "validator_exception", "validator_contract", "repair_invalid"])
 def test_output_repair_exceptions_parity(store, database, tmp_path, failure):
     def validator(value, ctx):
@@ -520,6 +533,7 @@ def test_output_repair_exceptions_parity(store, database, tmp_path, failure):
     assert new.partial_output == old.partial_output
 
 
+@pytest.mark.capability("tracing")
 def test_trace_delivery_span_parity_and_no_recovery_duplicates(store, database, tmp_path):
     class Processor:
         def __init__(self):
@@ -555,6 +569,8 @@ def test_trace_delivery_span_parity_and_no_recovery_duplicates(store, database, 
     assert all(s.span_id in starts and s.ended_at >= s.started_at for action, s in new_processor.spans if action == "end")
 
 
+@pytest.mark.capability("event-store")
+@pytest.mark.capability("lifecycle-events")
 def test_lifecycle_events_replay_ack_and_rollback_parity(store, database, tmp_path):
     agent = Agent("test", "test", tools=[echo])
     config = RunConfig(workspace=tmp_path)
@@ -585,6 +601,7 @@ def test_lifecycle_events_replay_ack_and_rollback_parity(store, database, tmp_pa
     assert list(bridge.replay(run_id=new.run_id)) == replayed
 
 
+@pytest.mark.capability("session-memory")
 def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_path, monkeypatch):
     memory = paired_memory_manager(monkeypatch, 999999)
     meta = {"session_id": "remember", "session_memory_min_tokens": 1, "session_memory_min_text_messages": 1}
@@ -643,6 +660,7 @@ class StreamingScripted(ScriptedLLM):
         return response
 
 
+@pytest.mark.capability("stream-deltas")
 @pytest.mark.parametrize("drop", [False, True])
 def test_live_stream_deltas_and_durable_final_restart_parity(store, database, tmp_path, drop):
     config = RunConfig(workspace=tmp_path)
@@ -698,6 +716,8 @@ def test_live_stream_deltas_and_durable_final_restart_parity(store, database, tm
     assert len([r for r in records(store, kind="op_started") if r.operation_id.endswith("/primary/1")]) == 1
 
 
+@pytest.mark.capability("endpoint-routing")
+@pytest.mark.capability("result-fields")
 @pytest.mark.parametrize("preferred", [None, "b"])
 @pytest.mark.parametrize("randomized", [False, True])
 @pytest.mark.parametrize("failures", [1, 2])
@@ -783,6 +803,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
     assert project_result(store, "control", new.run_id, runtime=rt).raw_result.messages == new.raw_result.messages
 
 
+@pytest.mark.capability("result-fields")
 @pytest.mark.parametrize("wait", ["no_tool", "ask_user"])
 def test_wait_result_fields_parity(store, database, tmp_path, wait):
     agent = Agent("test", "test")
@@ -793,6 +814,7 @@ def test_wait_result_fields_parity(store, database, tmp_path, wait):
     assert new.status == AgentStatus.WAIT_USER and new.wait_reason
 
 
+@pytest.mark.capability("typed-output")
 def test_repair_usage_budget_is_logged_intentional_difference(store, database, tmp_path):
     def fix(request):
         return LLMResponse("valid", raw={"usage": USAGE})
@@ -817,6 +839,7 @@ def test_repair_usage_budget_is_logged_intentional_difference(store, database, t
     assert [c["purpose"] for c in new.metadata["session_model_calls"]] == ["primary", "output_repair"]
 
 
+@pytest.mark.capability("after-cycle")
 @pytest.mark.parametrize("boundary", ["ask_user", "finish_steer"])
 def test_after_cycle_wait_and_native_finish_snapshot_restart(store, database, tmp_path, boundary):
     snapshots = []
@@ -854,6 +877,7 @@ def test_after_cycle_wait_and_native_finish_snapshot_restart(store, database, tm
         assert [(m.role, m.content) for m in a.messages] == [(m.role, m.content) for m in b.messages]
 
 
+@pytest.mark.capability("host-budget")
 @pytest.mark.parametrize("failure", ["raise", "currency", "decrease"])
 @pytest.mark.parametrize("policy", list(UnavailableMetricPolicy))
 def test_host_meter_failure_latch_restart_parity(store, database, tmp_path, failure, policy):
@@ -893,6 +917,7 @@ def test_host_meter_failure_latch_restart_parity(store, database, tmp_path, fail
     assert project_result(store, "control", new.run_id, runtime=rt).budget_usage == new.budget_usage
 
 
+@pytest.mark.capability("memory-hook")
 @pytest.mark.parametrize("fault", ["unknown_field", "bad_message", "missing_source", "bad_source", "bad_state", "bad_budget"])
 def test_boundary_validation_rolls_back(store, database, tmp_path, fault):
     from vv_agent.session.records import make_record
@@ -956,6 +981,7 @@ def test_boundary_validation_rolls_back(store, database, tmp_path, fault):
         store.release(lease)
 
 
+@pytest.mark.capability("endpoint-routing")
 def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_path):
     from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
     from vv_agent.session.records import make_record
@@ -1002,6 +1028,8 @@ def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_pa
         store.release(lease)
 
 
+@pytest.mark.capability("event-store")
+@pytest.mark.capability("lifecycle-events")
 def test_delegation_events_and_child_replay_paired_producer(store, database, tmp_path):
     from vv_agent.event_store import RunEventReplayQuery
     from vv_agent.session.children import ChildSession, child_delivery
@@ -1040,6 +1068,7 @@ def test_delegation_events_and_child_replay_paired_producer(store, database, tmp
     assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in replayed)
 
 
+@pytest.mark.capability("tracing")
 def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
     from vv_agent.session.records import InboxItem, SessionSpec
 
@@ -1070,6 +1099,7 @@ def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
     assert deliver_spans(store, "control", [Processor()]) == 0 and seen == saved
 
 
+@pytest.mark.capability("typed-output")
 @pytest.mark.parametrize("output_type", [dict, list, Answer])
 def test_output_coercion_exception_becomes_durable_result(store, database, tmp_path, output_type):
     agent, config = Agent("test", "test", output_type=output_type), RunConfig(workspace=tmp_path)
@@ -1081,6 +1111,7 @@ def test_output_coercion_exception_becomes_durable_result(store, database, tmp_p
     assert len(records(store, kind="op_started")) == 1
 
 
+@pytest.mark.capability("typed-output")
 def test_uncertain_repair_does_not_retry_on_recovery(store, database, tmp_path):
     calls = []
 
@@ -1113,6 +1144,7 @@ def test_uncertain_repair_does_not_retry_on_recovery(store, database, tmp_path):
     assert new.raw_result.error_code == "model_outcome_unknown"
 
 
+@pytest.mark.capability("microcompaction")
 @pytest.mark.parametrize("keep", [1, 2, 5])
 def test_prompt_too_long_logical_cycle_and_tail_parity(store, database, tmp_path, monkeypatch, keep):
     memory = paired_memory_manager(monkeypatch, 999999, keep)
@@ -1139,6 +1171,7 @@ def test_prompt_too_long_logical_cycle_and_tail_parity(store, database, tmp_path
     assert [(m.role, m.content) for m in new.raw_result.messages] == [(m.role, m.content) for m in old.raw_result.messages]
 
 
+@pytest.mark.capability("result-fields")
 def test_completed_result_compaction_flags_are_per_cycle(store, database, tmp_path, monkeypatch):
     memory = paired_memory_manager(monkeypatch)
     agent, config = Agent("test", "test", tools=[echo]), memory_config(tmp_path)
@@ -1170,6 +1203,7 @@ def test_event_observers_cannot_mutate_durable_receipts(store, database, tmp_pat
     assert [e.to_dict() for e in bridge.replay(run_id=result.run_id)] == original
 
 
+@pytest.mark.capability("tracing")
 def test_trace_processors_cannot_mutate_durable_output(store, database, tmp_path):
     from vv_agent.session.records import InboxItem, SessionSpec
 
@@ -1216,6 +1250,7 @@ def test_span_ids_are_scoped_by_session():
     assert {span.span_id for _, _, span in events[0]}.isdisjoint(span.span_id for _, _, span in events[1])
 
 
+@pytest.mark.capability("typed-output")
 @pytest.mark.parametrize("policy", list(UnavailableMetricPolicy))
 def test_repair_missing_usage_policy_is_durable(store, database, tmp_path, policy):
     agent = Agent(

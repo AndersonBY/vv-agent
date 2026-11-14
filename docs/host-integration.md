@@ -10,6 +10,11 @@ vv-agent ships no Celery or Redis code and no integration extra. The Celery
 example below lives in the host. A single-process host can use SQLite instead
 of PostgreSQL.
 
+The core relocation to `vv_agent.kernel` does not require host SQL or API
+changes. Contract 39 changes a failed closed-session diagnostic to exactly
+`invalid session schema`; stored formats and canonical bytes remain unchanged.
+Do not parse complete `jsonschema.ValidationError` text or schema dumps.
+
 A few terms used throughout:
 
 - A session's inbox holds inputs waiting to be applied: user messages, replies,
@@ -63,8 +68,9 @@ Rules for host writes:
 ### Schema
 
 `PostgresStore.install_schema()` runs the current DDL, which is the `DDL`
-string in `vv_agent/session/postgres.py`. A host that manages its own DDL must
-copy that literal from the installed release. SQLite files carry
+string owned by `src/vv_agent/kernel/_postgres.py` and exported by
+`src/vv_agent/session/postgres.py`. A host that manages its own DDL must copy
+that literal from the installed release. SQLite files carry
 `PRAGMA user_version` 3, and the store refuses to open any other version.
 
 vv-agent has no schema migrator. Finish old sessions with the release that

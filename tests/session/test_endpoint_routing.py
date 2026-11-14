@@ -189,7 +189,7 @@ def test_rejection_endpoint_policy_is_distinct_from_unknown_retry(store, databas
 
     from .test_model_rejection import http_error
 
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     calls, replies = transport
     start(store)
     error = ModelRequestRejected(409, "Temporary endpoint refusal", retryable=True) if status == 409 else http_error(status)
@@ -243,7 +243,7 @@ def test_endpoint_rejections_exhaust_without_backoff_and_keep_last_safe_error(st
 def test_host_rejection_retry_override_wins(store, database, transport, monkeypatch, status, retryable, ids, retry):
     from vv_agent.llm.errors import ModelRequestRejected
 
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     calls, replies = transport
     start(store)
     replies.extend([ModelRequestRejected(status, "Rejected", retryable=retryable), {"content": "done"}])

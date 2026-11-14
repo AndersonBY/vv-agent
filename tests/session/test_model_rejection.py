@@ -158,7 +158,7 @@ def test_http_context_error_compacts_then_next_primary_succeeds(store, database,
 
 @pytest.mark.parametrize("success", [True, False])
 def test_rate_limit_has_definitive_receipts_and_bounded_retry(store, database, monkeypatch, success):
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0, raising=False)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0, raising=False)
     calls = []
     rejected = fail(http_error(429, "Rate limited"), calls)
     start(store)
@@ -267,7 +267,7 @@ def test_real_vv_llm_adapter_preserves_rejection_and_stream_boundary(
         return SimpleNamespace(create_completion=complete)
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", create)
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     rt = runtime(database, [])
     rt.llm = VvLlmClient([EndpointTarget("a", "unused", "https://provider.invalid")], backend="openai")
     if with_callback:
@@ -311,7 +311,7 @@ def test_rate_limit_backoff_survives_restart_and_does_not_repeat_rejected_attemp
 def test_explicit_temporary_rejection_retries(store, database, monkeypatch):
     from vv_agent.llm.errors import ModelRequestRejected
 
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     start(store)
     drive(
         store, "s", runtime=runtime(database, [fail(ModelRequestRejected(409, "Busy", retryable=True), []), LLMResponse("done")])
@@ -332,7 +332,7 @@ def test_http_ambiguous_status_never_uses_prompt_too_long_text_heuristic(store, 
 
 @pytest.mark.parametrize("success", [True, False])
 def test_summary_rate_limit_can_recover_or_keep_original_history(store, database, monkeypatch, success):
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     rejected = fail(http_error(429), [])
     start(store)
     drive(
@@ -410,7 +410,7 @@ def test_quota_in_summary_preserves_history_and_child_boundary(store, database, 
     from .test_summary_requests import call
     from .test_summary_requests import configured as summary_runtime
 
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     rejected = fail(http_error(status, message), [])
     steps = [rejected] * (2 if status == 429 else 1)
     rt = (

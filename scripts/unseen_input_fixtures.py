@@ -17,7 +17,7 @@ from vv_agent.session.sqlite import SQLiteStore
 
 def generate():
     with (
-        patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000),
+        patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000),
         patch.object(cases, "HTTP_PORT", 18737),
     ):
         return _generate()

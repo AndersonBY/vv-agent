@@ -1,0 +1,167 @@
+"""Internal PostgreSQL reference store, bound to caller-owned psycopg v3 connections."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from threading import RLock
+from typing import TYPE_CHECKING, Any, LiteralString, cast
+
+from vv_agent.kernel._reducer import Fold
+from vv_agent.kernel._sql import SQLStore
+from vv_agent.kernel._store import Lease
+
+if TYPE_CHECKING:
+    from psycopg import Connection
+
+CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
+DDL = """
+CREATE TABLE sk_session (
+    session_id text PRIMARY KEY,
+    schema_version smallint NOT NULL CHECK (schema_version = 1),
+    parent_session_id text REFERENCES sk_session(session_id), parent_operation_id text,
+    head_seq bigint NOT NULL DEFAULT 0 CHECK (head_seq >= 0),
+    inbox_seq bigint NOT NULL DEFAULT 0 CHECK (inbox_seq >= 0),
+    lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+    lease_owner text, lease_until_ms bigint,
+    phase text NOT NULL CHECK (phase IN ('idle','active','parked','suspended','closed')),
+    active_turn_id text, next_drive_ms bigint,
+    drive_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0), terminal_seq bigint NOT NULL DEFAULT 0,
+    CHECK ((lease_owner IS NULL) = (lease_until_ms IS NULL)),
+    CHECK (terminal_seq BETWEEN 0 AND head_seq)
+);
+CREATE INDEX sk_session_due ON sk_session(next_drive_ms,session_id) WHERE next_drive_ms IS NOT NULL;
+CREATE INDEX sk_session_parent ON sk_session(parent_session_id);
+CREATE TABLE sk_record (
+    session_id text NOT NULL REFERENCES sk_session(session_id), seq bigint NOT NULL CHECK (seq > 0),
+    record_id text NOT NULL, schema_version smallint NOT NULL CHECK (schema_version = 1),
+    kind text NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
+        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
+    turn_id text, operation_id text, attempt integer CHECK (attempt > 0), body bytea NOT NULL,
+    digest text NOT NULL CHECK (length(digest)=64), commit_id text NOT NULL,
+    commit_digest text NOT NULL CHECK (length(commit_digest)=64),
+    commit_position integer NOT NULL CHECK (commit_position >= 0), writer_epoch bigint NOT NULL, created_ms bigint NOT NULL,
+    PRIMARY KEY(session_id,seq), UNIQUE(session_id,record_id), UNIQUE(session_id,commit_id,commit_position)
+);
+CREATE INDEX sk_record_operation ON sk_record(session_id,operation_id,attempt,seq) WHERE operation_id IS NOT NULL;
+CREATE INDEX sk_record_turn ON sk_record(session_id,turn_id,seq);
+CREATE TABLE sk_inbox (
+    session_id text NOT NULL REFERENCES sk_session(session_id), input_id text NOT NULL,
+    input_seq bigint NOT NULL CHECK (input_seq > 0),
+    kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
+        'control','provider_evidence','model_selection')),
+    body bytea NOT NULL, digest text NOT NULL CHECK (length(digest)=64),
+    available_ms bigint NOT NULL, received_ms bigint NOT NULL, consumed_seq bigint,
+    PRIMARY KEY(session_id,input_id), UNIQUE(session_id,input_seq),
+    FOREIGN KEY(session_id,consumed_seq) REFERENCES sk_record(session_id,seq)
+);
+CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
+CREATE TABLE sk_consumer (
+    session_id text NOT NULL REFERENCES sk_session(session_id), consumer text NOT NULL,
+    last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
+    project_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0), PRIMARY KEY(session_id,consumer)
+);
+-- Commit metadata is necessary for empty/fully overlapping commits and their original head_seq.
+-- It owns no execution state; record bodies remain solely in sk_record.
+CREATE TABLE sk_commit (
+    session_id text NOT NULL REFERENCES sk_session(session_id), commit_id text NOT NULL,
+    body bytea NOT NULL, digest text NOT NULL CHECK(length(digest)=64),
+    record_sequences bytea NOT NULL, head_seq bigint NOT NULL CHECK(head_seq >= 0), created_ms bigint NOT NULL,
+    PRIMARY KEY(session_id,commit_id)
+);
+"""
+
+
+def _connection_conninfo(connection: Connection[Any]) -> str:
+    from psycopg.conninfo import make_conninfo
+
+    info = connection.info
+    # ConnectionInfo.dsn deliberately omits the password.
+    return make_conninfo(info.dsn, password=info.password) if info.password else info.dsn
+
+
+class PostgresStore(SQLStore):
+    """A serialized connection; atomic() nests as a savepoint in host transactions."""
+
+    # Session keys never change. This still serializes writers while allowing
+    # child inserts to retain their parent foreign-key KEY SHARE locks.
+    lock_clause = " FOR NO KEY UPDATE"
+    clock_sql = CLOCK
+
+    def __init__(self, connection: Connection[Any], *, fold_factory: Callable[[], Fold]):
+        super().__init__(fold_factory=fold_factory)
+        self.connection = connection
+        self._connection_lock = RLock()
+
+    def heartbeat_store(self):
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        conninfo = _connection_conninfo(self.connection)
+        options = conninfo_to_dict(conninfo).get("options", "")
+        return self._heartbeat_connection(
+            make_conninfo(
+                conninfo,
+                connect_timeout=3,
+                options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
+            )
+        )
+
+    def _heartbeat_connection(self, conninfo: str):
+        return PostgresStore.standalone(conninfo, fold_factory=self.fold_factory)
+
+    @contextmanager
+    def _bound_append(self, lease: Lease) -> Iterator[None]:
+        # Rollback restores settings on failure; success must restore them explicitly.
+        with self._transaction():
+            previous = self._one("SELECT current_setting('lock_timeout'),current_setting('statement_timeout')")
+            self._rows(
+                f"WITH remaining AS (SELECT GREATEST(1,%s-({self.clock_sql})) AS ms) "
+                "SELECT set_config('lock_timeout',ms::text || 'ms',true), "
+                "set_config('statement_timeout',ms::text || 'ms',true) FROM remaining",
+                (lease.expires_at_ms,),
+            )
+            yield
+            self._rows(
+                "SELECT set_config('lock_timeout',%s,true),set_config('statement_timeout',%s,true)",
+                previous,
+            )
+
+    @staticmethod
+    def _connect(conninfo: str) -> Connection[Any]:
+        import psycopg
+
+        return psycopg.connect(conninfo, autocommit=True)
+
+    @classmethod
+    @contextmanager
+    def standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold]) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, fold_factory=fold_factory)
+
+    def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        from psycopg.rows import tuple_row
+
+        with self._connection_lock, self.connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(cast(LiteralString, query), params, binary=query.lstrip().startswith("SELECT"))
+            return cursor.fetchall() if cursor.description is not None else []
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        try:
+            with self._connection_lock, self.connection.transaction():
+                yield
+        except BaseException:
+            self._fold_cache = None
+            self._previous_prefix = None
+            raise
+
+    def _transaction_id(self) -> object:
+        from psycopg.pq import TransactionStatus
+
+        if self.connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise RuntimeError("SessionTx requires an open transaction")
+        return self._one("SELECT pg_current_xact_id()::text")[0]
+
+    def install_schema(self) -> None:
+        with self._transaction():
+            self._rows(DDL)

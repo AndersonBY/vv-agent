@@ -140,7 +140,7 @@ def test_quota_rejection_through_real_http_kernel(loopback, monkeypatch, provide
     loopback.rejection = (status, {"message": message, "type": "invalid_request_error"})
     native = importlib.import_module(provider)
     monkeypatch.setattr(native._base_client.SyncAPIClient, "_sleep_for_retry", lambda *args, **kwargs: None)
-    monkeypatch.setattr("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         start(store)

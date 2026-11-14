@@ -242,7 +242,7 @@ def test_message_sharing_does_not_merge_json_scalar_types():
     assert cache.share({"metadata": {"value": True}, "content": "same", "role": "user"}) is shared[0]
 
 
-def test_fast_record_parser_keeps_jcs_numbers_unicode_and_legacy_errors():
+def test_record_parser_keeps_jcs_numbers_unicode_and_parser_errors():
     from vv_agent.session.records import RecordError
 
     attributes = {
@@ -406,7 +406,44 @@ def test_fragment_parser_matches_public_validation_for_mutated_messages():
             assert parsed.encode() == expected.encode()
 
 
-def test_fast_parser_rejects_duplicate_keys_after_unescaping():
+@pytest.mark.parametrize("kind", ["op_planned", "boundary_recorded"])
+def test_fragment_cache_cannot_replace_nan_with_an_interned_null(kind):
+    from copy import deepcopy
+
+    from vv_agent.session.records import _MessageCache, make_record
+
+    from .helpers import record
+
+    message = {"role": None, "content": "same"}
+    if kind == "op_planned":
+        value = record(kind).to_dict()
+        value["payload"]["request"] = {"messages": [message]}
+    else:
+        value = make_record(
+            kind,
+            session_id="s",
+            turn_id="t",
+            payload={
+                "boundary_id": "memory",
+                "stage": "before_memory",
+                "source_operation_id": None,
+                "source_digest": None,
+                "data": {"messages": [message], "shared_state": {}},
+            },
+        ).to_dict()
+    cache = _MessageCache()
+    cache.share(deepcopy(message))
+    snapshots = value["payload"]["request"] if kind == "op_planned" else value["payload"]["data"]
+    snapshots["messages"][0]["role"] = float("nan")
+    body = json.dumps(value).encode()
+    with pytest.raises(ValueError, match="non-finite number") as public:
+        Record.parse(body)
+    with pytest.raises(type(public.value)) as retained:
+        Record._parse(body, cache)
+    assert str(retained.value) == str(public.value)
+
+
+def test_record_parser_rejects_duplicate_keys_after_unescaping():
     from vv_agent.session.records import RecordError, _MessageCache
 
     body = SessionSpec("s", "p", "w", attributes={"a": 1}).record().encode()
@@ -417,11 +454,11 @@ def test_fast_parser_rejects_duplicate_keys_after_unescaping():
         Record._parse(bad, _MessageCache())
 
 
-def test_fast_json_decoder_matches_the_original_reader(monkeypatch):
+def test_record_json_numbers_match_stdlib_canonical_encoding():
     import random
     import struct
 
-    from vv_agent.session import records
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     literals = [
         b"1e-400",
@@ -438,29 +475,23 @@ def test_fast_json_decoder_matches_the_original_reader(monkeypatch):
         b"-0.0",
         b'"\\ud800"',
         b'"\\ud83d\\ude00"',
-        b'{"a":1,"\\u0061":2}',
     ]
     rng = random.Random(17)
     literals.extend(json.dumps(struct.unpack("!d", rng.getrandbits(64).to_bytes(8))[0]).encode() for _ in range(128))
     template = SessionSpec("s", "p", "w", attributes={"probe": None}).record().encode()
-
-    def unsupported(*args, **kwargs):
-        raise ValueError("use the original reader")
-
-    def outcome(body):
-        try:
-            parsed = Record.parse(body)
-            return parsed.encode(), parsed.to_dict()
-        except (ValueError, TypeError) as error:
-            return type(error), str(error)
-
     for literal in literals:
         body = template.replace(b'"probe":null', b'"probe":' + literal)
-        actual = outcome(body)
-        with monkeypatch.context() as patch:
-            patch.setattr(records.jiter, "from_json", unsupported)
-            expected = outcome(body)
-        assert actual == expected
+        value = json.loads(body)
+        try:
+            expected = canonical_json_bytes(value)
+        except (ValueError, TypeError) as error:
+            with pytest.raises(ValueError) as caught:
+                Record.parse(body)
+            assert str(caught.value) == str(error)
+        else:
+            parsed = Record.parse(body)
+            assert parsed.to_dict() == value
+            assert parsed.encode() == expected
 
 
 def test_192_batch_protection_decodes_at_most_twice_undeclared(monkeypatch):

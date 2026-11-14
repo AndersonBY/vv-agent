@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -15,9 +14,9 @@ from vv_agent.app_server.run_adapter import StartedTurn, TurnResumeError
 from vv_agent.app_server.run_adapter import _RunAdapterFormatting as RunAdapter
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadSnapshot, TurnRecord
 from vv_agent.app_server.usage_projection import task_token_usage_to_wire
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.types import AgentStatus, Message
 
 from .context_view import context_view
@@ -27,6 +26,7 @@ from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict
 from .surfaces import SessionDriver
+from .timing import Clock, SystemClock
 
 
 class ThreadStatus(StrEnum):
@@ -45,9 +45,7 @@ class ThreadStatus(StrEnum):
 
 def project_thread_status(state: ExecutionState, *, pending: bool = False, now_ms: int | None = None) -> ThreadStatus:
     if now_ms is None:
-        import time
-
-        now_ms = int(time.time() * 1000)
+        now_ms = SystemClock().now_ms()
     if state.closed:
         return ThreadStatus.CLOSED
     if state.archived:
@@ -95,9 +93,7 @@ def _content(
     }
 
 
-def thread_status(kernel, thread_id, *, snapshot=None):
-    import time
-
+def thread_status(kernel, thread_id, *, snapshot=None, clock: Clock | None = None):
     state, records, _ = snapshot or kernel.store.read_state(thread_id)
     pending = any(
         x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None for x in kernel.store.peek_inbox(thread_id)
@@ -105,7 +101,7 @@ def thread_status(kernel, thread_id, *, snapshot=None):
     pending = pending or any(
         r._payload["disposition"] == "queued" and key not in state.admitted_inputs for key, r in state.applied_inputs.items()
     )
-    status = project_thread_status(state, pending=pending, now_ms=int(time.time() * 1000))
+    status = project_thread_status(state, pending=pending, now_ms=(clock if clock is not None else SystemClock()).now_ms())
     wait_kind = {
         "provider_running": "provider",
         "child_running": "child",
@@ -159,14 +155,15 @@ class TurnMismatch(ValueError):
 @dataclass
 class _NotificationPosition:
     seq: int
-    due: float = field(default_factory=time.monotonic)
+    due: float
     delay: float = 0.05
     warning_at: float = 0
     lock: Any = field(default_factory=threading.RLock)
 
 
 class _KernelThreadStore:
-    def __init__(self, kernel: SessionDriver) -> None:
+    def __init__(self, kernel: SessionDriver, *, clock: Clock | None = None) -> None:
+        self.clock = clock if clock is not None else SystemClock()
         self.kernel = kernel
         self.runtimes: dict[str, Any] = {}
 
@@ -241,7 +238,7 @@ class _KernelThreadStore:
             records[0].created_ms / 1000,
             records[-1].created_ms / 1000,
             archived,
-            project_thread_status(state, pending=bool(pending)).value,
+            project_thread_status(state, pending=bool(pending), now_ms=self.clock.now_ms()).value,
             state.active_turn_id or (f"{thread_id}/turn/{pending[-1].input_id}" if pending else None),
             attributes["metadata"]
             | (
@@ -304,7 +301,9 @@ class _KernelThreadStore:
             projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
             if projection.item:
                 items.append(projection.item)
-        return ThreadSnapshot(thread, turns, items, thread_status(self.kernel, thread_id, snapshot=(state, records, 0)))
+        return ThreadSnapshot(
+            thread, turns, items, thread_status(self.kernel, thread_id, snapshot=(state, records, 0), clock=self.clock)
+        )
 
     def list_threads(self, *, include_archived=False, authorize=None, archived=None, offset=0, limit=None):
         candidates = []
@@ -384,6 +383,7 @@ class _KernelRunAdapter(RunAdapter):
     def __init__(self, *, kernel, **kwargs):
         super().__init__(**kwargs)
         self.kernel = kernel
+        self.clock = self._store.clock
         self.kernel.model_resolver = self._host.resolve_model
         self._pumps: list[threading.Thread] = []
         self._notification_lock = threading.RLock()
@@ -401,7 +401,7 @@ class _KernelRunAdapter(RunAdapter):
             if not self._router.is_registered(connection_id):
                 return
             if thread_id not in self._notification_positions:
-                self._notification_positions[thread_id] = _NotificationPosition(position)
+                self._notification_positions[thread_id] = _NotificationPosition(position, due=self.clock.monotonic())
             self._state_manager.subscribe(thread_id, connection_id)
             self._ensure_observer()
 
@@ -428,7 +428,7 @@ class _KernelRunAdapter(RunAdapter):
 
     def _observe_turns(self):
         while not self._notification_stop.wait(0.05):
-            now = time.monotonic()
+            now = self.clock.monotonic()
             with self._notification_lock:
                 sessions = sorted(
                     ((sid, pos) for sid, pos in self._notification_positions.items() if pos.due <= now),
@@ -450,7 +450,7 @@ class _KernelRunAdapter(RunAdapter):
                         position.warning_at = now + 1.0
                         self._notify_subscribers(sid, "error/warning", {"message": str(exc), "code": "notification_stream"})
                 position.delay = 0.05 if changed else min(1.0, position.delay * 2)
-                position.due = time.monotonic() + position.delay
+                position.due = self.clock.monotonic() + position.delay
 
     def _schedule_lease_retry(self, sid, started, connection_id):
         target = started.handle._lease_unavailable_session or sid
@@ -463,7 +463,7 @@ class _KernelRunAdapter(RunAdapter):
             return
         head, epoch, remaining = self.kernel.store.lease_status(target)
         with self._notification_lock:
-            self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, head, epoch, connection_id)
+            self._lease_retries[sid] = (self.clock.monotonic() + remaining / 1000, target, head, epoch, connection_id)
             self._ensure_observer()
 
     def _retry_lease(self, sid, retry):
@@ -477,7 +477,7 @@ class _KernelRunAdapter(RunAdapter):
                 new_head, new_epoch, remaining = self.kernel.store.lease_status(target)
                 if remaining > 0:
                     with self._notification_lock:
-                        self._lease_retries[sid] = (time.monotonic() + remaining / 1000, target, new_head, new_epoch, None)
+                        self._lease_retries[sid] = (self.clock.monotonic() + remaining / 1000, target, new_head, new_epoch, None)
                     return
                 self.recover(self._subscriber(sid), sid, lease_retry=False)
             except Exception as exc:
@@ -820,7 +820,7 @@ class _KernelRunAdapter(RunAdapter):
         self._start(connection_id, thread_id, None, request_id=request_id)
 
     def public_thread_status(self, thread_id):
-        return thread_status(self.kernel, thread_id)
+        return thread_status(self.kernel, thread_id, clock=self.clock)
 
     def fork_thread(self, params):
         from .fork import fork_thread

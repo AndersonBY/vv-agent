@@ -11,6 +11,7 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
+from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.memory import MemoryManager
 from vv_agent.model import resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
@@ -22,6 +23,7 @@ from .children import child_handles
 from .context import project_context
 from .kernel import drive
 from .records import InboxItem, SessionSpec
+from .reducer import _fold_factory_for
 from .result import project_result
 from .runtime import Runtime
 from .sqlite import SQLiteStore
@@ -36,8 +38,8 @@ class SessionDriver:
         self.model_resolver = model_resolver
         self._owns_store = store is None
         self.store = store if store is not None else SQLiteStore(str(path))
-        self.path = self.store.path if isinstance(self.store, SQLiteStore) else None
-        if isinstance(self.store, SQLiteStore) and not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
+        self.path = self.store.path if isinstance(self.store, CoreSQLiteStore) else None
+        if isinstance(self.store, CoreSQLiteStore) and not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
             self.store.install_schema()
         self.handles: list[RunHandle] = []
         self._background: dict[str, RunHandle] = {}
@@ -60,7 +62,7 @@ class SessionDriver:
             if callback in retained:
                 retained.remove(callback)
         self._close_callbacks.clear()
-        if self._owns_store and isinstance(self.store, SQLiteStore):
+        if self._owns_store and isinstance(self.store, CoreSQLiteStore):
             with self.store._connection_lock:
                 self.store.connection.close()
 
@@ -188,7 +190,7 @@ class SessionDriver:
 
     def messages(self, sid: str) -> list[Message]:
         state, records, _ = self.store.read_state(sid)
-        return [m for m in project_context(records, state) if m.role != "system"]
+        return [m for m in project_context(records, state, _fold_factory=_fold_factory_for(self.store)) if m.role != "system"]
 
     def waits(
         self, sid: str, runtime: Runtime | None = None, *, snapshot=None

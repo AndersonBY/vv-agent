@@ -24,11 +24,274 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
+`kernel/_drive.py` owns lease acquisition, factory admission, the drive loop and
+idle/release ordering. `session/_drive_phase.py` constructs the SDK runtime,
+heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;
+`session/_driver_scope.py` supplies synchronization primitives,
+heartbeat scheduling and the shared invocation boundary. Public
+`HeartbeatStopped` resolves to the same core exception class.
+`kernel/_driver_dispatch.py` owns operation execution decisions and tool
+finalization. The core input, planning and recovery modules accept inputs,
+build plans, advance execution and close turns. Their synchronous `session/`
+entry points use the same algorithms. `session/_recovery_phase.py` and
+`session/_driver_dispatch.py` supply SDK observations and effects while those
+phase generators are suspended. One driver owns the retained state.
+
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
 adapter when accessed. Model execution also loads it when the kernel checks
 endpoint bindings. These exports resolve to the same classes as direct imports
 from `vv_agent.llm.vv_llm_client`.
+
+Root SDK exports resolve lazily to the original objects in their owning
+modules. Importing `vv_agent.kernel` or `vv_agent.kernel._schema` through normal
+Python package imports loads only the package facade and the requested core
+modules, using the standard library alone. Accessing a root SDK export may load
+its outer SDK dependencies.
+The App Server package also resolves exports lazily, so importing its host or
+session adapter does not initialize the client and server through the package
+facade.
+
+Canonical JSON encoding, UTF-16 key ordering, canonical SHA-256 digests and
+digest validation are owned by `src/vv_agent/kernel/_canonical_json.py`. The
+implementation is shared by its active consumers and supports ordinary package
+imports using only the standard library.
+
+The extracted schema core owns the closed record, inbox, handle and boundary
+schema definitions and their compiled-check registry in
+`src/vv_agent/kernel/_record_schema.py`, using the standard-library-only compiler
+in `src/vv_agent/kernel/_schema.py`. Both modules support ordinary package imports
+without loading the outer SDK. `session/records.py` consumes these same schema
+objects and checks. `kernel/_record_codec.py` owns standard-library object
+loading, duplicate-member rejection and schema validation. Closed-schema
+failures use the contract 39 diagnostic `invalid session schema`; specific
+semantic/parser errors and canonical bytes remain unchanged.
+`kernel/_records.py` owns Record, InboxItem, SessionSpec, retained fragments and
+message interning with stdlib/core dependencies only. `session/records.py`
+exports the same actual objects; no second Record implementation exists.
+
+Message values, artifact references, cursors and compaction evidence validation
+are owned by `kernel/_message_values.py`; the strict Message decoder is owned by
+`kernel/_message_codec.py`. `types.py` and existing root exports resolve to these
+same objects. Both core modules use only the standard library and core canonical
+JSON helpers. Message metadata and tool arguments retain their signed-64 through
+unsigned-64 integer range; canonical digest encoding and artifact sizes/cursor
+offsets retain the narrower I-JSON safe-integer range.
+
+Tool calls, directives, result statuses and the complete `ToolExecutionResult`
+value/validator are owned by `kernel/_tool_values.py`. It uses only the standard
+library and the existing canonical JSON and Message values. Existing `types.py`
+and root bindings refer to the same actual classes and enums; compaction memory
+and reducer result validation import them directly from core. Unknown/null field,
+metadata, status, recovery-pointer and byte-size rules remain part of this one
+implementation. Tool execution and artifact persistence remain outside core.
+
+`kernel/_tool_result_checks.py` owns definitive-result and structured-body checks
+without importing records or schemas. `kernel/_provider_outcomes.py` owns
+Definitive/Accepted/Unknown values and receipt/handle validation, including
+provider/request/attempt identity and evidence checks. Existing outer imports
+resolve to these actual objects. FunctionProvider, host-interaction outcomes and
+workspace preparation remain in the SDK.
+
+`kernel/_tool_schema.py` emits schema-check requests and owns issue normalization
+and rejection results. The explicit host leaf `_jsonschema.py` uses the existing
+Draft202012 validator and cache. Core imports do not load this leaf or jsonschema;
+SDK and host-side simulation adapters use the same real validator, without
+preloading the tools package or substituting a second validation algorithm.
+
+Tool completion-policy application, image notifications and skipped-result
+construction live in `kernel/_tool_behavior.py`. `runtime/tool_results.py`
+exports the same functions, and context projection imports the image helper
+directly from core. Stop policies mutate the existing result directive.
+
+Model settings, tool choice, response format and retry settings are owned by
+`kernel/_model_settings.py`. Microcompaction policy and normalization are owned by
+`kernel/_microcompaction_policy.py`; tool metadata, its enums, normalization and
+metadata-denial rules are owned by `kernel/_tool_metadata.py`. Their existing
+outer modules explicitly export the same objects for active public and SDK callers.
+
+Resolved prompt sections/bundles, immutable metadata helpers and stable prompt
+digests are owned by `kernel/_prompt_values.py`. `prompt/builder.py` and the prompt
+package expose the same resolved values. `SystemPromptBuilder`, template rendering,
+workspace/path resolution, Session Memory insertion and current-time capture stay
+outside core.
+
+`kernel/_definition.py` owns the single frozen-definition/schema cache, canonical
+composition and digest, model identity filtering and historical endpoint
+adaptation. Runtime supplies resolved binding facts and the read-only tool
+catalog. `kernel/_tool_planner.py` owns tool selection and metadata filtering;
+SDK compilation and shell-hint resolution remain outer. Builtin tool names and
+the workspace tool list have one core owner shared by SDK exports and the schema
+generator.
+
+Budget values and validation are owned by `kernel/_budget_values.py`.
+`kernel/_budget.py` owns budget state, reservations, limits and unavailable-metric
+latches. It requests clock and host-cost observations; `budget.py` performs those
+reads while core evaluation is suspended and preserves the synchronous SDK API.
+Task values import the core budget objects without loading the live adapter.
+`kernel/_retained_budget.py` reconstructs retained usage for both SDK budget
+views and core receipt decisions. `kernel/_driver_outcomes.py` owns definitive
+receipt classification, completion budget effects, bounded retries, unknown
+outcomes and parking decisions. It also builds yielded wait receipts from child
+and provider evidence. The SDK supplies callback lookup and invocation, resource
+preparation, clock, meter and cancellation observations at their existing points.
+
+Pure compaction markers, rendering and recovery-envelope functions are owned by
+`kernel/_compaction_text.py`. Memory code reuses those actual objects, and the
+reducer imports the core renderer. `kernel/_microcompaction.py` owns candidate
+planning and Message replacement; its planners and summary acceptance in
+`kernel/_summary_compaction.py` yield internal `TokenCount` requests. The core
+fold delegates through these generators without invoking the SDK token counter.
+The synchronous SDK Fold and MemoryManager drivers call the existing counter
+while the core generator chain is suspended, then send the result back. Counts
+are requested only at the original decision points, without model pre-scanning,
+count-result caching or fold replay. MemoryManager retains its counting hooks,
+model callbacks, archive I/O and SessionMemory notification; accepted notifications
+reuse the count computed during validation. The public microcompaction planner
+remains synchronous, with one authoritative core generator algorithm.
+`kernel/_compaction_phase.py` owns compaction scheduling, protected-tail and
+PTL decisions, summary receipt adoption and extraction ledger decisions.
+`kernel/_microcompaction_apply.py` owns microcompaction application. The SDK
+resolves counting, archive, routing and memory callbacks at their existing
+points. The phase keeps one settings mapping and derives capacity and threshold
+only when each branch needs them. MemoryManager owns defaults and normalization;
+SessionMemory owns its extraction, merge and persistence implementation.
+Driver plan/commit/close still provide the ledger integration.
+Compaction capacity and integer coercion are owned by
+`kernel/_compaction_threshold.py`. `MemoryManager._definition_settings()`
+provides Runtime with the current settings projection. `_memory_settings.py`
+owns the shared settings fields, defaults and policy normalization;
+`MemoryManager` inherits them and supplies its SDK-specific field types.
+`_token_counting.py` owns the actual host counter and token-request drain;
+`memory/token_utils.py` and `memory/_counting.py` export the same objects. This
+host leaf can load its real tokenizer dependencies without importing the SDK
+memory package. It stays outside the standard-library-only kernel.
+The ordinary token counter retains its production model dispatch, incremental
+cache, formatting and per-call fallback behavior. CoreFold's synchronous
+convenience entry requires a CPU-only counter; the default SDK drives
+`extend_steps` outside core. Model execution and other SDK effects remain on
+the host side. Public surfaces have not converged on `LocalWorker`; that
+convergence is deferred to P3.
+
+Lease ownership, renewal publication, expiry checks, commit/poll latch ordering,
+heartbeat error-budget decisions and control matching live in
+`kernel/_lease_scope.py`. The SDK uses those actual methods and supplies the
+existing Clock port, synchronization objects and actor identity. Core calls the
+injected clock at the original sampling points; it does not read system time or
+construct threads, events, locks or thread-local state. SDK constructors, keeper
+scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
+`session/_driver_scope.py` / `session/timing.py`. Public HeartbeatStopped bindings
+resolve to the single core exception class. Invocation uses the real provider
+outcomes; no duplicate outcome or cancellation-error type is introduced.
+
+`kernel/_cancellation.py` owns cancellation state, callback ordering and
+parent-child propagation. The SDK supplies its existing Event, Lock and child
+factory, retaining the public token constructor, child return type and exception
+identity used by tool consumers.
+
+ScheduledLeaseKeeper runs the same core heartbeat step and transient-error budget
+as the SDK. Recoverable renewal errors retain the last confirmed lease without
+publishing readiness; terminal errors publish completion and cancel a scoped
+token. Normal stop drains queued renewal work without implying lease loss.
+Renewal turns are explicitly scheduled by seeded scenarios. SimWorld has no timed
+queue, and a synchronous factory readiness wait does not pump queued retries;
+recurring scheduling and factory-wait equivalence are not established.
+
+Execution statuses, tasks and child configuration, usage accounting, cycle/model
+call records and final results are owned by `kernel/_execution_values.py`, together
+with their existing validation and wire versions. The module imports only stdlib
+and other core values. `types.py` remains the explicit existing export surface for
+the same actual objects, including the canonical `vv_agent.types.AgentResult`
+binding. Private helper exports remain only where SDK or producer callers use them.
+`core_types.py` owns that export surface. `types.py` forwards the existing
+bindings until the next Python package major release. When found as top-level
+`types` from the package working directory, it loads the actual standard-library
+module without importing the agent package; see the Python contract mapping.
+
+After-cycle decisions, native outcomes, detached snapshots, validation errors and
+durable denial-state helpers are owned by `kernel/_cycle_values.py`. Their
+validation and UTF-16-sorted state updates use stdlib and core values only.
+`runtime/lifecycle.py` exports those same objects and retains the hook protocol
+and `AfterCycleHookManager`, including callback execution and decision composition.
+The reducer validates after-cycle and budget boundaries through core values.
+`kernel/_cycles.py` owns selected-cycle projection, shared by SDK results and
+`kernel/_after_cycle.py`. The after-cycle phase builds snapshots and records
+hook decisions; the SDK invokes user hooks and supplies bound shared state.
+Before hooks, the SDK also projects retained events to enforce their descriptor
+bounds. It does not rebuild the full SDK result merely to read cycles and usage.
+`kernel/_output_phase.py` owns output receipt reuse, validation outcomes and the
+single logged, tools-free repair plan. The SDK invokes guardrails, coercion and
+validators at the original observation points; mutable output settings are read
+when their branches need them. Session output and RunResult share one serializer.
+Serialization can invoke model_dump or dataclass callbacks; the host handles
+that request while the output phase generator is suspended.
+The compaction, output and after-cycle phases share ledger request types from
+`kernel/_driver_requests.py`; their existing adapters retain the same planning,
+boundary and guarded-commit calls.
+`kernel/_state.py`, `kernel/_context.py` and `kernel/_reducer.py` own execution
+state, aligned context projection, input protection and all record transitions.
+The fold receives settings normalization and message-counting callables. It
+still recomputes compaction eligibility, prompts, replacements, protected tails
+and evidence; the outer adapter supplies values, not an acceptance decision.
+`MemoryManager` and replay share the high-level microcompaction planner.
+
+`kernel/_driver.py` owns the driver's retained state, record construction and
+lease-fenced commit algorithm. The SDK driver inherits those same methods;
+store, fold, lease scope and watermark are not mirrored in another driver.
+Explicit clock, fold and observation callbacks preserve transaction timing,
+while the SDK owns cost-meter reads, hooks and log emission.
+`kernel/_driver_dispatch.py` and `kernel/_driver_recovery.py` own dispatch,
+recovery and terminal decisions, composing the same input, output, compaction
+and receipt generators. `kernel/_child_summary.py` derives child summaries from
+the actual log and fold. `kernel/_child_delegation.py` owns handoff limits,
+child identities and inherited admission data; SDK leaves parse requests and
+compile the chosen child agent.
+`kernel/_driver_planning.py` owns operation/model plans and selected-model,
+fork, then frozen-task/default precedence. The SDK supplies route bindings,
+provider membership and callbacks at their original points. Retained fragments,
+idempotency keys and consumed unknowns are constructed by the shared planner.
+`kernel/_driver_inputs.py` owns inbox ordering, input identity/disposition and
+turn admission, using the same CoreDriver and DefinitionCache. Interaction values
+and reply validation, summary intent helpers and provider-result identity also
+have single core owners. The SDK supplies compilation, authentication and resource
+observations; input consumption and guarded commits keep their original ordering.
+
+`kernel/_store.py` owns store protocols, receipts, leases and errors;
+`kernel/_sql.py` owns the shared SQL transaction and scheduling rules.
+`kernel/_sqlite.py` and `kernel/_postgres.py` own the concrete connections, DDL
+and transactions. These two adapters are the explicit storage-I/O exception;
+PostgreSQL imports its driver lazily. Core stores require a fold factory, and
+SQLite also requires a Clock. Thin `session/` subclasses provide the existing
+SDK defaults and public constructors. SQL prefixes, forked folds and the driver
+use the same fold factory. The outer context adapter also uses that
+factory when a historical prefix must be rebuilt. Replacing a store's factory
+clears both validated-prefix caches.
+
+`kernel/_child_store.py` owns child admission, cancellation, terminal delivery,
+authenticity checks and ordinary child-result assembly over the store ports.
+`session/children.py` exports the same objects; configured-agent and handoff
+reconstruction remain in the SDK delegation adapter.
+
+`kernel/_usage.py` owns usage normalization and the model-attempt ledger. SDK
+result projection and the simulation's I5 checks consume that same function.
+Unselected receipts remain billable, and missing measurements remain distinct
+from reported zero usage.
+
+Shared event wire validation lives in `kernel/_event_validation.py`. The outer
+event classes retain construction, time and UUID defaults. Retained memory
+boundaries use the shared validator before checking their expected event kind,
+identities and matching start; cycle-aborted constructor checks retain their
+original position after wire validation.
+
+Record task decoding consumes core `AgentTask` and preserves its cached private
+value and detached public copies. Its private interning keys remain separate
+from canonical wire bytes, and future message validation is still deferred to
+its owning boundary. The seeded simulation enters through `kernel/_drive.py`
+and the actual core phase generators and SQL stores. Its test host supplies
+scripted external outcomes and the real schema, token-counting and settings
+leaves. A fresh-process import check rejects other SDK modules. SDK producer
+tests use a separate SDK assembly over the same scheduler and SQL assertions;
+they still exercise the public runtime's callbacks and defaults.
 
 The default no-tool policy is `finish`. Choosing `continue` or `wait_user`
 does not change the cycle limit. Waiting is not a terminal state: a reply
@@ -105,7 +368,11 @@ cycle reported that metric.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
+| `src/vv_agent/kernel/_schema.py` | Standard-library-only compiler for the closed session-schema vocabulary. |
+| `src/vv_agent/kernel/_record_schema.py` | Authoritative closed session schemas and compiled checks. |
+| `src/vv_agent/kernel/_record_codec.py` | Schema rejection, duplicate-checking object loading and concise contract 39 diagnostics. |
+| `src/vv_agent/kernel/_records.py` | Record, inbox and session values, canonical identity, retained fragments and private message caching. |
+| `src/vv_agent/kernel/_canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
 | `src/vv_agent/interaction.py` | Typed question and answer values, wire validation, and request digests. |
 | `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
 | `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, provider outcomes, and validation of definitive results. The session store owns admission and receipts. |
@@ -131,7 +398,7 @@ cycle reported that metric.
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
 | `src/vv_agent/tracing.py` | Trace spans and the processor protocol. |
 | `src/vv_agent/runtime/compiler.py` | Compiles `Agent + input + RunConfig` into an `AgentTask`. Import this submodule directly to avoid package import cycles. |
-| `src/vv_agent/types.py` | Runtime types: tasks, messages, tool calls, results, statuses, and token usage. |
+| `src/vv_agent/types.py` | Existing exports of the actual kernel-owned value objects. Execution/task/usage/result definitions live in `src/vv_agent/kernel/_execution_values.py`. |
 | `src/vv_agent/session/` | Session kernel, SQLite and PostgreSQL stores, `SessionDriver`, child sessions, and projections. See [session-kernel.md](session-kernel.md). |
 | `src/vv_agent/app_server/` | App Server protocol, transport, and thread mapping. See [app-server.md](app-server.md). |
 | `src/vv_agent/llm/` | Model protocol adapters, scripted test clients, prompt cache behavior, and the `vv-llm` client bridge. |
@@ -243,6 +510,22 @@ directive. The target agent's output becomes the run output, and the runtime
 emits `HandoffStartedEvent` and `HandoffCompletedEvent`.
 
 ### Tool policy
+
+`kernel/_tool_policy.py` owns ToolPolicy, policy merging, compiler metadata
+projection and frozen/current context-policy composition. Compiler and Runtime
+use these same implementations; execution context and user callback bindings
+remain with their SDK owners.
+`kernel/_call_context.py` supplies task/plan-derived call facts at the existing
+read points and shares the original preapproval comparisons. SDK context
+construction still owns workspace, RunContext and child-manager bindings; the
+facts object carries none of those host objects.
+
+`kernel/_tool_admission.py` owns argument parsing and the ordered schema,
+policy and preapproval decisions before dispatch. The SDK resolves late reads,
+runs the existing JSON Schema primitive and invokes callbacks while that core
+generator is suspended. FunctionProvider uses the same admission path for both
+preflight and submit; a successful preflight does not bypass submit validation.
+Approval transport, events and executor effects remain with the SDK.
 
 `ToolPolicy` is checked twice: when the runtime builds the tool schema list
 for the model, and again when the executor dispatches a call. Besides

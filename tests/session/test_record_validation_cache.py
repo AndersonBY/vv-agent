@@ -5,8 +5,13 @@ from copy import deepcopy
 from hashlib import sha256
 
 import pytest
+from jsonschema import Draft202012Validator
+from jsonschema.validators import extend
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel import _records as core_records
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._record_schema import _CHECKS, _SCHEMAS, HANDLE
+from vv_agent.kernel._schema import _compile_check
 from vv_agent.session import records
 from vv_agent.session.kernel import read_state
 from vv_agent.session.records import RecordError, SessionSpec
@@ -27,8 +32,8 @@ def test_record_bytes_and_digest_are_retained_without_payload_aliases(monkeypatc
     def unexpected(*args, **kwargs):
         raise AssertionError("a retained record must not encode or validate again")
 
-    monkeypatch.setattr(records, "canonical_json_bytes", unexpected)
-    monkeypatch.setattr(records, "validate", unexpected)
+    monkeypatch.setattr(core_records, "canonical_json_bytes", unexpected)
+    monkeypatch.setattr(core_records, "validate", unexpected)
     assert rec.encode() is body and rec.digest is checksum
     assert deepcopy(rec) is rec
     assert rec.payload["definition"] == {}
@@ -123,22 +128,31 @@ def example(schema):
     return True if kind == "boolean" else None
 
 
+StrictValidator = extend(
+    Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", lambda _, value: type(value) is int)
+)
+
+
 @pytest.mark.parametrize(
     "validator",
-    list(records._VALIDATORS.values()),
+    [StrictValidator(schema) for schema in _SCHEMAS],
     ids=lambda v: str(list(v.schema.get("properties", v.schema))),
 )
 def test_compiled_checks_match_jsonschema(validator):
     value = example(validator.schema)
-    check = records._CHECKS[id(validator.schema)]
+    check = _CHECKS[id(validator.schema)]
     for candidate in [value, *mutations(value)]:
-        assert check(candidate) == validator.is_valid(candidate), candidate
+        valid = validator.is_valid(candidate)
+        assert check(candidate) == valid, candidate
+        if not valid:
+            with pytest.raises(RecordError, match=r"^invalid session schema$"):
+                records.validate(candidate, validator.schema, canonical=False)
 
 
-@pytest.mark.parametrize("variant", records.HANDLE["oneOf"])
+@pytest.mark.parametrize("variant", HANDLE["oneOf"])
 def test_compiled_checks_match_all_nested_handles(variant):
-    validator = records._StrictValidator(variant)
-    check = records._compile_check(variant)
+    validator = StrictValidator(variant)
+    check = _compile_check(variant)
     value = example(variant)
     for candidate in [value, *mutations(value)]:
         assert check(candidate) == validator.is_valid(candidate), candidate

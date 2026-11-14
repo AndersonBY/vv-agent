@@ -10,9 +10,8 @@ from typing import TYPE_CHECKING, cast
 from vv_agent.events import MemoryCompactCompleted, MemoryCompactMode, MemoryCompactStarted, MemoryCompactTrigger
 from vv_agent.memory.provider import call_after_memory_providers, call_before_memory_providers
 from vv_agent.memory.session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryState
-from vv_agent.types import Message
 
-from .records import copy_json, digest
+from .records import copy_json
 
 if TYPE_CHECKING:
     from .kernel import _Driver
@@ -79,70 +78,7 @@ def save_projection(driver: _Driver) -> None:
             staging.unlink(missing_ok=True)
 
 
-def extract_memory(driver: _Driver, source: list[Message], current_tokens: int, cycle: int) -> bool:
-    assert driver.state.active_turn_id is not None
-    task = driver.state.turns[driver.state.active_turn_id].start._task()
-    if not task.metadata.get("session_memory_enabled"):
-        return False
-    task = driver.task()
-    memory = restore_memory(driver)
-    oid = f"{task.task_id}/model/session_memory/{digest([m.to_dict() for m in source])}"
-    saved = driver.boundary("session_memory_saved", oid)
-    if saved is not None:
-        save_projection(driver)
-        return False
-    op = driver.state.operations.get(oid)
-    if op is not None:
-        if op.selected_attempt is None:
-            return False
-        receipt = op.attempts[op.selected_attempt].result
-        assert receipt is not None
-        memory.config.extraction_callback = lambda *_: receipt._payload["result"].get("content", "")
-        memory.extract(source, current_cycle=cycle, current_tokens=current_tokens)
-        driver.commit(
-            [driver.boundary_record("session_memory_saved", oid, {"state": memory.state.to_dict()}, source_operation_id=oid)],
-            guarded=True,
-        )
-        save_projection(driver)
-        return True
-    count = sum(not memory.skip_extraction_message(m) and bool(m.content) for m in source)
-    if not memory.should_extract(current_tokens, count):
-        return False
-    start = memory.state.last_extracted_message_index + 1 if 0 <= memory.state.last_extracted_message_index < len(source) else 0
-    new = [m for m in source[start:] if not memory.skip_extraction_message(m)]
-    if not new:
-        return False
-    _, resolved = driver.runtime.model_route("session_memory")
-    request = {
-        "model": resolved.model_id,
-        "messages": [Message("user", memory.extraction_prompt(new)).to_dict()],
-        "tools": [],
-        "prompt_bundle": None,
-        "model_settings": task.model_settings.to_dict() if task.model_settings else None,
-        "metadata": {"purpose": "session_memory", "vv_session": {"cycle_index": cycle}},
-    }
-    driver.commit([driver.plan(oid, request, "model", purpose="session_memory")], guarded=True)
-    return True
-
-
-def pending_memory(driver: _Driver):
-    tid = driver.state.active_turn_id
-    for (turn, stage, key), r in reversed(list(driver.state.boundaries.items())):
-        if turn == tid and stage == "memory_started" and driver.boundary("memory_completed", key) is None:
-            return key, r._payload["data"]["event"]
-    return None
-
-
-def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str, prune=None, requested_by=None) -> bool:
-    if pending_memory(driver):
-        return False
-    key = (
-        digest([driver.state.active_turn_id, [m.to_dict() for m in source], trigger, requested_by])
-        if requested_by
-        else digest([driver.state.active_turn_id, [m.to_dict() for m in source], trigger])
-    )
-    if driver.boundary("memory_started", key):
-        return False
+def before_compaction_event(driver, manager, source, *, key, cycle, trigger, prune):
     event = MemoryCompactStarted(
         run_id=driver.state.active_turn_id or "",
         trace_id=driver.state.active_turn_id or "",
@@ -172,36 +108,12 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}})
     metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
     object.__setattr__(event, "version", "v6")
-    if requested_by:
-        metadata = metadata | {"requested_by": requested_by, "source_digest": digest([m.to_dict() for m in source])}
-    payload = event.to_dict() | {"metadata": metadata}
-    driver.commit([driver.boundary_record("memory_started", key, {"event": payload})], guarded=True)
-    return True
+    return event.to_dict() | {"metadata": metadata}
 
 
-def finish_compact(
-    driver: _Driver, manager, source, *, mode: str, changed: bool, archived_count=0, reclaimed_tokens=0, artifact_failure_count=0
-) -> bool:
-    pending = pending_memory(driver)
-    if pending is None:
-        return False
-    key, start = pending
-    start_id = driver.boundary("memory_started", key)
-    start_seq = next(row.seq for row in driver.records if row.record == start_id)
-    micro = [
-        row.record._payload["micro_usage"]
-        for row in driver.records
-        if row.seq > start_seq
-        and row.record.turn_id == driver.state.active_turn_id
-        and row.record.kind == "context_compacted"
-        and "micro_usage" in row.record._payload
-    ]
-    if micro:
-        archived_count += sum(v["archived_count"] for v in micro)
-        reclaimed_tokens += sum(v["reclaimed_tokens"] for v in micro)
-        artifact_failure_count += sum(v["artifact_failure_count"] for v in micro)
-        if not changed:
-            changed, mode = True, "micro"
+def after_compaction_event(
+    driver, manager, source, *, key, start, mode, changed, archived_count, reclaimed_tokens, artifact_failure_count
+):
     event = MemoryCompactCompleted(
         run_id=driver.state.active_turn_id or "",
         trace_id=driver.state.active_turn_id or "",
@@ -221,21 +133,27 @@ def finish_compact(
     )
     object.__setattr__(event, "version", "v6")
     metadata = call_after_memory_providers(driver.runtime.config.memory_providers, event)
-    if "requested_by" in start.get("metadata", {}):
-        metadata = metadata | {"requested_by": start["metadata"]["requested_by"]}
-        metadata["compaction_error"] = None
-        if not changed and any(
-            op.kind == "model"
-            and op.attempts[1].plan._payload["purpose"] == "compaction"
-            and op.attempts[1].plan._payload["request"]["metadata"].get("source_digest") == start["metadata"].get("source_digest")
-            for op in driver.state.operations.values()
-        ):
-            metadata["compaction_error"] = "summary_unavailable"
-    records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
-    if changed and mode in {"summary", "emergency"} and driver._task().metadata.get("session_memory_enabled"):
-        memory = restore_memory(driver)
-        memory.on_compaction(current_tokens=event.summary_tokens)
-        records.append(driver.boundary_record("session_memory_saved", f"compact/{key}", {"state": memory.state.to_dict()}))
-    driver.commit(records, guarded=True)
-    save_projection(driver)
-    return True
+    return event.to_dict() | {"metadata": metadata}
+
+
+def select_extraction_messages(memory, source, current_tokens):
+    count = sum(not memory.skip_extraction_message(m) and bool(m.content) for m in source)
+    if not memory.should_extract(current_tokens, count):
+        return None
+    start = memory.state.last_extracted_message_index + 1 if 0 <= memory.state.last_extracted_message_index < len(source) else 0
+    new = [m for m in source[start:] if not memory.skip_extraction_message(m)]
+    if not new:
+        return None
+    return new
+
+
+def apply_extraction_receipt(memory, source, current_tokens, cycle, content):
+    memory.config.extraction_callback = lambda *_: content
+    memory.extract(source, current_cycle=cycle, current_tokens=current_tokens)
+    return memory.state.to_dict()
+
+
+def session_memory_compacted(driver, current_tokens):
+    memory = restore_memory(driver)
+    memory.on_compaction(current_tokens=current_tokens)
+    return memory.state.to_dict()

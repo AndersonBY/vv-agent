@@ -17,8 +17,10 @@ from vv_agent import (
 )
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
-from vv_agent.session import kernel
+from vv_agent.kernel import _child_delegation
+from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.session.children import ChildSession, ChildTool, child_delivery
+from vv_agent.session.delegation import assemble as assemble_child_specs
 from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import Runtime
 from vv_agent.session.surfaces import SessionDriver
@@ -59,13 +61,13 @@ def test_local_declaration_keeps_steer_pending_until_normal_result(store, tmp_pa
         )
 
     if wait_kind == "child":
-        assemble = kernel.assemble
+        assemble = _child_delegation.assemble
 
         def declared_children(*args, **kwargs):
-            children = cast(list[ChildSession], assemble(*args, **kwargs))
+            children = cast(list[ChildSession], (yield from assemble(*args, **kwargs)))
             return [replace(child, yield_on_steer=True) for child in children]
 
-        monkeypatch.setattr(kernel, "assemble", declared_children)
+        monkeypatch.setattr(_child_delegation, "assemble", declared_children)
         child = Agent("worker", "Work.", model="m", tools=[wait_child])
         agent = Agent("parent", "Delegate.", model="m", tools=[child.as_tool()])
         steps = [
@@ -205,7 +207,7 @@ def test_local_declaration_keeps_steer_pending_until_normal_result(store, tmp_pa
 
 @pytest.mark.parametrize("entry", ["runner", "interactive"])
 def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, tmp_path, monkeypatch, entry):
-    assemble = kernel.assemble
+    assemble = assemble_child_specs
 
     def exercise(declared):
         driver = SessionDriver(store=store)
@@ -222,7 +224,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
             def admit(plan):
                 state, _, _ = store.read_state(plan.session_id)
                 task = state.turns[plan.turn_id].start.task()
-                context = value.context(task, plan, kernel.CancellationToken(), store=store, session_id=plan.session_id)
+                context = value.context(task, plan, CancellationToken(), store=store, session_id=plan.session_id)
                 specs = cast(list[ChildSession], assemble(value, plan, context, task, store))
                 admitted.extend(replace(child, yield_on_steer=declared) for child in specs)
                 return admitted

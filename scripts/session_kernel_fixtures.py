@@ -2001,7 +2001,7 @@ def generate(output: Path):
     output.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         # Fixed elapsed-time observations do not affect deadlines, which use store time.
-        stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
+        stack.enter_context(patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000))
         # The evaluator's default captured the real clock when budget.py was imported.
         stack.enter_context(
             patch("vv_agent.session.kernel.BudgetEvaluator", partial(BudgetEvaluator, clock_ns=lambda: 100_000_000))

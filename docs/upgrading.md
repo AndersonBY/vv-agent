@@ -12,6 +12,11 @@ for older versions and no in-place migrations. When a release bumps the record
 or inbox schema, the new runtime rejects rows written by the old one with
 `RecordError`. That covers finished sessions too, not only running ones.
 
+The concrete SQLite/PostgreSQL adapters live under `vv_agent.kernel`; the
+`vv_agent.session` store imports retain their SDK constructors and defaults.
+That internal move preserves the DDL, stored bytes and version checks and
+requires no database migration.
+
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
 call that already has a receipt, and prove which inputs were applied. Keeping
@@ -76,6 +81,22 @@ session table when you create it. Never let a new-version worker drive an
 old-version session.
 
 ## Version notes
+
+### 0.36.0 — Unreleased
+
+The core and concrete session stores move under `vv_agent.kernel`; the existing
+`vv_agent.session` exports and facades plus public SDK entry points remain.
+Record schema 1, inbox schema 3, SQL layouts, canonical bytes, IDs, and digests
+are unchanged. Existing sessions need no migration, drain, decoder selection,
+or byte rewrite.
+
+Contract 39 narrows failed closed-session diagnostics to
+`invalid session schema`. This is a public diagnostic change, but accepted and
+rejected values, validation order, and execution behavior do not change. Do not
+parse complete `jsonschema.ValidationError` text, paths, or schema dumps. P1 adds
+no backend DDL, `Principal`, or provider work; upgrade the dependency and rely
+on the stable invalid-schema text. Contract adoption is pending and the
+canonical lock remains 38.0.0. See the [release notes](releases/0.36.0.md).
 
 ### 0.35.0 — 2026-11-12
 
@@ -557,7 +578,7 @@ with real PostgreSQL, review the formatter, model routing and tokenizer
 boundaries, then add the exact version pair to the verified set. Versions are
 listed individually; a newer version is not assumed safe. The gates are
 `_VERIFIED_DEEPSEEK_VERSIONS` and `_VERIFIED_TIKTOKEN_VERSIONS` in
-`memory/token_utils.py`. The repository lock
+`src/vv_agent/_token_counting.py`. The repository lock
 uses vv-llm 0.8.5, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
 qwen-tokenizer 0.3.0.
 

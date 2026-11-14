@@ -2,7 +2,7 @@
 
 import pytest
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 
 
 def test_jcs_string_escapes_and_utf16_key_order():
