@@ -66,6 +66,14 @@ CREATE TABLE sk_commit (
 ) STRICT;
 """
 
+DEFAULT_BUSY_TIMEOUT_MS = 5000
+DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 250
+
+
+def _positive_timeout(value: int, name: str) -> None:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
 
 class SQLiteStore(SQLStore):
     """A serialized connection per instance; BEGIN IMMEDIATE fences local writers."""
@@ -73,11 +81,29 @@ class SQLiteStore(SQLStore):
     clock_sql = "session_now_ms()"
 
     def heartbeat_store(self):
-        return nullcontext(self) if self.path == ":memory:" else SQLiteStore.standalone(self.path)
+        return (
+            nullcontext(self)
+            if self.path == ":memory:"
+            else SQLiteStore.standalone(
+                self.path,
+                busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+                heartbeat_busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+            )
+        )
 
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path: str,
+        *,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ):
+        _positive_timeout(busy_timeout_ms, "busy_timeout_ms")
+        _positive_timeout(heartbeat_busy_timeout_ms, "heartbeat_busy_timeout_ms")
         self.path = path
-        self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
+        self.busy_timeout_ms = busy_timeout_ms
+        self.heartbeat_busy_timeout_ms = heartbeat_busy_timeout_ms
+        self.connection = sqlite3.connect(path, isolation_level=None, timeout=busy_timeout_ms / 1000, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()
         if version != 3 and (version != 0 or existing):
@@ -87,7 +113,7 @@ class SQLiteStore(SQLStore):
         if version == 0 and existing is None:
             self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         self.connection.create_function("session_now_ms", 0, lambda: time.time_ns() // 1_000_000)
         self._connection_lock = RLock()
         self._epoch = 0
@@ -95,8 +121,14 @@ class SQLiteStore(SQLStore):
 
     @classmethod
     @contextmanager
-    def standalone(cls, path: str) -> Iterator[SQLiteStore]:
-        store = cls(path)
+    def standalone(
+        cls,
+        path: str,
+        *,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ) -> Iterator[SQLiteStore]:
+        store = cls(path, busy_timeout_ms=busy_timeout_ms, heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms)
         try:
             yield store
         finally:

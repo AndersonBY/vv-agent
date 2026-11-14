@@ -486,7 +486,7 @@ def test_real_sigkill_at_accept_and_parked_boundaries(database, store, business,
     server = Server(store, business, supported=supported)
     try:
         # Real lease expiry, without editing the store's lease or clock.
-        Event().wait(15.1)
+        Event().wait(60.1)
         server.resume()
         if cut == "accepted" and not supported:
             assert server.attempt().state == "unknown"

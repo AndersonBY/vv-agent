@@ -162,7 +162,7 @@ def test_default_lease_expiry_empty_inbox_recovers_without_wake(store, database)
         pipe.close()
         assert not store.peek_inbox("s")
         recovered = runtime(database, [LLMResponse("done")], [effect_tool()])
-        assert recovered.ttl_ms == 15000 and recovered.heartbeat_seconds == 0.25
+        assert recovered.ttl_ms == 60000 and recovered.heartbeat_seconds == 0.25
 
         def project(sid, consumer):
             with store.atomic() as tx:
@@ -170,14 +170,15 @@ def test_default_lease_expiry_empty_inbox_recovers_without_wake(store, database)
                 if batch is not None:
                     tx.ack(batch)
 
-        while time.monotonic() - begin < 20:
+        deadline = begin + recovered.ttl_ms / 1000 + 5
+        while time.monotonic() < deadline:
             tick(store, runtime=lambda _sid: recovered, project=project, page_size=1)
             if not store.list_runnable() and read_state(store, "s")[0].active_turn_id is None:
                 break
             # Poll the natural database expiry; no fault cut is chosen by a sleep.
             time.sleep(1)
         state, rows, _ = read_state(store, "s")
-        assert time.monotonic() - begin < 20
+        assert time.monotonic() - begin < recovered.ttl_ms / 1000 + 5
         assert state.active_turn_id is None and not recovered.llm.steps
         assert [r.record.attempt for r in rows if r.record.kind == "op_started"] == [1, 2]
         assert next(r.record for r in rows if r.record.kind == "turn_ended").payload["status"] == "completed"

@@ -129,12 +129,16 @@ class _LeaseHeartbeat:
         ttl_ms: int,
         heartbeat_seconds: float,
         *,
+        sqlite_retry_budget_seconds: float = 5.0,
+        sqlite_retry_delay_seconds: float = 0.05,
         now_ms: int | None = None,
     ):
         self.successful_ready = False
         self.lease = lease
         self.heartbeat_store = heartbeat_store
         self.ttl_ms, self.heartbeat_seconds = ttl_ms, heartbeat_seconds
+        self.sqlite_retry_budget_seconds = sqlite_retry_budget_seconds
+        self.sqlite_retry_delay_seconds = sqlite_retry_delay_seconds
         self.stop = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
@@ -225,8 +229,8 @@ class _LeaseHeartbeat:
                         _SQLiteLockRetryingStore(
                             store,
                             stop=self.stop,
-                            retry_budget_seconds=min(self.heartbeat_seconds / 2, 0.25),
-                            retry_delay_seconds=min(self.heartbeat_seconds / 8, 0.05),
+                            retry_budget_seconds=min(self.sqlite_retry_budget_seconds, self.ttl_ms / 2000),
+                            retry_delay_seconds=min(self.sqlite_retry_delay_seconds, self.heartbeat_seconds / 8),
                         ),
                     )
                 while not self.stop.is_set():
@@ -267,7 +271,15 @@ class _LeaseHeartbeat:
 
 class _Scope(_LeaseHeartbeat):
     def __init__(self, lease: Lease, runtime: Runtime, *, now_ms: int | None = None):
-        super().__init__(lease, runtime.heartbeat_store, runtime.ttl_ms, runtime.heartbeat_seconds, now_ms=now_ms)
+        super().__init__(
+            lease,
+            runtime.heartbeat_store,
+            runtime.ttl_ms,
+            runtime.heartbeat_seconds,
+            sqlite_retry_budget_seconds=runtime.sqlite_heartbeat_retry_budget_seconds,
+            sqlite_retry_delay_seconds=runtime.sqlite_heartbeat_retry_delay_seconds,
+            now_ms=now_ms,
+        )
         self.runtime = runtime
         self.token = CancellationToken()
         self.turn_id: str | None = None

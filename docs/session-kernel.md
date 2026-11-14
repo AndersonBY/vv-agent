@@ -244,8 +244,11 @@ just wrote.
 `Runtime` (`session/runtime.py`) supplies the agent, RunConfig, resolved model,
 LLM client, tool and provider bindings, and a `heartbeat_store` factory: a
 separate connection for files and PostgreSQL, the same locked instance for
-memory sessions. Defaults are a 15-second lease (`ttl_ms=15000`) and 250 ms
+memory sessions. Defaults are a 60-second lease (`ttl_ms=60000`) and 250 ms
 heartbeats; the heartbeat must be at most one second and under half the TTL.
+SQLite heartbeat retries use a 5-second budget with 50 ms waits by default.
+Hosts can tune `sqlite_heartbeat_retry_budget_seconds` and
+`sqlite_heartbeat_retry_delay_seconds` on `Runtime`.
 
 For a callable runtime, `drive` uses the explicit
 `FACTORY_LEASE_TTL_MS = 15000` and `FACTORY_HEARTBEAT_SECONDS = 0.25` preparation
@@ -758,7 +761,11 @@ without closing it, for example `lambda: nullcontext(store)`. File stores use
 independent connections to one path. SQLite is single-host only.
 
 SQLite uses STRICT tables, foreign keys, WAL for files, `synchronous=FULL`, a
-5000 ms busy timeout and `user_version=3`; any other version is rejected.
+5000 ms normal connection busy timeout and `user_version=3`; any other version
+is rejected. `SQLiteStore.heartbeat_store()` opens an independent connection
+with a 250 ms busy timeout by default (`heartbeat_busy_timeout_ms`). The short
+heartbeat timeout lets the kernel retry around ordinary session write
+transactions instead of blocking one renewal for the full normal timeout.
 Transactions use `BEGIN IMMEDIATE`, lease time is read after taking the write
 lock, and nested mutations use savepoints. Host writes and acknowledgements
 share `store.atomic()`.

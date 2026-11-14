@@ -152,7 +152,7 @@ def test_lost_lease_backoff_preserves_original_outcome_and_new_owner(store, data
     rows = []
 
     def fail(*_args):
-        clock(15000)
+        clock(60000)
         if takeover:
             current = store.acquire("s", owner="new", ttl_ms=30000)
             assert current is not None

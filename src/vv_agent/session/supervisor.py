@@ -4,7 +4,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from uuid import uuid4
 
-from .kernel import Runtime, drive
+from .kernel import FACTORY_LEASE_TTL_MS, Runtime, drive
 from .store import LeaseLost, SessionStore
 
 
@@ -25,13 +25,20 @@ def tick(
     failures = []
     while page := store.list_runnable(limit=page_size, after=cursor):
         for work in page:
+            drive_runtime = None
             try:
                 if work.kind == "drive":
                     if dispatch is not None:
                         dispatch(work.session_id)
                     else:
                         assert runtime is not None
-                        drive(store, work.session_id, runtime=runtime, failure_backoff_ms=failure_backoff_ms)
+
+                        def resolve(sid):
+                            nonlocal drive_runtime
+                            drive_runtime = runtime(sid)
+                            return drive_runtime
+
+                        drive(store, work.session_id, runtime=resolve, failure_backoff_ms=failure_backoff_ms)
                 else:
                     project(work.session_id, work.consumer)
             except Exception as exc:
@@ -41,7 +48,11 @@ def tick(
                     if work.kind == "project":
                         store.defer_projection(work.session_id, work.consumer, retry_after_ms=failure_backoff_ms)
                     else:
-                        lease = store.acquire(work.session_id, owner=uuid4().hex, ttl_ms=15000)
+                        lease = store.acquire(
+                            work.session_id,
+                            owner=uuid4().hex,
+                            ttl_ms=drive_runtime.ttl_ms if drive_runtime is not None else FACTORY_LEASE_TTL_MS,
+                        )
                         if lease is not None:
                             try:
                                 with suppress(LeaseLost):
