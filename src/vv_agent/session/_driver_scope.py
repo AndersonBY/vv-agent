@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -14,8 +15,44 @@ from vv_agent.runtime.cancellation import CancellationToken
 
 from .providers import Outcome
 from .runtime import Runtime
+from .sqlite import SQLiteStore
 from .store import Lease, SessionStore
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
+
+_SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+
+class _SQLiteLockRetryingStore:
+    """Retry only SQLite file-heartbeat write-lock contention."""
+
+    def __init__(
+        self,
+        store: SessionStore,
+        *,
+        clock: Clock,
+        stop: threading.Event,
+        retry_budget_seconds: float,
+        retry_delay_seconds: float,
+    ) -> None:
+        self.store = store
+        self.clock = clock
+        self.stop = stop
+        self.retry_budget_seconds = retry_budget_seconds
+        self.retry_delay_seconds = retry_delay_seconds
+
+    def renew(self, lease: Lease, *, ttl_ms: int):
+        deadline = self.clock.monotonic() + self.retry_budget_seconds
+        while True:
+            try:
+                return self.store.renew(lease, ttl_ms=ttl_ms)
+            except sqlite3.OperationalError as exc:
+                if not any(message in str(exc) for message in _SQLITE_LOCK_MESSAGES):
+                    raise
+                remaining = deadline - self.clock.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("SQLite heartbeat renewal lock retry budget exhausted") from exc
+                if self.stop.wait(min(self.retry_delay_seconds, remaining)):
+                    raise HeartbeatStopped("heartbeat stopped") from exc
 
 
 class _LeaseHeartbeat(LeaseOwnership):
@@ -53,14 +90,26 @@ class _LeaseHeartbeat(LeaseOwnership):
         try:
             with self.heartbeat_store() as store:
                 transient_errors: tuple[type[Exception], ...] = (TimeoutError,)
+                heartbeat_store = store
                 if isinstance(store, PostgresStore):
                     from psycopg import OperationalError
 
                     transient_errors = (TimeoutError, OperationalError)
                     # Host factories may bypass PostgresStore.heartbeat_store().
                     store._rows("SELECT set_config('lock_timeout','250ms',false),set_config('statement_timeout','1000ms',false)")
+                elif isinstance(store, SQLiteStore) and store.path != ":memory:":
+                    heartbeat_store = cast(
+                        SessionStore,
+                        _SQLiteLockRetryingStore(
+                            store,
+                            clock=self.clock,
+                            stop=self.stop,
+                            retry_budget_seconds=min(self.heartbeat_seconds / 2, 0.25),
+                            retry_delay_seconds=min(self.heartbeat_seconds / 8, 0.05),
+                        ),
+                    )
                 while not self.stop.is_set():
-                    self.heartbeat_step(store, transient_errors)
+                    self.heartbeat_step(heartbeat_store, transient_errors)
                     if self.stop.wait(self.heartbeat_seconds):
                         break
         except Exception as exc:
