@@ -10,7 +10,7 @@ from session.test_core_driver_outcomes import receipt_fixture
 from support.sdk_runtime import SDKWorld
 
 from vv_agent.budget import RunBudgetLimits
-from vv_agent.session import kernel
+from vv_agent.kernel._budget import BudgetObservation
 
 
 @pytest.mark.parametrize("flags", [[], ["-S"]], ids=["normal", "no-site"])
@@ -20,14 +20,35 @@ def test_core_receipt_unknown_and_parking_use_real_storage_without_sdk_imports(t
     with SDKWorld(database, seed=17) as world:
         worker, plan, outcome = receipt_fixture(world, limits=RunBudgetLimits(max_total_tokens=100) if budgeted else None)
         clock_observations = []
-        original_clock = kernel._DEFAULT_BUDGET_CLOCK_NS
+        original_clock = worker.runtime.clock.monotonic_ns
+        recording_budget_clock = False
 
         def observe_clock():
+            nonlocal recording_budget_clock
             value = original_clock()
-            clock_observations.append(value)
+            if recording_budget_clock:
+                clock_observations.append(value)
+                recording_budget_clock = False
             return value
 
-        monkeypatch.setattr(kernel, "_DEFAULT_BUDGET_CLOCK_NS", observe_clock)
+        monkeypatch.setattr(worker.runtime.clock, "monotonic_ns", observe_clock)
+        run_outcome_steps = worker._run_outcome_steps
+
+        def observe_budget_reads(steps):
+            nonlocal recording_budget_clock
+            response = None
+            while True:
+                try:
+                    request = steps.send(response)
+                except StopIteration as done:
+                    return done.value
+                recording_budget_clock = request is BudgetObservation.CLOCK_NS
+                response = yield request
+
+        def run_marked_outcome_steps(steps, **kwargs):
+            return run_outcome_steps(observe_budget_reads(steps), **kwargs)
+
+        monkeypatch.setattr(worker, "_run_outcome_steps", run_marked_outcome_steps)
         expected = worker.completed(plan, outcome)
         source = {
             "operation_id": plan.operation_id,
