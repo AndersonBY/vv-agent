@@ -25,6 +25,19 @@ AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") e
 DEFAULT_WORKERS = min(5, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
 
 
+def canonical_scenario_inventory():
+    from .scenarios import SCENARIOS
+
+    inventory = sorted(SCENARIOS)
+    if not all(isinstance(name, str) and name for name in inventory) or len(inventory) != len(set(inventory)):
+        raise ValueError("SCENARIOS must contain unique nonempty string names")
+    return inventory
+
+
+def scenario_inventory_sha256(inventory):
+    return hashlib.sha256(json.dumps(inventory, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
 @contextmanager
 def database(backend):
     if backend == "sqlite":
@@ -108,6 +121,7 @@ def contract_identity(lock):
 def versions():
     lock = json.loads((ROOT / "contract.lock.json").read_text())
     checksum = hashlib.sha256()
+    inventory = canonical_scenario_inventory()
     files = [
         *ROOT.joinpath("src").rglob("*.py"),
         *ROOT.joinpath("tests/sim").glob("*.py"),
@@ -119,6 +133,8 @@ def versions():
     status = _git(ROOT, "status", "--porcelain")
     return contract_identity(lock) | {
         "code_digest": checksum.hexdigest(),
+        "scenario_inventory": inventory,
+        "scenario_inventory_sha256": scenario_inventory_sha256(inventory),
         "code_revision": _git(ROOT, "rev-parse", "HEAD"),
         "dirty": bool(status) if status is not None else None,
         "in_memory_mutations": mutation_identity(),
@@ -153,6 +169,8 @@ def replay_provenance(recorded, current):
     """Source/contract/mutant differences reject replay; Git availability is metadata."""
     required = (
         "code_digest",
+        "scenario_inventory",
+        "scenario_inventory_sha256",
         "contract_selection",
         "contract_version",
         "contract_manifest_sha256",

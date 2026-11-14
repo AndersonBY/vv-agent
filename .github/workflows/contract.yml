@@ -86,13 +86,6 @@ jobs:
             tests/test_kernel_input_dependencies.py \
             tests/test_kernel_schema.py::test_kernel_schema_import_is_isolated_without_site_packages
 
-      - name: Test Colab campaign lifecycle
-        run: |
-          uv run pytest -q --strict-markers \
-            tests/test_colab_simulation.py \
-            tests/test_colab_campaign.py \
-            tests/test_colab_nightly.py
-
       - name: Verify formatting
         run: uv run ruff format --check .
 

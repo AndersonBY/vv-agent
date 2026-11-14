@@ -104,9 +104,8 @@ transaction tests on regular paths and retain PostgreSQL acceptance through a
 disposable database over TCP with password authentication. Reports record the
 actual temporary directory, filesystem type (or null when unavailable), and
 requested `TMPDIR` in `environment.sqlite_temporary_storage`. Full suites and
-the million-seed SQLite / 10,000-seed PostgreSQL campaigns run remotely.
-The [Colab entry point](colab-simulation.md) runs both campaigns from explicit
-source revisions and distinguishes small setup samples from full-size acceptance.
+large acceptance campaigns use a separate internal harness with explicit source
+revisions; that harness is kept outside the public repository.
 
 ### Concurrency-fix seed reference
 

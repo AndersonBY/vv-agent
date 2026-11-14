@@ -219,8 +219,8 @@ cases; those 17-scenario results do not establish expanded-code acceptance.
 The large-campaign requirements are 1,000,000 SQLite seeds and at least 10,000
 PostgreSQL seeds. Acceptance status belongs in the fixed-snapshot evidence and
 release notes.
-These results do not establish throughput on the two-CPU Colab environment or
-large-campaign reliability. I9/W2c and I11/W4 remain later-phase requirements.
+These results do not establish large-campaign reliability. I9/W2c and I11/W4
+remain later-phase requirements.
 
 
 The expanded participant slice passed all 20 SQLite directed recovery cases
@@ -238,18 +238,8 @@ sample. No steady-state or 1,000-seed throughput claim follows from this sample.
 
 
 The accepted 17-scenario configuration is original `ec53fda` bounded batching
-with `TMPDIR=/dev/shm`, WAL/FULL and all checks retained. On Colab with Python
-3.12.3, eight CPUs, about 50 GiB RAM and eight workers, the same seeds 0–999 /
-17 scenarios / 14,754 decisions passed in **26.0672s internally / 27.455982462s
-for the full command**. Its report file SHA-256 was
-`80ed0a0724db851301b32ee1a3da38cf940a5b0c89ec7dca56fdb60fb867d895`;
-source digest `38aa5d9952ee69d9fe46978be68b3a55973d6db0263eddf1a9eab0f43aae8328`.
-Evidence: `/content/trusted-p1-results/batch-tmpfs-smoke-status.json` and
-`/content/trusted-p1-results/batch-tmpfs-smoke.log`.
-
-Earlier experiments on that VM measured 68.6089s internally for original
-batching on `/tmp`; rolling dispatch on `/tmp` took 72.6855s internally /
-73.9615s for the full command. Rolling dispatch with `/dev/shm` took 19.9844s
+with `TMPDIR=/dev/shm`, WAL/FULL and all checks retained. Large acceptance runs
+use a separate internal harness and are not part of this public test guide.
 internally / 21.23025s for the full command. The rolling variant remains
 experimental evidence only; the simpler original batcher meets the gate and
 is the selected implementation.

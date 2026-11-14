@@ -99,6 +99,18 @@ def test_successful_world_summary_does_not_hash_source(tmp_path, monkeypatch):
         assert "code_digest" not in run_scenario(world, "tools")
 
 
+def test_report_identity_carries_canonical_scenario_inventory():
+    from . import report
+
+    identity = report.versions()
+    inventory = sorted(SCENARIOS)
+    assert identity["scenario_inventory"] == inventory
+    assert (
+        identity["scenario_inventory_sha256"]
+        == hashlib.sha256(json.dumps(inventory, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    )
+
+
 def test_context_compaction_calls_real_normalizer_and_token_counter(sim_database, monkeypatch):
     from . import assembly
 
@@ -484,7 +496,19 @@ def test_same_content_local_archive_replays_without_git_metadata(local_contract,
     assert "error" not in replayed, replayed
     assert replayed["replay_provenance"]["matched"]
     assert replayed["replay_provenance"]["differences"]["contract_revision"] == {"recorded": "a" * 40, "current": None}
-    for field in ("code_digest", "contract_selection", "contract_version", "contract_manifest_sha256", "in_memory_mutations"):
+    for field in (
+        "code_digest",
+        "scenario_inventory",
+        "scenario_inventory_sha256",
+        "contract_selection",
+        "contract_version",
+        "contract_manifest_sha256",
+        "in_memory_mutations",
+    ):
         altered = recorded | {field: "changed"}
         assert not report.replay_provenance(altered, current)["matched"], field
+    for field in ("scenario_inventory", "scenario_inventory_sha256"):
+        missing = dict(recorded)
+        missing.pop(field)
+        assert not report.replay_provenance(missing, current)["matched"], field
     assert not report.replay_provenance(recorded, current | {"contract_revision": "b" * 40})["matched"]
