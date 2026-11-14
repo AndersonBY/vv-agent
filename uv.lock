@@ -1485,7 +1485,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.35.0"
+version = "0.35.1"
 source = { editable = "." }
 dependencies = [
     { name = "deepseek-tokenizer" },
