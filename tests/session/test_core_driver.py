@@ -210,9 +210,10 @@ def test_sdk_uses_core_ledger_methods_and_refreshes_live_bindings(tmp_path):
         assert lease is not None
         scope = kernel._Scope(lease, rt, now_ms=store._now())
         driver = kernel._Driver(store, "s", rt, scope)
-        clock = Clock([])
-        rt.clock = clock
-        assert driver.clock is clock
+        original_clock = driver.clock
+        rt.clock = Clock([])
+        assert driver.clock is original_clock
+        assert driver.clock is not rt.clock
         calls = []
 
         def factory():
