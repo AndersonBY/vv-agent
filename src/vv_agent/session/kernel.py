@@ -7,7 +7,7 @@ from collections.abc import Callable, Generator
 from contextlib import suppress
 from typing import Any
 
-from vv_agent.budget import _DEFAULT_BUDGET_CLOCK_NS, BudgetEvaluator, BudgetExhaustion
+from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
@@ -72,16 +72,17 @@ class _Driver(CoreDriver):
             emit_phase=emit_phase,
         )
 
-    @property
-    def clock(self) -> Clock:
-        return self.runtime.clock
-
     def live_budget(self) -> BudgetEvaluator | None:
         inputs = self._run_outcome_steps(_driver_outcomes.live_budget_inputs_steps(self))
         if inputs is None:
             return None
         limits, initial = inputs
-        return BudgetEvaluator(limits, initial_usage=initial, host_cost_meter=self.runtime.config.host_cost_meter)
+        return BudgetEvaluator(
+            limits,
+            initial_usage=initial,
+            host_cost_meter=self.runtime.config.host_cost_meter,
+            clock_ns=self.clock.monotonic_ns,
+        )
 
     def budget_record(
         self,
@@ -158,11 +159,11 @@ class _Driver(CoreDriver):
                 elif request is _driver_outcomes.OutcomeRead.POLL_INTERVAL:
                     response = self.runtime.poll_ms
                 elif request is _driver_outcomes.OutcomeRead.ACTIVE_INTERVAL_NS:
-                    response = self.runtime.clock.monotonic_ns()
+                    response = self.clock.monotonic_ns()
                 elif request is _driver_outcomes.OutcomeRead.BIND_BUDGET_METER:
                     budget_meter = self.runtime.config.host_cost_meter
                 elif request is BudgetObservation.CLOCK_NS:
-                    response = _DEFAULT_BUDGET_CLOCK_NS()
+                    response = self.clock.monotonic_ns()
                 elif request is BudgetObservation.HOST_COST:
                     if budget_meter is None:
                         response = HostCostObservation(unavailable_reason=BudgetUnavailableReason.METER_MISSING)

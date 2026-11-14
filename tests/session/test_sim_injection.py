@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from vv_agent import Agent, RunConfig
+from vv_agent.budget import RunBudgetLimits
 from vv_agent.llm.errors import ModelRequestRejected
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.session import kernel
@@ -166,6 +167,51 @@ def test_real_drive_uses_scripted_seams_without_starting_threads(tmp_path, monke
         ]
         assert max(active_ms) == 7
         assert all(op.state == "completed" for op in state.operations.values())
+
+
+def test_budget_clock_stays_bound_after_runtime_clock_replacement(tmp_path):
+    clock = ManualClock(ns=1_000_000_000)
+    replacement = ManualClock(ms=clock.ms, ns=clock.ns + 100_000_000_000)
+
+    def answer(_request):
+        clock.advance(11)
+        return LLMResponse("done")
+
+    with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
+        store.install_schema()
+        start(store)
+        rt = runtime(store, [answer], clock=clock, lease_keeper=ManualKeeper(), invoker=InlineInvoker())
+        rt.config.budget_limits = RunBudgetLimits(max_wall_time_ms=10)
+        lease = store.acquire("s", owner="budget-clock", ttl_ms=1000)
+        assert lease is not None
+        scope = kernel._Scope(lease, rt, now_ms=store._now())
+        driver = kernel._Driver(store, "s", rt, scope)
+        driver.refresh()
+
+        rt.clock = replacement
+        for _ in range(20):
+            if not driver.step():
+                break
+
+        boundary = next(
+            record.record
+            for record in driver.records
+            if record.record.kind == "boundary_recorded" and record.record.payload["boundary_id"].endswith("/complete/1")
+        )
+        assert boundary.payload["data"]["usage"]["elapsed_ms"] == 11
+        assert boundary.payload["data"]["exhaustion"] == {
+            "dimension": "wall_time",
+            "tool_name": None,
+            "reason": "limit_exceeded",
+            "limit": 10,
+            "observed": 11,
+            "attempted_increment": None,
+            "overshoot": 1,
+            "unit": "milliseconds",
+            "currency": None,
+            "enforcement_boundary": "model_call_complete",
+            "unavailable_reason": None,
+        }
 
 
 def test_child_runtime_inherits_seams():

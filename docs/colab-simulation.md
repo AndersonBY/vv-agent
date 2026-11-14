@@ -64,6 +64,38 @@ uv run python scripts/colab_campaign.py start \
 job directory. Existing nonempty job directories are rejected, so a second
 `start` cannot silently launch another VM.
 
+## Independent seed shards
+
+For distributed P1 evidence, run one controller job per independent VM. The
+optional `--seed` is the first seed for that job and defaults to `0`. Each
+backend still runs its configured `--sqlite-seeds` or `--postgres-seeds`
+count, so a shard covers `[seed, seed + count)` and its campaign result must
+carry the same seed and count. Use the same source and contract revisions,
+unique job/session directories, and non-overlapping ranges across VMs.
+
+The controller validates a shard from its recorded seed through the configured
+total. Combining those independently validated reports is a manual,
+human-reviewed step; the controller does not schedule shards, merge their
+evidence, or continue one shard from another. Each remote execution still has
+a fresh, empty report directory: `colab_simulation.py` refuses resume or replay
+when any report already exists. The unknown-job boundary is unchanged, so the
+controller never restarts a job automatically.
+
+`scripts/colab_merge.py` performs the separate, read-only aggregation step. It
+accepts two or more independently validated shard job directories and writes a
+single summary outside those job directories:
+
+```bash
+uv run python scripts/colab_merge.py \
+  --job-dir /tmp/vv-agent-colab/shard-a \
+  --job-dir /tmp/vv-agent-colab/shard-b \
+  --output /tmp/vv-agent-colab/p1-merged.json
+```
+
+The merger does not start, stop, retry, replay, or modify any shard. It emits
+`full_acceptance: true` only when the combined SQLite and PostgreSQL ranges
+exactly equal the full P1 totals and every shard and aggregate gate passes.
+
 ## Observe And Recover
 
 `status` performs a fresh session check and observer cell. A running process is
@@ -115,6 +147,9 @@ Both samples and full runs require PostgreSQL temporary role/database cleanup.
 Full acceptance additionally requires 21 P1 scenarios, aggregate I1-I8/I10,
 ordinary non-tmpfs SQLite storage evidence, exact full totals, and
 `full_acceptance: true`. A partial run claiming full acceptance is rejected.
+A partial shard with `full_acceptance: false` can be accepted when its complete
+configured range is valid, but it does not satisfy the full P1 nightly gate by
+itself.
 Only after all evidence is retained and validated does `collect` stop an owned
 session. A known terminal failure may then be released, but never reported as a
 pass.

@@ -13,7 +13,7 @@ import vv_agent.budget as budget_module
 from vv_agent.budget import BudgetEvaluator, HostCost, RunBudgetLimits
 from vv_agent.kernel import _driver_outcomes as core
 from vv_agent.kernel._driver_planning import ProviderAvailable
-from vv_agent.session import kernel, tool_results
+from vv_agent.session import tool_results
 from vv_agent.session.records import InboxItem, digest
 
 
@@ -55,10 +55,10 @@ def assert_core_suspended():
         frame = frame.f_back
 
 
-def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_path, monkeypatch):
+def test_budget_uses_bound_clock_and_meter_keeps_original_sampling_order(tmp_path, monkeypatch):
     original = inspect.signature(BudgetEvaluator).parameters["clock_ns"].default
-    assert original is budget_module._DEFAULT_BUDGET_CLOCK_NS is kernel._DEFAULT_BUDGET_CLOCK_NS
-    events, current = [], {"active": False, "switched": False, "ns": 0}
+    assert original is budget_module._DEFAULT_BUDGET_CLOCK_NS
+    events, current = [], {"active": False, "ns": 0}
 
     class Meter:
         def __init__(self, name, amount):
@@ -68,6 +68,8 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
             if current["active"]:
                 assert_core_suspended()
                 events.append("meter:" + self.name)
+                if self.name == "bound":
+                    worker.runtime.config = replace(worker.runtime.config, host_cost_meter=replacement)
             return HostCost("credits", self.amount)
 
     first, replacement = Meter("bound", 3), Meter("replacement", 1001)
@@ -76,6 +78,7 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
             world, limits=RunBudgetLimits(max_total_tokens=100, max_host_cost=HostCost("credits", 100)), meter=first
         )
         runtime_clock = worker.runtime.clock
+        current["ns"] = runtime_clock.monotonic_ns()
 
         class RuntimeClock:
             def now_ms(self):
@@ -88,9 +91,7 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
                 return runtime_clock.sleep(seconds)
 
             def monotonic_ns(self):
-                assert_core_suspended()
-                events.append("runtime-clock")
-                return runtime_clock.monotonic_ns()
+                raise AssertionError("budget sampling used mutable runtime.clock")
 
         worker.runtime.clock = RuntimeClock()
 
@@ -98,19 +99,12 @@ def test_budget_default_clock_and_bound_meter_keep_original_sampling_order(tmp_p
             assert_core_suspended()
             events.append("budget-clock")
             current["ns"] += 1_000_000
-            if not current["switched"]:
-                worker.runtime.config = replace(worker.runtime.config, host_cost_meter=replacement)
-                current["switched"] = True
             return current["ns"]
 
-        # Replace both actual observation bindings; the product default identity above is unchanged.
-        defaults = BudgetEvaluator.__init__.__kwdefaults__
-        assert defaults is not None
-        monkeypatch.setitem(defaults, "clock_ns", budget_clock)
-        monkeypatch.setattr(kernel, "_DEFAULT_BUDGET_CLOCK_NS", budget_clock)
+        monkeypatch.setattr(runtime_clock, "monotonic_ns", budget_clock)
         current["active"] = True
         result = worker.completed(plan, outcome)
-        assert events == ["runtime-clock", "budget-clock", "budget-clock", "meter:bound", "budget-clock", "meter:bound"]
+        assert events == ["budget-clock", "budget-clock", "budget-clock", "meter:bound", "budget-clock", "meter:bound"]
         boundaries = [r.payload["data"] for r in result if r.kind == "boundary_recorded"]
         assert len(boundaries) == 2 and all(r["exhaustion"] is None for r in boundaries)
         assert all(r["usage"]["host_cost"]["amount_microunits"] == 3 for r in boundaries)

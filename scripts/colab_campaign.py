@@ -338,9 +338,12 @@ def start(
     postgres_seeds: int,
     sqlite_chunk_size: int = SQLITE_CHUNK,
     postgres_chunk_size: int = POSTGRES_CHUNK,
+    seed: int = 0,
     *,
     cli=run_cli,
 ) -> dict:
+    if type(seed) is not int or seed < 0:
+        raise ValueError("seed must be a non-negative integer")
     job_dir = job_dir.resolve()
     if JOB_RE.fullmatch(job_dir.name) is None:
         raise ValueError("job directory basename must be a safe job id")
@@ -370,7 +373,7 @@ def start(
         "--postgres-chunk-size",
         str(postgres_chunk_size),
         "--seed",
-        "0",
+        str(seed),
         "--workers",
         "8",
     ]
@@ -384,6 +387,7 @@ def start(
         "postgres_seeds": postgres_seeds,
         "sqlite_chunk_size": sqlite_chunk_size,
         "postgres_chunk_size": postgres_chunk_size,
+        "seed": seed,
         "remote_job_dir": remote_job,
         "remote_reports_dir": remote_reports,
         "command": command,
@@ -493,7 +497,7 @@ def observe(job_dir: Path, *, cli=run_cli) -> dict:
     result_meta = observed.get("result")
     if not isinstance(result_meta, dict):
         observed.update(_unknown("child exited zero without reports/result.json"))
-    elif result_meta.get("status") == "complete":
+    elif result_meta.get("status") == "complete" and result_meta.get("has_error") is not True:
         observed.update(state="terminal_complete", terminal=True, fresh=True, reason="complete result")
     else:
         observed.update(state="terminal_failed", terminal=True, accepted=False, reason="result reports failure")
@@ -564,10 +568,48 @@ def _require(value: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def _validate_collection_manifest(evidence: Path) -> None:
+    manifest = _json(evidence / "collection-manifest.json")
+    _require(manifest.get("terminal") is True, "terminal collection manifest is missing")
+    transfers = manifest.get("transfers")
+    _require(isinstance(transfers, list), "collection manifest transfers are missing")
+    recorded = {}
+    for item in transfers:
+        _require(isinstance(item, dict), "collection manifest transfer is malformed")
+        relative, digest = item.get("relative_path"), item.get("sha256")
+        _require(isinstance(relative, str) and isinstance(digest, str), "collection manifest transfer is malformed")
+        _require(relative not in recorded, f"collection manifest duplicates {relative}")
+        _require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, f"collection manifest hash is malformed: {relative}")
+        recorded[relative] = digest
+    actual = {
+        path.relative_to(evidence).as_posix(): _sha(path)
+        for path in evidence.rglob("*")
+        if path.is_file() and path.name != "collection-manifest.json"
+    }
+    _require(recorded == actual, "collection manifest does not cover the exact terminal evidence")
+
+
 def validate_evidence(evidence: Path, state: dict, observation: dict) -> dict:
     _require(observation.get("exit_code") == 0, "child exit code is not zero")
+    seed = state.get("seed")
+    _require(type(seed) is int and seed >= 0, "state seed must be a non-negative integer")
     result = _json(evidence / "reports/result.json")
     _require(result.get("status") == "complete", "result is not complete")
+    _require("error" not in result, "result contains an error")
+    runtime = result.get("runtime")
+    _require(
+        isinstance(runtime, dict) and runtime.get("temporary_directory_removed") is True,
+        "temporary directory cleanup is unverified",
+    )
+    postgres_cleanup = runtime.get("postgres")
+    _require(
+        isinstance(postgres_cleanup, dict)
+        and postgres_cleanup.get("password_authentication_verified") is True
+        and postgres_cleanup.get("temporary_role_removed") is True
+        and postgres_cleanup.get("temporary_databases_removed") is True,
+        "PostgreSQL authentication or cleanup is unverified",
+    )
+    _validate_collection_manifest(evidence)
     identity = result.get("identity") or {}
     _require(identity.get("vv_agent_revision") == state["vv_agent_revision"], "source revision mismatch")
     _require(identity.get("contract_revision") == state["contract_revision"], "contract revision mismatch")
@@ -622,14 +664,28 @@ def validate_evidence(evidence: Path, state: dict, observation: dict) -> dict:
     for backend in ("sqlite", "postgres"):
         ordered = sorted(parts[backend], key=lambda item: item["start"])
         if not ordered:
-            raise ValueError(f"missing {backend} parts")
-        cursor, remaining = 0, configured[backend]
+            raise ValueError(f"missing {backend} parts for seed range starting at {seed}")
+        cursor, remaining = seed, configured[backend]
         for part in ordered:
-            _require(part["start"] == cursor, f"{backend} ranges are not contiguous")
-            _require(part["count"] == min(chunks[backend], remaining), f"{backend} chunk count mismatch")
+            if part["start"] < cursor:
+                raise ValueError(
+                    f"{backend} part {part['name']} overlaps the previous range at seed {part['start']}; expected {cursor}"
+                )
+            _require(
+                part["start"] == cursor,
+                f"missing {backend} seed range [{cursor}, {part['start']}) before {part['name']}",
+            )
+            expected_count = min(chunks[backend], remaining)
+            _require(
+                part["count"] == expected_count,
+                f"{backend} chunk count mismatch in {part['name']}: expected {expected_count}, got {part['count']}",
+            )
             cursor += part["count"]
             remaining -= part["count"]
-        _require(cursor == configured[backend], f"{backend} actual total mismatch")
+        _require(
+            remaining == 0,
+            f"{backend} actual total mismatch: expected {configured[backend]}, got {configured[backend] - remaining}",
+        )
         aggregate = {}
         covered = set()
         for part in ordered:
@@ -637,7 +693,14 @@ def validate_evidence(evidence: Path, state: dict, observation: dict) -> dict:
                 aggregate[name] = aggregate.get(name, 0) + count
             covered.update(part["data"].get("covered", []))
         campaign = campaigns[backend]
-        _require(campaign.get("seed") == 0 and campaign.get("seeds") == configured[backend], f"result {backend} total mismatch")
+        _require(
+            campaign.get("seed") == seed,
+            f"result {backend} seed mismatch: expected {seed}, got {campaign.get('seed')}",
+        )
+        _require(
+            campaign.get("seeds") == configured[backend],
+            f"result {backend} seeds mismatch: expected {configured[backend]}, got {campaign.get('seeds')}",
+        )
         _require(campaign.get("scenarios") == aggregate, f"result {backend} scenarios differ from part sum")
         _require(set(campaign.get("covered", [])) == covered, f"result {backend} coverage differs from part union")
         _require(sorted(campaign.get("reports", [])) == [part["name"] for part in ordered], f"result {backend} manifest mismatch")
@@ -645,12 +708,7 @@ def validate_evidence(evidence: Path, state: dict, observation: dict) -> dict:
             isinstance(campaign.get("pending"), dict) and frozenset(campaign["pending"]) == EXPECTED_PENDING,
             f"result {backend} pending mismatch",
         )
-        summary[backend] = {"seeds": cursor, "reports": len(ordered), "scenarios": aggregate}
-    postgres_cleanup = (result.get("runtime") or {}).get("postgres") or {}
-    _require(
-        postgres_cleanup.get("temporary_role_removed") is True and postgres_cleanup.get("temporary_databases_removed") is True,
-        "PostgreSQL cleanup is unverified",
-    )
+        summary[backend] = {"seed": seed, "seeds": configured[backend], "reports": len(ordered), "scenarios": aggregate}
     full = configured["sqlite"] >= FULL_SQLITE and configured["postgres"] >= FULL_POSTGRES
     claimed_full = result.get("full_acceptance")
     _require(isinstance(claimed_full, bool), "full_acceptance is missing")
@@ -698,6 +756,10 @@ def collect(job_dir: Path, observation: dict | None = None, *, cli=run_cli) -> d
         except (OSError, ValueError, json.JSONDecodeError) as error:
             acceptance = {"accepted": False, "full_acceptance": False, "reason": str(error)}
         _check(cli(["stop", "--session", state["session"]]), "stop")
+        released_status = cli(["status", "--session", state["session"]])
+        released_output = released_status.stdout + released_status.stderr
+        if released_status.returncode == 0 or "not found" not in released_output.lower():
+            raise RuntimeError("session release was not confirmed")
         release = {
             "terminal": True,
             "state": observation["state"],
@@ -738,11 +800,10 @@ def wait(job_dir: Path, *, interval: float = 60.0, max_observations: int = 0, cl
             continue
         if observation.get("state") != "running":
             return observation
-        if observation.get("state") == "running":
-            try:
-                collect(job_dir, observation, cli=cli)
-            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
-                return {"state": "unknown", "terminal": False, "reason": f"partial collection failed: {error}"}
+        try:
+            collect(job_dir, observation, cli=cli)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
+            return {"state": "unknown", "terminal": False, "reason": f"partial collection failed: {error}"}
         if count >= max_observations > 0:
             return observation
         time.sleep(interval)
@@ -760,6 +821,7 @@ def _add_start(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--postgres-seeds", type=_positive, default=FULL_POSTGRES)
     parser.add_argument("--sqlite-chunk-size", type=_positive, default=SQLITE_CHUNK)
     parser.add_argument("--postgres-chunk-size", type=_positive, default=POSTGRES_CHUNK)
+    parser.add_argument("--seed", type=_nonnegative, default=0)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -800,6 +862,7 @@ def main(argv: list[str] | None = None, *, cli=run_cli) -> int:
                 args.postgres_seeds,
                 args.sqlite_chunk_size,
                 args.postgres_chunk_size,
+                seed=args.seed,
                 cli=cli,
             )
         if args.action in {"run", "wait"}:

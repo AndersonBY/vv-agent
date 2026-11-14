@@ -54,10 +54,10 @@ def part(backend: str, start: int, count: int, coverage=()) -> dict:
     return value
 
 
-def payloads(sqlite_seeds=2, postgres_seeds=1) -> dict[str, bytes]:
+def payloads(sqlite_seeds=2, postgres_seeds=1, seed=0) -> dict[str, bytes]:
     parts = {
-        f"reports/sqlite-{0:010d}-{sqlite_seeds:010d}.json": part("sqlite", 0, sqlite_seeds),
-        f"reports/postgres-{0:010d}-{postgres_seeds:010d}.json": part("postgres", 0, postgres_seeds),
+        f"reports/sqlite-{seed:010d}-{sqlite_seeds:010d}.json": part("sqlite", seed, sqlite_seeds),
+        f"reports/postgres-{seed:010d}-{postgres_seeds:010d}.json": part("postgres", seed, postgres_seeds),
     }
     result = {
         "status": "complete",
@@ -65,16 +65,18 @@ def payloads(sqlite_seeds=2, postgres_seeds=1) -> dict[str, bytes]:
         "identity": {"vv_agent_revision": CODE, "contract_revision": CONTRACT},
         "campaigns": {},
         "runtime": {
+            "temporary_directory_removed": True,
             "postgres": {
+                "password_authentication_verified": True,
                 "temporary_role_removed": True,
                 "temporary_databases_removed": True,
-            }
+            },
         },
     }
     for backend, seeds in (("sqlite", sqlite_seeds), ("postgres", postgres_seeds)):
         names = sorted(Path(name).name for name in parts if Path(name).name.startswith(backend + "-"))
         result["campaigns"][backend] = {
-            "seed": 0,
+            "seed": seed,
             "seeds": seeds,
             "scenarios": {"precommit": seeds},
             "covered": [],
@@ -112,7 +114,7 @@ def observation(files: dict[str, bytes], *, state="terminal_complete", wrong_has
     }
 
 
-def write_state(job_dir: Path, sqlite_seeds=2, postgres_seeds=1) -> dict:
+def write_state(job_dir: Path, sqlite_seeds=2, postgres_seeds=1, seed=0) -> dict:
     job_dir.mkdir()
     state = {
         "job_dir": str(job_dir.resolve()),
@@ -124,6 +126,7 @@ def write_state(job_dir: Path, sqlite_seeds=2, postgres_seeds=1) -> dict:
         "postgres_seeds": postgres_seeds,
         "sqlite_chunk_size": campaign.SQLITE_CHUNK,
         "postgres_chunk_size": campaign.POSTGRES_CHUNK,
+        "seed": seed,
         "remote_job_dir": "/content/vv-agent-campaigns/job-1",
         "remote_reports_dir": "/content/vv-agent-campaigns/job-1/reports",
         "command": ["python3", "/content/vv-agent-campaigns/job-1/colab_simulation.py"],
@@ -138,15 +141,17 @@ def write_evidence(evidence: Path, files: dict[str, bytes]) -> None:
         path = evidence / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
+    transfers = [{"relative_path": name, "sha256": sha(body), "status": "downloaded"} for name, body in sorted(files.items())]
+    (evidence / "collection-manifest.json").write_text(json.dumps({"terminal": True, "transfers": transfers}) + "\n")
 
 
 def terminal_cli(job_dir: Path, files: dict[str, bytes], observed: dict):
     calls = []
+    stopped = False
 
     def run(arguments):
+        nonlocal stopped
         calls.append(list(arguments))
-        if arguments[0] == "status":
-            return completed(arguments, stdout="[session-1] Status: IDLE\n")
         if arguments[0] == "exec":
             return completed(arguments, stdout="OBSERVE_JSON=" + json.dumps(observed) + "\n")
         if arguments[0] == "download":
@@ -155,7 +160,12 @@ def terminal_cli(job_dir: Path, files: dict[str, bytes], observed: dict):
             Path(arguments[-1]).write_bytes(files[relative])
             return completed(arguments)
         if arguments[0] == "stop":
+            stopped = True
             return completed(arguments)
+        if arguments[0] == "status" and stopped:
+            return completed(arguments, code=1, stderr="Session 'session-1' not found\n")
+        if arguments[0] == "status":
+            return completed(arguments, stdout="[session-1] Status: IDLE\n")
         raise AssertionError(arguments)
 
     return run, calls
@@ -169,15 +179,21 @@ def test_public_run_waits_from_running_to_terminal_and_stops_after_collect(tmp_p
     terminal = observation(files)
     observations = 0
     calls = []
+    stopped = False
 
     def run(arguments):
-        nonlocal observations
+        nonlocal observations, stopped
         calls.append(list(arguments))
-        if arguments[0] in {"new", "upload", "stop"}:
+        if arguments[0] in {"new", "upload"}:
+            return completed(arguments)
+        if arguments[0] == "stop":
+            stopped = True
             return completed(arguments)
         if arguments[0] == "exec" and Path(arguments[arguments.index("--file") + 1]).name == "launch_cell.py":
             marker = {"status": {"state": "running", "child_identity": CHILD}}
             return completed(arguments, stdout="LAUNCH_JSON=" + json.dumps(marker) + "\n")
+        if arguments[0] == "status" and stopped:
+            return completed(arguments, code=1, stderr="Session 'session-1' not found\n")
         if arguments[0] == "status":
             return completed(arguments, stdout="[session-1] Status: IDLE\n")
         if arguments[0] == "exec":
@@ -216,7 +232,7 @@ def test_public_run_waits_from_running_to_terminal_and_stops_after_collect(tmp_p
     assert code == 0
     assert observations == 2
     names = [call[0] for call in calls]
-    assert names[-1] == "stop"
+    assert names[-2:] == ["stop", "status"]
     assert (job_dir / "evidence/reports/result.json").is_file()
     assert campaign._json(job_dir / "released.json")["acceptance"]["accepted"] is True
 
@@ -235,17 +251,23 @@ def test_public_run_retries_one_observation_timeout_for_the_same_job(tmp_path: P
     observer_calls = 0
     successful_observations = 0
     timeout_injected = False
+    stopped = False
 
     def run(arguments):
-        nonlocal initial_launches, observation_status_calls, observer_calls, successful_observations, timeout_injected
+        nonlocal initial_launches, observation_status_calls, observer_calls, successful_observations, timeout_injected, stopped
         calls.append(list(arguments))
-        if arguments[0] in {"new", "upload", "stop"}:
+        if arguments[0] in {"new", "upload"}:
+            return completed(arguments)
+        if arguments[0] == "stop":
+            stopped = True
             return completed(arguments)
         if arguments[0] == "exec" and Path(arguments[arguments.index("--file") + 1]).name == "launch_cell.py":
             initial_launches += 1
             marker = {"status": {"state": "running", "child_identity": CHILD}}
             return completed(arguments, stdout="LAUNCH_JSON=" + json.dumps(marker) + "\n")
         if arguments[0] == "status":
+            if stopped:
+                return completed(arguments, code=1, stderr="Session 'session-1' not found\n")
             if initial_launches:
                 observation_status_calls += 1
             if timeout_action == "status" and initial_launches and not timeout_injected:
@@ -295,7 +317,7 @@ def test_public_run_retries_one_observation_timeout_for_the_same_job(tmp_path: P
     assert observation_status_calls == 3
     assert observer_calls == (3 if timeout_action == "exec" else 2)
     names = [call[0] for call in calls]
-    assert names[-1] == "stop" and names.count("stop") == 1
+    assert names[-2:] == ["stop", "status"] and names.count("stop") == 1
     assert '"retrying": true' in capsys.readouterr().out
     assert (job_dir / "evidence/reports/result.json").is_file()
 
@@ -418,7 +440,16 @@ def test_terminal_hash_mismatch_preserves_vm(tmp_path: Path):
     assert not (job_dir / "released.json").exists()
 
 
-def validate_files(tmp_path: Path, files: dict[str, bytes], sqlite_seeds=2, postgres_seeds=1):
+def validate_files(
+    tmp_path: Path,
+    files: dict[str, bytes],
+    sqlite_seeds=2,
+    postgres_seeds=1,
+    *,
+    seed=0,
+    sqlite_chunk_size=campaign.SQLITE_CHUNK,
+    postgres_chunk_size=campaign.POSTGRES_CHUNK,
+):
     evidence = tmp_path / "evidence"
     write_evidence(evidence, files)
     state = {
@@ -426,8 +457,9 @@ def validate_files(tmp_path: Path, files: dict[str, bytes], sqlite_seeds=2, post
         "contract_revision": CONTRACT,
         "sqlite_seeds": sqlite_seeds,
         "postgres_seeds": postgres_seeds,
-        "sqlite_chunk_size": campaign.SQLITE_CHUNK,
-        "postgres_chunk_size": campaign.POSTGRES_CHUNK,
+        "sqlite_chunk_size": sqlite_chunk_size,
+        "postgres_chunk_size": postgres_chunk_size,
+        "seed": seed,
     }
     return campaign.validate_evidence(evidence, state, {"exit_code": 0})
 
@@ -453,6 +485,70 @@ def test_sample_requires_postgres_cleanup_before_acceptance(tmp_path: Path):
     files["reports/result.json"] = json.dumps(result).encode()
     with pytest.raises(ValueError, match="cleanup"):
         validate_files(tmp_path, files)
+
+
+@pytest.mark.parametrize(
+    ("runtime_update", "message"),
+    [
+        ({"temporary_directory_removed": False}, "temporary directory cleanup"),
+        ({"postgres": {"password_authentication_verified": False}}, "PostgreSQL authentication"),
+    ],
+)
+def test_acceptance_requires_runtime_cleanup_and_password_evidence(tmp_path: Path, runtime_update, message):
+    files = payloads()
+    result = json.loads(files["reports/result.json"])
+    result["runtime"].update(runtime_update)
+    files["reports/result.json"] = json.dumps(result).encode()
+    with pytest.raises(ValueError, match=message):
+        validate_files(tmp_path, files)
+
+
+def test_acceptance_rejects_result_error_and_manifest_drift(tmp_path: Path):
+    files = payloads()
+    result = json.loads(files["reports/result.json"])
+    result["error"] = {"message": "producer failed"}
+    files["reports/result.json"] = json.dumps(result).encode()
+    with pytest.raises(ValueError, match="result contains an error"):
+        validate_files(tmp_path / "result-error", files)
+
+    evidence = tmp_path / "manifest"
+    write_evidence(evidence, payloads())
+    manifest = json.loads((evidence / "collection-manifest.json").read_text())
+    manifest["transfers"][0]["sha256"] = "f" * 64
+    (evidence / "collection-manifest.json").write_text(json.dumps(manifest) + "\n")
+    state = {
+        "vv_agent_revision": CODE,
+        "contract_revision": CONTRACT,
+        "sqlite_seeds": 2,
+        "postgres_seeds": 1,
+        "sqlite_chunk_size": campaign.SQLITE_CHUNK,
+        "postgres_chunk_size": campaign.POSTGRES_CHUNK,
+        "seed": 0,
+    }
+    with pytest.raises(ValueError, match="collection manifest"):
+        campaign.validate_evidence(evidence, state, {"exit_code": 0})
+
+
+def test_stop_without_release_confirmation_does_not_write_release(tmp_path: Path):
+    job_dir = tmp_path / "job-1"
+    write_state(job_dir)
+    files = payloads()
+    observed = observation(files)
+    run, calls = terminal_cli(job_dir, files, observed)
+    stopped = False
+
+    def no_release(arguments):
+        nonlocal stopped
+        if arguments[0] == "stop":
+            stopped = True
+        if arguments[0] == "status" and stopped:
+            calls.append(list(arguments))
+            return completed(arguments, stdout="[session-1] Status: IDLE\n")
+        return run(arguments)
+
+    with pytest.raises(RuntimeError, match="release was not confirmed"):
+        campaign.collect(job_dir, cli=no_release)
+    assert not (job_dir / "released.json").exists()
 
 
 def test_result_scenarios_must_equal_actual_part_sum(tmp_path: Path):
@@ -482,7 +578,14 @@ def full_payloads(sqlite_filesystem="ext4") -> dict[str, bytes]:
         "full_acceptance": True,
         "identity": {"vv_agent_revision": CODE, "contract_revision": CONTRACT},
         "campaigns": {},
-        "runtime": {"postgres": {"temporary_role_removed": True, "temporary_databases_removed": True}},
+        "runtime": {
+            "temporary_directory_removed": True,
+            "postgres": {
+                "password_authentication_verified": True,
+                "temporary_role_removed": True,
+                "temporary_databases_removed": True,
+            },
+        },
     }
     coverage = sorted(campaign.REQUIRED_COVERED)
     scenario_names = [f"scenario-{index:02d}" for index in range(21)]
@@ -580,7 +683,7 @@ def test_full_requires_21_aggregate_scenarios(tmp_path: Path):
         validate_files(tmp_path, files, 1_000_000, 10_000)
 
 
-def test_five_seed_chunk_two_ranges_validate(tmp_path: Path):
+def shard_payloads(*, seed: int, total: int = 5, chunk_size: int = 2) -> dict[str, bytes]:
     files = {}
     result = {
         "status": "complete",
@@ -588,45 +691,112 @@ def test_five_seed_chunk_two_ranges_validate(tmp_path: Path):
         "identity": {"vv_agent_revision": CODE, "contract_revision": CONTRACT},
         "campaigns": {},
         "runtime": {
+            "temporary_directory_removed": True,
             "postgres": {
+                "password_authentication_verified": True,
                 "temporary_role_removed": True,
                 "temporary_databases_removed": True,
-            }
+            },
         },
     }
     for backend in ("sqlite", "postgres"):
-        names, start = [], 0
-        while start < 5:
-            count = min(2, 5 - start)
+        names, start = [], seed
+        while start < seed + total:
+            count = min(chunk_size, seed + total - start)
             name = f"reports/{backend}-{start:010d}-{count:010d}.json"
             files[name] = json.dumps(part(backend, start, count)).encode()
             names.append(Path(name).name)
             start += count
         result["campaigns"][backend] = {
-            "seed": 0,
-            "seeds": 5,
-            "scenarios": {"precommit": 5},
+            "seed": seed,
+            "seeds": total,
+            "scenarios": {"precommit": total},
             "covered": [],
             "pending": {"I9": "future", "I11": "future"},
             "reports": names,
         }
     files["reports/result.json"] = json.dumps(result).encode()
-    evidence = tmp_path / "evidence"
-    write_evidence(evidence, files)
-    state = {
-        "vv_agent_revision": CODE,
-        "contract_revision": CONTRACT,
-        "sqlite_seeds": 5,
-        "postgres_seeds": 5,
-        "sqlite_chunk_size": 2,
-        "postgres_chunk_size": 2,
-    }
-    accepted = campaign.validate_evidence(evidence, state, {"exit_code": 0})
+    return files
+
+
+@pytest.mark.parametrize("seed", [0, 5])
+def test_contiguous_shard_ranges_validate_from_state_seed(tmp_path: Path, seed: int):
+    accepted = validate_files(
+        tmp_path / str(seed),
+        shard_payloads(seed=seed),
+        5,
+        5,
+        seed=seed,
+        sqlite_chunk_size=2,
+        postgres_chunk_size=2,
+    )
     assert accepted["accepted"] is True
+    assert accepted["full_acceptance"] is False
+    assert accepted["backends"]["sqlite"]["seed"] == seed
+    assert accepted["backends"]["sqlite"]["seeds"] == 5
     assert accepted["backends"]["sqlite"]["reports"] == 3
 
 
-def test_start_persists_explicit_chunk_sizes(tmp_path: Path):
+def test_shard_rejects_missing_or_wrong_starting_range(tmp_path: Path):
+    files = shard_payloads(seed=5)
+    del files["reports/sqlite-0000000005-0000000002.json"]
+    with pytest.raises(ValueError, match=r"missing sqlite seed range \[5, 7\)"):
+        validate_files(
+            tmp_path / "missing",
+            files,
+            5,
+            5,
+            seed=5,
+            sqlite_chunk_size=2,
+            postgres_chunk_size=2,
+        )
+
+    with pytest.raises(ValueError, match=r"missing sqlite seed range \[4, 5\)"):
+        validate_files(
+            tmp_path / "wrong-start",
+            shard_payloads(seed=5),
+            5,
+            5,
+            seed=4,
+            sqlite_chunk_size=2,
+            postgres_chunk_size=2,
+        )
+
+
+def test_shard_rejects_overlapping_ranges(tmp_path: Path):
+    files = shard_payloads(seed=5)
+    files["reports/sqlite-0000000006-0000000002.json"] = json.dumps(part("sqlite", 6, 2)).encode()
+    with pytest.raises(ValueError, match="overlaps the previous range"):
+        validate_files(
+            tmp_path,
+            files,
+            5,
+            5,
+            seed=5,
+            sqlite_chunk_size=2,
+            postgres_chunk_size=2,
+        )
+
+
+@pytest.mark.parametrize(("field", "value", "message"), [("seed", 4, "seed mismatch"), ("seeds", 4, "seeds mismatch")])
+def test_shard_rejects_wrong_result_seed_or_total(tmp_path: Path, field: str, value: int, message: str):
+    files = shard_payloads(seed=5)
+    result = json.loads(files["reports/result.json"])
+    result["campaigns"]["sqlite"][field] = value
+    files["reports/result.json"] = json.dumps(result).encode()
+    with pytest.raises(ValueError, match=message):
+        validate_files(
+            tmp_path,
+            files,
+            5,
+            5,
+            seed=5,
+            sqlite_chunk_size=2,
+            postgres_chunk_size=2,
+        )
+
+
+def test_start_persists_seed_and_explicit_chunk_sizes(tmp_path: Path):
     job_dir = tmp_path / "job-1"
     calls = []
 
@@ -637,16 +807,60 @@ def test_start_persists_explicit_chunk_sizes(tmp_path: Path):
         marker = {"status": {"state": "running", "child_identity": CHILD}}
         return completed(arguments, stdout="LAUNCH_JSON=" + json.dumps(marker) + "\n")
 
-    state = campaign.start(job_dir, "session-1", CODE, CONTRACT, 5, 5, 2, 2, cli=run)
+    state = campaign.start(job_dir, "session-1", CODE, CONTRACT, 5, 5, 2, 2, seed=7, cli=run)
     assert state["sqlite_chunk_size"] == 2 and state["postgres_chunk_size"] == 2
-    assert campaign._json(job_dir / "state.json")["command"][12:16] == [
+    persisted = campaign._json(job_dir / "state.json")
+    assert state["seed"] == 7 and persisted["seed"] == 7
+    command = persisted["command"]
+    assert command[12:16] == [
         "--sqlite-chunk-size",
         "2",
         "--postgres-chunk-size",
         "2",
     ]
+    seed_index = command.index("--seed")
+    assert command[seed_index : seed_index + 2] == ["--seed", "7"]
     assert [call[0] for call in calls].count("new") == 1
     assert [call[0] for call in calls][-3:] == ["upload", "status", "exec"]
+
+
+def test_start_seed_defaults_to_zero_and_rejects_invalid_values(tmp_path: Path):
+    args = campaign.parse_args(
+        [
+            "start",
+            "--job-dir",
+            str(tmp_path / "default"),
+            "--session",
+            "session-1",
+            "--vv-agent-revision",
+            CODE,
+            "--contract-revision",
+            CONTRACT,
+        ]
+    )
+    assert args.seed == 0
+    with pytest.raises(SystemExit):
+        campaign.parse_args(
+            [
+                "start",
+                "--job-dir",
+                str(tmp_path / "negative"),
+                "--session",
+                "session-1",
+                "--vv-agent-revision",
+                CODE,
+                "--contract-revision",
+                CONTRACT,
+                "--seed",
+                "-1",
+            ]
+        )
+
+    for index, invalid_seed in enumerate((-1, 1.5, "1", True)):
+        job_dir = tmp_path / f"invalid-{index}"
+        with pytest.raises(ValueError, match="non-negative integer"):
+            campaign.start(job_dir, "session-1", CODE, CONTRACT, 2, 1, seed=invalid_seed, cli=lambda arguments: None)
+        assert not job_dir.exists()
 
 
 def test_start_refresh_failure_does_not_exec_or_stop(tmp_path: Path):
