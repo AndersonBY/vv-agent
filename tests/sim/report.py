@@ -23,8 +23,17 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_WORKERS = 8
 POSTGRES_CONNECTIONS_PER_WORKER = 16
 POSTGRES_ADMIN_CONNECTION_RESERVE = 4
+POSTGRES_CLEANUP_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2)
 AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
 DEFAULT_WORKERS = min(5, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
+
+
+class _PostgresDatabase(str):
+    def __new__(cls, value):
+        instance = super().__new__(cls, value)
+        instance.cleanup_evidence = None
+        instance.cleanup_error = None
+        return instance
 
 
 def canonical_scenario_inventory():
@@ -84,6 +93,42 @@ def simulation_worker_plan(backend, workers):
     return {"requested_workers": workers, "effective_workers": workers}
 
 
+def _cleanup_postgres_database(admin, name):
+    """Terminate this role's sessions in the temporary database, then drop it."""
+    import psycopg
+    from psycopg import sql
+
+    delays = (*POSTGRES_CLEANUP_RETRY_DELAYS, None)
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT current_user")
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("PostgreSQL cleanup could not resolve current_user")
+                role = row[0]
+                cursor.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND usename = %s AND pid <> pg_backend_pid()",
+                    (name, role),
+                )
+                signals = [result[0] for result in cursor.fetchall() if result]
+                cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
+            return {
+                "database": name,
+                "role": role,
+                "same_role_sessions": len(signals),
+                "terminated_sessions": sum(signal is True for signal in signals),
+                "drop_attempts": attempt,
+                "drop_completed": True,
+            }
+        except psycopg.errors.ObjectInUse:
+            if delay is None:
+                raise
+            time.sleep(delay)
+    raise AssertionError("PostgreSQL cleanup retry loop exhausted without an outcome")
+
+
 @contextmanager
 def database(backend):
     if backend == "sqlite":
@@ -100,17 +145,21 @@ def database(backend):
     with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=3) as admin:
         with admin.cursor() as cursor:
             cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        database_handle = _PostgresDatabase(make_conninfo(dsn, dbname=name))
         original_error = None
         try:
-            yield make_conninfo(dsn, dbname=name)
+            yield database_handle
         except BaseException as exc:
             original_error = exc
             raise
         finally:
             try:
-                with admin.cursor() as cursor:
-                    cursor.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+                database_handle.cleanup_evidence = _cleanup_postgres_database(admin, name)
             except Exception as cleanup_error:
+                database_handle.cleanup_error = {
+                    "type": type(cleanup_error).__name__,
+                    "message": str(cleanup_error),
+                }
                 if original_error is None:
                     raise
                 original_error.add_note(f"PostgreSQL cleanup also failed: {type(cleanup_error).__name__}: {cleanup_error}")
@@ -257,18 +306,39 @@ def _run_seed(job):
     from .world import InvariantViolation, SimWorld
 
     backend, seed, scenario, replay, budget = job
-    with database(backend) as db, SimWorld(db, seed=seed, replay=replay) as world:
-        storage = (
-            {"sqlite_temporary_storage": temporary_storage(db.parent.parent)} if isinstance(db, Path) and db.is_file() else {}
-        )
-        try:
-            summary = run_scenario(world, scenario)
-            if replay is not None and world.choices.used != set(world.choices.overrides):
-                raise ValueError("replay has unused decisions; code or scenario differs")
-            return summary | storage
-        except Exception as exc:
-            failure = world.summary() | storage | {"error": f"{type(exc).__name__}: {exc}"}
-            invariant = exc.invariant if isinstance(exc, InvariantViolation) else None
+    db = None
+    world = None
+    failure = None
+    invariant = None
+    storage = {}
+    try:
+        with database(backend) as db, SimWorld(db, seed=seed, replay=replay) as world:
+            storage = (
+                {"sqlite_temporary_storage": temporary_storage(db.parent.parent)} if isinstance(db, Path) and db.is_file() else {}
+            )
+            try:
+                summary = run_scenario(world, scenario)
+                if replay is not None and world.choices.used != set(world.choices.overrides):
+                    raise ValueError("replay has unused decisions; code or scenario differs")
+            except Exception as exc:
+                failure = world.summary() | storage | {"error": f"{type(exc).__name__}: {exc}"}
+                invariant = exc.invariant if isinstance(exc, InvariantViolation) else None
+                raise
+        result = summary | storage
+        if isinstance(db, _PostgresDatabase):
+            result["postgres_cleanup"] = db.cleanup_evidence
+        return result
+    except Exception as exc:
+        if db is None:
+            raise
+        if failure is None:
+            summary = world.summary() if world is not None else {"seed": seed, "scenario": scenario}
+            failure = summary | storage | {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(db, _PostgresDatabase):
+            if db.cleanup_error is not None:
+                failure["cleanup_error"] = db.cleanup_error
+            if db.cleanup_evidence is not None:
+                failure["postgres_cleanup"] = db.cleanup_evidence
     failure["minimized_decisions"], failure["minimization_trials"] = failure["decisions"], 0
     if invariant and budget:
 
@@ -345,6 +415,7 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             "cpu_affinity": AFFINITY,
             "sqlite_temporary_storage": {"verified": False, "observations": []},
             "postgres_worker_plan": None,
+            "postgres_cleanup": None,
             "visible_memory_bytes": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else None,
         },
     }
@@ -360,6 +431,14 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
         seed, seeds, backend, scenario = replay["seed"], 1, replay["backend"], replay["scenario"]
     worker_plan = simulation_worker_plan(backend, workers)
     identity["environment"]["postgres_worker_plan"] = worker_plan
+    if backend == "postgres":
+        identity["environment"]["postgres_cleanup"] = {
+            "verified": False,
+            "seeds_observed": 0,
+            "seeds_cleaned": 0,
+            "terminated_sessions": 0,
+            "max_drop_attempts": 0,
+        }
     scenarios, decisions, covered = {}, 0, set()
     results = _seed_results(
         backend=backend,
@@ -377,6 +456,14 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             if observed is not None and observed not in storage["observations"]:
                 storage["observations"].append(observed)
                 storage["verified"] = all(item["filesystem"] is not None for item in storage["observations"])
+            cleanup = identity["environment"]["postgres_cleanup"]
+            if cleanup is not None:
+                cleanup["seeds_observed"] += 1
+                evidence = result.get("postgres_cleanup")
+                if evidence is not None:
+                    cleanup["seeds_cleaned"] += int(evidence["drop_completed"])
+                    cleanup["terminated_sessions"] += evidence["terminated_sessions"]
+                    cleanup["max_drop_attempts"] = max(cleanup["max_drop_attempts"], evidence["drop_attempts"])
             if "error" in result:
                 return result | identity | {"replay_provenance": provenance}
             scenarios[result["scenario"]] = scenarios.get(result["scenario"], 0) + 1
@@ -384,6 +471,9 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             covered.update(result["covered"])
     finally:
         results.close()
+    cleanup = identity["environment"]["postgres_cleanup"]
+    if cleanup is not None:
+        cleanup["verified"] = cleanup["seeds_observed"] == seeds and cleanup["seeds_cleaned"] == seeds
     elapsed = time.perf_counter() - started
     return identity | {
         "backend": backend,
