@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.35.3 — 2026-11-15
+## 0.35.4 — 2026-11-15
 
 Runtimes now default to a 60-second execution lease. Heartbeat
 connections use an independent configurable busy timeout and retry lock
 contention for a bounded window, so ordinary session write transactions do not
 consume the lease through one long SQLite wait. Supervisor backoff reuses the
-runtime's configured lease TTL. See [release notes](docs/releases/0.35.3.md).
+runtime's configured lease TTL. See [release notes](docs/releases/0.35.4.md).
 
 ## 0.35.0 — 2026-11-12
 

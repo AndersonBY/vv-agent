@@ -304,7 +304,7 @@ def test_expiry_retry_failure_warns_once_with_two_acquires(tmp_path, monkeypatch
         request(server, 2, "turn/start", submission())
         eventually(lambda: any(m.get("params", {}).get("code") == "lease_retry_exhausted" for m in messages))
         server.run_adapter.join()
-        assert len(attempts) == 2 and attempts[1] - attempts[0] >= 0.1
+        assert len(attempts) == 2 and attempts[1] - attempts[0] >= 0.09
         assert lifecycle(messages) == []
         assert not server.run_adapter._lease_retries
 

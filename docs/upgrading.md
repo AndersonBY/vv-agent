@@ -77,14 +77,14 @@ old-version session.
 
 ## Version notes
 
-### 0.35.3 — 2026-11-15
+### 0.35.4 — 2026-11-15
 
 The default runtime lease TTL is now 60 seconds (`Runtime.ttl_ms`). File-backed
 SQLite heartbeat connections use a separate configurable busy timeout and a
 bounded lock retry window. Hosts that set explicit `ttl_ms` values keep their
 existing behavior; no session store or wire migration is required.
 
-See the [release notes](releases/0.35.3.md).
+See the [release notes](releases/0.35.4.md).
 
 ### 0.35.0 — 2026-11-12
 
