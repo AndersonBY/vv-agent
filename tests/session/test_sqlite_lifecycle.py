@@ -1,13 +1,212 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Event, current_thread
+from time import monotonic
 
 import pytest
 
+from vv_agent.session import kernel
 from vv_agent.session.kernel import drive
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
 from .test_recovery_matrix import records_of, runtime, start
+
+
+@contextmanager
+def no_wait_heartbeat_store(database):
+    with SQLiteStore.standalone(str(database)) as store:
+        # Keep lock-contention tests within the heartbeat retry budget.
+        store.connection.execute("PRAGMA busy_timeout=0")
+        yield store
+
+
+@pytest.mark.sqlite_file
+def test_file_heartbeat_recovers_from_sqlite_lock_without_duplicate_model_call(store, database, monkeypatch):
+    start(store)
+    write_lock_held, release_write_lock = Event(), Event()
+    retried, renewed_after_lock = Event(), Event()
+    model_calls, lock_failures = [], []
+    renew = SQLiteStore.renew
+
+    def observed(value, lease, *, ttl_ms):
+        try:
+            result = renew(value, lease, ttl_ms=ttl_ms)
+        except sqlite3.OperationalError as error:
+            if current_thread().name == "session-heartbeat" and "database is locked" in str(error):
+                lock_failures.append(1)
+                if len(lock_failures) >= 2:
+                    retried.set()
+            raise
+        if current_thread().name == "session-heartbeat" and write_lock_held.is_set():
+            renewed_after_lock.set()
+        return result
+
+    def answer(_request):
+        model_calls.append(1)
+        with SQLiteStore.standalone(str(database)) as locker, locker.atomic():
+            write_lock_held.set()
+            assert release_write_lock.wait(5)
+        assert renewed_after_lock.wait(5)
+        return LLMResponse("done")
+
+    monkeypatch.setattr(SQLiteStore, "renew", observed)
+    rt = runtime(database, [answer], ttl_ms=2000, heartbeat_seconds=0.04)
+    rt.heartbeat_store = lambda: no_wait_heartbeat_store(database)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(drive, store, "s", runtime=rt)
+        try:
+            assert write_lock_held.wait(5)
+            assert retried.wait(5)
+            assert model_calls == [1]
+        finally:
+            release_write_lock.set()
+        future.result(timeout=10)
+
+    assert renewed_after_lock.is_set()
+    assert len(lock_failures) >= 2
+    assert model_calls == [1] and not rt.llm.steps
+    assert [record.payload["status"] for record in records_of(store, "turn_ended")] == ["completed"]
+
+
+@pytest.mark.sqlite_file
+def test_persistent_sqlite_lock_exhausts_retry_budget_as_transient_timeout(store, database, monkeypatch):
+    start(store)
+    lease = store.acquire("s", owner="heartbeat", ttl_ms=500)
+    assert lease is not None
+    lock_failures = []
+    renew = SQLiteStore.renew
+
+    def observed(value, current, *, ttl_ms):
+        try:
+            return renew(value, current, ttl_ms=ttl_ms)
+        except sqlite3.OperationalError as error:
+            if current_thread().name == "session-heartbeat" and "database is locked" in str(error):
+                lock_failures.append(1)
+            raise
+
+    monkeypatch.setattr(SQLiteStore, "renew", observed)
+    heartbeat = kernel._LeaseHeartbeat(
+        lease,
+        lambda: no_wait_heartbeat_store(database),
+        300,
+        0.04,
+        now_ms=store._now(),
+    )
+    with SQLiteStore.standalone(str(database)) as locker, locker.atomic():
+        heartbeat.thread.start()
+        assert heartbeat.ready.wait(5)
+
+    assert len(lock_failures) >= 2
+    assert heartbeat.lost
+    assert isinstance(heartbeat.heartbeat_error, TimeoutError)
+    assert isinstance(heartbeat.heartbeat_error.__cause__, sqlite3.OperationalError)
+    assert "database is locked" in str(heartbeat.heartbeat_error.__cause__)
+    heartbeat.close()
+
+
+@pytest.mark.sqlite_file
+def test_sqlite_table_lock_message_is_retried(store, database, monkeypatch):
+    start(store)
+    lease = store.acquire("s", owner="heartbeat", ttl_ms=4000)
+    assert lease is not None
+    attempts, renewed = [], Event()
+    renew = SQLiteStore.renew
+
+    def observed(value, current, *, ttl_ms):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database table is locked: sk_session")
+        result = renew(value, current, ttl_ms=ttl_ms)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr(SQLiteStore, "renew", observed)
+    heartbeat = kernel._LeaseHeartbeat(
+        lease,
+        lambda: no_wait_heartbeat_store(database),
+        4000,
+        0.04,
+        now_ms=store._now(),
+    )
+    heartbeat.thread.start()
+    assert renewed.wait(5)
+    heartbeat.close()
+
+    assert len(attempts) >= 2
+    assert not heartbeat.lost
+
+
+@pytest.mark.sqlite_file
+@pytest.mark.parametrize(
+    "message",
+    ["disk I/O error", "no such table: sk_session", "database disk image is malformed"],
+)
+def test_non_lock_sqlite_operational_error_fails_without_retry(store, database, monkeypatch, message):
+    start(store)
+    lease = store.acquire("s", owner="heartbeat", ttl_ms=4000)
+    assert lease is not None
+    attempts = []
+
+    def failing(_store, _lease, *, ttl_ms):
+        attempts.append(ttl_ms)
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(SQLiteStore, "renew", failing)
+    heartbeat = kernel._LeaseHeartbeat(
+        lease,
+        lambda: no_wait_heartbeat_store(database),
+        4000,
+        0.04,
+        now_ms=store._now(),
+    )
+    heartbeat.thread.start()
+    assert heartbeat.ready.wait(5)
+
+    assert attempts == [4000]
+    assert heartbeat.lost
+    assert isinstance(heartbeat.heartbeat_error, sqlite3.OperationalError)
+    assert str(heartbeat.heartbeat_error) == message
+    heartbeat.close()
+
+
+@pytest.mark.sqlite_file
+def test_close_interrupts_sqlite_lock_retry_wait(store, database, monkeypatch):
+    start(store)
+    lease = store.acquire("s", owner="heartbeat", ttl_ms=4000)
+    assert lease is not None
+    attempts, retried = [], Event()
+    renew = SQLiteStore.renew
+
+    def observed(value, current, *, ttl_ms):
+        try:
+            return renew(value, current, ttl_ms=ttl_ms)
+        except sqlite3.OperationalError as error:
+            if current_thread().name == "session-heartbeat" and "database is locked" in str(error):
+                attempts.append(1)
+                if len(attempts) >= 2:
+                    retried.set()
+            raise
+
+    monkeypatch.setattr(SQLiteStore, "renew", observed)
+    heartbeat = kernel._LeaseHeartbeat(
+        lease,
+        lambda: no_wait_heartbeat_store(database),
+        4000,
+        0.04,
+        now_ms=store._now(),
+    )
+    with SQLiteStore.standalone(str(database)) as locker, locker.atomic():
+        heartbeat.thread.start()
+        assert retried.wait(5)
+        started = monotonic()
+        heartbeat.close()
+        assert monotonic() - started < 2
+
+    assert not heartbeat.thread.is_alive()
+    assert not heartbeat.lost
+    assert len(attempts) >= 2
 
 
 def test_memory_heartbeat_borrows_owner_connection_and_owner_closes_it(monkeypatch):

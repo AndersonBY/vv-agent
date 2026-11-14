@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion, RunBudgetLimits
@@ -65,6 +66,7 @@ from .records import InboxItem, Record, _RetainedTools, copy_json, digest, inher
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import EndpointUnavailable, Runtime, RuntimeNotReady, budget, model_usage, request_from_dict
 from .sql import SQLSessionTx, SQLStore
+from .sqlite import SQLiteStore
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 from .summary_requests import child_summary, compaction_request, pending_compaction_requests, summary_pending
 
@@ -83,6 +85,40 @@ logger = logging.getLogger(__name__)
 
 class HeartbeatStopped(LeaseLost):
     """Normal stop of a lease-renewal worker; grants no execution ownership."""
+
+
+_SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+
+class _SQLiteLockRetryingStore:
+    """Retry only file-backed SQLite heartbeat lock contention."""
+
+    def __init__(
+        self,
+        store: SessionStore,
+        *,
+        stop: threading.Event,
+        retry_budget_seconds: float,
+        retry_delay_seconds: float,
+    ) -> None:
+        self.store = store
+        self.stop = stop
+        self.retry_budget_seconds = retry_budget_seconds
+        self.retry_delay_seconds = retry_delay_seconds
+
+    def renew(self, lease: Lease, *, ttl_ms: int):
+        deadline = time.monotonic() + self.retry_budget_seconds
+        while True:
+            try:
+                return self.store.renew(lease, ttl_ms=ttl_ms)
+            except sqlite3.OperationalError as exc:
+                if not any(message in str(exc) for message in _SQLITE_LOCK_MESSAGES):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("SQLite heartbeat renewal lock retry budget exhausted") from exc
+                if self.stop.wait(min(self.retry_delay_seconds, remaining)):
+                    raise HeartbeatStopped("heartbeat stopped") from exc
 
 
 class _LeaseHeartbeat:
@@ -176,12 +212,23 @@ class _LeaseHeartbeat:
         try:
             with self.heartbeat_store() as store:
                 transient_errors: tuple[type[Exception], ...] = (TimeoutError,)
+                heartbeat_store = store
                 if isinstance(store, PostgresStore):
                     from psycopg import OperationalError
 
                     transient_errors = (TimeoutError, OperationalError)
                     # Host factories may bypass PostgresStore.heartbeat_store().
                     store._rows("SELECT set_config('lock_timeout','250ms',false),set_config('statement_timeout','1000ms',false)")
+                elif isinstance(store, SQLiteStore) and store.path != ":memory:":
+                    heartbeat_store = cast(
+                        SessionStore,
+                        _SQLiteLockRetryingStore(
+                            store,
+                            stop=self.stop,
+                            retry_budget_seconds=min(self.heartbeat_seconds / 2, 0.25),
+                            retry_delay_seconds=min(self.heartbeat_seconds / 8, 0.05),
+                        ),
+                    )
                 while not self.stop.is_set():
                     with self.lock:
                         if self.heartbeat_error is not None and self.expires_deadline - time.monotonic() <= max(
@@ -189,7 +236,7 @@ class _LeaseHeartbeat:
                         ):
                             raise self.heartbeat_error
                     try:
-                        self.poll(store)
+                        self.poll(heartbeat_store)
                     except Exception as exc:
                         if not isinstance(exc, transient_errors):
                             raise
