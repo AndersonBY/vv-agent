@@ -22,6 +22,39 @@ def no_wait_heartbeat_store(database):
         yield store
 
 
+def test_new_sqlite_database_uses_wal(tmp_path):
+    database = tmp_path / "new.sqlite"
+
+    with SQLiteStore.standalone(str(database)) as store:
+        assert store.connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        store.install_schema()
+
+
+@pytest.mark.sqlite_file
+def test_existing_sqlite_heartbeat_connections_open_during_write_transaction(store, database):
+    start(store)
+    # A non-WAL journal makes an accidental journal_mode rewrite fail immediately
+    # while the foreground connection holds SQLite's write lock.
+    assert store.connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+
+    def open_heartbeat(_):
+        with SQLiteStore.standalone(str(database)) as heartbeat:
+            return heartbeat.connection.execute("SELECT COUNT(*) FROM sk_session").fetchone()
+
+    locker = sqlite3.connect(str(database), isolation_level=None)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+        locker.execute("UPDATE sk_session SET next_drive_ms=next_drive_ms WHERE session_id='s'")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = [future.result(timeout=10) for future in [pool.submit(open_heartbeat, index) for index in range(3)]]
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert results == [(1,), (1,), (1,)]
+    assert store.connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+
+
 @pytest.mark.sqlite_file
 def test_file_heartbeat_recovers_from_sqlite_lock_without_duplicate_model_call(store, database, monkeypatch):
     start(store)
