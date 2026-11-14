@@ -21,6 +21,8 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_WORKERS = 8
+POSTGRES_CONNECTIONS_PER_WORKER = 16
+POSTGRES_ADMIN_CONNECTION_RESERVE = 4
 AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
 DEFAULT_WORKERS = min(5, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
 
@@ -38,6 +40,50 @@ def scenario_inventory_sha256(inventory):
     return hashlib.sha256(json.dumps(inventory, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
+def postgres_connection_counts(dsn):
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    admin_dsn = make_conninfo(dsn, options="-c statement_timeout=0 -c lock_timeout=0")
+    with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=3) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT current_setting('max_connections')::int,"
+            "current_setting('superuser_reserved_connections')::int,"
+            "(SELECT count(*)::int FROM pg_stat_activity)"
+        )
+        return cursor.fetchone()
+
+
+def postgres_worker_plan(workers):
+    """Cap one campaign from a startup slot snapshot; no cross-campaign lock is created."""
+    dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN", "dbname=postgres")
+    maximum, reserved, active = postgres_connection_counts(dsn)
+    available = maximum - reserved - active - POSTGRES_ADMIN_CONNECTION_RESERVE
+    if available < POSTGRES_CONNECTIONS_PER_WORKER:
+        raise RuntimeError(
+            "PostgreSQL cannot admit one simulation worker safely: "
+            f"{available} slots available after reserves, {POSTGRES_CONNECTIONS_PER_WORKER} required"
+        )
+    return {
+        "requested_workers": workers,
+        "effective_workers": min(workers, available // POSTGRES_CONNECTIONS_PER_WORKER),
+        "connections_per_worker": POSTGRES_CONNECTIONS_PER_WORKER,
+        "admin_connection_reserve": POSTGRES_ADMIN_CONNECTION_RESERVE,
+        "max_connections": maximum,
+        "superuser_reserved_connections": reserved,
+        "active_connections": active,
+        "available_connections": available,
+        "reservation_scope": "single_campaign",
+        "capacity_source": "startup_snapshot",
+    }
+
+
+def simulation_worker_plan(backend, workers):
+    if backend == "postgres":
+        return postgres_worker_plan(workers)
+    return {"requested_workers": workers, "effective_workers": workers}
+
+
 @contextmanager
 def database(backend):
     if backend == "sqlite":
@@ -50,12 +96,24 @@ def database(backend):
 
     dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN", "dbname=postgres")
     name = f"vvsk_sim_{uuid4().hex}"
-    with psycopg.connect(dsn, autocommit=True, connect_timeout=3) as admin:
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    admin_dsn = make_conninfo(dsn, options="-c statement_timeout=0 -c lock_timeout=0")
+    with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=3) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        original_error = None
         try:
             yield make_conninfo(dsn, dbname=name)
+        except BaseException as exc:
+            original_error = exc
+            raise
         finally:
-            admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
+            try:
+                with admin.cursor() as cursor:
+                    cursor.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+            except Exception as cleanup_error:
+                if original_error is None:
+                    raise
+                original_error.add_note(f"PostgreSQL cleanup also failed: {type(cleanup_error).__name__}: {cleanup_error}")
 
 
 def _git(root, *args):
@@ -228,8 +286,7 @@ def _run_seed(job):
     return failure
 
 
-def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
-    """Bound submission AND result memory independently of campaign length."""
+def _seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
     if seeds < 1 or not 1 <= workers <= MAX_WORKERS or minimize_budget < 0:
         raise ValueError(f"positive seeds, 1..{MAX_WORKERS} workers and a nonnegative minimization budget required")
     if replay is not None and seeds != 1:
@@ -242,6 +299,20 @@ def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1,
     with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
         for batch in batched(jobs, workers * 2):
             yield from pool.map(_run_seed, batch)
+
+
+def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
+    """Bound submission AND result memory, including PostgreSQL connection slots."""
+    plan = simulation_worker_plan(backend, workers)
+    yield from _seed_results(
+        backend=backend,
+        seed=seed,
+        seeds=seeds,
+        scenario=scenario,
+        workers=plan["effective_workers"],
+        replay=replay,
+        minimize_budget=minimize_budget,
+    )
 
 
 @cache
@@ -273,6 +344,7 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             "logical_cpus": os.cpu_count(),
             "cpu_affinity": AFFINITY,
             "sqlite_temporary_storage": {"verified": False, "observations": []},
+            "postgres_worker_plan": None,
             "visible_memory_bytes": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else None,
         },
     }
@@ -286,13 +358,15 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
         raise ValueError("in-memory mutants require workers=1; spawned workers execute the source on disk")
     if replay is not None:
         seed, seeds, backend, scenario = replay["seed"], 1, replay["backend"], replay["scenario"]
+    worker_plan = simulation_worker_plan(backend, workers)
+    identity["environment"]["postgres_worker_plan"] = worker_plan
     scenarios, decisions, covered = {}, 0, set()
-    results = seed_results(
+    results = _seed_results(
         backend=backend,
         seed=seed,
         seeds=seeds,
         scenario=scenario,
-        workers=workers,
+        workers=worker_plan["effective_workers"],
         replay=replay["decisions"] if replay is not None else None,
         minimize_budget=minimize_budget,
     )

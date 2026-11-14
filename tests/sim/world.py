@@ -177,9 +177,18 @@ class SimWorld:
         self.scenario = None
         self.covered = set()
         self.memory_settings = {}
+        self.postgres_runtime_ready = False
 
     def __enter__(self):
-        self.connection("host").install_schema()
+        host = self.connection("host")
+        try:
+            host.install_schema()
+        except BaseException:
+            self.stack.close()
+            raise
+        if not isinstance(self.database, Path):
+            self.postgres_runtime_ready = True
+            self._set_postgres_runtime_timeouts(host)
         return self
 
     def __exit__(self, *args):
@@ -196,10 +205,16 @@ class SimWorld:
             store = self.stack.enter_context(context)
             if isinstance(store, SQLiteStore):
                 store._rows("PRAGMA busy_timeout=10")
+            elif self.postgres_runtime_ready:
+                self._set_postgres_runtime_timeouts(store)
             else:
-                store._rows("SELECT set_config('lock_timeout','10ms',false),set_config('statement_timeout','100ms',false)")
+                store._rows("SELECT set_config('lock_timeout','0',false),set_config('statement_timeout','0',false)")
             self.connections[participant] = store
         return self.connections[participant]
+
+    @staticmethod
+    def _set_postgres_runtime_timeouts(store):
+        store._rows("SELECT set_config('lock_timeout','10ms',false),set_config('statement_timeout','100ms',false)")
 
     def install_write_observer(self):
         """Per-world patch restored by ExitStack; no production files are changed."""

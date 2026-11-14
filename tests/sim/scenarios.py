@@ -12,7 +12,7 @@ from vv_agent.kernel._records import InboxItem, SessionSpec
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolExecutionResult
 
-from .world import FaultyStore, SimWorld, require
+from .world import FaultyStore, SimWorld, WorkerDeath, require
 
 SCENARIOS = (
     "tools",
@@ -401,15 +401,80 @@ def future_input(w, provider):
     w.queue.clear()
 
 
+def _audit_executor_stops(w):
+    """Record the stop that ``SimWorld.drive`` would otherwise reduce to a participant name."""
+    actual_drive_runtime = w._drive_runtime
+
+    def observed_drive_runtime(store, sid, *, runtime, factory):
+        try:
+            return actual_drive_runtime(store, sid, runtime=runtime, factory=factory)
+        except (WorkerDeath, LeaseLost, TimeoutError) as exc:
+            w.events.append(
+                {
+                    "executor_stop": {
+                        "session_id": sid,
+                        "participant": runtime.participant,
+                        "exception_type": type(exc).__name__,
+                    }
+                }
+            )
+            raise
+
+    w._drive_runtime = observed_drive_runtime
+
+
+def _drive_until_parked(w, sid, *, participant, provider, children):
+    """Reschedule only an executor stop while establishing the I7 precondition."""
+    observer = w.connection("observer")
+    for drive_number in range(1, 5):
+        event_start = len(w.events)
+        w.drive(sid, participant=participant, provider=provider, children=children)
+        w.check()
+        state, rows, _ = observer.read_state(sid)
+        terminals = [row.record for row in rows if row.record.kind == "turn_ended"]
+        require(not terminals, "I7", f"{sid} ended before root cancellation")
+        parked_tools = [op for op in state.operations.values() if op.kind == "tool" and op.state == "parked"]
+        if state.active_turn_id is not None and bool(state.waits) and parked_tools:
+            return
+        window = w.events[event_start:]
+        stops = [
+            event["executor_stop"]
+            for event in window
+            if event.get("executor_stop", {}).get("session_id") == sid and event["executor_stop"]["participant"] == participant
+        ]
+        observed = [
+            (event.get("worker_stopped"), event.get("executor_stop"))
+            for event in window
+            if "worker_stopped" in event or "executor_stop" in event
+        ]
+        require(
+            bool(stops) and any(event.get("worker_stopped") == participant for event in window),
+            "I7",
+            f"{sid} never became active: no matching executor stop for {sid}/{participant}; observed {observed}",
+        )
+        if drive_number == 4:
+            break
+        w.events.append(
+            {
+                "precondition_redrive": {
+                    "session_id": sid,
+                    "participant": participant,
+                    "redrive": drive_number,
+                    "exception_type": stops[0]["exception_type"],
+                }
+            }
+        )
+        w.advance(1000)
+    require(False, "I7", f"{sid} never became active after one drive and three bounded redrives")
+
+
 def cancel_descendants(w, provider):
+    _audit_executor_stops(w)
     parent_children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "child work")}
     child_children = {"effect": lambda _plan: ChildSession(SessionSpec("grandchild", "sim", "/tmp"), "grandchild work")}
-    w.drive(provider=provider, children=parent_children)
-    w.check()
-    w.drive("child", participant="child-worker", children=child_children)
-    w.check()
-    w.drive("grandchild", participant="grandchild-worker", provider=provider)
-    w.check()
+    _drive_until_parked(w, "s", participant="worker-0", provider=provider, children=parent_children)
+    _drive_until_parked(w, "child", participant="child-worker", provider=provider, children=child_children)
+    _drive_until_parked(w, "grandchild", participant="grandchild-worker", provider=provider, children={})
     observer = w.connection("observer")
     turns = {}
     for sid, parent in (("s", None), ("child", "s"), ("grandchild", "child")):

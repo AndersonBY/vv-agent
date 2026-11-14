@@ -184,18 +184,124 @@ def test_future_input_oracle_detects_removed_sql_readiness_filter(sim_database, 
         run_scenario(world, "future_input")
 
 
+def _assert_i7_cancel_tree(world, result):
+    active = next(event["active_cancellation_tree"] for event in result["events"] if "active_cancellation_tree" in event)
+    assert active == {
+        "s": "s/turn/initial",
+        "child": "child/turn/start",
+        "grandchild": "grandchild/turn/start",
+    }
+    assert [(sid, attempt) for sid, _op, attempt, kind, _key in world.calls if kind == "model"] == [
+        ("s", 1),
+        ("child", 1),
+        ("grandchild", 1),
+    ]
+    for sid in active:
+        state, rows, _ = world.connection("observer").read_state(sid)
+        assert state.active_turn_id is None
+        assert [row.record.payload["status"] for row in rows if row.record.kind == "turn_ended"] == ["cancelled"]
+    assert world.connection("provider")._one("SELECT count(*) FROM sim_effect")[0] == 0
+    assert "I7" in result["covered"]
+
+
 def test_root_cancel_terminates_started_child_and_grandchild(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         result = run_scenario(world, "cancel_descendants")
-        active = next(event["active_cancellation_tree"] for event in result["events"] if "active_cancellation_tree" in event)
-        assert set(active) == {"s", "child", "grandchild"}
-        assert {sid for sid, _op, _attempt, kind, _key in world.calls if kind == "model"} == set(active)
-        for sid in active:
-            state, rows, _ = world.connection("observer").read_state(sid)
-            assert state.active_turn_id is None
-            assert [row.record.payload["status"] for row in rows if row.record.kind == "turn_ended"] == ["cancelled"]
-        assert "I7" in result["covered"]
+        _assert_i7_cancel_tree(world, result)
         world.check(quiescent=True, every_prefix=True)
+
+
+@pytest.mark.parametrize("seed", [250229, 875459])
+def test_final_evidence_seed_redrives_transient_executor_stop_before_cancel(tmp_path, seed):
+    with SimWorld(tmp_path / f"seed-{seed}.sqlite", seed=seed) as world:
+        actual_drive_runtime = world._drive_runtime
+        interrupted = False
+
+        def stop_grandchild_once(store, sid, *, runtime, factory):
+            nonlocal interrupted
+            if not interrupted and sid == "grandchild" and runtime.participant == "grandchild-worker":
+                interrupted = True
+                raise TimeoutError("executor stopped before claiming grandchild")
+            return actual_drive_runtime(store, sid, runtime=runtime, factory=factory)
+
+        world._drive_runtime = stop_grandchild_once
+        result = run_scenario(world, "cancel_descendants")
+
+        assert interrupted
+        assert result["seed"] == seed
+        assert result["decisions"][0] == {"at": "scenario#0", "value": "cancel_descendants"}
+        assert [event["worker_stopped"] for event in result["events"] if "worker_stopped" in event] == ["grandchild-worker"]
+        assert [event["executor_stop"] for event in result["events"] if "executor_stop" in event] == [
+            {"session_id": "grandchild", "participant": "grandchild-worker", "exception_type": "TimeoutError"}
+        ]
+        assert [event["precondition_redrive"] for event in result["events"] if "precondition_redrive" in event] == [
+            {
+                "session_id": "grandchild",
+                "participant": "grandchild-worker",
+                "redrive": 1,
+                "exception_type": "TimeoutError",
+            }
+        ]
+        _assert_i7_cancel_tree(world, result)
+        world.check(quiescent=True, every_prefix=True)
+
+
+@pytest.mark.parametrize("seed", [250228, 250229, 250230, 875458, 875459, 875460])
+def test_cancel_descendants_seed_range_preserves_three_generation_tree(tmp_path, seed):
+    with SimWorld(tmp_path / f"seed-{seed}.sqlite", seed=seed) as world:
+        result = run_scenario(world, "cancel_descendants")
+        _assert_i7_cancel_tree(world, result)
+
+
+def test_precondition_rejects_unrelated_participant_stop(tmp_path):
+    with SimWorld(tmp_path / "unrelated-stop.sqlite", seed=250229) as world:
+        actual_drive = world.drive
+
+        def stop_unrelated_worker(store_sid="s", *, participant="worker-0", **kwargs):
+            if store_sid == "grandchild" and participant == "grandchild-worker":
+                world.events.append({"worker_stopped": "other-worker", "dead": False})
+                return None
+            return actual_drive(store_sid, participant=participant, **kwargs)
+
+        world.drive = stop_unrelated_worker
+        with pytest.raises(InvariantViolation, match="no matching executor stop for grandchild/grandchild-worker"):
+            run_scenario(world, "cancel_descendants")
+        assert not any("precondition_redrive" in event for event in world.events)
+
+
+def test_precondition_does_not_swallow_non_executor_failure(tmp_path):
+    with SimWorld(tmp_path / "non-executor.sqlite", seed=250229) as world:
+        actual_drive_runtime = world._drive_runtime
+
+        def fail_non_executor(store, sid, *, runtime, factory):
+            if sid != "grandchild":
+                return actual_drive_runtime(store, sid, runtime=runtime, factory=factory)
+            raise InvariantViolation("synthetic", "non-executor failure")
+
+        world._drive_runtime = fail_non_executor
+        with pytest.raises(InvariantViolation, match="synthetic: non-executor failure"):
+            run_scenario(world, "cancel_descendants")
+        assert not any("executor_stop" in event or "precondition_redrive" in event for event in world.events)
+
+
+def test_persistent_executor_stop_fails_after_three_bounded_drives(tmp_path):
+    with SimWorld(tmp_path / "persistent-stop.sqlite", seed=875459) as world:
+        actual_drive_runtime = world._drive_runtime
+        attempts = []
+
+        def always_stop(store, sid, *, runtime, factory):
+            if sid != "grandchild":
+                return actual_drive_runtime(store, sid, runtime=runtime, factory=factory)
+            attempts.append((sid, runtime.participant))
+            raise TimeoutError("persistent executor stop")
+
+        world._drive_runtime = always_stop
+        with pytest.raises(InvariantViolation, match="grandchild never became active after one drive and three bounded redrives"):
+            run_scenario(world, "cancel_descendants")
+        assert attempts == [("grandchild", "grandchild-worker")] * 4
+        stops = [event["executor_stop"] for event in world.events if "executor_stop" in event]
+        assert stops == [{"session_id": "grandchild", "participant": "grandchild-worker", "exception_type": "TimeoutError"}] * 4
+        assert len([event for event in world.events if "precondition_redrive" in event]) == 3
 
 
 def test_descendant_oracle_detects_missing_second_generation_cancel(sim_database, monkeypatch):
