@@ -1,7 +1,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from threading import Event, current_thread
+from threading import Barrier, Event, current_thread
 from time import monotonic
 
 import pytest
@@ -20,6 +20,62 @@ def no_wait_heartbeat_store(database):
         # Keep lock-contention tests within the heartbeat retry budget.
         store.connection.execute("PRAGMA busy_timeout=0")
         yield store
+
+
+@pytest.mark.sqlite_file
+def test_existing_database_heartbeat_connections_skip_journal_configuration_under_write_lock(store, database, monkeypatch):
+    start(store)
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    with SQLiteStore.standalone(str(database)) as writer:
+        writer.connection.execute("BEGIN IMMEDIATE")
+        statements.clear()
+        connected = Barrier(3)
+
+        def open_heartbeat(_):
+            with SQLiteStore.standalone(str(database)) as heartbeat:
+                connected.wait(timeout=5)
+                return (
+                    heartbeat.connection.execute("PRAGMA journal_mode").fetchone()[0],
+                    heartbeat.connection.execute("PRAGMA synchronous").fetchone()[0],
+                    heartbeat.connection.execute("PRAGMA busy_timeout").fetchone()[0],
+                )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = [future.result(timeout=10) for future in [pool.submit(open_heartbeat, index) for index in range(3)]]
+        writer.connection.execute("ROLLBACK")
+
+    assert results == [("wal", 2, 5000)] * 3
+    assert not [statement for statement in statements if statement.strip().lower() == "pragma journal_mode=wal"]
+
+
+@pytest.mark.sqlite_file
+def test_new_database_initialization_still_configures_wal_once(tmp_path):
+    database = tmp_path / "new.sqlite"
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(sqlite3, "connect", traced_connect)
+        with SQLiteStore.standalone(str(database)) as store:
+            store.install_schema()
+            assert store.connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+            assert store.connection.execute("PRAGMA synchronous").fetchone() == (2,)
+            assert store.connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+
+    assert sum(statement.strip().lower() == "pragma journal_mode=wal" for statement in statements) == 1
 
 
 @pytest.mark.sqlite_file

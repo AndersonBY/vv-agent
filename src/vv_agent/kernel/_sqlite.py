@@ -90,9 +90,10 @@ class SQLiteStore(SQLStore):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute("PRAGMA synchronous=FULL")
+        if version == 0 and not existing:
+            self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.create_function("session_now_ms", 0, self.clock.now_ms)
         self._connection_lock = RLock()
         self._epoch = 0
