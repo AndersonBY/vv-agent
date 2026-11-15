@@ -12,82 +12,190 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
-from ._content import ContentRef, ContentSessionWriter
+from ._content import (
+    APPROVAL_METADATA,
+    APPROVAL_REASON,
+    APPROVAL_SCOPE,
+    CHILD_RESULT,
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    INPUT_SELECTION,
+    SESSION_ATTRIBUTES,
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    SESSION_WORKSPACE,
+    ContentRef,
+    ContentSessionWriter,
+)
 from ._hydration import reference_digest
-from ._records import Record, copy_json, digest, make_record, record_identity
+from ._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 
 _CONTENT_REF_FIELDS = frozenset({"content_id", "mac", "size", "key_id", "labels"})
 _MISSING = object()
 
+PROVIDER_RESULT = "provider.result"
+PROVIDER_USAGE = "provider.usage"
+PROVIDER_EVIDENCE = "provider.evidence"
+PROVIDER_HANDLE_JOB_ID = "provider.handle.job_id"
+PROVIDER_HANDLE_EVIDENCE = "provider.handle.evidence"
+PROVIDER_HANDLE_QUERY_REF = "provider.handle.query_ref"
+PROVIDER_HANDLE_CANCEL_REF = "provider.handle.cancel_ref"
+
+
+@dataclass(frozen=True, slots=True)
+class NestedContentSlot:
+    """One explicitly typed content-reference array below an encrypted container."""
+
+    path: tuple[str, ...]
+    slot: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContentSlot:
+    """One statically schema-owned content slot and its explicit nested paths."""
+
+    path: tuple[str, ...]
+    slot: str
+    nested: tuple[NestedContentSlot, ...] = ()
+
+
+_REQUEST_NESTED = (NestedContentSlot(("messages", "*"), "messages"),)
+_DEFINITION_NESTED = (NestedContentSlot(("task", "initial_messages", "*"), "task.initial_messages"),)
+_SEED_MESSAGES = (NestedContentSlot(("seed", "messages", "*"), "seed.messages"),)
+
 # Each path is explicit. ``*`` expands one declared JSON array element and the
 # resulting link slot is the field name followed by its stable zero-based index.
-_CONTENT_SLOTS: Mapping[str, tuple[tuple[tuple[str, ...], str], ...]] = {
-    "turn_started": ((("definition",), "definition"), (("budget",), "budget")),
-    "input_applied": ((("reason",), "input_reason"), (("model_binding",), "model_binding")),
+_CONTENT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
+    "session_created": (
+        ContentSlot(("principal", "attributes"), SESSION_PRINCIPAL_ATTRIBUTES, _SEED_MESSAGES),
+        ContentSlot(("workspace",), SESSION_WORKSPACE),
+        ContentSlot(("attributes",), SESSION_ATTRIBUTES, _SEED_MESSAGES),
+    ),
+    "turn_started": (
+        ContentSlot(("definition",), "definition", _DEFINITION_NESTED),
+        ContentSlot(("budget",), "budget"),
+        ContentSlot(("environment", "descriptor"), "environment_descriptor"),
+        ContentSlot(("environment", "operational_policy"), "environment_operational_policy"),
+    ),
+    "input_applied": (
+        ContentSlot(("input", "actor", "attributes"), INPUT_ACTOR_ATTRIBUTES),
+        ContentSlot(("reason",), "input_reason"),
+        ContentSlot(("model_binding",), "model_binding"),
+    ),
     "op_planned": (
-        (("request",), "request"),
-        (("tool",), "tool"),
-        (("budget_admission",), "budget_admission"),
+        ContentSlot(("request",), "request", _REQUEST_NESTED),
+        ContentSlot(("tool",), "tool"),
+        ContentSlot(("budget_admission",), "budget_admission"),
     ),
     "op_prepared": (
-        (("request",), "request"),
-        (("tool",), "tool"),
-        (("hook_result",), "hook_result"),
-        (("shared_state",), "shared_state"),
+        ContentSlot(("request",), "request", _REQUEST_NESTED),
+        ContentSlot(("tool",), "tool"),
+        ContentSlot(("hook_result",), "hook_result"),
+        ContentSlot(("shared_state",), "shared_state"),
     ),
-    "turn_parked": ((("question",), "turn_question"),),
+    "turn_parked": (ContentSlot(("question",), "turn_question"),),
+    "op_started": (),
     "op_parked": (
-        (("handle", "job_id"), "provider_handle_job_id"),
-        (("handle", "evidence"), "provider_handle_evidence"),
-        (("handle", "query_ref"), "provider_handle_query_ref"),
-        (("handle", "cancel_ref"), "provider_handle_cancel_ref"),
-        (("handle", "scope"), "approval_scope"),
-        (("handle", "question"), "user_question"),
-        (("interaction_result",), "interaction_result"),
-        (("delegation", "agent_name"), "delegation_agent_name"),
-        (("delegation", "metadata"), "delegation_metadata"),
+        ContentSlot(("handle", "job_id"), "provider_handle_job_id"),
+        ContentSlot(("handle", "evidence"), "provider_handle_evidence"),
+        ContentSlot(("handle", "query_ref"), "provider_handle_query_ref"),
+        ContentSlot(("handle", "cancel_ref"), "provider_handle_cancel_ref"),
+        ContentSlot(("handle", "scope"), "approval_scope"),
+        ContentSlot(("handle", "question"), "user_question"),
+        ContentSlot(("interaction_result",), "interaction_result"),
+        ContentSlot(("delegation", "agent_name"), "delegation_agent_name"),
+        ContentSlot(("delegation", "metadata"), "delegation_metadata"),
     ),
     "op_completed": (
-        (("result",), "result"),
-        (("usage",), "usage"),
-        (("shared_state",), "shared_state"),
-        (("evidence",), "evidence"),
+        ContentSlot(("result",), "result"),
+        ContentSlot(("usage",), "usage"),
+        ContentSlot(("shared_state",), "shared_state"),
+        ContentSlot(("evidence",), "evidence"),
+        ContentSlot(("usage_counts", "budget", "host_cost", "unit"), "usage_counts.host_cost.unit"),
+        ContentSlot(("usage_counts", "budget", "host_cost", "currency"), "usage_counts.host_cost.currency"),
     ),
     "op_unknown": (
-        (("reason",), "op_unknown_reason"),
-        (("dispatch_evidence",), "op_unknown_dispatch_evidence"),
-        (("observation",), "op_unknown_observation"),
+        ContentSlot(("reason",), "op_unknown_reason"),
+        ContentSlot(("dispatch_evidence",), "op_unknown_dispatch_evidence"),
+        ContentSlot(("observation",), "op_unknown_observation"),
     ),
     "context_compacted": (
-        (("replacement", "*"), "replacement"),
-        (("evidence_manifest",), "evidence_manifest"),
+        ContentSlot(("replacement", "*"), "replacement"),
+        ContentSlot(("evidence_manifest",), "evidence_manifest"),
     ),
-    "usage_observed": ((("usage",), "usage"), (("source",), "usage_source")),
+    "usage_observed": (ContentSlot(("usage",), "usage"), ContentSlot(("source",), "usage_source")),
     "turn_ended": (
-        (("reason",), "turn_ended_reason"),
-        (("result",), "turn_ended_result"),
-        (("budget",), "turn_ended_budget"),
+        ContentSlot(("reason",), "turn_ended_reason"),
+        ContentSlot(("result",), "turn_ended_result"),
+        ContentSlot(("budget",), "turn_ended_budget"),
+    ),
+    "boundary_recorded": (),
+}
+
+_INPUT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
+    "user": (ContentSlot(("content",), INPUT_CONTENT),),
+    "steer": (ContentSlot(("content",), INPUT_CONTENT),),
+    "follow_up": (ContentSlot(("content",), INPUT_CONTENT),),
+    "model_selection": (ContentSlot(("selection",), INPUT_SELECTION),),
+    "provider_result": (
+        ContentSlot(("result",), PROVIDER_RESULT),
+        ContentSlot(("usage",), PROVIDER_USAGE),
+        ContentSlot(("evidence",), PROVIDER_EVIDENCE),
+    ),
+    "approval_answer": (
+        ContentSlot(("scope",), APPROVAL_SCOPE),
+        ContentSlot(("reason",), APPROVAL_REASON),
+        ContentSlot(("metadata",), APPROVAL_METADATA),
+    ),
+    "child_result": (ContentSlot(("result",), CHILD_RESULT),),
+    "control": (),
+    "provider_evidence": (
+        ContentSlot(("handle", "job_id"), PROVIDER_HANDLE_JOB_ID),
+        ContentSlot(("handle", "evidence"), PROVIDER_HANDLE_EVIDENCE),
+        ContentSlot(("handle", "query_ref"), PROVIDER_HANDLE_QUERY_REF),
+        ContentSlot(("handle", "cancel_ref"), PROVIDER_HANDLE_CANCEL_REF),
     ),
 }
 
-_BOUNDARY_CONTENT_SLOTS: Mapping[str, tuple[tuple[tuple[str, ...], str], ...]] = {
-    "before_memory": ((("messages", "*"), "message"), (("shared_state",), "shared_state")),
+_BOUNDARY_CONTENT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
+    "before_memory": (ContentSlot(("messages", "*"), "message"), ContentSlot(("shared_state",), "shared_state")),
     "after_cycle": (
-        (("steering_messages", "*"), "message"),
-        (("stop", "message"), "stop_message"),
-        (("shared_state",), "shared_state"),
-        (("error",), "boundary_error"),
+        ContentSlot(("steering_messages", "*"), "message"),
+        ContentSlot(("stop", "message"), "stop_message"),
+        ContentSlot(("shared_state",), "shared_state"),
+        ContentSlot(("error",), "boundary_error"),
     ),
-    "memory_started": ((("event",), "memory_event"),),
-    "memory_completed": ((("event",), "memory_event"),),
-    "session_memory_saved": ((("state", "entries", "*", "content"), "session_memory_content"),),
+    "memory_started": (ContentSlot(("event",), "memory_event"),),
+    "memory_completed": (ContentSlot(("event",), "memory_event"),),
+    "session_memory_saved": (ContentSlot(("state", "entries", "*", "content"), "session_memory_content"),),
     "output_checked": (
-        (("reason",), "output_reason"),
-        (("value",), "output_value"),
-        (("partial_output",), "partial_output"),
+        ContentSlot(("reason",), "output_reason"),
+        ContentSlot(("value",), "output_value"),
+        ContentSlot(("partial_output",), "partial_output"),
     ),
-    "budget": ((("usage",), "budget_usage"), (("exhaustion",), "budget_exhaustion")),
+    "budget": (ContentSlot(("usage",), "budget_usage"), ContentSlot(("exhaustion",), "budget_exhaustion")),
 }
+
+
+def input_content_slots(kind: str) -> tuple[ContentSlot, ...]:
+    """Return the closed payload slots for one of the nine inbox kinds."""
+
+    return _INPUT_SLOTS[kind]
+
+
+def input_record_slots(kind: str) -> tuple[ContentSlot, ...]:
+    """Project inbox payload slots under the embedded ``input.payload`` owner path."""
+
+    return tuple(
+        ContentSlot(("input", "payload", *item.path), f"input.payload.{'.'.join(item.path)}")
+        for item in input_content_slots(kind)
+    )
+
+
+_CONTENT_SLOTS["input_applied"] = (
+    ContentSlot(("input", "actor", "attributes"), INPUT_ACTOR_ATTRIBUTES),
+    ContentSlot(("reason",), "input_reason"),
+    ContentSlot(("model_binding",), "model_binding"),
+)
 
 _REFERENCE_DIGESTS: Mapping[tuple[str, str], str] = {
     ("turn_started", "definition"): "definition_digest",
@@ -141,6 +249,39 @@ class RecordContentLink:
 class RecordContentPublication:
     records: tuple[Record, ...]
     links: tuple[DeclaredRecordContentLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredInputContentLink:
+    input_id: str
+    slot: str
+    ref: ContentRef
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedNestedContentLink:
+    slot: str
+    ref: ContentRef
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedContentValue:
+    ref: ContentRef
+    nested: tuple[PublishedNestedContentLink, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class InputContentPublication:
+    item: InboxItem
+    links: tuple[DeclaredInputContentLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCreatedContent:
+    principal: dict[str, Any]
+    workspace: ContentRef
+    attributes: ContentRef
+    nested: tuple[PublishedNestedContentLink, ...]
 
 
 def declared_content_ref(value: Any) -> ContentRef | None:
@@ -205,6 +346,104 @@ def publish_json(writer: ContentSessionWriter, value: Any) -> ContentRef:
     return writer.put_json(value) if declared is None else declared
 
 
+def publish_content_container(
+    writer: ContentSessionWriter,
+    value: Any,
+    *,
+    slot: str,
+    nested: tuple[NestedContentSlot, ...] = (),
+) -> PublishedContentValue:
+    """Publish one outer container and only its explicitly declared nested refs."""
+
+    declared = declared_content_ref(value)
+    if declared is not None:
+        if not nested:
+            return PublishedContentValue(declared)
+        content = writer.get_json(declared)
+        return PublishedContentValue(declared, _declared_nested_links(content, nested, slot))
+
+    prepared = deepcopy(value)
+    nested_links: list[PublishedNestedContentLink] = []
+    for path, nested_slot, nested_value in _expand_nested_slots(prepared, nested, slot):
+        if nested_value is _MISSING or nested_value is None:
+            continue
+        nested_ref = publish_json(writer, nested_value)
+        _set_path(prepared, path, nested_ref.to_dict())
+        nested_links.append(PublishedNestedContentLink(nested_slot, nested_ref))
+    return PublishedContentValue(writer.put_json(prepared), tuple(nested_links))
+
+
+def declare_input_content(writer: ContentSessionWriter, item: InboxItem) -> InputContentPublication:
+    """Publish provider inbox values and retain their owner-slot declarations."""
+
+    payload = deepcopy(item.payload)
+    links: list[DeclaredInputContentLink] = []
+    for content_slot in input_content_slots(item.kind):
+        for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
+            if value is _MISSING or value is None:
+                continue
+            declared = declared_content_ref(value)
+            ref = writer.assert_input(item.input_id, declared, slot) if declared is not None else writer.put_json(value)
+            _set_path(payload, path, ref.to_dict())
+            links.append(DeclaredInputContentLink(item.input_id, slot, ref))
+    return InputContentPublication(replace(item, payload=payload), tuple(links))
+
+
+def publish_session_created_content(
+    writer: ContentSessionWriter,
+    *,
+    principal: dict[str, Any],
+    workspace: Any,
+    attributes: Any,
+) -> SessionCreatedContent:
+    """Publish creation values while keeping seed messages as owned child objects."""
+
+    published_principal = copy_json(principal)
+    principal_attributes = publish_content_container(
+        writer,
+        published_principal["attributes"],
+        slot=SESSION_PRINCIPAL_ATTRIBUTES,
+        nested=_SEED_MESSAGES,
+    )
+    published_principal["attributes"] = principal_attributes.ref.to_dict()
+    workspace_ref = publish_json(writer, workspace)
+    published_attributes = publish_content_container(
+        writer,
+        attributes,
+        slot=SESSION_ATTRIBUTES,
+        nested=_SEED_MESSAGES,
+    )
+    return SessionCreatedContent(
+        principal=published_principal,
+        workspace=workspace_ref,
+        attributes=published_attributes.ref,
+        nested=principal_attributes.nested + published_attributes.nested,
+    )
+
+
+def link_declared_input_content(
+    writer: ContentSessionWriter,
+    item: InboxItem,
+) -> None:
+    """Link inbox payload and actor references after the inbox row exists."""
+
+    for content_slot in input_content_slots(item.kind):
+        for _path, slot, value in _expand_slot(item.payload, content_slot.path, content_slot.slot):
+            if value is _MISSING or value is None:
+                continue
+            ref = declared_content_ref(value)
+            if ref is None:
+                raise ValueError(f"input content slot is not a ContentRef: {item.input_id}/{slot}")
+            writer.link_input(item.input_id, ref, slot)
+
+    if item.actor is not None:
+        attributes = item.actor["attributes"]
+        ref = declared_content_ref(attributes)
+        if ref is None:
+            raise ValueError(f"input actor attributes are not a ContentRef: {item.input_id}")
+        writer.link_input(item.input_id, ref, INPUT_ACTOR_ATTRIBUTES)
+
+
 def publish_turn_started(
     writer: ContentSessionWriter,
     definition: Any,
@@ -217,7 +456,12 @@ def publish_turn_started(
     declared = declared_content_ref(definition)
     if declared is None and admission_definition_digest is not None and digest(definition) != admission_definition_digest:
         raise ValueError("child admission definition digest mismatch")
-    definition_ref = writer.put_json(definition) if declared is None else declared
+    definition_ref = publish_content_container(
+        writer,
+        definition,
+        slot="definition",
+        nested=_DEFINITION_NESTED,
+    ).ref
     budget_ref = publish_json(writer, budget)
     return TurnStartedContent(
         definition=definition_ref,
@@ -248,20 +492,25 @@ def publish_record_content(writer: ContentSessionWriter, records: Iterable[Recor
     for record in source:
         payload = deepcopy(record.payload)
         changed = False
-        for path, slot, value in _slots(record, payload=payload):
-            if value is _MISSING or value is None:
-                continue
-            ref = publish_json(writer, value)
-            _set_path(payload, path, ref.to_dict())
-            changed = True
-            key = (record.record_id, slot)
-            if key in seen_links:
-                raise ValueError(f"record content slot is declared more than once: {record.record_id}/{slot}")
-            seen_links.add(key)
-            links.append(DeclaredRecordContentLink(record.record_id, slot, ref))
-            digest_field = _REFERENCE_DIGESTS.get((record.kind, slot))
-            if digest_field is not None:
-                payload[digest_field] = reference_digest(ref)
+        for content_slot in _content_slot_specs(record.kind, payload):
+            for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
+                if value is _MISSING or value is None:
+                    continue
+                published_content = publish_content_container(
+                    writer,
+                    value,
+                    slot=slot,
+                    nested=content_slot.nested,
+                )
+                ref = published_content.ref
+                _set_path(payload, path, ref.to_dict())
+                changed = True
+                _append_record_link(record, slot, ref, links, seen_links)
+                for nested_link in published_content.nested:
+                    _append_record_link(record, nested_link.slot, nested_link.ref, links, seen_links)
+                digest_field = _REFERENCE_DIGESTS.get((record.kind, slot))
+                if digest_field is not None:
+                    payload[digest_field] = reference_digest(ref)
         published.append(replace(record, payload=payload) if changed else record)
 
     return RecordContentPublication(tuple(published), tuple(links))
@@ -322,23 +571,74 @@ def link_declared_record_content(
         )
 
 
+def _append_record_link(
+    record: Record,
+    slot: str,
+    ref: ContentRef,
+    links: list[DeclaredRecordContentLink],
+    seen_links: set[tuple[str, str]],
+) -> None:
+    key = (record.record_id, slot)
+    if key in seen_links:
+        raise ValueError(f"record content slot is declared more than once: {record.record_id}/{slot}")
+    seen_links.add(key)
+    links.append(DeclaredRecordContentLink(record.record_id, slot, ref))
+
+
+def _declared_nested_links(
+    root: Any,
+    nested: tuple[NestedContentSlot, ...],
+    outer_slot: str,
+) -> tuple[PublishedNestedContentLink, ...]:
+    links: list[PublishedNestedContentLink] = []
+    for _path, slot, value in _expand_nested_slots(root, nested, outer_slot):
+        if value is _MISSING or value is None:
+            continue
+        ref = declared_content_ref(value)
+        if ref is None:
+            raise ValueError(f"nested content slot is not a ContentRef: {slot}")
+        links.append(PublishedNestedContentLink(slot, ref))
+    return tuple(links)
+
+
+def _expand_nested_slots(
+    root: Any,
+    nested: tuple[NestedContentSlot, ...],
+    outer_slot: str,
+) -> Iterable[tuple[tuple[str, ...], str, Any]]:
+    for content_slot in nested:
+        slot = f"{outer_slot}.{content_slot.slot}"
+        yield from _expand_slot(root, content_slot.path, slot)
+
+
+def _content_slot_specs(kind: str, source: dict[str, Any]) -> tuple[ContentSlot, ...]:
+    if kind == "boundary_recorded":
+        stage = source.get("stage")
+        rules = _BOUNDARY_CONTENT_SLOTS.get(stage, ()) if isinstance(stage, str) else ()
+        return tuple(ContentSlot(("data", *content_slot.path), content_slot.slot, content_slot.nested) for content_slot in rules)
+    if kind == "input_applied":
+        input_value = source.get("input")
+        input_kind = input_value.get("kind") if isinstance(input_value, dict) else None
+        if isinstance(input_kind, str):
+            return (
+                ContentSlot(("input", "actor", "attributes"), INPUT_ACTOR_ATTRIBUTES),
+                *input_record_slots(input_kind),
+                ContentSlot(("reason",), "input_reason"),
+                ContentSlot(("model_binding",), "model_binding"),
+            )
+    try:
+        return _CONTENT_SLOTS[kind]
+    except KeyError:
+        raise ValueError(f"record kind has no closed content inventory: {kind}") from None
+
+
 def _slots(record: Record, *, payload: dict[str, Any] | None = None) -> Iterable[tuple[tuple[str, ...], str, Any]]:
     yield from _payload_slots(record.kind, record.payload if payload is None else payload)
 
 
 def _payload_slots(kind: str, source: dict[str, Any]) -> Iterable[tuple[tuple[str, ...], str, Any]]:
-    if kind == "boundary_recorded":
-        stage = source.get("stage")
-        rules = _BOUNDARY_CONTENT_SLOTS.get(stage, ()) if isinstance(stage, str) else ()
-        root = source.get("data")
-        if isinstance(root, dict):
-            for path, slot in rules:
-                for resolved, declared_slot, value in _expand_slot(root, path, slot):
-                    yield ("data", *resolved), declared_slot, value
-        return
-
-    for path, slot in _CONTENT_SLOTS.get(kind, ()):
-        yield from _expand_slot(source, path, slot)
+    for content_slot in _content_slot_specs(kind, source):
+        yield from _expand_slot(source, content_slot.path, content_slot.slot)
 
 
 def _expand_slot(
@@ -353,10 +653,16 @@ def _expand_slot(
         return
     part, remaining = path[0], path[1:]
     if part == "*":
+        if root is None:
+            yield resolved, slot, _MISSING
+            return
         if not isinstance(root, list):
             raise ValueError(f"declared content array has non-array value at {'/'.join(resolved)}")
         for index, item in enumerate(root):
             yield from _expand_slot(item, remaining, f"{slot}[{index}]", resolved=(*resolved, str(index)))
+        return
+    if root is None:
+        yield resolved, slot, _MISSING
         return
     if not isinstance(root, dict):
         raise ValueError(f"declared content slot has non-object value at {'/'.join(resolved)}")

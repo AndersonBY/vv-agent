@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 from typing import Any, cast
 
@@ -27,6 +29,16 @@ from vv_agent.kernel._content import (
     KeyProvider,
     Principal,
     SourceKind,
+)
+from vv_agent.kernel._content_publication import (
+    PROVIDER_EVIDENCE,
+    PROVIDER_HANDLE_CANCEL_REF,
+    PROVIDER_HANDLE_EVIDENCE,
+    PROVIDER_HANDLE_JOB_ID,
+    PROVIDER_HANDLE_QUERY_REF,
+    PROVIDER_RESULT,
+    PROVIDER_USAGE,
+    publish_session_created_content,
 )
 from vv_agent.kernel._content_store import DurableContentStore
 from vv_agent.kernel._records import Record, SessionSpec
@@ -59,9 +71,19 @@ _SLOTS = frozenset(
         APPROVAL_REASON,
         APPROVAL_METADATA,
         CHILD_RESULT,
+        PROVIDER_EVIDENCE,
+        PROVIDER_HANDLE_CANCEL_REF,
+        PROVIDER_HANDLE_EVIDENCE,
+        PROVIDER_HANDLE_JOB_ID,
+        PROVIDER_HANDLE_QUERY_REF,
+        PROVIDER_RESULT,
+        PROVIDER_USAGE,
     }
 )
 _PROVIDER_ATTRIBUTE = "_vv_agent_content_key_provider"
+_NESTED_SEED_MESSAGE_SLOT = re.compile(
+    r"^(?:session\.attributes|session\.principal\.attributes)\.seed\.messages\[(?:0|[1-9][0-9]*)\]$"
+)
 
 INTERNAL_LABELS = ContentLabels(source=(SourceKind.INTERNAL,), classification=Classification.INTERNAL)
 HOST_LABELS = ContentLabels(source=(SourceKind.USER,), classification=Classification.INTERNAL)
@@ -159,7 +181,7 @@ def _root_store(store: object) -> object:
 
 
 def _slot(value: str) -> str:
-    if value not in _SLOTS:
+    if value not in _SLOTS and _NESTED_SEED_MESSAGE_SLOT.fullmatch(value) is None:
         raise ValueError("content links require a stable declared slot")
     return value
 
@@ -364,7 +386,26 @@ class SessionContentWriter:
             ):
                 raise Conflict("parent session not found in tenant")
 
-            record = spec.record(_existing=Record.parse(existing_body)) if existing_body is not None else spec.record()
+            existing_record = Record.parse(existing_body) if existing_body is not None else None
+            if spec.attributes is None and existing_record is not None:
+                attributes = existing_record._payload["attributes"]
+            else:
+                attributes = spec.attributes
+            if attributes is None:
+                raise ValueError("session attributes require a ContentRef")
+            created_content = publish_session_created_content(
+                self,
+                principal=spec.principal,
+                workspace=spec.workspace,
+                attributes=attributes,
+            )
+            spec = replace(
+                spec,
+                principal=created_content.principal,
+                workspace=created_content.workspace.to_dict(),
+                attributes=created_content.attributes.to_dict(),
+            )
+            record = spec.record(_existing=existing_record) if existing_record is not None else spec.record()
             body = canonical_json_bytes({"create": record.to_dict(), "consumers": sorted(consumers)})
             manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
             if existing_body is not None:
@@ -410,9 +451,10 @@ class SessionContentWriter:
 
             self.link_record(1, principal.attributes, SESSION_PRINCIPAL_ATTRIBUTES)
             self.link_record(1, _content_ref(spec.workspace), SESSION_WORKSPACE)
-            if spec.attributes is None:
-                raise ValueError("session attributes require a ContentRef")
+            assert spec.attributes is not None
             self.link_record(1, _content_ref(spec.attributes), SESSION_ATTRIBUTES)
+            for nested in created_content.nested:
+                self.link_record(1, nested.ref, nested.slot)
             return receipt
 
 

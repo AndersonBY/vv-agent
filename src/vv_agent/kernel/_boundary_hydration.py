@@ -3,44 +3,35 @@
 from __future__ import annotations
 
 import hmac
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
 from ._budget_values import BudgetExhaustion, BudgetUsageSnapshot, RunBudgetLimits
-from ._content import (
-    APPROVAL_METADATA,
-    APPROVAL_REASON,
-    APPROVAL_SCOPE,
-    CHILD_RESULT,
-    INPUT_ACTOR_ATTRIBUTES,
-    INPUT_CONTENT,
-    INPUT_SELECTION,
-    SESSION_ATTRIBUTES,
-    SESSION_PRINCIPAL_ATTRIBUTES,
-    SESSION_WORKSPACE,
+from ._content import INPUT_ACTOR_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES
+from ._content_publication import (
+    _MISSING,
+    _REFERENCE_DIGESTS,
+    _content_slot_specs,
+    _expand_nested_slots,
+    _expand_slot,
+    declared_content_ref,
+    input_content_slots,
 )
-from ._content_publication import _REFERENCE_DIGESTS, _payload_slots, declared_content_ref
 from ._driver import CoreDriver
 from ._execution_values import AgentTask
-from ._hydration import DefinitionContent, HydrationSlot, ReferenceDigestMismatch, TypedSchemaFailure, reference_digest
+from ._hydration import (
+    DefinitionContent,
+    ReferenceDigestMismatch,
+    TypedSchemaFailure,
+    _parse_budget,
+    _parse_definition,
+    _parse_principal_attributes,
+    reference_digest,
+)
 from ._message_values import COMPACTION_METADATA_KEY, Message, validate_compaction_metadata
 from ._records import InboxItem, Record, copy_json
 from ._store import StoredRecord
-
-_DEFINITION_REF_DIGEST = "definition_digest"
-_INPUT_PATHS: Mapping[str, tuple[tuple[tuple[str, ...], str], ...]] = {
-    "user": ((("content",), INPUT_CONTENT),),
-    "steer": ((("content",), INPUT_CONTENT),),
-    "follow_up": ((("content",), INPUT_CONTENT),),
-    "model_selection": ((("selection",), INPUT_SELECTION),),
-    "approval_answer": (
-        (("scope",), APPROVAL_SCOPE),
-        (("reason",), APPROVAL_REASON),
-        (("metadata",), APPROVAL_METADATA),
-    ),
-    "child_result": ((("result",), CHILD_RESULT),),
-}
 
 
 def definition_payload(driver: CoreDriver, record: Record) -> dict[str, Any]:
@@ -92,30 +83,15 @@ def hydrate_stored_payload(
     payload = copy_json(record.payload)
     owner = f"record:{stored.seq}"
 
-    slots = list(_payload_slots(record.kind, record.payload))
-    if record.kind == "session_created":
-        slots.extend(
-            (
-                (("principal", "attributes"), SESSION_PRINCIPAL_ATTRIBUTES, None),
-                (("workspace",), SESSION_WORKSPACE, None),
-                (("attributes",), SESSION_ATTRIBUTES, None),
-            )
-        )
-    # Publication and hydration share full payload paths; boundary slots already include data.
-    for path, slot, _declared in slots:
-        try:
-            value = _path_get(payload, path)
-        except (KeyError, IndexError):
-            continue
-        if value is None:
-            continue
-        hydrated = _hydrate_declared(driver, owner, record, payload, slot, value)
-        _path_set(payload, path, hydrated)
-
-    if include_input and record.kind == "input_applied":
-        item = InboxItem(**copy_json(payload["input"]))
-        hydrated_input = _hydrate_input(driver, item)
-        payload["input"] = hydrated_input.to_dict()
+    # Publication and hydration share the same closed outer and nested path table.
+    for content_slot in _content_slot_specs(record.kind, record.payload):
+        for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
+            if not include_input and record.kind == "input_applied" and path[:1] == ("input",):
+                continue
+            if value is _MISSING or value is None:
+                continue
+            hydrated = _hydrate_declared(driver, owner, record, payload, slot, value, content_slot.nested)
+            _path_set(payload, path, hydrated)
     return payload
 
 
@@ -151,38 +127,50 @@ def _hydrate_declared(
     payload: dict[str, Any],
     slot: str,
     value: Any,
+    nested: tuple[Any, ...] = (),
 ) -> Any:
     ref = declared_content_ref(value)
     if ref is None:
         raise TypedSchemaFailure(f"{record.kind}/{slot} must be a ContentRef, not plaintext")
 
-    stored = driver.stored_record(record)
     expected = _REFERENCE_DIGESTS.get((record.kind, slot))
     if expected is not None:
         expected_value = payload.get(expected)
         if not isinstance(expected_value, str) or not hmac.compare_digest(reference_digest(ref), expected_value):
             raise ReferenceDigestMismatch(f"{record.kind}/{slot} reference digest does not match {expected}")
 
-    hydrator = driver.hydrator_for(stored.seq)
-    try:
-        typed_slot = HydrationSlot(slot)
-    except ValueError:
-        generic = driver.read_content_json(owner, slot, ref)
-        return _parse_slot(slot, generic)
-
-    typed = hydrator.hydrate(typed_slot, ref, expected_reference_digest=expected_value if expected else None)
-    return _parse_slot(slot, typed)
+    content = driver.read_content_json(owner, slot, ref)
+    for _path, nested_slot, nested_value in _expand_nested_slots(content, nested, slot):
+        if nested_value is _MISSING or nested_value is None:
+            continue
+        nested_ref = declared_content_ref(nested_value)
+        if nested_ref is None:
+            raise TypedSchemaFailure(f"{record.kind}/{nested_slot} must be a ContentRef, not plaintext")
+        _path_set(content, _path, driver.read_content_json(owner, nested_slot, nested_ref))
+    return _parse_slot(slot, content)
 
 
 def _parse_slot(slot: str, value: Any) -> Any:
     base = slot.split("[", 1)[0]
-    if base in {"definition"}:
-        if not isinstance(value, DefinitionContent):
-            raise TypedSchemaFailure("definition hydration returned the wrong type")
+    if base == SESSION_PRINCIPAL_ATTRIBUTES:
+        try:
+            return _parse_principal_attributes(value)
+        except (TypeError, ValueError) as exc:
+            raise TypedSchemaFailure("principal attributes do not match the current schema") from exc
+    if base == "definition":
+        if isinstance(value, DefinitionContent):
+            return _definition_value(value)
+        try:
+            value = _parse_definition(value)
+        except (TypeError, ValueError) as exc:
+            raise TypedSchemaFailure("definition does not match the current schema") from exc
         return _definition_value(value)
     if base == "budget":
         if not isinstance(value, RunBudgetLimits):
-            raise TypedSchemaFailure("budget hydration returned the wrong type")
+            try:
+                value = _parse_budget(value)
+            except (TypeError, ValueError) as exc:
+                raise TypedSchemaFailure("budget does not match the current schema") from exc
         return value.to_dict()
     if base in {"message", "replacement"}:
         try:
@@ -218,17 +206,19 @@ def _parse_slot(slot: str, value: Any) -> Any:
     return copy_json(value)
 
 
-def _hydrate_input(driver: CoreDriver, item: InboxItem) -> InboxItem:
+def hydrate_input(driver: CoreDriver, item: InboxItem) -> InboxItem:
+    """Hydrate one inbox item through its exact input owner and slot paths."""
+
     payload = copy_json(item.payload)
     owner = f"input:{item.input_id}"
-    for path, slot in _INPUT_PATHS.get(item.kind, ()):
-        value = _path_get(payload, path)
-        if value is None:
-            continue
-        ref = declared_content_ref(value)
-        if ref is None:
-            raise TypedSchemaFailure(f"input:{item.input_id}/{slot} must be a ContentRef, not plaintext")
-        _path_set(payload, path, driver.read_content_json(owner, slot, ref))
+    for content_slot in input_content_slots(item.kind):
+        for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
+            if value is _MISSING or value is None:
+                continue
+            ref = declared_content_ref(value)
+            if ref is None:
+                raise TypedSchemaFailure(f"input:{item.input_id}/{slot} must be a ContentRef, not plaintext")
+            _path_set(payload, path, driver.read_content_json(owner, slot, ref))
 
     actor = copy_json(item.actor)
     if actor is not None:
@@ -271,6 +261,7 @@ __all__ = [
     "definition_payload",
     "hydrate_boundary_data",
     "hydrate_context_compacted",
+    "hydrate_input",
     "hydrate_record",
     "hydrate_stored_payload",
     "hydrate_stored_record",

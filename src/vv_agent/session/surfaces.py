@@ -13,6 +13,11 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
 from vv_agent.kernel._content import ContentRef, KeyProvider
+from vv_agent.kernel._content_publication import (
+    declare_input_content,
+    link_declared_input_content,
+    publish_session_created_content,
+)
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID
 from vv_agent.memory import MemoryManager
@@ -24,12 +29,7 @@ from vv_agent.types import AgentTask, Message
 
 from .children import child_handles
 from .content_runtime import (
-    APPROVAL_METADATA,
-    APPROVAL_REASON,
-    APPROVAL_SCOPE,
-    INPUT_ACTOR_ATTRIBUTES,
     INPUT_CONTENT,
-    INPUT_SELECTION,
     SessionContentWriter,
     bind_content_key_provider,
     content_key_provider_for,
@@ -140,35 +140,8 @@ class SessionDriver:
         ContentRef.from_dict(attributes)
         return actor
 
-    @staticmethod
-    def _input_content_ref(
-        writer: SessionContentWriter,
-        input_id: str,
-        slot: str,
-        value: Any,
-    ) -> tuple[ContentRef, bool]:
-        try:
-            ref = ContentRef.from_dict(value)
-        except (TypeError, ValueError):
-            return writer.put_json(value), False
-        return writer.assert_input(input_id, ref, slot), True
-
     def _prepare_item(self, sid: str, item: InboxItem, writer: SessionContentWriter) -> InboxItem:
-        payload = dict(item.payload)
-        if item.kind in {"user", "steer", "follow_up"}:
-            ref, _ = self._input_content_ref(writer, item.input_id, INPUT_CONTENT, payload["content"])
-            payload["content"] = ref.to_dict()
-        elif item.kind == "model_selection" and payload["selection"] is not None:
-            ref, _ = self._input_content_ref(writer, item.input_id, INPUT_SELECTION, payload["selection"])
-            payload["selection"] = ref.to_dict()
-        elif item.kind == "approval_answer":
-            if payload.get("reason") is not None:
-                ref, _ = self._input_content_ref(writer, item.input_id, APPROVAL_REASON, payload["reason"])
-                payload["reason"] = ref.to_dict()
-            if payload.get("metadata") is not None:
-                ref, _ = self._input_content_ref(writer, item.input_id, APPROVAL_METADATA, payload["metadata"])
-                payload["metadata"] = ref.to_dict()
-        return replace(item, payload=payload)
+        return declare_input_content(writer, item).item
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
         with self.store.atomic() as tx:
@@ -176,11 +149,17 @@ class SessionDriver:
 
             def session_spec(content: SessionContentWriter) -> SessionSpec:
                 principal, _ = content.service_principal("local")
+                created = publish_session_created_content(
+                    content,
+                    principal=principal,
+                    workspace=str(workspace),
+                    attributes=attributes or {},
+                )
                 return SessionSpec(
                     sid,
-                    principal,
-                    content.put_json(str(workspace)).to_dict(),
-                    attributes=content.put_json(attributes or {}).to_dict(),
+                    created.principal,
+                    created.workspace.to_dict(),
+                    attributes=created.attributes.to_dict(),
                 )
 
             writer.create_session(session_spec, consumers=("events", "app_server", "traces"))
@@ -334,21 +313,7 @@ class SessionDriver:
         bound_actor = self._bound_actor(actor or item.actor, subject_id=actor_subject_id, writer=writer)
         item = replace(item, actor=bound_actor)
         receipt = tx.push(sid, item)
-        if item.kind in {"user", "steer", "follow_up"}:
-            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["content"]), INPUT_CONTENT)
-        elif item.kind == "model_selection" and item.payload["selection"] is not None:
-            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["selection"]), INPUT_SELECTION)
-        elif item.kind == "approval_answer":
-            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["scope"]), APPROVAL_SCOPE)
-            if item.payload.get("reason") is not None:
-                writer.link_input(item.input_id, ContentRef.from_dict(item.payload["reason"]), APPROVAL_REASON)
-            if item.payload.get("metadata") is not None:
-                writer.link_input(item.input_id, ContentRef.from_dict(item.payload["metadata"]), APPROVAL_METADATA)
-        writer.link_input(
-            item.input_id,
-            ContentRef.from_dict(bound_actor["attributes"]),
-            INPUT_ACTOR_ATTRIBUTES,
-        )
+        link_declared_input_content(writer, item)
         return receipt
 
     def read_input_content(

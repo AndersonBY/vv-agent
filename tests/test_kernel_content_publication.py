@@ -66,14 +66,20 @@ class _Writer:
     def __init__(self, refs: list[ContentRef]) -> None:
         self.refs = iter(refs)
         self.puts: list[object] = []
+        self.values: dict[ContentRef, object] = {}
         self.durable = _LinkStore()
 
     def put_json(self, value, *, labels=...):
         self.puts.append(deepcopy(value))
-        return next(self.refs)
+        ref = next(self.refs)
+        self.values[ref] = deepcopy(value)
+        return ref
 
     def get_json(self, ref):
-        raise AssertionError("unexpected get_json")
+        return deepcopy(self.values[ref])
+
+    def remember(self, ref: ContentRef, value: object) -> None:
+        self.values[ref] = deepcopy(value)
 
     def copy_json_from(self, source, ref):
         raise AssertionError("unexpected copy_json_from")
@@ -104,6 +110,7 @@ def test_legal_refs_are_preserved_and_only_declared_slots_are_linked() -> None:
     definition_ref = _ref("definition")
     budget_ref = _ref("budget")
     writer = _Writer([])
+    writer.remember(definition_ref, {"agent_name": "kernel", "task": {"user_prompt": "work"}})
 
     published = publish_turn_started(writer, definition_ref.to_dict(), budget_ref)
     assert published.definition == definition_ref
@@ -186,12 +193,13 @@ def test_publisher_handles_planned_and_completed_refs_and_digests() -> None:
     result = {"content": "done", "tool_calls": []}
     evidence = ["synchronous-return"]
     request_ref = _ref("request")
+    message_ref = _ref("request-message")
     tool_ref = _ref("tool")
     budget_ref = _ref("budget-admission")
     result_ref = _ref("result")
     evidence_ref = _ref("evidence")
     usage_ref = _ref("usage")
-    writer = _Writer([request_ref, budget_ref, result_ref, evidence_ref])
+    writer = _Writer([message_ref, request_ref, budget_ref, result_ref, evidence_ref])
 
     planned = _plain_record(
         "op_planned",
@@ -241,9 +249,16 @@ def test_publisher_handles_planned_and_completed_refs_and_digests() -> None:
     assert completed_payload["usage"] == usage_ref.to_dict()
     assert completed_payload["evidence"] == evidence_ref.to_dict()
     assert completed_payload["shared_state"] is None
-    assert writer.puts == [request, budget_admission, result, evidence]
+    assert writer.puts == [
+        request["messages"][0],
+        request | {"messages": [message_ref.to_dict()]},
+        budget_admission,
+        result,
+        evidence,
+    ]
     assert [(link.record_id, link.slot, link.ref) for link in publication.links] == [
         (planned.record_id, "request", request_ref),
+        (planned.record_id, "request.messages[0]", message_ref),
         (planned.record_id, "tool", tool_ref),
         (planned.record_id, "budget_admission", budget_ref),
         (completed.record_id, "result", result_ref),
@@ -279,7 +294,9 @@ def test_publisher_does_not_recursively_guess_unknown_slots() -> None:
         },
     )
 
-    publication = publish_record_content(_Writer([]), (record,))
+    writer = _Writer([])
+    writer.remember(request_ref, {"messages": []})
+    publication = publish_record_content(writer, (record,))
 
     assert publication.records[0].payload["replacement"] == {"not": "a declared op_planned slot"}
     assert {link.slot for link in publication.links} == {"request", "tool", "budget_admission"}
