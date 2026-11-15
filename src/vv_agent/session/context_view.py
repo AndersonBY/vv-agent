@@ -11,6 +11,7 @@ from vv_agent.types import Message
 
 from .compaction import memory_settings
 from .context import project_context
+from .projection import fold_hydrated_records, hydrate_input, hydrate_records, hydration_for_session_store
 from .records import InboxItem, digest
 from .reducer import Fold, _fold_factory_for
 from .store import Conflict
@@ -39,11 +40,22 @@ def context_view(store, session_id: str) -> dict[str, Any]:
             break
     else:
         raise ContextSnapshotBusy("context_snapshot_busy")
-    return project_view(session_id, records, inbox, _fold_factory=_fold_factory_for(store))
+    source_records = tuple(records)
+    hydration = hydration_for_session_store(store, session_id)
+    return project_view(
+        session_id,
+        source_records,
+        inbox,
+        _fold_factory=_fold_factory_for(store),
+        _hydration=hydration,
+        _source_records=source_records,
+    )
 
 
-def context_messages(records, state, definition, *, _fold_factory=Fold):
-    messages = project_context(records, state, _fold_factory=_fold_factory)
+def context_messages(records, state, definition, *, _fold_factory=Fold, _source_records=None):
+    source_records = tuple(records if _source_records is None else _source_records)
+    bodies = tuple(row.record.encode() for row in source_records)
+    messages = project_context(records, state, _fold_factory=_fold_factory, _record_bodies=bodies)
     attributes = records[0].record._payload["attributes"]
     if not state.turns and definition and "app_server_fork" not in attributes:
         from vv_agent.types import AgentTask
@@ -53,11 +65,18 @@ def context_messages(records, state, definition, *, _fold_factory=Fold):
     return messages
 
 
-def project_view(session_id, records, inbox=(), *, _fold_factory=Fold):
-    state = _fold_factory().extend(
-        (r.record for r in records),
-        consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
-    )
+def project_view(
+    session_id,
+    records,
+    inbox=(),
+    *,
+    _fold_factory=Fold,
+    _hydration=None,
+    _source_records=None,
+):
+    source_records = tuple(records if _source_records is None else _source_records)
+    records = hydrate_records(records, _hydration)
+    state = fold_hydrated_records(records, source_records, _fold_factory, _hydration)
     attributes = records[0].record._payload["attributes"]
     if "app_server" not in attributes:
         raise KeyError(session_id)
@@ -67,7 +86,7 @@ def project_view(session_id, records, inbox=(), *, _fold_factory=Fold):
         if r._payload["disposition"] == "queued" and key not in state.admitted_inputs
     ]
     # A consumed input can overlap the captured prefix and the later inbox read.
-    pending.extend(x.item for x in inbox if x.item.input_id not in state.applied_inputs)
+    pending.extend(hydrate_input(x.item, _hydration) for x in inbox if x.item.input_id not in state.applied_inputs)
     pending = [x for x in pending if x.kind in {"user", "steer", "follow_up", "model_selection"} and not compaction_request(x)]
     start = state.turns[next(reversed(state.turns))].start if state.turns else None
     definition = start._payload["definition"] if start else attributes.get("app_server_context")
@@ -86,7 +105,13 @@ def project_view(session_id, records, inbox=(), *, _fold_factory=Fold):
     settings = memory_settings(baseline or definition, selection) if definition else None
     manager = MemoryManager(**settings) if settings else None
     binding = effective["binding"] if effective else {}
-    messages = context_messages(records, state, definition, _fold_factory=_fold_factory)
+    messages = context_messages(
+        records,
+        state,
+        definition,
+        _fold_factory=_fold_factory,
+        _source_records=source_records,
+    )
     summary = [m for m in messages if m.name == "memory_summary"]
     instructions = [m for m in messages if m.role == "system" and m.name != "memory_summary"]
     history = [m for m in messages if m.role != "system" and m.name != "memory_summary"]
@@ -128,7 +153,13 @@ def project_view(session_id, records, inbox=(), *, _fold_factory=Fold):
             "replacedMessageCount": len(payload["prefix_ids"]),
             "summary": "\n".join(m.get("content", "") for m in payload["replacement"] if m.get("name") == "memory_summary"),
         }
-    raw = project_context(records, state, compacted=False, _fold_factory=_fold_factory)
+    raw = project_context(
+        records,
+        state,
+        compacted=False,
+        _fold_factory=_fold_factory,
+        _record_bodies=tuple(row.record.encode() for row in source_records),
+    )
     return {
         "threadId": session_id,
         **({"lineage": attributes["app_server_fork"]["lineage"]} if "app_server_fork" in attributes else {}),

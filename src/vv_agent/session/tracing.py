@@ -8,14 +8,20 @@ from dataclasses import replace
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.tracing import Span, TraceProcessor
 
+from .projection import SessionHydration, hydrate_record_payload, hydration_for_session_store
 from .records import copy_json, digest
 from .store import SessionStore, StoredRecord
 
 
-def project_spans(records: tuple[StoredRecord, ...]) -> list[tuple[int, str, Span]]:
+def project_spans(
+    records: tuple[StoredRecord, ...],
+    *,
+    hydration: SessionHydration | None = None,
+) -> list[tuple[int, str, Span]]:
     spans, deliveries, plans = {}, [], {}
     for stored in records:
-        r, p = stored.record, stored.record._payload
+        r = stored.record
+        p = hydrate_record_payload(stored, hydration)
         tid = r.turn_id
         if tid is None:
             continue
@@ -110,9 +116,13 @@ def deliver_spans(store: SessionStore, session_id: str, processors: list[TracePr
         if batch is None:
             return 0
         _, records, _ = store.read_state(session_id)
+        hydration = hydration_for_session_store(store, session_id)
         deliveries = [
             row
-            for row in project_spans(tuple(r for r in records if r.seq <= batch.through_seq))
+            for row in project_spans(
+                tuple(r for r in records if r.seq <= batch.through_seq),
+                hydration=hydration,
+            )
             if batch.from_seq <= row[0] <= batch.through_seq
         ]
         tx.ack(batch)

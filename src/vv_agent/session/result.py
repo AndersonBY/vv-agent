@@ -13,12 +13,18 @@ from vv_agent.result import RunResult
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
+    AgentTask,
     CompletionReason,
     Message,
 )
 
 from .context import project_context
-from .projection import project_records
+from .projection import (
+    fold_hydrated_records,
+    hydrate_records,
+    hydration_for_session_store,
+    project_records,
+)
 from .records import copy_json
 from .reducer import ExecutionState, _fold_factory_for
 from .runtime import Runtime
@@ -33,11 +39,21 @@ def project_result(
     runtime: Runtime | None = None,
     snapshot: tuple[ExecutionState, tuple[StoredRecord, ...], int] | None = None,
 ) -> RunResult:
-    state, records, _ = snapshot if snapshot is not None else store.read_state(session_id)
+    _, source_records, _ = snapshot if snapshot is not None else store.read_state(session_id)
+    hydration = hydration_for_session_store(store, session_id)
+    records = hydrate_records(source_records, hydration)
+    state = fold_hydrated_records(records, source_records, _fold_factory_for(store), hydration)
     turn = state.turns[turn_id]
-    task = turn.start._task()
+    task = AgentTask.from_dict(turn.start._payload["definition"]["task"])
     terminal, records = turn_result_prefix(records, turn_id)
-    messages = project_context(records, state, _fold_factory=_fold_factory_for(store))
+    source_by_id = {row.record.record_id: row for row in source_records}
+    result_bodies = tuple(source_by_id[row.record.record_id].record.encode() for row in records)
+    messages = project_context(
+        records,
+        state,
+        _fold_factory=_fold_factory_for(store),
+        _record_bodies=result_bodies,
+    )
     shared = deepcopy(task.initial_shared_state)
     for stored in records:
         r = stored.record
@@ -172,7 +188,7 @@ def project_result(
         final_output=output,
         status=status,
         raw_result=raw,
-        events=[e for e in project_records(records) if e.run_id == turn_id],
+        events=[e for e in project_records(records, hydration=hydration) if e.run_id == turn_id],
         token_usage=usage,
         run_id=turn_id,
         trace_id=turn_id,

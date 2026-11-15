@@ -17,12 +17,17 @@ from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import ContentRef
 from vv_agent.types import AgentStatus, Message
 
-from .content_runtime import INPUT_CONTENT, SESSION_ATTRIBUTES, SessionContentWriter
+from .content_runtime import SessionContentWriter
 from .context_view import context_view
-from .projection import project_records
+from .projection import (
+    SessionHydration,
+    hydrate_input,
+    hydrate_record_payload,
+    hydration_for_store,
+    project_records,
+)
 from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
@@ -169,6 +174,13 @@ class _KernelThreadStore:
         self.kernel = kernel
         self.runtimes: dict[str, Any] = {}
 
+    def _hydration(self, thread_id: str) -> SessionHydration:
+        return hydration_for_store(
+            self.kernel.store,
+            tenant_id=self.kernel.tenant_id,
+            session_id=thread_id,
+        )
+
     def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None, context=None):
         attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
         values = attributes | ({"app_server_context": context} if context is not None else {})
@@ -216,18 +228,8 @@ class _KernelThreadStore:
         }
 
     def _thread_metadata(self, thread_id, state, records):
-        attributes_ref = records[0].record.payload["attributes"]
-        try:
-            ContentRef.from_dict(attributes_ref)
-        except (TypeError, ValueError):
-            attributes = attributes_ref.get("app_server")
-        else:
-            attributes = self.kernel.read_record_content(
-                thread_id,
-                records[0].seq,
-                attributes_ref,
-                slot=SESSION_ATTRIBUTES,
-            ).get("app_server")
+        creation = hydrate_record_payload(records[0], self._hydration(thread_id))
+        attributes = creation["attributes"].get("app_server")
         if attributes is None:
             raise KeyError(thread_id)
         pending = [
@@ -265,14 +267,7 @@ class _KernelThreadStore:
         )
 
     def _input_content(self, thread_id: str, item: InboxItem) -> Any:
-        content = item.payload.get("content")
-        if not isinstance(content, dict):
-            return content
-        try:
-            ref = ContentRef.from_dict(content)
-        except (TypeError, ValueError):
-            return content
-        return self.kernel.read_input_content(thread_id, item.input_id, ref, slot=INPUT_CONTENT)
+        return hydrate_input(item, self._hydration(thread_id)).payload.get("content")
 
     def read_thread(self, thread_id):
         try:
@@ -280,6 +275,7 @@ class _KernelThreadStore:
         except KeyError:
             raise KeyError(thread_id) from None
         thread = self._thread_metadata(thread_id, state, records)
+        hydration = self._hydration(thread_id)
         turns = []
         runtime = self.runtimes.get(thread_id)
         for tid, turn in state.turns.items():
@@ -329,7 +325,7 @@ class _KernelThreadStore:
                 )
             )
         items = []
-        for event in project_records(records):
+        for event in project_records(records, hydration=hydration):
             projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
             if projection.item:
                 items.append(projection.item)
@@ -345,18 +341,7 @@ class _KernelThreadStore:
                 if authorize is not None and not authorize(sid):
                     continue
                 page = self.kernel.store.read(sid, limit=1)
-                attributes_ref = page.records[0].record._payload["attributes"]
-                try:
-                    ContentRef.from_dict(attributes_ref)
-                except (TypeError, ValueError):
-                    attributes = attributes_ref
-                else:
-                    attributes = self.kernel.read_record_content(
-                        sid,
-                        page.records[0].seq,
-                        attributes_ref,
-                        slot=SESSION_ATTRIBUTES,
-                    )
+                attributes = hydrate_record_payload(page.records[0], self._hydration(sid))["attributes"]
                 if not attributes.get("app_server"):
                     continue
                 is_archived = any(
@@ -436,6 +421,13 @@ class _KernelRunAdapter(RunAdapter):
         self._notification_stop = threading.Event()
         self._notification_thread: threading.Thread | None = None
         self.kernel._on_close(self.close)
+
+    def _hydration(self, thread_id: str) -> SessionHydration:
+        return hydration_for_store(
+            self.kernel.store,
+            tenant_id=self.kernel.tenant_id,
+            session_id=thread_id,
+        )
 
     def subscribe(self, thread_id, connection_id):
         state, records, _ = self.kernel.store.read_state(thread_id)
@@ -573,7 +565,10 @@ class _KernelRunAdapter(RunAdapter):
                     )
             if rows:
                 sequences = {row.seq for row in rows}
-                for event in project_records(self.kernel.store.projection_context(sid, rows)):
+                for event in project_records(
+                    self.kernel.store.projection_context(sid, rows),
+                    hydration=self._hydration(sid),
+                ):
                     if event.metadata["session_seq"] not in sequences:
                         continue
                     projection = map_run_event(event, thread_id=sid, turn_id=event.run_id)
@@ -625,18 +620,8 @@ class _KernelRunAdapter(RunAdapter):
                 if initial_id
                 else (InboxItem(**queued) if queued else pending)
             )
-            if item is not None and isinstance(item.payload.get("content"), dict):
-                try:
-                    content_ref = ContentRef.from_dict(item.payload["content"])
-                except (TypeError, ValueError):
-                    content = item.payload["content"]
-                else:
-                    content = self.kernel.read_input_content(
-                        thread_id,
-                        item.input_id,
-                        content_ref,
-                        slot=INPUT_CONTENT,
-                    )
+            if item is not None:
+                content = hydrate_input(item, self._hydration(thread_id)).payload.get("content")
         metadata = thread.metadata | (content.get("app_server", {}).get("metadata", {}) if content else {})
         agent = self._host.resolve_agent(AgentResolutionRequest(thread_id, thread.agent_key, thread.cwd, metadata))
         config = self._host.build_run_config(RunConfigResolutionRequest(thread_id, thread.agent_key, thread.cwd, metadata))
@@ -992,19 +977,9 @@ class _KernelRunAdapter(RunAdapter):
         previous = self.kernel._retained_reply(thread_id, input_id)
         if previous:
             retained = previous[1]
-            retained_content = retained.payload.get("content")
-            if isinstance(retained_content, dict):
-                try:
-                    retained_ref = ContentRef.from_dict(retained_content)
-                except (TypeError, ValueError):
-                    retained_content = retained_content
-                else:
-                    retained_content = self.kernel.read_input_content(
-                        previous[0],
-                        retained.input_id,
-                        retained_ref,
-                        slot=INPUT_CONTENT,
-                    )
+            retained_content = hydrate_input(retained, self._hydration(previous[0])).payload.get("content")
+            if not isinstance(retained_content, dict):
+                raise SubmissionConflict("submission_conflict")
             original = (
                 {"kind": "respond", **retained_content["metadata"]["interaction_response"]}
                 if retained.kind == "user"

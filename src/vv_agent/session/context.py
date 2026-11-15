@@ -26,6 +26,7 @@ def project_context(
     _task: AgentTask | None = None,
     _seen_turn: bool = False,
     _fold_factory: Callable[[], CoreFold] | None = None,
+    _record_bodies: Sequence[bytes] | None = None,
 ) -> list[Message]:
     if (
         compacted
@@ -39,7 +40,7 @@ def project_context(
         logical = [row.record for row in records]
         inputs = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
         factory = Fold if _fold_factory is None else _fold_factory
-        state = factory().extend(logical, consumed_inputs=inputs)
+        state = factory().extend(logical, consumed_inputs=inputs, bodies=_record_bodies)
         return _project_context(records, state)
     return _project_context(
         records,
