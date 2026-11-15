@@ -6,6 +6,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Any, Protocol
 
+from vv_agent.kernel._content import ContentSessionWriter
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import ContentReader, MissingContentLink, SessionHydrator
 from vv_agent.kernel._lease_scope import Clock
@@ -13,7 +14,7 @@ from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx
-from vv_agent.kernel._store import Conflict, Lease, SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, SessionStore, SessionTx, StoredRecord
 
 
 class DriverLeaseScope(Protocol):
@@ -149,6 +150,16 @@ class CoreDriver:
         else:
             raise ValueError("record_owner must be a positive record sequence or input id")
         return SessionHydrator(reader, tenant_id=tenant_id, session_id=self.sid, owner=owner)
+
+    def content_writer(self, tx: SessionTx | None = None) -> ContentSessionWriter:
+        """Return a writer bound to the caller-owned transaction, when it carries content capability."""
+
+        if not isinstance(tx, ContentSessionTx):
+            raise ValueError("session content writer requires an outer transaction with ContentSessionTx capability")
+        tenant_id = getattr(self.store, "tenant_id", None)
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise ValueError("session content writer requires a store with a non-empty tenant binding")
+        return tx.content_writer(tenant_id=tenant_id, session_id=self.sid)
 
     def _task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
