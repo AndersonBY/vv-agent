@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
 from vv_agent.events import RunEvent
+from vv_agent.kernel._child_store import input_content_ref, service_principal
 from vv_agent.result import RunResult
 from vv_agent.session.children import cancel_children, child_delivery, child_handles
 from vv_agent.session.events import SessionRunEventStore
@@ -291,7 +292,16 @@ class RunHandle:
             state, _, _ = self.kernel.store.read_state(self.session_id)
             if state.active_turn_id != self.run_id:
                 return False
-            receipt = tx.push(self.session_id, InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id))
+            receipt = tx.push(
+                self.session_id,
+                InboxItem(
+                    f"cancel/{self.run_id}",
+                    "control",
+                    {"action": "cancel"},
+                    self.run_id,
+                    actor=service_principal(self.kernel.tenant_id, "run-handle"),
+                ),
+            )
             cancel_children(self.kernel.store, tx, state, self.session_id, self.run_id)
         return not receipt.replayed
 
@@ -308,17 +318,55 @@ class RunHandle:
         return RunHandleState("cancelled" if cancelled else result.status.value, True, cancelled)
 
     def approve(self, request_id: str, decision) -> None:
-        self.kernel.approve(self.session_id, self.runtime, request_id, decision, f"approval/{request_id}/answer")
+        self.kernel.approve(
+            self.session_id,
+            self.runtime,
+            request_id,
+            decision,
+            f"approval/{request_id}/answer",
+            actor=service_principal(self.kernel.tenant_id, "run-handle"),
+        )
 
     def steer(self, message: str) -> None:
-        self.kernel.push(self.session_id, InboxItem(uuid4().hex, "steer", {"content": message}, self.run_id))
+        input_id = uuid4().hex
+        self.kernel.push(
+            self.session_id,
+            InboxItem(
+                input_id,
+                "steer",
+                {
+                    "content": input_content_ref(
+                        message,
+                        slot=f"session/{self.session_id}/input/{input_id}",
+                        tenant_id=self.kernel.tenant_id,
+                    )
+                },
+                self.run_id,
+                actor=service_principal(self.kernel.tenant_id, "run-handle"),
+            ),
+        )
 
     def follow_up(self, message: str) -> None:
-        self.kernel.push(self.session_id, InboxItem(uuid4().hex, "follow_up", {"content": message}))
+        input_id = uuid4().hex
+        self.kernel.push(
+            self.session_id,
+            InboxItem(
+                input_id,
+                "follow_up",
+                {
+                    "content": input_content_ref(
+                        message,
+                        slot=f"session/{self.session_id}/input/{input_id}",
+                        tenant_id=self.kernel.tenant_id,
+                    )
+                },
+                actor=service_principal(self.kernel.tenant_id, "run-handle"),
+            ),
+        )
 
     def resume(self, state_or_token=None, payload=None) -> RunResult:
         if state_or_token is not None or payload is not None:
             raise ValueError("resume uses the retained session and turn without new input")
         from vv_agent.session.surfaces import resume_turn
 
-        return resume_turn(self.session_id, self.run_id)
+        return resume_turn(self.session_id, self.run_id, tenant_id=self.kernel.tenant_id)

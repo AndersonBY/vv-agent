@@ -16,7 +16,12 @@ from vv_agent.config import project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.kernel._child_delegation import error as error
 from vv_agent.kernel._child_delegation import success as success
-from vv_agent.kernel._child_store import ordinary_result_for_children
+from vv_agent.kernel._child_store import (
+    _store_tenant_id,
+    input_content_ref,
+    ordinary_result_for_children,
+    service_principal,
+)
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -440,7 +445,17 @@ class ChildTasks:
         turn_id = state.active_turn_id or h["turn_id"]
         generation = state.turns[turn_id].start._payload["generation"] if turn_id in state.turns else h["generation"]
         with self.store.atomic() as tx:
-            tx.push(task_id, InboxItem(input_id, kind, payload, turn_id, generation))
+            tx.push(
+                task_id,
+                InboxItem(
+                    input_id,
+                    kind,
+                    payload,
+                    turn_id,
+                    generation,
+                    actor=service_principal(_store_tenant_id(self.store), "child-tasks"),
+                ),
+            )
 
     def message(self, task_id: str, input_id: str, text: str) -> str:
         if self.get(task_id) is None:
@@ -451,8 +466,12 @@ class ChildTasks:
         previous = InboxItem(**applied._payload["input"]) if applied else pending
         if previous is not None:
             content = previous.payload.get("content")
-            previous_text = content.get("text") if isinstance(content, dict) else content
-            if previous_text != text:
+            expected_content = input_content_ref(
+                text,
+                slot=f"session/{task_id}/input/{input_id}",
+                tenant_id=_store_tenant_id(self.store),
+            )
+            if content != expected_content:
                 raise Conflict("child message id reused with different content")
             with self.store.atomic() as tx:
                 tx.push(task_id, previous)
@@ -460,9 +479,24 @@ class ChildTasks:
         target = state.active_turn_id
         generation = state.turns[target].start._payload["generation"] if target else None
         action = "message_queued" if target else "continued"
-        kind, payload = ("steer", {"content": text}) if target else ("follow_up", {"content": text})
+        content = input_content_ref(
+            text,
+            slot=f"session/{task_id}/input/{input_id}",
+            tenant_id=_store_tenant_id(self.store),
+        )
+        kind, payload = ("steer", {"content": content}) if target else ("follow_up", {"content": content})
         with self.store.atomic() as tx:
-            tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
+            tx.push(
+                task_id,
+                InboxItem(
+                    input_id,
+                    kind,
+                    payload,
+                    target,
+                    generation,
+                    actor=service_principal(_store_tenant_id(self.store), "child-tasks"),
+                ),
+            )
         self.runtime.wake(task_id)
         self.runtime.hook("after_input", None)
         return action

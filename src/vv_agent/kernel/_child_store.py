@@ -5,13 +5,70 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Any
 
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, Principal
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._state import child_handles as child_handles
-from vv_agent.kernel._store import SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._store import DEFAULT_TENANT_ID, SessionStore, SessionTx, StoredRecord
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
+
+
+def local_content_ref(value: Any, *, slot: str, tenant_id: str = DEFAULT_TENANT_ID) -> dict[str, Any]:
+    """Return the local adapter's deterministic S1 reference for clear runtime data."""
+    body = canonical_json_bytes(value)
+    identity = canonical_json_bytes({"slot": slot, "tenant_id": tenant_id, "value": value})
+    return ContentRef(
+        content_id="content/local/" + sha256(identity).hexdigest(),
+        mac=sha256(body).hexdigest(),
+        size=len(body),
+        key_id="key/local/" + sha256(tenant_id.encode()).hexdigest(),
+        labels=ContentLabels(classification=Classification.INTERNAL),
+    ).to_dict()
+
+
+def input_content_ref(value: Any, *, slot: str, tenant_id: str = DEFAULT_TENANT_ID) -> dict[str, Any]:
+    """Normalize runtime content to the S1 reference form accepted by inbox schemas."""
+    try:
+        ContentRef.from_dict(value)
+    except (TypeError, ValueError):
+        return local_content_ref(value, slot=slot, tenant_id=tenant_id)
+    return value
+
+
+def is_content_ref(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        ContentRef.from_dict(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def service_principal(tenant_id: str, subject_id: str, *, attributes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a trusted local service identity for inputs without a host-authenticated user."""
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise ValueError("tenant_id must be a non-empty string")
+    if not isinstance(subject_id, str) or not subject_id:
+        raise ValueError("subject_id must be a non-empty string")
+    value = attributes if attributes is not None else {"role": subject_id}
+    return Principal(
+        tenant_id=tenant_id,
+        subject_id=subject_id,
+        subject_kind="service",
+        attributes=ContentRef.from_dict(local_content_ref(value, slot=f"principal/{subject_id}/attributes", tenant_id=tenant_id)),
+    ).to_dict()
+
+
+def _store_tenant_id(store: SessionStore) -> str:
+    tenant_id = getattr(store, "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise ValueError("session store must expose a non-empty tenant binding")
+    return tenant_id
 
 
 @dataclass(frozen=True)
@@ -72,6 +129,7 @@ def cancel_children(store: SessionStore, tx: SessionTx, state: ExecutionState, s
                             {"action": "cancel"},
                             child_tid,
                             child_turn.start._payload["generation"] if child_turn else handle["generation"],
+                            actor=service_principal(_store_tenant_id(store), "child-control"),
                         ),
                     )
     return []
@@ -92,22 +150,50 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
         "generation": child.generation,
         "background": child.background,
     }
+    attributes = child.spec.attributes
+    if is_content_ref(attributes):
+        raise ValueError("child admission attributes require content hydration before adding child_handle")
+    attributes = dict(attributes or {}) | {"child_handle": handle}
+    tenant_id = child.spec.principal["tenant_id"]
+    tx_store = getattr(tx, "store", None)
+    if tx_store is not None and _store_tenant_id(tx_store) != tenant_id:
+        raise ValueError("child principal must use the parent transaction tenant")
     tx.create(
         replace(
             child.spec,
             parent_session_id=plan.session_id,
             parent_operation_id=plan.operation_id,
-            attributes=dict(child.spec.attributes or {}) | {"child_handle": handle},
+            attributes=local_content_ref(
+                attributes,
+                slot=f"session/{child.spec.session_id}/attributes",
+                tenant_id=tenant_id,
+            ),
         ),
         consumers=(*child.consumers, "child_delivery"),
     )
-    tx.push(child.spec.session_id, InboxItem("start", "user", {"content": child.content}, generation=child.generation))
+    tx.push(
+        child.spec.session_id,
+        InboxItem(
+            "start",
+            "user",
+            {
+                "content": input_content_ref(
+                    child.content,
+                    slot=f"session/{child.spec.session_id}/input/start",
+                    tenant_id=tenant_id,
+                )
+            },
+            generation=child.generation,
+            actor=service_principal(tenant_id, "child-admission"),
+        ),
+    )
     return handle
 
 
-def completion_input(handle: dict[str, Any], terminal: StoredRecord) -> InboxItem:
+def completion_input(handle: dict[str, Any], terminal: StoredRecord, *, actor: dict[str, Any] | None = None) -> InboxItem:
     target = handle["delivery_target"]
     record = terminal.record
+    actor = actor or service_principal(DEFAULT_TENANT_ID, "child-delivery")
     return InboxItem(
         f"child/{handle['session_id']}/{record.record_id}",
         "child_result",
@@ -123,6 +209,7 @@ def completion_input(handle: dict[str, Any], terminal: StoredRecord) -> InboxIte
         },
         target["turn_id"],
         target["generation"],
+        actor=actor,
     )
 
 
@@ -135,10 +222,11 @@ def child_delivery(
         return 0
     created = store.read(session_id, limit=1).records[0].record
     handle = created.payload["attributes"]["child_handle"]
+    actor = service_principal(_store_tenant_id(store), "child-delivery")
     for terminal in batch.records:
         if terminal.record.kind == "turn_ended" and terminal.record.turn_id == handle["turn_id"]:
             hook("before_parent_inbox")
-            tx.push(created.payload["parent_session_id"], completion_input(handle, terminal))
+            tx.push(created.payload["parent_session_id"], completion_input(handle, terminal, actor=actor))
             hook("after_parent_inbox")
     tx.ack(batch)
     hook("after_child_ack")
@@ -174,7 +262,7 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
     if r.kind != "turn_ended" or r.turn_id != p["turn_id"] or r.digest != p["terminal_digest"]:
         return None
     # Canonical input bytes distinguish JSON values such as true and 1.
-    expected = completion_input(handle, terminal)
+    expected = completion_input(handle, terminal, actor=service_principal(_store_tenant_id(store), "child-delivery"))
     if (
         replace(expected, input_id=item.input_id, available_ms=item.available_ms, generation=item.generation).encode()
         != item.encode()

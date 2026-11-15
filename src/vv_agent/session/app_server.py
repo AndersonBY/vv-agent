@@ -17,6 +17,7 @@ from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._child_store import input_content_ref, local_content_ref, service_principal
 from vv_agent.types import AgentStatus, Message
 
 from .context_view import context_view
@@ -169,14 +170,21 @@ class _KernelThreadStore:
 
     def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None, context=None):
         attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
+        principal = service_principal(self.kernel.tenant_id, "app-server")
+        workspace = local_content_ref(cwd or ".", slot=f"session/{input_id}/workspace", tenant_id=self.kernel.tenant_id)
+        attributes_ref = local_content_ref(
+            attributes | ({"app_server_context": context} if context is not None else {}),
+            slot=f"session/{input_id}/attributes",
+            tenant_id=self.kernel.tenant_id,
+        )
         try:
             with self.kernel.store.atomic() as tx:
                 receipt = tx.create(
                     SessionSpec(
                         input_id,
-                        "local",
-                        cwd or ".",
-                        attributes=attributes | ({"app_server_context": context} if context is not None else {}),
+                        principal,
+                        workspace,
+                        attributes=attributes_ref,
                     ),
                     consumers=("events", "app_server", "traces"),
                 )
@@ -184,24 +192,23 @@ class _KernelThreadStore:
         except Conflict:
             # Retry with the winning node's frozen context; tx.create owns replay.
             creation = self.kernel.store.read(input_id, limit=1).records[0].record._payload
-            prior = creation["attributes"]
             with self.kernel.store.atomic() as tx:
                 receipt = tx.create(
                     SessionSpec(
                         input_id,
-                        "local",
-                        cwd or ".",
-                        attributes=attributes
-                        | ({"app_server_context": prior["app_server_context"]} if "app_server_context" in prior else {}),
+                        creation["principal"],
+                        creation["workspace"],
+                        attributes=creation["attributes"],
                     ),
                     consumers=("events", "app_server", "traces"),
                 )
             replayed = receipt.replayed
+        state, _, _ = self.kernel.store.read_state(input_id)
         return {
             "threadId": input_id,
             "agentKey": agent_key,
             "cwd": cwd,
-            "status": self.read_thread(input_id).thread.status,
+            "status": project_thread_status(state, now_ms=self.clock.now_ms()).value,
             "accepted": True,
             "replayed": replayed,
         }
@@ -600,6 +607,12 @@ class _KernelRunAdapter(RunAdapter):
 
     def submit_input(self, *, connection_id, thread_id, input_id, expected_turn_id, kind, input, metadata=None):
         content = _content(self, input, metadata or {}, kind, expected_turn_id)
+        actor = service_principal(self.kernel.tenant_id, "app-server")
+        content_ref = input_content_ref(
+            content,
+            slot=f"session/{thread_id}/input/{input_id}",
+            tenant_id=self.kernel.tenant_id,
+        )
         try:
             while True:
                 state, records, _ = self.kernel.store.read_state(thread_id)
@@ -612,13 +625,9 @@ class _KernelRunAdapter(RunAdapter):
                         retained = stored.item
                         if retained.kind != ("user" if kind == "start" else kind):
                             raise SubmissionConflict("submission_conflict")
-                        original = retained.payload["content"]
-                        if not isinstance(original, dict) or canonical_json_bytes(
-                            original.get("app_server")
-                        ) != canonical_json_bytes(content["app_server"]):
+                        if canonical_json_bytes(retained.payload["content"]) != canonical_json_bytes(content_ref):
                             raise SubmissionConflict("submission_conflict")
                         item = retained
-                        content = original
                     else:
                         if state.closed or state.archived:
                             raise TurnMismatch("Thread is closed or archived")
@@ -644,9 +653,10 @@ class _KernelRunAdapter(RunAdapter):
                         item = InboxItem(
                             input_id,
                             "user" if kind == "start" else kind,
-                            {"content": content},
+                            {"content": content_ref},
                             expected_turn_id if kind == "steer" else None,
                             state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
+                            actor=actor,
                         )
                     receipt = self.kernel.push(thread_id, item)
                     break
@@ -839,13 +849,18 @@ class _KernelRunAdapter(RunAdapter):
             request_id,
             "user",
             {
-                "content": {
-                    "text": "",
-                    "messages": [],
-                    "metadata": {"request_compaction": True},
-                    "app_server_compaction": params,
-                }
+                "content": input_content_ref(
+                    {
+                        "text": "",
+                        "messages": [],
+                        "metadata": {"request_compaction": True},
+                        "app_server_compaction": params,
+                    },
+                    slot=f"session/{thread_id}/input/{request_id}",
+                    tenant_id=self.kernel.tenant_id,
+                )
             },
+            actor=service_principal(self.kernel.tenant_id, "app-server"),
         )
         try:
             while True:
@@ -890,7 +905,15 @@ class _KernelRunAdapter(RunAdapter):
     def select_model(self, *, thread_id, input_id, selection):
         self._store.read_thread(thread_id)
         try:
-            self.kernel.push(thread_id, InboxItem(input_id, "model_selection", {"selection": selection}))
+            self.kernel.push(
+                thread_id,
+                InboxItem(
+                    input_id,
+                    "model_selection",
+                    {"selection": selection},
+                    actor=service_principal(self.kernel.tenant_id, "app-server"),
+                ),
+            )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         return {"threadId": thread_id, "inputId": input_id, "accepted": True}
@@ -952,8 +975,16 @@ class _KernelRunAdapter(RunAdapter):
             _, agent, config = self._binding(thread_id)
             runtime = self.kernel.runtime(agent, config)
         try:
+            actor = service_principal(self.kernel.tenant_id, "app-server")
             if action["kind"] == "respond":
-                receipt = self.kernel.answer(thread_id, runtime, target, InteractionAnswer.from_dict(action["answer"]), input_id)
+                receipt = self.kernel.answer(
+                    thread_id,
+                    runtime,
+                    target,
+                    InteractionAnswer.from_dict(action["answer"]),
+                    input_id,
+                    actor=actor,
+                )
             else:
                 receipt = self.kernel.push(
                     thread_id,
@@ -963,6 +994,7 @@ class _KernelRunAdapter(RunAdapter):
                         {"action": action["kind"]},
                         turn_id,
                         state.turns[turn_id].start._payload["generation"],
+                        actor=actor,
                     ),
                 )
         except Conflict as exc:
@@ -986,7 +1018,14 @@ class _KernelRunAdapter(RunAdapter):
         _, agent, config = self._binding(thread_id)
         runtime = self._store.runtimes.get(thread_id) or self.kernel.runtime(agent, config)
         try:
-            self.kernel.approve(thread_id, runtime, request_id, ApprovalDecision(**decision), f"approval/{request_id}/answer")
+            self.kernel.approve(
+                thread_id,
+                runtime,
+                request_id,
+                ApprovalDecision(**decision),
+                f"approval/{request_id}/answer",
+                actor=service_principal(self.kernel.tenant_id, "app-server"),
+            )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         active = self._state_manager.active_turn(thread_id)

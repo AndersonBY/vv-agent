@@ -11,7 +11,9 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
+from vv_agent.kernel._child_store import input_content_ref, local_content_ref, service_principal
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
+from vv_agent.kernel._store import DEFAULT_TENANT_ID
 from vv_agent.memory import MemoryManager
 from vv_agent.model import resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
@@ -29,18 +31,40 @@ from .runtime import Runtime
 from .sqlite import SQLiteStore
 from .store import Conflict, SessionStore
 
-_DRIVERS: WeakValueDictionary[str, SessionDriver] = WeakValueDictionary()
+_DRIVERS: WeakValueDictionary[tuple[str, str], SessionDriver] = WeakValueDictionary()
 _STORE_CLOSERS: WeakKeyDictionary[SessionStore, list[Any]] = WeakKeyDictionary()
 
 
 class SessionDriver:
-    def __init__(self, path: str | Path = ":memory:", *, store: SessionStore | None = None, model_resolver=None) -> None:
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        *,
+        store: SessionStore | None = None,
+        tenant_id: str | None = None,
+        model_resolver=None,
+    ) -> None:
         self.model_resolver = model_resolver
         self._owns_store = store is None
-        self.store = store if store is not None else SQLiteStore(str(path))
-        self.path = self.store.path if isinstance(self.store, CoreSQLiteStore) else None
-        if isinstance(self.store, CoreSQLiteStore) and not self.store.connection.execute("PRAGMA user_version").fetchone()[0]:
-            self.store.install_schema()
+        self._root_store = store if store is not None else SQLiteStore(str(path))
+        bound_tenant = getattr(self._root_store, "tenant_id", None)
+        if tenant_id is None:
+            if store is None:
+                tenant_id = DEFAULT_TENANT_ID
+            elif isinstance(bound_tenant, str) and bound_tenant:
+                tenant_id = bound_tenant
+            else:
+                raise ValueError("tenant_id is required for a session store without a tenant binding")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise ValueError("tenant_id must be a non-empty string")
+        self.tenant_id = tenant_id
+        self.store = self._root_store if bound_tenant == self.tenant_id else self._root_store.for_tenant(self.tenant_id)
+        self.path = self._root_store.path if isinstance(self._root_store, CoreSQLiteStore) else None
+        if (
+            isinstance(self._root_store, CoreSQLiteStore)
+            and not self._root_store.connection.execute("PRAGMA user_version").fetchone()[0]
+        ):
+            self._root_store.install_schema()
         self.handles: list[RunHandle] = []
         self._background: dict[str, RunHandle] = {}
         self._background_lock = RLock()
@@ -55,26 +79,55 @@ class SessionDriver:
     def close(self) -> None:
         for handle in self.handles:
             handle.join()
-        callbacks = _STORE_CLOSERS.pop(self.store, []) if self._owns_store else list(self._close_callbacks)
+        callbacks = _STORE_CLOSERS.pop(self._root_store, []) if self._owns_store else list(self._close_callbacks)
         for callback in callbacks:
             callback()
-            retained = _STORE_CLOSERS.get(self.store, [])
+            retained = _STORE_CLOSERS.get(self._root_store, [])
             if callback in retained:
                 retained.remove(callback)
         self._close_callbacks.clear()
-        if self._owns_store and isinstance(self.store, CoreSQLiteStore):
-            with self.store._connection_lock:
-                self.store.connection.close()
+        if self._owns_store and isinstance(self._root_store, CoreSQLiteStore):
+            with self._root_store._connection_lock:
+                self._root_store.connection.close()
 
     def _on_close(self, callback):
         self._close_callbacks.append(callback)
-        _STORE_CLOSERS.setdefault(self.store, []).append(callback)
+        _STORE_CLOSERS.setdefault(self._root_store, []).append(callback)
+
+    def _bound_actor(self, actor: dict[str, Any] | None, *, subject_id: str) -> dict[str, Any]:
+        if actor is None:
+            return service_principal(self.tenant_id, subject_id)
+        if not isinstance(actor, dict) or actor.get("tenant_id") != self.tenant_id:
+            raise ValueError("input actor must use the session tenant")
+        return actor
+
+    def _prepare_item(self, sid: str, item: InboxItem) -> InboxItem:
+        payload = dict(item.payload)
+        if item.kind in {"user", "steer", "follow_up"}:
+            payload["content"] = input_content_ref(
+                payload["content"],
+                slot=f"session/{sid}/input/{item.input_id}",
+                tenant_id=self.tenant_id,
+            )
+        elif item.kind == "model_selection" and payload["selection"] is not None:
+            payload["selection"] = input_content_ref(
+                payload["selection"],
+                slot=f"session/{sid}/input/{item.input_id}/selection",
+                tenant_id=self.tenant_id,
+            )
+        return replace(item, payload=payload)
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
-        _DRIVERS[sid] = self
-        spec = SessionSpec(sid, "local", workspace, attributes=attributes)
+        principal = self._bound_actor(None, subject_id="local")
+        spec = SessionSpec(
+            sid,
+            principal,
+            local_content_ref(str(workspace), slot=f"session/{sid}/workspace", tenant_id=self.tenant_id),
+            attributes=local_content_ref(attributes or {}, slot=f"session/{sid}/attributes", tenant_id=self.tenant_id),
+        )
         with self.store.atomic() as tx:
             tx.create(spec, consumers=("events", "app_server", "traces"))
+        _DRIVERS[(self.tenant_id, sid)] = self
 
     def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
 
@@ -130,6 +183,7 @@ class SessionDriver:
         task: AgentTask | None = None,
         consumer: str = "events",
         autostart: bool = True,
+        actor: dict[str, Any] | None = None,
     ) -> RunHandle:
         state, _, _ = self.store.read_state(sid)
         if state.turns and config.shared_state is None:
@@ -142,7 +196,8 @@ class SessionDriver:
             raise RuntimeError("session is closed or archived")
         if content is not None:
             identity = input_id or uuid4().hex
-            self.push(sid, InboxItem(identity, "user", {"content": content}))
+            input_actor = self._bound_actor(actor, subject_id="local")
+            self.push(sid, InboxItem(identity, "user", {"content": content}, actor=input_actor), actor=input_actor)
             tid = f"{sid}/turn/{identity}"
         else:
             queued = next(
@@ -174,14 +229,29 @@ class SessionDriver:
             handle.start()
         return handle
 
-    def push(self, sid: str, item: InboxItem):
+    def push(self, sid: str, item: InboxItem, *, actor: dict[str, Any] | None = None):
+        item = self._prepare_item(sid, item)
+        item = replace(item, actor=self._bound_actor(actor or item.actor, subject_id="local"))
         with self.store.atomic() as tx:
             return tx.push(sid, item)
 
-    def control(self, sid: str, action: str, input_id: str, *, runtime: Runtime | None = None):
+    def control(
+        self,
+        sid: str,
+        action: str,
+        input_id: str,
+        *,
+        runtime: Runtime | None = None,
+        actor: dict[str, Any] | None = None,
+    ):
         state, _, _ = self.store.read_state(sid)
         tid = None if action in {"archive", "close"} else state.active_turn_id
-        receipt = self.push(sid, InboxItem(input_id, "control", {"action": action}, tid))
+        input_actor = self._bound_actor(actor, subject_id="local-control")
+        receipt = self.push(
+            sid,
+            InboxItem(input_id, "control", {"action": action}, tid, actor=input_actor),
+            actor=input_actor,
+        )
         if runtime is None and state.active_turn_id is None:
             runtime = self._control_runtime(sid)
         if runtime is not None:
@@ -248,7 +318,16 @@ class SessionDriver:
                         seen.add(child_id)
         return found
 
-    def answer(self, sid: str, runtime: Runtime, target, answer, input_id: str):
+    def answer(
+        self,
+        sid: str,
+        runtime: Runtime,
+        target,
+        answer,
+        input_id: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ):
         from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 
         from .interactions import InteractionError, reply_content, validate_reply
@@ -261,7 +340,15 @@ class SessionDriver:
         except ToolResultReadError:
             raise InteractionError("stale_interaction") from None
         previous = self._retained_reply(sid, input_id)
-        item = InboxItem(input_id, "user", {"content": reply_content(target, answer)}, target.turn_id, target.generation)
+        item = InboxItem(
+            input_id,
+            "user",
+            {"content": reply_content(target, answer)},
+            target.turn_id,
+            target.generation,
+            actor=self._bound_actor(actor, subject_id="interaction-reply"),
+        )
+        item = self._prepare_item(target.session_id, item)
         if previous:
             if previous[0] != target.session_id or previous[1].encode() != item.encode():
                 raise Conflict("input_id reused with different bytes")
@@ -284,7 +371,16 @@ class SessionDriver:
                     raise InteractionError("stale_interaction")
             return self.push(target.session_id, item)
 
-    def approve(self, sid: str, runtime: Runtime, request_id: str, decision: ApprovalDecision | str, input_id: str):
+    def approve(
+        self,
+        sid: str,
+        runtime: Runtime,
+        request_id: str,
+        decision: ApprovalDecision | str,
+        input_id: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ):
         if isinstance(decision, str):
             decision = ApprovalDecision.from_input(decision)
         previous = self._retained_reply(sid, input_id)
@@ -313,8 +409,14 @@ class SessionDriver:
         return self.push(
             target,
             InboxItem(
-                input_id, "approval_answer", payload, wait["turn_id"], state.turns[wait["turn_id"]].start._payload["generation"]
+                input_id,
+                "approval_answer",
+                payload,
+                wait["turn_id"],
+                state.turns[wait["turn_id"]].start._payload["generation"],
+                actor=self._bound_actor(actor, subject_id="approval"),
             ),
+            actor=actor,
         )
 
     def _retained_reply(self, sid: str, input_id: str):
@@ -334,12 +436,12 @@ class SessionDriver:
         return None
 
 
-def resume_turn(session_id: str, turn_id: str) -> RunResult:
+def resume_turn(session_id: str, turn_id: str, *, tenant_id: str = DEFAULT_TENANT_ID) -> RunResult:
     from .bindings import MissingHostBinding
 
     if not isinstance(session_id, str) or not isinstance(turn_id, str):
         raise TypeError("resume requires session_id and turn_id strings")
-    driver = _DRIVERS.get(session_id)
+    driver = _DRIVERS.get((tenant_id, session_id))
     if driver is None:
         raise MissingHostBinding("resume requires the original host runtime; use AgentSession for durable sessions")
     state, _, _ = driver.store.read_state(session_id)
