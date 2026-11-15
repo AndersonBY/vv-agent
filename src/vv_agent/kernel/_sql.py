@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Any
+from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec, _MessageCache
@@ -42,6 +43,22 @@ _DRIVE_RUNNABLE_SQL = """
         AND i.consumed_seq IS NULL AND i.available_ms<=t.ms))
 """
 
+_INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
+
+
+class InputAdmissionProofError(Conflict):
+    """A signed inbox row no longer matches its original trusted admission."""
+
+
+class LedgerSigner(Protocol):
+    """The minimum signing capability used by transactional input admission."""
+
+    def bind_key(self) -> Any:
+        """Return an immutable binding exposing ``key_id`` and ``sign(message)``."""
+        ...
+
+    def verify(self, key_id: str, message: bytes, signature: bytes) -> bool: ...
+
 
 def _positive(value: int, name: str) -> None:
     if type(value) is not int or value <= 0:
@@ -63,6 +80,52 @@ def _tenant(value: str) -> None:
         raise ValueError("tenant_id must be nonempty text without NUL")
 
 
+def _input_admission_message(
+    tenant_id: str,
+    session_id: str,
+    input_id: str,
+    input_seq: int,
+    received_ms: int,
+    body_digest: str,
+    key_id: str,
+    signed_ms: int,
+) -> bytes:
+    return canonical_json_bytes(
+        {
+            "domain": _INPUT_ADMISSION_DOMAIN,
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "input_id": input_id,
+            "input_seq": input_seq,
+            "received_ms": received_ms,
+            "body_digest": body_digest,
+            "key_id": key_id,
+            "signed_ms": signed_ms,
+        }
+    )
+
+
+def _input_body(item: InboxItem) -> bytes:
+    """Encode the clear input body; proof bytes live in SQL columns."""
+
+    return replace(item, admission_proof=None).encode()
+
+
+def stored_input_proof(stored: StoredInput) -> dict[str, Any] | None:
+    """Build the exact record proof copied from an authenticated inbox row."""
+
+    proof = stored.item.admission_proof
+    if proof is None:
+        return None
+    return {
+        "input_seq": stored.input_seq,
+        "received_ms": stored.received_ms,
+        "key_id": proof["admission_key_id"],
+        "signature": proof["admission_signature"],
+        "signed_ms": proof["admission_signed_ms"],
+    }
+
+
 @dataclass
 class _Prefix:
     tenant_id: str
@@ -78,6 +141,9 @@ class SQLStore:
 
     lock_clause = ""
     clock_sql = ""
+    _input_admission_configured = False
+    _input_admission_allow_unsigned = False
+    _input_admission_signer: LedgerSigner | None = None
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
     _tenant_id = DEFAULT_TENANT_ID
@@ -151,6 +217,76 @@ class SQLStore:
 
     def _now(self) -> int:
         return self._one(f"SELECT {self.clock_sql}")[0]
+
+    def configure_input_admission(self, signer: LedgerSigner | None = None, *, allow_unsigned: bool = False) -> None:
+        """Select signed inbox admission or the explicit local hash-only mode."""
+
+        if signer is not None and allow_unsigned:
+            raise ValueError("input admission cannot be both signed and unsigned")
+        if signer is None and not allow_unsigned:
+            raise ValueError("input admission requires a signer or explicit allow_unsigned=True")
+        if signer is not None and (
+            not callable(getattr(signer, "bind_key", None)) or not callable(getattr(signer, "verify", None))
+        ):
+            raise TypeError("ledger signer must provide bind_key() and verify()")
+        root = self._root_store or self
+        root._input_admission_configured = True
+        root._input_admission_allow_unsigned = allow_unsigned
+        root._input_admission_signer = signer
+
+    def _input_admission_policy(self) -> tuple[bool, bool, LedgerSigner | None]:
+        root = self._root_store or self
+        return (
+            bool(root._input_admission_configured),
+            bool(root._input_admission_allow_unsigned),
+            root._input_admission_signer,
+        )
+
+    def _stored_input(self, session_id: str, row: tuple[Any, ...]) -> StoredInput:
+        """Validate and reconstruct one inbox row before any content hydration."""
+
+        body, seq, received, consumed, checksum, key_id, signature, signed_ms = row
+        if sha256(body).hexdigest() != checksum:
+            raise Conflict("stored input digest mismatch")
+        base = InboxItem.parse(body)
+        if base.admission_proof is not None:
+            raise InputAdmissionProofError("stored input body duplicates admission proof")
+        columns = (key_id, signature, signed_ms)
+        if any(value is None for value in columns) and not all(value is None for value in columns):
+            raise InputAdmissionProofError("stored input admission proof is incomplete")
+        proof = None
+        if all(value is not None for value in columns):
+            proof = {
+                "admission_key_id": key_id,
+                "admission_signature": base64.b64encode(bytes(signature)).decode("ascii"),
+                "admission_signed_ms": signed_ms,
+            }
+        item = replace(base, admission_proof=proof)
+        item.encode()
+        if item.actor is None or item.actor["tenant_id"] != self.tenant_id:
+            raise Conflict("input actor belongs to another tenant")
+
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        if configured:
+            if allow_unsigned:
+                if proof is not None:
+                    raise InputAdmissionProofError("unsigned input admission must not contain a proof")
+            else:
+                if signer is None or proof is None:
+                    raise InputAdmissionProofError("signed input admission proof is missing")
+                message = _input_admission_message(
+                    self.tenant_id,
+                    session_id,
+                    item.input_id,
+                    seq,
+                    received,
+                    checksum,
+                    proof["admission_key_id"],
+                    proof["admission_signed_ms"],
+                )
+                if not signer.verify(proof["admission_key_id"], message, bytes(signature)):
+                    raise InputAdmissionProofError("signed input admission signature is invalid")
+        return StoredInput(item, seq, received, consumed)
 
     @contextmanager
     def _bound_append(self, lease: Lease) -> Iterator[None]:
@@ -258,14 +394,13 @@ class SQLStore:
                 bodies.append(row_data[0])
                 cursor, head_digest = stored.seq, row_data[5]
         consumed = []
-        for body, checksum in self._rows(
-            "SELECT body,digest FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s "
+        for input_row in self._rows(
+            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s "
             "AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
             (self.tenant_id, session_id, row[1], through, head),
         ):
-            if sha256(body).hexdigest() != checksum:
-                raise Conflict("stored input digest mismatch")
-            consumed.append(InboxItem.parse(body))
+            consumed.append(self._stored_input(session_id, input_row).item)
         reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=bodies)
         prefix = _Prefix(
             self.tenant_id,
@@ -353,16 +488,14 @@ class SQLStore:
 
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox "
+            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            "FROM sk_inbox "
             "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
             (self.tenant_id, session_id, input_id),
         )
         if not rows:
             return None
-        body, seq, received, consumed, checksum = rows[0]
-        if sha256(body).hexdigest() != checksum:
-            raise Conflict("stored input digest mismatch")
-        return StoredInput(InboxItem.parse(body), seq, received, consumed)
+        return self._stored_input(session_id, rows[0])
 
     def control_records(self, session_id: str, *, through_seq: int) -> tuple[StoredRecord, ...]:
         """Read consumed control facts for catalog filtering without folding turns."""
@@ -457,17 +590,13 @@ class SQLStore:
             _natural(through_input_seq, "through_input_seq")
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox "
+            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            "FROM sk_inbox "
             "WHERE tenant_id=%s AND session_id=%s "
             "AND consumed_seq IS NULL " + readiness + "AND (%s OR input_seq<=%s) ORDER BY input_seq LIMIT %s",
             (self.tenant_id, session_id, through_input_seq is None, through_input_seq or 0, limit),
         )
-        result = []
-        for body, seq, received, consumed, checksum in rows:
-            if sha256(body).hexdigest() != checksum:
-                raise Conflict("stored input digest mismatch")
-            result.append(StoredInput(InboxItem.parse(body), seq, received, consumed))
-        return tuple(result)
+        return tuple(self._stored_input(session_id, row) for row in rows)
 
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None:
         _identity(owner)
@@ -497,9 +626,11 @@ class SQLStore:
                 (renewed.expires_at_ms, self.tenant_id, lease.session_id),
             )
             controls = tuple(
-                InboxItem.parse(r[0])
+                self._stored_input(lease.session_id, r).item
                 for r in self._rows(
-                    "SELECT body FROM sk_inbox WHERE tenant_id=%s AND session_id=%s "
+                    "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
+                    "admission_signature,admission_signed_ms "
+                    "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s "
                     "AND consumed_seq IS NULL AND available_ms<=%s AND kind='control' ORDER BY input_seq",
                     (self.tenant_id, lease.session_id, now),
                 )
@@ -834,26 +965,55 @@ class SQLSessionTx:
 
     def push(self, session_id: str, item: InboxItem) -> InputReceipt:
         self._active()
-        body = item.encode()
+        if item.admission_proof is not None:
+            raise InputAdmissionProofError("input admission proof is created inside the SQL transaction")
+        body = _input_body(item)
         s = self.store
         assert item.actor is not None
         if item.actor["tenant_id"] != s.tenant_id:
             raise Conflict("input actor belongs to another tenant")
+        configured, allow_unsigned, signer = s._input_admission_policy()
+        if configured and not allow_unsigned and signer is None:
+            raise InputAdmissionProofError("signed input admission signer is unavailable")
         with s._transaction():
             row = s._lock(session_id)
             old = s._rows(
-                "SELECT body,input_seq,received_ms FROM sk_inbox "
+                "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+                "FROM sk_inbox "
                 "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                 (s.tenant_id, session_id, item.input_id),
             )
             if old:
+                stored = s._stored_input(session_id, old[0])
                 if old[0][0] != body:
                     raise Conflict("input identity has different bytes")
-                return InputReceipt(item.input_id, old[0][1], old[0][2], True)
+                return InputReceipt(item.input_id, stored.input_seq, stored.received_ms, True)
             now, seq = s._now(), row[1] + 1
+            key_id = signature = signed_ms = None
+            if configured and not allow_unsigned:
+                assert signer is not None
+                bound = signer.bind_key()
+                key_id = getattr(bound, "key_id", None)
+                if not isinstance(key_id, str) or not key_id:
+                    raise InputAdmissionProofError("ledger signer returned an invalid key identity")
+                message = _input_admission_message(
+                    s.tenant_id,
+                    session_id,
+                    item.input_id,
+                    seq,
+                    now,
+                    sha256(body).hexdigest(),
+                    key_id,
+                    now,
+                )
+                signature = bound.sign(message)
+                if not isinstance(signature, bytes) or not signature:
+                    raise InputAdmissionProofError("ledger signer returned an invalid signature")
+                signed_ms = now
             s._rows(
-                "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,available_ms,received_ms) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,"
+                "admission_key_id,admission_signature,admission_signed_ms,available_ms,received_ms) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     s.tenant_id,
                     session_id,
@@ -862,6 +1022,9 @@ class SQLSessionTx:
                     item.kind,
                     body,
                     sha256(body).hexdigest(),
+                    key_id,
+                    signature,
+                    signed_ms,
                     item.available_ms,
                     now,
                 ),
@@ -982,14 +1145,22 @@ class SQLSessionTx:
             now = s._now()
             for input_id in consume_input_ids:
                 incoming = s._one(
-                    "SELECT body,consumed_seq,available_ms FROM sk_inbox "
+                    "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
+                    "admission_signature,admission_signed_ms,available_ms FROM sk_inbox "
                     "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (s.tenant_id, session_id, input_id),
                 )
+                stored = s._stored_input(session_id, incoming[:8])
                 applied = applications[input_id][0]
-                if incoming[1] is not None or incoming[2] > now or incoming[0] != canonical_json_bytes(applied._payload["input"]):
+                applied_input = applied._payload["input"]
+                if (
+                    stored.consumed_seq is not None
+                    or incoming[8] > now
+                    or stored.item.to_dict() != applied_input
+                    or stored_input_proof(stored) != applied._payload["input_proof"]
+                ):
                     raise Conflict("input already consumed, unavailable, or different bytes")
-                consumed.append(InboxItem.parse(incoming[0]))
+                consumed.append(stored.item)
             state = reducer.extend((r for _, r, _ in new), consumed_inputs=consumed, bodies=(encoded[p] for p, _, _ in new))
             now = s._now()
             s._check_lease(session_id, lease, row, now)  # Validation may outlive the lease.

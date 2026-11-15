@@ -17,6 +17,7 @@ from ._execution_values import AgentTask
 from ._message_values import Message
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance, validate_provider_result
 from ._records import InboxItem, Record, _RetainedTools, copy_json, digest
+from ._sql import stored_input_proof
 from ._state import Attempt
 from ._store import Conflict
 from ._summary_requests import compaction_request
@@ -440,7 +441,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
             {
                 "input": item.to_dict(),
                 "input_digest": item.digest,
-                "input_proof": None,
+                "input_proof": stored_input_proof(stored),
                 "disposition": disposition,
                 "reason": reason,
                 "target_operation_id": target,

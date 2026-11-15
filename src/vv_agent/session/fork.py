@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import replace
 from hashlib import sha256
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
+from vv_agent.kernel._content import ContentRef
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
 from .compaction import memory_settings
+from .content_runtime import SESSION_ATTRIBUTES
 from .context_view import context_messages, project_view
+from .projection import hydration_for_session_store
 from .records import InboxItem, SessionSpec, copy_json, digest, inherited_seed_policies
 from .reducer import _fold_factory_for
 from .store import Conflict
@@ -33,14 +37,17 @@ def validate_params(params):
     digest(params)  # Enforce I-JSON before looking up an identity.
 
 
-def _replay(store, sid, params):
+def _replay(kernel, sid, params):
     from .app_server import SubmissionConflict
 
+    store = kernel.store
     try:
-        creation = store.read(sid, limit=1).records[0].record._payload
+        created = store.read(sid, limit=1).records[0]
     except (KeyError, Conflict):
         return None
-    fork = creation["attributes"].get("app_server_fork")
+    creation = created.record._payload
+    attributes = kernel.read_record_content(sid, created.seq, creation["attributes"], slot=SESSION_ATTRIBUTES)
+    fork = attributes.get("app_server_fork")
     if fork is None or digest(fork["params"]) != digest(params):
         raise SubmissionConflict("submission_conflict")
     return {"threadId": sid, "accepted": True, "replayed": True, "lineage": copy_json(fork["lineage"])}
@@ -57,7 +64,7 @@ def _artifact_backend(kernel, host, sid, binding):
 def fork_thread(kernel, host, params):
     source = params["threadId"]
     sid = "fork/" + digest([source, params["forkId"]])
-    previous = _replay(kernel.store, sid, params)
+    previous = _replay(kernel, sid, params)
     if previous is not None:
         return previous
     try:
@@ -69,7 +76,9 @@ def fork_thread(kernel, host, params):
     records = page.records
     while records[-1].seq < page.head_seq:
         records += kernel.store.read(source, after_seq=records[-1].seq, through_seq=page.head_seq).records
-    attributes = records[0].record._payload["attributes"]
+    created = records[0]
+    attributes_ref = created.record._payload["attributes"]
+    attributes = kernel.read_record_content(source, created.seq, attributes_ref, slot=SESSION_ATTRIBUTES)
     if "app_server" not in attributes:
         raise KeyError(source)
     ended = [r for r in records if r.record.kind == "turn_ended"]
@@ -88,7 +97,12 @@ def fork_thread(kernel, host, params):
         (r.record for r in records),
         consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
     )
-    view = project_view(source, records, _fold_factory=factory)
+    view = project_view(
+        source,
+        records,
+        _fold_factory=factory,
+        _hydration=hydration_for_session_store(kernel.store, source),
+    )
     definition = copy_json(
         state.turns[next(reversed(state.turns))].start._payload["definition"]
         if state.turns
@@ -175,9 +189,31 @@ def fork_thread(kernel, host, params):
     )
     try:
         with kernel.store.atomic() as tx:
-            receipt = tx.create(spec, consumers=("events", "app_server", "traces"))
+            content_writer = getattr(tx, "content_writer", None)
+            if not callable(content_writer):
+                raise ValueError("fork requires a transaction with trusted content capability")
+            destination = content_writer(tenant_id=kernel.tenant_id, session_id=sid)
+            source_content = content_writer(tenant_id=kernel.tenant_id, session_id=source)
+            source_principal = page.records[0].record._payload["principal"]
+            source_workspace = page.records[0].record._payload["workspace"]
+            attributes_labels = ContentRef.from_dict(attributes_ref).labels
+
+            def destination_spec(writer):
+                principal_attributes = writer.copy_json_from(source_content, source_principal["attributes"])
+                workspace = writer.copy_json_from(source_content, source_workspace)
+                return replace(
+                    spec,
+                    principal=source_principal | {"attributes": principal_attributes.to_dict()},
+                    workspace=workspace.to_dict(),
+                    attributes=writer.put_json(attributes, labels=attributes_labels).to_dict(),
+                )
+
+            receipt = destination.create_session(
+                destination_spec,
+                consumers=("events", "app_server", "traces"),
+            )
     except Conflict:
-        previous = _replay(kernel.store, sid, params)
+        previous = _replay(kernel, sid, params)
         if previous is None:
             raise
         return previous

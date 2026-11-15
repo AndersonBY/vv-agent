@@ -312,8 +312,14 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
     # Canonical input bytes distinguish JSON values such as true and 1.
     expected = completion_input(handle, terminal, actor=item.actor, result_ref=item.payload["result"])
     if (
-        replace(expected, input_id=item.input_id, available_ms=item.available_ms, generation=item.generation).encode()
-        != item.encode()
+        replace(
+            expected,
+            input_id=item.input_id,
+            available_ms=item.available_ms,
+            generation=item.generation,
+            admission_proof=None,
+        ).encode()
+        != replace(item, admission_proof=None).encode()
     ):
         return None
     tenant_id = _store_tenant_id(store)
