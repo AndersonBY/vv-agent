@@ -13,13 +13,16 @@ from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, 
 from vv_agent.kernel._content_publication import (
     declared_record_content,
     link_declared_record_content,
+    publish_record_content,
     publish_turn_started,
 )
 from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._record_codec import RecordError
-from vv_agent.kernel._records import SessionSpec, digest, make_record
+from vv_agent.kernel._records import Record, SessionSpec, digest, make_record, record_identity
+from vv_agent.kernel._sql import SQLSessionTx
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.content_store import LocalKeyProvider, SQLContentStore
 from vv_agent.session.kernel import _Driver
 from vv_agent.session.records import InboxItem
@@ -161,6 +164,125 @@ def test_plain_values_are_put_once_and_child_digest_is_checked() -> None:
     assert rejected.puts == []
 
 
+def _plain_record(kind: str, payload: dict, *, suffix: str = "1", session_id: str = "session-a") -> Record:
+    operation_id = f"operation/{suffix}"
+    turn_id = "turn-a"
+    return Record(
+        record_id=record_identity(kind, session_id, turn_id, operation_id, 1, payload),
+        kind=kind,
+        session_id=session_id,
+        turn_id=turn_id,
+        operation_id=operation_id,
+        attempt=1,
+        payload=payload,
+    )
+
+
+def test_publisher_handles_planned_and_completed_refs_and_digests() -> None:
+    request = {"messages": [{"role": "user", "content": "work"}]}
+    budget_admission = {"tool": "search"}
+    result = {"content": "done", "tool_calls": []}
+    evidence = ["synchronous-return"]
+    request_ref = _ref("request")
+    tool_ref = _ref("tool")
+    budget_ref = _ref("budget-admission")
+    result_ref = _ref("result")
+    evidence_ref = _ref("evidence")
+    usage_ref = _ref("usage")
+    writer = _Writer([request_ref, budget_ref, result_ref, evidence_ref])
+
+    planned = _plain_record(
+        "op_planned",
+        {
+            "op_kind": "tool",
+            "purpose": None,
+            "request": request,
+            "request_digest": digest(request),
+            "context_version": "7",
+            "dependencies": [],
+            "tool": tool_ref.to_dict(),
+            "idempotency_key": "operation/1",
+            "budget_admission": budget_admission,
+            "not_before_ms": None,
+            "provider_binding": "function",
+            "consumed_unknowns": [],
+            "policy_decision": None,
+        },
+        suffix="planned",
+    )
+    completed = _plain_record(
+        "op_completed",
+        {
+            "result": result,
+            "result_digest": digest(result),
+            "usage": usage_ref.to_dict(),
+            "shared_state": None,
+            "evidence": evidence,
+            "execution_started": True,
+            "context": "normal",
+            "request_digest": digest(request),
+            "provider_binding": "function",
+            "policy_decision": None,
+        },
+        suffix="completed",
+    )
+
+    publication = publish_record_content(writer, (planned, completed))
+
+    planned_payload, completed_payload = (record.payload for record in publication.records)
+    assert planned_payload["request"] == request_ref.to_dict()
+    assert planned_payload["tool"] == tool_ref.to_dict()
+    assert planned_payload["budget_admission"] == budget_ref.to_dict()
+    assert planned_payload["request_digest"] == reference_digest(request_ref)
+    assert completed_payload["result"] == result_ref.to_dict()
+    assert completed_payload["result_digest"] == reference_digest(result_ref)
+    assert completed_payload["usage"] == usage_ref.to_dict()
+    assert completed_payload["evidence"] == evidence_ref.to_dict()
+    assert completed_payload["shared_state"] is None
+    assert writer.puts == [request, budget_admission, result, evidence]
+    assert [(link.record_id, link.slot, link.ref) for link in publication.links] == [
+        (planned.record_id, "request", request_ref),
+        (planned.record_id, "tool", tool_ref),
+        (planned.record_id, "budget_admission", budget_ref),
+        (completed.record_id, "result", result_ref),
+        (completed.record_id, "usage", usage_ref),
+        (completed.record_id, "evidence", evidence_ref),
+    ]
+    assert planned.payload["request"] == request
+    assert completed.payload["result"] == result
+    assert all(len(record.encode()) for record in publication.records)
+
+
+def test_publisher_does_not_recursively_guess_unknown_slots() -> None:
+    request_ref = _ref("request")
+    tool_ref = _ref("tool")
+    budget_ref = _ref("admission")
+    record = _plain_record(
+        "op_planned",
+        {
+            "op_kind": "model",
+            "purpose": "primary",
+            "request": request_ref.to_dict(),
+            "request_digest": reference_digest(request_ref),
+            "context_version": "1",
+            "dependencies": [],
+            "tool": tool_ref.to_dict(),
+            "idempotency_key": None,
+            "budget_admission": budget_ref.to_dict(),
+            "not_before_ms": None,
+            "provider_binding": "model",
+            "consumed_unknowns": [],
+            "policy_decision": None,
+            "replacement": {"not": "a declared op_planned slot"},
+        },
+    )
+
+    publication = publish_record_content(_Writer([]), (record,))
+
+    assert publication.records[0].payload["replacement"] == {"not": "a declared op_planned slot"}
+    assert {link.slot for link in publication.links} == {"request", "tool", "budget_admission"}
+
+
 def _turn_payload(definition: ContentRef, budget: ContentRef) -> dict:
     return {
         "input_ids": [],
@@ -225,6 +347,160 @@ def test_link_failure_rolls_back_record_key_content_and_links(tmp_path, monkeypa
         }
         assert after == before
         assert [row.record.kind for row in driver.records] == ["session_created"]
+
+
+def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "op-rollback.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with SQLiteStore.standalone(str(path)) as store:
+        store.install_schema()
+        sessions = SessionDriver(store=store, content_key_provider=provider)
+        sessions.create("s", "/workspace", {})
+        agent = Agent("kernel", "Work.", model="scripted")
+        runtime = sessions.runtime(
+            agent,
+            RunConfig(
+                model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
+                workspace="/workspace",
+            ),
+            session_id="s",
+        )
+        lease = sessions.store.acquire("s", owner="op-rollback-test", ttl_ms=15_000)
+        assert lease is not None
+        driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+        before = {
+            table: store._one(
+                f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
+                ("default", "s"),
+            )[0]
+            for table in ("sk_record", "sk_commit", "sk_content", "sk_content_link")
+        }
+
+        def fail_append(self, *args, **kwargs):
+            raise RuntimeError("forced op append failure")
+
+        monkeypatch.setattr(SQLSessionTx, "append", fail_append)
+        result = {"content": "done", "tool_calls": []}
+        plan = _plain_record(
+            "op_planned",
+            {
+                "op_kind": "tool",
+                "purpose": None,
+                "request": _ref("plan-request").to_dict(),
+                "request_digest": digest({"request": True}),
+                "context_version": "1",
+                "dependencies": [],
+                "tool": _ref("plan-tool").to_dict(),
+                "idempotency_key": None,
+                "budget_admission": _ref("plan-budget").to_dict(),
+                "not_before_ms": None,
+                "provider_binding": None,
+                "consumed_unknowns": [],
+                "policy_decision": None,
+            },
+            suffix="transaction",
+            session_id="s",
+        )
+        completed = driver.record(
+            "op_completed",
+            {
+                "result": result,
+                "result_digest": digest(result),
+                "usage": {},
+                "shared_state": {},
+                "evidence": ["synchronous-return"],
+                "execution_started": True,
+                "context": "normal",
+                "request_digest": digest({"request": True}),
+                "provider_binding": None,
+                "policy_decision": None,
+            },
+            plan,
+        )
+
+        with pytest.raises(RuntimeError, match="forced op append failure"):
+            driver.commit([completed], guarded=True)
+
+        after = {
+            table: store._one(
+                f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
+                ("default", "s"),
+            )[0]
+            for table in before
+        }
+        assert after == before
+        assert [row.record.kind for row in driver.records] == ["session_created"]
+
+
+def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "replay.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    puts: list[object] = []
+    put_json = SessionContentWriter.put_json
+
+    def record_put(self, value, *, labels=...):
+        puts.append(deepcopy(value))
+        return put_json(self, value) if labels is ... else put_json(self, value, labels=labels)
+
+    monkeypatch.setattr(SessionContentWriter, "put_json", record_put)
+    with SQLiteStore.standalone(str(path)) as store:
+        store.install_schema()
+        sessions = SessionDriver(store=store, content_key_provider=provider)
+        sessions.create("s", "/workspace", {})
+        agent = Agent("kernel", "Work.", model="scripted")
+        runtime = sessions.runtime(
+            agent,
+            RunConfig(
+                model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
+                workspace="/workspace",
+            ),
+            session_id="s",
+        )
+        lease = sessions.store.acquire("s", owner="replay-test", ttl_ms=15_000)
+        assert lease is not None
+        driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+        definition = {"agent_name": "kernel", "task": {"user_prompt": "work"}}
+        budget = RunBudgetLimits(max_tool_calls=2).to_dict()
+        turn_id = "s/turn/replay"
+        record = Record(
+            record_id=f"turn/{turn_id}/started",
+            kind="turn_started",
+            session_id="s",
+            turn_id=turn_id,
+            operation_id=None,
+            attempt=None,
+            payload={
+                "input_ids": [],
+                "definition": definition,
+                "definition_digest": digest(definition),
+                "handler_version": "1",
+                "budget": budget,
+                "binding": None,
+                "generation": 0,
+                "policy_digest": None,
+                "requirements": {"level": 1, "handler_version": "1", "capabilities": []},
+                "tokenizer_binding": None,
+                "environment": None,
+            },
+        )
+
+        puts.clear()
+        driver.commit([record], guarded=True)
+        assert puts == [definition, budget]
+        turn = driver.records[-1]
+        store._rows(
+            "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND record_seq=%s AND slot=%s",
+            ("default", "s", turn.seq, "definition"),
+        )
+
+        driver.commit([record], guarded=True)
+
+        assert puts == [definition, budget]
+        links = store._rows(
+            "SELECT slot FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND record_seq=%s ORDER BY slot",
+            ("default", "s", turn.seq),
+        )
+        assert [row[0] for row in links] == ["budget", "definition"]
 
 
 def test_missing_transaction_capability_rejects_record_after_append(tmp_path) -> None:

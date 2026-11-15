@@ -9,12 +9,19 @@ from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter
-from vv_agent.kernel._content_publication import declared_record_content, link_declared_record_content
+from vv_agent.kernel._content_publication import (
+    has_record_content,
+    has_record_content_payload,
+    link_declared_record_content,
+    publish_record_content,
+    require_record_link_writer,
+    resolve_record_content_links,
+)
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import ContentReader, MissingContentLink, SessionHydrator
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._record_codec import RecordError
-from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
+from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx
 from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, SessionStore, SessionTx, StoredRecord
@@ -26,19 +33,6 @@ class DriverLeaseScope(Protocol):
     generation: int | None
 
     def committing(self) -> AbstractContextManager[Lease]: ...
-
-
-class ActiveUsageContentUnavailable(RuntimeError):
-    """The active usage producer requires the session content store."""
-
-    code = "active_usage_content_unavailable"
-
-    def __init__(self, meter_id: str) -> None:
-        self.meter_id = meter_id
-        super().__init__(
-            f"S1 active usage meter {meter_id!r} requires the session content store; "
-            "the commit was blocked before writing plaintext"
-        )
 
 
 class CoreDriver:
@@ -111,13 +105,37 @@ class CoreDriver:
         self.scope.generation = self.state.turns[tid].start._payload["generation"] if tid else None
 
     def record(self, kind: str, payload: dict[str, Any], plan: Record | None = None, *, tid: str | None = None) -> Record:
-        return make_record(
+        payload = copy_json(payload)
+        if kind == "turn_started":
+            payload.setdefault("policy_digest", None)
+            payload.setdefault(
+                "requirements",
+                {"level": 1, "handler_version": payload.get("handler_version"), "capabilities": []},
+            )
+            payload.setdefault("tokenizer_binding", None)
+            payload.setdefault("environment", None)
+        elif kind in {"op_planned", "op_prepared", "op_completed"}:
+            payload.setdefault("policy_decision", None)
+        turn_id = plan.turn_id if plan else tid or self.state.active_turn_id
+        operation_id = plan.operation_id if plan else None
+        attempt = plan.attempt if plan else None
+        if not has_record_content_payload(kind, payload):
+            return make_record(
+                kind,
+                session_id=self.sid,
+                turn_id=turn_id,
+                operation_id=operation_id,
+                attempt=attempt,
+                payload=payload,
+            )
+        return Record(
+            record_identity(kind, self.sid, turn_id, operation_id, attempt, payload),
             kind,
-            session_id=self.sid,
-            turn_id=plan.turn_id if plan else tid or self.state.active_turn_id,
-            operation_id=plan.operation_id if plan else None,
-            attempt=plan.attempt if plan else None,
-            payload=payload,
+            self.sid,
+            turn_id,
+            operation_id,
+            attempt,
+            payload,
         )
 
     def hydrator_for(self, record_owner: int | str) -> SessionHydrator:
@@ -221,10 +239,10 @@ class CoreDriver:
         prepare: Callable[[SessionTx], list[Record]] | None = None,
     ) -> None:
         tid = self.state.active_turn_id
-        if tid is not None:
-            meter = f"active/{tid}/{self.scope.lease.epoch}"
-            self._observe_cost()
-            raise ActiveUsageContentUnavailable(meter)
+        prepared_records = list(records)
+        commit_records = prepared_records
+        content_writer = None
+        declarations = ()
         timings: list[tuple[str, float, str, str | None]] = []
         atomic_start = self.clock.monotonic_ns()
         atomic_error = None
@@ -245,9 +263,21 @@ class CoreDriver:
             with ExitStack() as latch, self.store.atomic() as tx:
                 if prepare is not None:
                     with phase("prepare"):
-                        records.extend(prepare(tx))
+                        prepared_records.extend(prepare(tx))
+                committed = {stored.record.record_id: stored.record for stored in self.records}
+                record_ids = [record.record_id for record in prepared_records]
+                if any(record_id in committed for record_id in record_ids):
+                    if not all(record_id in committed for record_id in record_ids):
+                        raise Conflict("commit mixes new records with already committed record ids")
+                    prepared_records = [committed[record_id] for record_id in record_ids]
+                if has_record_content(prepared_records):
+                    with phase("publish"):
+                        content_writer = require_record_link_writer(self.content_writer(tx))
+                        publication = publish_record_content(content_writer, prepared_records)
+                        commit_records = list(publication.records)
+                        declarations = publication.links
                 with phase("before_commit"):
-                    self._hook("before_commit", records[-1] if records else None)
+                    self._hook("before_commit", commit_records[-1] if commit_records else None)
                 # SQL append calls this only after encoding and immutable history
                 # preparation. Keep the latch through the outer atomic exit.
                 if isinstance(tx, SQLSessionTx):
@@ -257,22 +287,22 @@ class CoreDriver:
                         self.sid,
                         lease=self.scope.lease if isinstance(tx, SQLSessionTx) else latch.enter_context(self.scope.committing()),
                         expected_seq=self.records[-1].seq,
-                        commit_id=digest({"record_ids": [r.record_id for r in records], "consumed": list(consumed)}),
-                        records=tuple(records),
+                        commit_id=digest({"record_ids": [r.record_id for r in commit_records], "consumed": list(consumed)}),
+                        records=tuple(commit_records),
                         consume_input_ids=consumed,
                         expected_inbox_seq=self.watermark if guarded else None,
                     )
-                links = declared_record_content(records, receipt.record_sequences)
+                links = resolve_record_content_links(declarations, receipt.record_sequences)
                 if links:
                     with phase("finalize"):
-                        writer = self.content_writer(tx)
-                        link_declared_record_content(writer, links)
+                        assert content_writer is not None
+                        link_declared_record_content(content_writer, links)
         except BaseException as exc:
             atomic_error = type(exc).__name__
             raise
         finally:
             atomic_ms = (self.clock.monotonic_ns() - atomic_start) / 1_000_000
-            source = next((r for r in reversed(records) if r.operation_id), None)
+            source = next((r for r in reversed(commit_records) if r.operation_id), None)
             request_digest = source._payload.get("request_digest") if source else None
             if source and source.operation_id in self.state.operations:
                 operation = self.state.operations[source.operation_id]
@@ -296,7 +326,7 @@ class CoreDriver:
                         "exception_type": error or atomic_error,
                     },
                 )
-        self._hook("after_commit", records[-1] if records else None)
+        self._hook("after_commit", commit_records[-1] if commit_records else None)
         if receipt.replayed:
             self.refresh()
         else:
