@@ -22,6 +22,58 @@ Instructions here.
     assert "# My Skill" in body
 
 
+@pytest.mark.parametrize(
+    ("description_line", "expected"),
+    [
+        ("description: Compare A --- B", "Compare A --- B"),
+        ('description: "Compare A --- B"', "Compare A --- B"),
+    ],
+)
+def test_parse_frontmatter_preserves_delimiter_like_scalar_values(description_line: str, expected: str) -> None:
+    content = f"---\nname: test-skill\n{description_line}\n---\nBody\n"
+
+    metadata, body = parse_frontmatter(content)
+
+    assert metadata["description"] == expected
+    assert body == "Body"
+
+
+def test_parse_frontmatter_preserves_delimiter_like_block_scalar_lines() -> None:
+    content = """---
+name: test-skill
+description: |
+  Compare A
+  ---
+  with B.
+---
+Body
+"""
+
+    metadata, body = parse_frontmatter(content)
+
+    assert metadata["description"] == "Compare A\n---\nwith B.\n"
+    assert body == "Body"
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_parse_frontmatter_accepts_marker_trailing_whitespace(newline: str) -> None:
+    content = newline.join(
+        [
+            "---   ",
+            "name: test-skill",
+            "description: A test skill",
+            "---\t ",
+            "Body",
+            "Second line",
+        ]
+    )
+
+    metadata, body = parse_frontmatter(content)
+
+    assert metadata["name"] == "test-skill"
+    assert body == f"Body{newline}Second line"
+
+
 def test_parse_frontmatter_missing_block() -> None:
     with pytest.raises(SkillParseError, match="must start with YAML frontmatter"):
         parse_frontmatter("# No frontmatter")
@@ -31,6 +83,16 @@ def test_parse_frontmatter_unclosed() -> None:
     content = """---
 name: my-skill
 description: A test skill
+"""
+    with pytest.raises(SkillParseError, match="not properly closed"):
+        parse_frontmatter(content)
+
+
+def test_parse_frontmatter_rejects_closing_marker_with_body() -> None:
+    content = """---
+name: my-skill
+description: A test skill
+--- Body
 """
     with pytest.raises(SkillParseError, match="not properly closed"):
         parse_frontmatter(content)

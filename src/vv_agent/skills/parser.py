@@ -52,15 +52,19 @@ def discover_skill_dirs(root: Path) -> list[Path]:
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Parse YAML frontmatter and markdown body from SKILL.md content."""
-    if not content.startswith("---"):
+    lines = content.splitlines(keepends=True)
+    if not lines or not _is_frontmatter_delimiter(lines[0]):
         raise SkillParseError("SKILL.md must start with YAML frontmatter (---)")
 
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    closing_index = next(
+        (index for index, line in enumerate(lines[1:], start=1) if _is_frontmatter_delimiter(line)),
+        None,
+    )
+    if closing_index is None:
         raise SkillParseError("SKILL.md frontmatter not properly closed with ---")
 
-    frontmatter_str = parts[1]
-    body = parts[2].strip()
+    frontmatter_str = "".join(lines[1:closing_index])
+    body = "".join(lines[closing_index + 1 :]).strip()
     try:
         parsed = yaml.safe_load(frontmatter_str)
     except yaml.YAMLError as exc:
@@ -75,6 +79,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         metadata["metadata"] = {str(key): str(value) for key, value in raw_metadata.items()}
 
     return metadata, body
+
+
+def _is_frontmatter_delimiter(line: str) -> bool:
+    return line.rstrip("\r\n").rstrip(" \t") == "---"
 
 
 def _build_properties(metadata: dict[str, Any]) -> SkillProperties:
