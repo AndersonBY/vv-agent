@@ -157,15 +157,18 @@ multi-session ordering coverage. L2-L4 evidence belongs to
 The mutation tests recompile and patch the actual shared-core functions in memory:
 `SQLSessionTx` append fences and input replay/dedupe, `_driver_recovery.step`'s
 retry key, `_driver_outcomes.unknown_steps`' retry decision, and
-`LeaseOwnership.poll`'s lock ordering. They retain real SQL and reducer constraints. In
-particular, removing input replay reaches the database unique constraint; the
-harness rejects that failed duplicate push as an I3 violation rather than
-claiming duplicate durable rows were created.
+`LeaseOwnership.poll`'s lock ordering. They retain real SQL and reducer constraints.
+The input mutation removes the application replay branch and, only in its
+disposable database schema, the `(session_id,input_id)` identity constraint.
+The `(session_id,input_seq)` uniqueness remains, so a second push writes a real
+duplicate-identity row and fails the explicit I3 receipt check. Production DDL
+is unchanged.
 
-L1 runs the real heartbeat poll and commits a real SQL record at its renewal
-boundary. A mutation that holds `commit_lock` throughout that poll prevents the
-append from progressing, producing a bounded L1 failure without hanging a test
-thread. It is lock-order evidence, not a stress test of OS thread scheduling.
+L1 runs the real heartbeat poll and commits a real SQL record from its renewal
+callback. The probe proves that `poll` does not hold `commit_lock` across the
+renewal boundary; it does not construct concurrent database lock waits or a
+deadlock. A mutation that holds the latch throughout poll produces a bounded L1
+failure without hanging the test thread.
 
 ```bash
 uv run pytest tests/sim/test_mutations.py -k sqlite -q

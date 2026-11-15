@@ -16,6 +16,8 @@ from vv_agent.kernel._sql import SQLSessionTx
 from .scenarios import run_scenario
 from .world import InvariantViolation, SimWorld, require
 
+INPUT_DEDUPE_MUTATION = "push+dropped-input-identity-constraint"
+
 
 def mutate(function, before, after):
     source = textwrap.dedent(inspect.getsource(function))
@@ -32,6 +34,34 @@ def mutate(function, before, after):
         namespace,
     )
     return namespace[function.__name__]
+
+
+def drop_input_identity_constraint(world):
+    """Allow duplicate input identities only in this disposable test database."""
+    backend = world.summary()["backend"]
+    column_type = "TEXT" if backend == "sqlite" else "text"
+    integer_type = "INTEGER" if backend == "sqlite" else "bigint"
+    blob_type = "BLOB" if backend == "sqlite" else "bytea"
+    strict = " STRICT" if backend == "sqlite" else ""
+    store = world.connection("mutation/schema")
+    with store.atomic():
+        store._rows("DROP INDEX IF EXISTS sk_inbox_ready")
+        store._rows("DROP TABLE sk_inbox")
+        store._rows(
+            f"""
+            CREATE TABLE sk_inbox (
+                session_id {column_type} NOT NULL REFERENCES sk_session(session_id), input_id {column_type} NOT NULL,
+                input_seq {integer_type} NOT NULL CHECK (input_seq > 0),
+                kind {column_type} NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer',
+                    'child_result','control','provider_evidence','model_selection')),
+                body {blob_type} NOT NULL, digest {column_type} NOT NULL CHECK (length(digest)=64),
+                available_ms {integer_type} NOT NULL, received_ms {integer_type} NOT NULL, consumed_seq {integer_type},
+                UNIQUE(session_id,input_seq),
+                FOREIGN KEY(session_id,consumed_seq) REFERENCES sk_record(session_id,seq)
+            ){strict}
+            """
+        )
+        store._rows("CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL")
 
 
 @pytest.mark.parametrize(
@@ -65,7 +95,9 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
         )
         monkeypatch.setattr(SQLSessionTx, "append", namespace["append"])
     elif mutation == "input_dedupe":
-        monkeypatch.setattr(SQLSessionTx, "push", mutate(SQLSessionTx.push, "if old:", "if False and old:"))
+        input_mutation = mutate(SQLSessionTx.push, "if old:", "if False and old:")
+        input_mutation.__dict__["_sim_mutation"] = INPUT_DEDUPE_MUTATION
+        monkeypatch.setattr(SQLSessionTx, "push", input_mutation)
     elif mutation == "retry_key":
         monkeypatch.setattr(
             _driver_recovery,
@@ -90,18 +122,29 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
 
     identity = versions()
     assert len(identity["in_memory_mutations"]) == 1
+    if mutation == "input_dedupe":
+        assert identity["in_memory_mutations"][0]["mutation"] == INPUT_DEDUPE_MUTATION
     record_property("mutation_identity", identity)
-    scenario = "unknown_idempotent" if mutation == "retry_key" else "unknown_unsafe" if mutation == "unsafe_unknown" else "tools"
-    with SimWorld(sim_database, seed=17) as world, pytest.raises(InvariantViolation, match=expected):
-        run_scenario(world, scenario)
+    scenario = {
+        "retry_key": "unknown_idempotent",
+        "unsafe_unknown": "unknown_unsafe",
+    }.get(mutation, "tools")
+    expected_message = f"{expected}: duplicate input got a new receipt" if mutation == "input_dedupe" else expected
+    with SimWorld(sim_database, seed=17) as world:
+        if mutation == "input_dedupe":
+            drop_input_identity_constraint(world)
+        with pytest.raises(InvariantViolation, match=expected_message):
+            run_scenario(world, scenario)
 
 
 def lock_order_probe(world):
-    """A real SQL append progresses while production poll is about to renew.
+    """Check that production poll leaves commit_lock free at its renewal call.
 
-    At this scheduling point renewal may be waiting for a database row lock.
-    Holding commit_lock there would prevent the driver from doing its append.
-    The nonblocking acquisition turns that deadlock into a bounded failure.
+    The substituted renewal callback proves the commit latch is available, then
+    commits one real SQL record, then invokes the actual store renewal. This is
+    a bounded single-threaded lock-order probe; it does not create concurrent
+    database lock waits. A mutant holding the latch across poll fails before the
+    append while a nonblocking assertion prevents the test from hanging.
     """
     world.create()
     driving = world.connection("driver")
@@ -123,8 +166,12 @@ def lock_order_probe(world):
     original = renewal.renew
     committed = []
 
-    def waiting_on_database(current, *, ttl_ms):
-        require(heartbeat.commit_lock.acquire(blocking=False), "L1", "SQL renewal holds commit_lock; real append cannot progress")
+    def append_then_renew(current, *, ttl_ms):
+        require(
+            heartbeat.commit_lock.acquire(blocking=False),
+            "L1",
+            "LeaseOwnership.poll held commit_lock across its renewal boundary",
+        )
         try:
             rec = make_record(
                 "usage_observed",
@@ -144,14 +191,14 @@ def lock_order_probe(world):
             heartbeat.commit_lock.release()
         return original(current, ttl_ms=ttl_ms)
 
-    renewal.renew = waiting_on_database
+    renewal.renew = append_then_renew
     heartbeat.poll(renewal)
     assert committed[0].head_seq == 2
     assert world.connection("observer").read("s").records[-1].record.payload["meter_id"] == "lock-probe"
 
 
 @pytest.mark.parametrize("mutated", [False, True])
-def test_l1_real_append_during_renewal(sim_database, monkeypatch, record_property, mutated):
+def test_l1_commit_lock_free_at_renewal_boundary(sim_database, monkeypatch, record_property, mutated):
     if mutated:
         original = LeaseOwnership.poll
 
