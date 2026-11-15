@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -339,9 +339,30 @@ class KeyDestroyOutcome:
         object.__setattr__(self, "status", status)
 
 
+@dataclass(frozen=True, slots=True)
+class WrappedDataKey:
+    """A session-bound data-key envelope returned by a key provider."""
+
+    tenant_id: str
+    session_id: str
+    key_id: str
+    wrapped_key: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _text(self.tenant_id, "data key tenant_id", ContentBindingMismatch)
+        _text(self.session_id, "data key session_id", ContentBindingMismatch)
+        _text(self.key_id, "data key key_id", ContentBindingMismatch)
+        if not isinstance(self.wrapped_key, bytes) or not self.wrapped_key:
+            raise ContentBindingMismatch("wrapped_key must be non-empty bytes")
+
+
 @runtime_checkable
 class KeyProvider(Protocol):
-    """Backend contract; implementations must atomically revoke the capability."""
+    """Backend contract for session data keys and atomic key revocation."""
+
+    def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey: ...
+
+    def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes: ...
 
     def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome: ...
 

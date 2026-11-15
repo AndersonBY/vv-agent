@@ -60,6 +60,12 @@ class MemoryKeyProvider:
             self.capability = replace(self.capability, state=content.KeyCapabilityState.DESTROYED)
         return content.KeyDestroyOutcome(True, status, evidence_id if status is not content.KeyDestroyStatus.DESTROYING else None)
 
+    def generate_data_key(self, tenant_id: str, session_id: str) -> content.WrappedDataKey:
+        raise NotImplementedError
+
+    def unwrap(self, tenant_id: str, session_id: str, wrapped_key: content.WrappedDataKey) -> bytes:
+        raise NotImplementedError
+
 
 def test_shared_content_ref_schema_accepts_every_fixture_reference() -> None:
     lifecycle = _lifecycle()
