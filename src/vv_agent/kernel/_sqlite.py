@@ -6,10 +6,13 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from threading import RLock
+from typing import Any
 
+from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._content_store import SQLContentStore
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLStore
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore
 
 SCHEMA_VERSION = 4
 STORAGE_MAJOR = "S1"
@@ -283,3 +286,54 @@ class SQLiteStore(SQLStore):
                     self.connection.execute(statement)
             self.connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
             self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+class _SQLiteContentBackend:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    @staticmethod
+    def _query(query: str) -> str:
+        return query.replace("{p}", "?")
+
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+        row = self.connection.execute(self._query(query), params).fetchone()
+        return None if row is None else tuple(row)
+
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        return [tuple(row) for row in self.connection.execute(self._query(query), params).fetchall()]
+
+    def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        return self.connection.execute(self._query(query), params).rowcount
+
+    def require_transaction(self) -> None:
+        if not self.connection.in_transaction:
+            raise RuntimeError("durable content writes require the caller's outer session transaction")
+
+    def now_ms(self) -> int:
+        row = self.fetchone("SELECT session_now_ms()")
+        if row is None:
+            raise RuntimeError("SQLite content clock is unavailable")
+        return row[0]
+
+
+class SQLiteContentStore(SQLContentStore):
+    """SQLite content adapter bound to a caller-owned connection or transaction."""
+
+    def __init__(
+        self,
+        source: SQLiteStore | SQLSessionTx | sqlite3.Connection,
+        key_provider: KeyProvider,
+        *,
+        provider_id: str | None = None,
+    ) -> None:
+        connection: Any
+        if isinstance(source, SQLSessionTx):
+            if not isinstance(source.store, SQLiteStore):
+                raise TypeError("SQLiteContentStore transaction must belong to SQLiteStore")
+            connection = source.store.connection
+        else:
+            connection = source.connection if isinstance(source, SQLiteStore) else source
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("SQLiteContentStore requires a SQLite connection or SQLiteStore")
+        super().__init__(_SQLiteContentBackend(connection), key_provider, provider_id=provider_id)

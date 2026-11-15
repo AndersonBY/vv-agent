@@ -7,8 +7,10 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
+from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._content_store import SQLContentStore
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLStore
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore
 from vv_agent.kernel._store import Lease
 
 if TYPE_CHECKING:
@@ -292,3 +294,64 @@ class PostgresStore(SQLStore):
                 "INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,%s,1)",
                 (STORAGE_MAJOR,),
             )
+
+
+class _PostgresContentBackend:
+    def __init__(self, connection: Connection[Any]) -> None:
+        self.connection = connection
+
+    @staticmethod
+    def _query(query: str) -> LiteralString:
+        return cast(LiteralString, query.replace("{p}", "%s"))
+
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+        from psycopg.rows import tuple_row
+
+        with self.connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(self._query(query), params)
+            row = cursor.fetchone()
+            return None if row is None else tuple(row)
+
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        from psycopg.rows import tuple_row
+
+        with self.connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(self._query(query), params)
+            return [tuple(row) for row in cursor.fetchall()]
+
+    def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        with self.connection.cursor() as cursor:
+            cursor.execute(self._query(query), params)
+            return cursor.rowcount
+
+    def require_transaction(self) -> None:
+        from psycopg.pq import TransactionStatus
+
+        if self.connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise RuntimeError("durable content writes require the caller's outer session transaction")
+
+    def now_ms(self) -> int:
+        row = self.fetchone(f"SELECT {CLOCK}")
+        if row is None:
+            raise RuntimeError("PostgreSQL content clock is unavailable")
+        return row[0]
+
+
+class PostgresContentStore(SQLContentStore):
+    """PostgreSQL content adapter bound to a caller-owned connection or transaction."""
+
+    def __init__(
+        self,
+        source: PostgresStore | SQLSessionTx | Connection[Any],
+        key_provider: KeyProvider,
+        *,
+        provider_id: str | None = None,
+    ) -> None:
+        connection: Any
+        if isinstance(source, SQLSessionTx):
+            if not isinstance(source.store, PostgresStore):
+                raise TypeError("PostgresContentStore transaction must belong to PostgresStore")
+            connection = source.store.connection
+        else:
+            connection = source.connection if isinstance(source, PostgresStore) else source
+        super().__init__(_PostgresContentBackend(connection), key_provider, provider_id=provider_id)
