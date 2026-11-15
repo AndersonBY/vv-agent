@@ -2,6 +2,7 @@
 
 import json
 import runpy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
+from .helpers import content_ref, item, principal
 
 AUTHOR = runpy.run_path(str(Path(__file__).parents[2] / "scripts/app_server_interaction_fixtures.py"))
 InteractionServer, InteractionHost, target_of = (AUTHOR[k] for k in ("InteractionServer", "InteractionHost", "target_of"))
@@ -221,7 +223,11 @@ def test_direct_inbox_uses_kernel_validation_and_labels_free_text(store, typed, 
             if invalid:
                 content["interaction_id"] = "wrong-id"
         before = server.host.calls
-        server.server.kernel.push(THREAD, InboxItem("direct", "user", {"content": content}, TURN, 0))
+        direct = item("direct", "user", target_turn_id=TURN, generation=0, actor=principal("direct-user"))
+        server.server.kernel.push(
+            THREAD,
+            replace(direct, payload={"content": content_ref(f"direct/{typed}/{invalid}")}),
+        )
         runtime = server.server.store.runtimes[THREAD]
         drive(store, THREAD, runtime=runtime, _one_turn=True)
         receipt = store.read_state(THREAD)[0].applied_inputs["direct"]._payload
@@ -444,8 +450,8 @@ def test_historical_oversize_form_remains_parked_and_reports_explicit_error(stor
                 rec = row.record
                 if rec.kind == "op_parked" and rec.payload["handle"]["kind"] == "user":
                     payload = rec.payload
-                    payload["handle"]["question"] = "h" * 16385
-                    payload["interaction_result"]["metadata"]["question"] = "h" * 16385
+                    payload["handle"]["question"] = content_ref("h" * 16385)
+                    payload["interaction_result"] = content_ref("h" * 16385)
                     rec = replace(rec, payload=payload)
                 old_records.append(rec)
             with historical.atomic() as tx:
@@ -663,7 +669,11 @@ def test_direct_typed_inbox_cannot_bypass_envelope_or_answer_validation(store, m
         else:
             kind = "follow_up"
         before = server.host.calls
-        server.server.kernel.push(THREAD, InboxItem("bad-direct", kind, {"content": content}, tid, generation))
+        bad = item("bad-direct", kind, target_turn_id=tid, generation=generation, actor=principal("bad-direct-user"))
+        server.server.kernel.push(
+            THREAD,
+            replace(bad, payload={"content": content_ref(f"bad-direct/{mutation}")}),
+        )
         drive(store, THREAD, runtime=server.server.store.runtimes[THREAD], _one_turn=True)
         assert store.read_state(THREAD)[0].applied_inputs["bad-direct"].payload["disposition"] == "rejected"
         assert server.form() == form and server.host.calls == before

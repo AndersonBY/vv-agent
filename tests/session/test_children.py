@@ -9,18 +9,34 @@ import pytest
 from vv_agent.kernel._child_store import completion_input
 from vv_agent.session import children
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import SessionSpec
 from vv_agent.session.store import Conflict
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
-from .test_recovery_matrix import runtime, start
+from .helpers import content_ref, item, principal, record
+from .test_recovery_matrix import runtime
 
 
 @function_tool
 def child_task() -> str:
     raise AssertionError("child must use the session kernel")
+
+
+def start(store, sid="s"):
+    with store.atomic() as tx:
+        tx.create(
+            SessionSpec(
+                sid,
+                principal(f"{sid}-user"),
+                content_ref(f"{sid}/workspace"),
+                attributes=content_ref(f"{sid}/attributes"),
+            ),
+            consumers=("events",),
+        )
+        prompt = item("initial", "user", actor=principal(f"{sid}-user"))
+        tx.push(sid, replace(prompt, payload={"content": content_ref(f"{sid}/initial")}))
 
 
 def parent_runtime(database, *, background=False, steps=None, hook=lambda *_: None):
@@ -30,7 +46,14 @@ def parent_runtime(database, *, background=False, steps=None, hook=lambda *_: No
         [child_task],
         children={
             "child_task": lambda plan: children.ChildSession(
-                SessionSpec("child", "test", "/tmp"), "do child", background=background
+                SessionSpec(
+                    "child",
+                    principal("child-user"),
+                    content_ref("child/workspace"),
+                    attributes=content_ref("child/attributes"),
+                ),
+                "do child",
+                background=background,
             )
         },
         hook=hook,
@@ -132,7 +155,7 @@ def test_twenty_concurrent_completion_duplicates_and_conflict(store, database):
     with ThreadPoolExecutor(max_workers=20) as pool:
         assert all(pool.map(push, range(20)))
     with pytest.raises(Conflict), store.atomic() as tx:
-        tx.push("s", replace(item, payload=item.payload | {"result": "forged"}))
+        tx.push("s", replace(item, payload=item.payload | {"result": content_ref("forged")}))
     drive(store, "s", runtime=rt)
     with store.atomic() as tx:
         tx.push("s", replace(item, input_id="identical-other-id"))
@@ -148,7 +171,10 @@ def test_parent_cancel_cascades_and_late_result_audit(store, database, child_sta
         complete_child(store, database)
     target = handle["delivery_target"]
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target["turn_id"], target["generation"]))
+        tx.push(
+            "s",
+            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+        )
     drive(store, "s", runtime=rt)
     if not child_started:
         assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox("child"))
@@ -197,7 +223,7 @@ def test_background_child_notification_at_safe_point(store, database):
         ("turn_id", "wrong-turn"),
         ("terminal_seq", 1),
         ("terminal_digest", "0" * 64),
-        ("result", "forged"),
+        ("result", content_ref("forged")),
         ("generation", 99),
         ("target_turn_id", "wrong-parent-turn"),
     ],
@@ -222,8 +248,6 @@ def test_child_completion_rejects_untrusted_or_mismatched_identity(store, databa
 
 def test_store_rejects_success_with_waiting_live_child(store, database):
     from vv_agent.session.reducer import TransitionError
-
-    from .helpers import record
 
     _, state, handle = parked(store, database)
     lease = store.acquire("s", owner="bad-terminal", ttl_ms=15000)
@@ -300,11 +324,15 @@ def test_child_completion_older_generation_cannot_overwrite_successor(store, dat
     rt, _, handle = parked(store, database)
     target = handle["delivery_target"]
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target["turn_id"], target["generation"]))
+        tx.push(
+            "s",
+            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+        )
     drive(store, "s", runtime=rt)
     complete_child(store, database)  # The durable cancel wins before the child's first model.
     with store.atomic() as tx:
-        tx.push("s", InboxItem("next", "follow_up", {"content": "new generation"}, generation=2))
+        follow_up = item("next", "follow_up", generation=2, actor=principal("s-user"))
+        tx.push("s", replace(follow_up, payload={"content": content_ref("new generation")}))
     drive(store, "s", runtime=runtime(database, [LLMResponse("new result")]))
     delivered(store)
     drive(store, "s", runtime=rt)
@@ -332,8 +360,6 @@ def test_twenty_concurrent_child_consumers_deliver_once(store, database):
 def test_store_cannot_forge_child_completion_without_terminal_input(store, database):
     from vv_agent.session.reducer import TransitionError
 
-    from .helpers import record
-
     _, state, handle = parked(store, database)
     oid = handle["delivery_target"]["operation_id"]
     plan = state.operations[oid].attempts[1].plan
@@ -357,13 +383,24 @@ def test_cancel_live_child_recursively_reaches_grandchild(store, database):
     parent_rt, _, handle = parked(store, database)
     child_rt = parent_runtime(database)
     child_rt.children = {
-        "child_task": lambda plan: children.ChildSession(SessionSpec("grandchild", "test", "/tmp"), "nested child")
+        "child_task": lambda plan: children.ChildSession(
+            SessionSpec(
+                "grandchild",
+                principal("grandchild-user"),
+                content_ref("grandchild/workspace"),
+                attributes=content_ref("grandchild/attributes"),
+            ),
+            "nested child",
+        )
     }
     drive(store, "child", runtime=child_rt)
     assert read_state(store, "child")[0].phase == "parked"
     target = handle["delivery_target"]
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target["turn_id"], target["generation"]))
+        tx.push(
+            "s",
+            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+        )
     drive(store, "s", runtime=parent_rt)
     drive(store, "child", runtime=child_rt)
     assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox("grandchild"))
@@ -407,11 +444,15 @@ def test_old_child_audit_during_new_model_does_not_force_another_model(store, da
     rt, _, handle = parked(store, database)
     target = handle["delivery_target"]
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target["turn_id"], target["generation"]))
+        tx.push(
+            "s",
+            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+        )
     drive(store, "s", runtime=rt)
     complete_child(store, database)
     with store.atomic() as tx:
-        tx.push("s", InboxItem("next", "follow_up", {"content": "new generation"}, generation=2))
+        follow_up = item("next", "follow_up", generation=2, actor=principal("s-user"))
+        tx.push("s", replace(follow_up, payload={"content": content_ref("new generation")}))
 
     def newer_model(request):
         with open_store(database) as other:

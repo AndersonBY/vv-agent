@@ -12,8 +12,9 @@ from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
-from .test_children import parent_runtime
-from .test_recovery_matrix import runtime, start
+from .helpers import content_ref, item, principal
+from .test_children import parent_runtime, start
+from .test_recovery_matrix import runtime
 
 CHILDREN = ("child-0", "child-1", "child-2")
 
@@ -21,7 +22,17 @@ CHILDREN = ("child-0", "child-1", "child-2")
 def batch_runtime(database, *, background=False):
     rt = parent_runtime(database)
     rt.children["child_task"] = lambda _plan: tuple(
-        children.ChildSession(SessionSpec(sid, "test", "/tmp"), "work", background=background) for sid in CHILDREN
+        children.ChildSession(
+            SessionSpec(
+                sid,
+                principal(f"{sid}-user"),
+                content_ref(f"{sid}/workspace"),
+                attributes=content_ref(f"{sid}/attributes"),
+            ),
+            "work",
+            background=background,
+        )
+        for sid in CHILDREN
     )
     return rt
 
@@ -179,7 +190,7 @@ def test_cancel_reaches_every_sibling_and_late_delivery_never_revives(store, dat
     state = read_state(store, "s")[0]
     tid = state.active_turn_id
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, tid, 0))
+        tx.push("s", item("cancel", "control", action="cancel", target_turn_id=tid, generation=0))
     drive(store, "s", runtime=rt)
     for sid in CHILDREN:
         assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox(sid))
@@ -282,7 +293,7 @@ def test_batch_error_result_keeps_every_child_outcome(store, database):
     for index, sid in enumerate(CHILDREN):
         if index == 1:
             with store.atomic() as tx:
-                tx.push(sid, InboxItem("cancel", "control", {"action": "cancel"}, f"{sid}/turn/start", 0))
+                tx.push(sid, item("cancel", "control", action="cancel", target_turn_id=f"{sid}/turn/start", generation=0))
             drive(store, sid, runtime=runtime(database, []))
         else:
             complete(store, database, sid)

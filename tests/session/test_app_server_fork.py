@@ -13,6 +13,7 @@ from vv_agent.session.records import SessionSpec
 from vv_agent.types import LLMResponse, Message, ToolArtifactRef, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
+from .helpers import content_ref, principal
 from .test_compaction import SUMMARY, tool_history
 
 
@@ -131,12 +132,9 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
             tx.create(
                 SessionSpec(
                     "source",
-                    "local",
-                    ".",
-                    attributes={
-                        "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
-                        "seed": {"messages": [m.to_dict() for m in history], "shared_state": {}},
-                    },
+                    principal("source-user"),
+                    content_ref("source/workspace"),
+                    attributes=content_ref("source/attributes"),
                 ),
                 consumers=("events", "traces", "app_server"),
             )
