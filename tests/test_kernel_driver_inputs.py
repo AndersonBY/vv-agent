@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+from session.helpers import content_ref, principal
 
 
 def produce(path, case):
@@ -21,23 +22,29 @@ def produce(path, case):
     from vv_agent.session.records import InboxItem, SessionSpec
     from vv_agent.session.runtime import Runtime
     from vv_agent.session.sqlite import SQLiteStore
-    from vv_agent.types import Message
 
     clock = SimClock()
-    attributes = (
-        {"seed": {"messages": [Message("user", "retained seed").to_dict()], "shared_state": {"nested": [True, 1]}}}
-        if case == "seed"
-        else None
-    )
-    content = {"text": "new text", "messages": [Message("user", "explicit input").to_dict()]} if case == "seed" else "work"
-    item = InboxItem("i", "user", {"content": content}, target_turn_id=None)
+    attributes = content_ref(f"attributes-{case}")
+    content = content_ref("explicit input" if case == "seed" else "work")
+    workspace = content_ref("workspace")
+    actor = principal("i")
+    item = InboxItem("i", "user", {"content": content}, target_turn_id=None, actor=actor)
     with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "p", "/tmp", attributes=attributes), consumers=())
+            tx.create(SessionSpec("s", principal(), workspace, attributes=attributes), consumers=())
             tx.push("s", item)
             if case == "cancel":
-                tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, "s/turn/i"))
+                tx.push(
+                    "s",
+                    InboxItem(
+                        "cancel",
+                        "control",
+                        {"action": "cancel"},
+                        target_turn_id="s/turn/i",
+                        actor=principal("cancel", "service"),
+                    ),
+                )
         runtime = Runtime(
             Agent("input", "Work."),
             RunConfig(session_memory_enabled=False),
@@ -78,6 +85,8 @@ def produce(path, case):
         pytest.MonkeyPatch().setattr(driver, "runtime", runtime)
         definition = driver.state.turns["s/turn/i"].start._payload["definition"]
         return {
+            "principal": principal(),
+            "workspace": workspace,
             "attributes": attributes,
             "item": item.to_dict(),
             "case": case,
@@ -179,10 +188,22 @@ class Catalog:
 with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as store:
     store.install_schema()
     with store.atomic() as tx:
-        tx.create(SessionSpec("s", "p", "/tmp", attributes=data["attributes"]), consumers=())
+        tx.create(
+            SessionSpec("s", data["principal"], data["workspace"], attributes=data["attributes"]),
+            consumers=(),
+        )
         tx.push("s", InboxItem(**data["item"]))
         if data["case"] == "cancel":
-            tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, "s/turn/i"))
+            tx.push(
+                "s",
+                InboxItem(
+                    "cancel",
+                    "control",
+                    {"action": "cancel"},
+                    target_turn_id="s/turn/i",
+                    actor=data["principal"],
+                ),
+            )
     scope = Scope(
         store.acquire("s", owner="owner", ttl_ms=15000),
         15000,
@@ -224,7 +245,7 @@ with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as stor
                 driver.commit(request.records, guarded=True)
                 response = None
             elif isinstance(request, inputs.CompileTurn):
-                assert request.content == ("new text" if data["case"] == "seed" else "work") and not request.control
+                assert request.content == data["item"]["payload"]["content"] and not request.control
                 response = AgentTask.from_dict(copy_json(data["compiled"]))
             elif isinstance(request, inputs.CurrentDefinition):
                 response = inputs.DefinitionFacts(cache, DefinitionBindings(**data["bindings"]), Catalog())
@@ -283,8 +304,16 @@ def queued_driver(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "queued.sqlite")) as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "p", "/tmp"), consumers=())
-            tx.push("s", InboxItem("i", "user", {"content": "work"}))
+            tx.create(
+                SessionSpec(
+                    "s",
+                    principal(),
+                    content_ref("workspace"),
+                    attributes=content_ref("attributes"),
+                ),
+                consumers=(),
+            )
+            tx.push("s", InboxItem("i", "user", {"content": content_ref("work")}, actor=principal("i")))
         rt = runtime(tmp_path / "queued.sqlite", [])
         lease = store.acquire("s", owner="test", ttl_ms=rt.ttl_ms)
         assert lease is not None
@@ -320,7 +349,15 @@ def test_model_selection_failure_is_rejected_inside_core_request_boundary(queued
 
     monkeypatch.setattr(driver.runtime, "model_resolver", fail)
     with driver.store.atomic() as tx:
-        tx.push("s", InboxItem("selection", "model_selection", {"selection": {"model": "other", "route": {}}}))
+        tx.push(
+            "s",
+            InboxItem(
+                "selection",
+                "model_selection",
+                {"selection": content_ref("other-selection")},
+                actor=principal("selection"),
+            ),
+        )
     driver.refresh()
     assert driver.apply_input()
     applied = driver.state.applied_inputs["selection"]
@@ -353,7 +390,15 @@ def test_real_ledger_and_catalog_stopiteration_preserves_original_error(queued_d
         monkeypatch.setattr(driver.runtime, "hook", hook)
     if entry == "input":
         with driver.store.atomic() as tx:
-            tx.push("s", InboxItem("other", "follow_up", {"content": "later"}))
+            tx.push(
+                "s",
+                InboxItem(
+                    "other",
+                    "follow_up",
+                    {"content": content_ref("later")},
+                    actor=principal("other"),
+                ),
+            )
         driver.refresh()
     before = [row.record.encode() for row in driver.store.read("s").records]
     with pytest.raises(StopIteration) as caught:

@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from typing import Any
 
 import pytest
+from session.helpers import content_ref, principal
 
 from vv_agent import Agent, GuardrailResult, OutputValidationResult, RunConfig
 from vv_agent.config import ResolvedModelConfig
@@ -113,8 +114,11 @@ def produce(case: str, *, guardrail_error: Exception | None = None) -> dict[str,
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", "/tmp"), consumers=("events",))
-            tx.push("s", InboxItem("initial", "user", {"content": "go"}))
+            tx.create(
+                SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=("events",),
+            )
+            tx.push("s", InboxItem("initial", "user", {"content": content_ref("go")}, actor=principal("initial")))
         runtime = Runtime(
             agent,
             RunConfig(no_tool_policy="finish", max_cycles=1),

@@ -7,15 +7,42 @@ the default in-memory store, upgrading is an ordinary dependency bump; read the
 
 ## Session data and upgrades
 
-vv-agent reads exactly one version of each stored shape. There are no decoders
-for older versions and no in-place migrations. When a release bumps the record
-or inbox schema, the new runtime rejects rows written by the old one with
-`RecordError`. That covers finished sessions too, not only running ones.
+The unreleased 0.36 line introduces the S1 store boundary. S1 records and inbox
+items use `schema_version: "S1"`. The SQLite schema uses
+`PRAGMA user_version` 4, `sk_settings.storage_major='S1'` and write level 1;
+PostgreSQL uses the same storage major and exact table set. These are exact
+rejection boundaries. Missing, stale, unknown or partially initialized schemas
+are not selected for compatibility, and old rows are not rewritten in place.
 
-The concrete SQLite/PostgreSQL adapters live under `vv_agent.kernel`; the
-`vv_agent.session` store imports retain their SDK constructors and defaults.
-That internal move preserves the DDL, stored bytes and version checks and
-requires no database migration.
+Tenant identity is part of the persisted key. Session, record, inbox, consumer,
+commit, checkpoint, key, content, content-link and tombstone rows carry
+`tenant_id`, with composite tenant/session keys and foreign keys. A
+`SessionSpec` carries a closed principal (`tenant_id`, `subject_id`,
+`subject_kind` and a content reference for principal attributes); an
+`InboxItem` carries an `actor` principal, and host ingress requires that actor
+to use the session tenant. The tenant-bound store facade scopes its SQL
+operations by `tenant_id`. The low-level codec validates each shape; it does
+not itself authenticate a tenant or repair a mismatched actor.
+
+That facade is an application routing boundary, not completed database
+isolation. PostgreSQL role allocation and `FORCE ROW LEVEL SECURITY` policies
+are deferred and are not installed by the S1 DDL. Do not treat access through a
+shared database role as credential isolation or as proof that one tenant cannot
+read another tenant's rows.
+
+The S1 logical skeleton stores content positions as `ContentRef` values instead
+of host, user or model plaintext. The producer/codec phase validates reference
+shape but does not yet hydrate content; the runtime reports that hydration is
+unavailable. The content store and key-provider integration, encryption,
+decryption, deletion lifecycle and end-to-end admission and checkpoint signing
+remain incomplete. Signature slots and checkpoint columns exist, and the codec
+checks their encoded shape, but that is not proof of authenticity. P2 is not
+complete while those content and security boundaries remain open.
+
+There are no decoders for pre-S1 versions and no in-place migration tool on
+this branch. The new runtime rejects old record and inbox envelopes; a store
+file or PostgreSQL schema that fails the exact S1 checks is also rejected.
+Those rules cover finished sessions as well as running ones.
 
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
@@ -84,19 +111,26 @@ old-version session.
 
 ### 0.36.0 — Unreleased
 
-The core and concrete session stores move under `vv_agent.kernel`; the existing
-`vv_agent.session` exports and facades plus public SDK entry points remain.
-Record schema 1, inbox schema 3, SQL layouts, canonical bytes, IDs, and digests
-are unchanged. Existing sessions need no migration, drain, decoder selection,
-or byte rewrite.
+**Store boundary**: P2 S1 changes the logical record and inbox envelopes from
+record schema 1 and inbox schema 3 to `schema_version: "S1"`. It changes the
+SQL layouts to tenant-scoped composite keys, sets SQLite `user_version` to 4,
+and makes the principal, actor and content-reference shapes closed. Pre-S1
+stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
+migration or import tool is provided.
+
+This branch implements the S1 skeleton schema, tenant-bound store routing and
+producer/codec boundary, but it does not complete P2. Content hydration and the
+key/content lifecycle are not integrated; admission, input and checkpoint
+signatures are not yet authenticated end to end; and PostgreSQL RLS is
+deferred. Hosts must not claim encrypted content, signed history or database
+credential isolation from these interfaces alone.
 
 Contract 39 narrows failed closed-session diagnostics to
 `invalid session schema`. This is a public diagnostic change, but accepted and
 rejected values, validation order, and execution behavior do not change. Do not
-parse complete `jsonschema.ValidationError` text, paths, or schema dumps. P1 adds
-no backend DDL, `Principal`, or provider work; upgrade the dependency and rely
-on the stable invalid-schema text. Contract adoption is pending and the
-canonical lock remains 38.0.0. See the [release notes](releases/0.36.0.md).
+parse complete `jsonschema.ValidationError` text, paths, or schema dumps.
+Contract adoption remains separate from the S1 store boundary. See the
+[0.36.0 release notes](releases/0.36.0.md).
 
 ### 0.35.0 — 2026-11-12
 

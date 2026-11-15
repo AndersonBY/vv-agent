@@ -24,6 +24,7 @@ from vv_agent.kernel._lease_scope import LeaseOwnership
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._records import SessionSpec, InboxItem, digest
+from hashlib import sha256
 class Clock:
     def now_ms(self): return 1000
     def monotonic(self): return 1.0
@@ -32,14 +33,22 @@ class Clock:
 clock=Clock()
 def unused(*args,**kwargs): raise AssertionError('no compaction requested')
 def factory(): return Fold(normalize_memory_settings=unused, count_messages=unused)
+def content_ref(label):
+    payload=label.encode('utf-8')
+    return {'content_id':f'content/test/{label}','mac':sha256(payload).hexdigest(),'size':len(payload),
+            'key_id':'key/test','labels':{'source':[],'classification':'internal'}}
+def principal():
+    return {'tenant_id':'default','subject_id':'p','subject_kind':'user',
+            'attributes':content_ref('principal/p')}
 class Scope(LeaseOwnership):
     turn_id=None
     generation=None
 with SQLiteStore.standalone(sys.argv[2],clock=clock,fold_factory=factory) as store:
     store.install_schema()
     with store.atomic() as tx:
-        tx.create(SessionSpec('s','p','w'), consumers=())
-        item=InboxItem('i','user',{'content':'go'})
+        tx.create(SessionSpec('s',principal(),content_ref('workspace'),
+                              attributes=content_ref('attributes')), consumers=())
+        item=InboxItem('i','user',{'content':content_ref('go')},actor=principal())
         tx.push('s',item)
     scope=Scope(store.acquire('s',owner='o',ttl_ms=15000),15000,.25,clock=clock,
         stop=Event(),ready=Event(),lock=Lock(),poll_lock=Lock(),commit_lock=Lock(),

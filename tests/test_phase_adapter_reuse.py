@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from pathlib import Path
 
+from session.helpers import content_ref, principal
 from support.kernel_runtime import KernelRuntime
 
 from vv_agent.agent import Agent
@@ -65,8 +66,11 @@ def test_historical_facades_use_the_real_sqlite_driver_bridge():
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "phase-adapter", "/tmp"), consumers=())
-            tx.push("s", InboxItem("initial", "user", {"content": "go"}))
+            tx.create(
+                SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=(),
+            )
+            tx.push("s", InboxItem("initial", "user", {"content": content_ref("go")}, actor=principal("initial")))
 
         runtime = kernel.Runtime(
             agent=Agent("kernel", "Be precise."),
