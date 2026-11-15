@@ -157,3 +157,115 @@ assert all(n in {'vv_agent','vv_agent.kernel'} or n.startswith('vv_agent.kernel.
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _started_model_plan(tmp_path):
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider
+    from vv_agent.session._driver_scope import _Scope
+    from vv_agent.session.content_store import LocalKeyProvider
+    from vv_agent.session.kernel import _Driver, drive
+    from vv_agent.session.records import InboxItem
+    from vv_agent.session.sqlite import SQLiteStore
+    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.types import LLMResponse
+
+    class Started(BaseException):
+        pass
+
+    store = SQLiteStore(str(tmp_path / "outcomes.sqlite"))
+    store.install_schema()
+    sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
+    sessions.create("s", "/workspace", {})
+    sessions.push("s", InboxItem("input", "user", {"content": "produce a result"}))
+    runtime = sessions.runtime(
+        Agent("outcomes", "Work.", model="scripted"),
+        RunConfig(
+            model_provider=ScriptedModelProvider.new("scripted", "scripted", [LLMResponse("unused")]),
+            workspace="/workspace",
+        ),
+        session_id="s",
+    )
+
+    def cut(point, record):
+        if point == "after_commit" and record is not None and record.kind == "op_started":
+            raise Started
+
+    runtime.hook = cut
+    with pytest.raises(Started):
+        drive(sessions.store, "s", runtime=runtime)
+    runtime.hook = lambda *_: None
+    lease = sessions.store.acquire("s", owner="outcomes-test", ttl_ms=15_000)
+    assert lease is not None
+    driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+    driver.bind_turn()
+    operation = next(op for op in driver.state.operations.values() if op.kind == "model")
+    return store, sessions, driver, operation.attempts[1].execution_plan
+
+
+def test_rejected_retry_reuses_the_committed_plan_refs_and_digest(tmp_path):
+    from vv_agent.kernel._content import ContentRef
+    from vv_agent.kernel._hydration import reference_digest
+    from vv_agent.kernel._provider_outcomes import Definitive
+    from vv_agent.kernel._records import digest
+
+    _store, sessions, driver, plan = _started_model_plan(tmp_path)
+    try:
+        outcome = Definitive(
+            {
+                "content": "retry",
+                "error_code": "model_request_rejected",
+                "rejection": {"retryable": True, "status_code": 429},
+            },
+            (),
+            {},
+            {},
+        )
+        records = driver.completed(plan, outcome)
+        retry = records[-1]
+        request_ref = ContentRef.from_dict(plan.payload["request"])
+        request = driver.hydrate_plan(plan).payload["request"]
+
+        assert [record.kind for record in records] == ["op_completed", "op_planned"]
+        assert retry.payload["request"] == plan.payload["request"]
+        assert retry.payload["tool"] == plan.payload["tool"]
+        assert retry.payload["budget_admission"] == plan.payload["budget_admission"]
+        assert retry.payload["request_digest"] == plan.payload["request_digest"] == reference_digest(request_ref)
+        assert plan.payload["request_digest"] != digest(request)
+    finally:
+        sessions.close()
+
+
+def test_completed_result_and_empty_usage_are_hydratable_and_deduplicated(tmp_path):
+    from vv_agent.kernel._content import ContentRef
+    from vv_agent.kernel._hydration import reference_digest
+    from vv_agent.kernel._provider_outcomes import Definitive
+    from vv_agent.kernel._records import digest
+
+    store, sessions, driver, plan = _started_model_plan(tmp_path)
+    try:
+        records = driver.completed(plan, Definitive({}, (), {}, {}))
+        assert [record.kind for record in records] == ["op_completed"]
+        driver.commit(records, guarded=True)
+        driver.refresh()
+        assert plan.operation_id is not None
+        completed = driver.state.operations[plan.operation_id].attempts[1].result
+        assert completed is not None
+
+        result_ref = ContentRef.from_dict(completed.payload["result"])
+        usage_ref = ContentRef.from_dict(completed.payload["usage"])
+        shared_ref = ContentRef.from_dict(completed.payload["shared_state"])
+        evidence_ref = ContentRef.from_dict(completed.payload["evidence"])
+        assert result_ref == usage_ref == shared_ref
+        assert driver.hydrate_record_field(completed, "result", result_ref) == {}
+        assert driver.hydrate_record_field(completed, "usage", usage_ref) == {}
+        assert driver.hydrate_record_field(completed, "shared_state", shared_ref) == {}
+        assert driver.hydrate_record_field(completed, "evidence", evidence_ref) == []
+        assert completed.payload["result_digest"] == reference_digest(result_ref)
+        assert completed.payload["result_digest"] != digest({})
+        rows = store._one(
+            "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            ("default", "s", result_ref.content_id),
+        )
+        assert rows == (1,)
+    finally:
+        sessions.close()

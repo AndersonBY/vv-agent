@@ -285,3 +285,134 @@ def test_effective_model_core_owns_selected_fork_default_precedence(mode):
     else:
         assert result["model"] == view.state.turns[view.state.active_turn_id].start._task().model
         assert trace == [core.PlanningRead.DEFAULT_MODEL_BINDING]
+
+
+def test_real_planner_publishes_hydratable_request_reference(tmp_path):
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider
+    from vv_agent.kernel._content import ContentRef
+    from vv_agent.kernel._hydration import reference_digest
+    from vv_agent.kernel._records import digest
+    from vv_agent.session._driver_scope import _Scope
+    from vv_agent.session.content_store import LocalKeyProvider
+    from vv_agent.session.kernel import _Driver, drive
+    from vv_agent.session.records import InboxItem
+    from vv_agent.session.sqlite import SQLiteStore
+    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.types import LLMResponse
+
+    class Planned(BaseException):
+        pass
+
+    marker = "PLANNER_CONTENT_MARKER_7e77"
+    with SQLiteStore.standalone(str(tmp_path / "planner.sqlite")) as store:
+        store.install_schema()
+        sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
+        sessions.create("s", "/workspace", {})
+        sessions.push("s", InboxItem("input", "user", {"content": marker}))
+        runtime = sessions.runtime(
+            Agent("planner", "Work.", model="scripted"),
+            RunConfig(
+                model_provider=ScriptedModelProvider.new("scripted", "scripted", [LLMResponse("done")]),
+                workspace="/workspace",
+            ),
+            session_id="s",
+        )
+
+        def cut(point, record):
+            if point == "after_commit" and record is not None and record.kind == "op_planned":
+                raise Planned
+
+        runtime.hook = cut
+        with pytest.raises(Planned):
+            drive(sessions.store, "s", runtime=runtime)
+
+        runtime.hook = lambda *_: None
+        lease = sessions.store.acquire("s", owner="planner-test", ttl_ms=15_000)
+        assert lease is not None
+        driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+        driver.bind_turn()
+        operation = next(op for op in driver.state.operations.values() if op.kind == "model")
+        plan = operation.attempts[1].execution_plan
+        request_ref = ContentRef.from_dict(plan.payload["request"])
+        budget_ref = ContentRef.from_dict(plan.payload["budget_admission"])
+        request = driver.hydrate_plan(plan).payload["request"]
+
+        assert marker in request["messages"][1]["content"]
+        assert plan.payload["request_digest"] == reference_digest(request_ref)
+        assert plan.payload["request_digest"] != digest(request)
+        assert budget_ref.size == 2
+        assert marker.encode() not in plan.encode()
+        sessions.close()
+
+
+def test_real_tool_planner_publishes_hydratable_request_and_capability_refs(tmp_path):
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
+    from vv_agent.kernel._content import ContentRef
+    from vv_agent.kernel._hydration import reference_digest
+    from vv_agent.kernel._records import digest
+    from vv_agent.session._driver_scope import _Scope
+    from vv_agent.session.content_store import LocalKeyProvider
+    from vv_agent.session.kernel import _Driver, drive
+    from vv_agent.session.records import InboxItem
+    from vv_agent.session.sqlite import SQLiteStore
+    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.types import LLMResponse, ToolCall
+
+    class ToolPlanned(BaseException):
+        pass
+
+    @function_tool
+    def effect(text: str) -> str:
+        return text
+
+    with SQLiteStore.standalone(str(tmp_path / "tool-planner.sqlite")) as store:
+        store.install_schema()
+        sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
+        sessions.create("s", "/workspace", {})
+        sessions.push("s", InboxItem("input", "user", {"content": "use the tool"}))
+        runtime = sessions.runtime(
+            Agent("planner", "Work.", tools=[effect], model="scripted"),
+            RunConfig(
+                model_provider=ScriptedModelProvider.new(
+                    "scripted",
+                    "scripted",
+                    [LLMResponse("", [ToolCall("call", "effect", {"text": "TOOL_MARKER_5e31"})])],
+                ),
+                workspace="/workspace",
+            ),
+            session_id="s",
+        )
+
+        def cut(point, record):
+            if (
+                point == "after_commit"
+                and record is not None
+                and record.kind == "op_planned"
+                and record.payload["op_kind"] == "tool"
+            ):
+                raise ToolPlanned
+
+        runtime.hook = cut
+        with pytest.raises(ToolPlanned):
+            drive(sessions.store, "s", runtime=runtime)
+
+        runtime.hook = lambda *_: None
+        lease = sessions.store.acquire("s", owner="tool-planner-test", ttl_ms=15_000)
+        assert lease is not None
+        driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+        driver.bind_turn()
+        operation = next(op for op in driver.state.operations.values() if op.kind == "tool")
+        plan = operation.attempts[1].execution_plan
+        hydrated = driver.hydrate_plan(plan).payload
+        request_ref = ContentRef.from_dict(plan.payload["request"])
+        tool_ref = ContentRef.from_dict(plan.payload["tool"])
+        budget_ref = ContentRef.from_dict(plan.payload["budget_admission"])
+
+        assert hydrated["request"]["arguments"] == {"text": "TOOL_MARKER_5e31"}
+        assert hydrated["tool"] == {}
+        assert hydrated["budget_admission"] == {}
+        assert plan.payload["request_digest"] == reference_digest(request_ref)
+        assert plan.payload["request_digest"] != digest(hydrated["request"])
+        assert tool_ref == budget_ref
+        assert b"TOOL_MARKER_5e31" not in plan.encode()
+        sessions.close()

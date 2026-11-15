@@ -410,3 +410,162 @@ def test_dispatch_preflight_formatter_keeps_callback_exception_chain(tmp_path, m
     result = next(json.loads(row)["payload"]["result"] for row in data["expected"] if json.loads(row)["kind"] == "op_completed")
     assert result["error_code"] == "tool_execution_failed"
     assert "formatted original policy failure" in result["content"]
+
+
+def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp_path):
+    from types import SimpleNamespace
+
+    from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
+    from vv_agent.kernel import _driver_dispatch as core
+    from vv_agent.kernel._content import ContentRef
+    from vv_agent.kernel._content_publication import make_record_before_publication, publish_record_content
+    from vv_agent.kernel._driver_planning import ProviderAvailable
+    from vv_agent.kernel._hydration import reference_digest
+    from vv_agent.kernel._records import digest
+    from vv_agent.kernel._tool_values import ToolCall, ToolExecutionResult
+    from vv_agent.session.content_runtime import SessionContentWriter
+    from vv_agent.session.content_store import LocalKeyProvider
+    from vv_agent.session.surfaces import SessionDriver
+
+    @function_tool
+    def effect(text: str) -> str:
+        return text
+
+    sessions = SessionDriver(tmp_path / "dispatch.sqlite", content_key_provider=LocalKeyProvider(b"k" * 32))
+    sessions.create("s", "/workspace", {})
+    runtime = sessions.runtime(
+        Agent("dispatch", "Work.", tools=[effect], model="scripted"),
+        RunConfig(
+            model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
+            workspace="/workspace",
+        ),
+        session_id="s",
+    )
+    task = runtime.compile("go", "s/turn/tool", seed=None, control=False)
+    turn_id = "s/turn/tool"
+    parent_id = "parent"
+    parent = make_record_before_publication(
+        "op_planned",
+        session_id="s",
+        turn_id=turn_id,
+        operation_id=parent_id,
+        attempt=1,
+        payload={
+            "op_kind": "model",
+            "purpose": "primary",
+            "request": {"tools": [{"function": {"name": "effect", "parameters": {"type": "object"}}}]},
+            "request_digest": "0" * 64,
+            "context_version": "1",
+            "dependencies": [],
+            "tool": None,
+            "idempotency_key": "parent",
+            "budget_admission": {},
+            "not_before_ms": None,
+            "provider_binding": "model",
+            "consumed_unknowns": [],
+        },
+    )
+    plan = make_record_before_publication(
+        "op_planned",
+        session_id="s",
+        turn_id=turn_id,
+        operation_id="tool",
+        attempt=1,
+        payload={
+            "op_kind": "tool",
+            "purpose": None,
+            "request": ToolCall("a", "effect", {"text": "original"}).to_dict(),
+            "request_digest": "1" * 64,
+            "context_version": "2",
+            "dependencies": [parent_id],
+            "tool": {},
+            "idempotency_key": "s/tool",
+            "budget_admission": {},
+            "not_before_ms": None,
+            "provider_binding": "function",
+            "consumed_unknowns": [],
+        },
+    )
+
+    class Driver:
+        sid = "s"
+        records = (SimpleNamespace(seq=2),)
+        fold = None
+        state = SimpleNamespace(
+            active_turn_id=turn_id,
+            preferred_endpoint_id=None,
+            turns={turn_id: SimpleNamespace(start=object())},
+            operations={parent_id: SimpleNamespace(selected_attempt=1, attempts={1: SimpleNamespace(plan=parent)})},
+        )
+        scope = SimpleNamespace(lease=SimpleNamespace(epoch=7))
+
+        def hydrated_definition(self, record):
+            del record
+            return SimpleNamespace(task=task, capabilities={})
+
+        def hydrate_plan(self, record):
+            return record
+
+        def record(self, kind, payload, plan=None):
+            return make_record_before_publication(
+                kind,
+                session_id="s",
+                turn_id=plan.turn_id if plan else turn_id,
+                operation_id=plan.operation_id if plan else None,
+                attempt=plan.attempt if plan else None,
+                payload=payload,
+            )
+
+    driver = Driver()
+    attempt = SimpleNamespace(plan=plan, execution_plan=plan, approval=None, prepared=None)
+    steps = core.dispatch(driver, attempt)
+    response = None
+    captured = None
+    while True:
+        try:
+            request = steps.send(response)
+        except StopIteration:
+            break
+        response = None
+        if isinstance(request, core.PrepareContext):
+            pass
+        elif isinstance(request, core.FinishContext):
+            response = {}
+        elif request is core.DispatchRead.HAS_HOOKS:
+            response = True
+        elif request is core.DispatchRead.CONTEXT_CYCLE:
+            response = 1
+        elif isinstance(request, core.SetContextCycle):
+            pass
+        elif request is core.DispatchRead.DURABLE_CONTEXT:
+            response = {"shared_marker": "SHARED_MARKER"}
+        elif isinstance(request, core.BeforeTool):
+            response = (
+                ToolCall("a", "effect", {"text": "PATCHED_MARKER"}),
+                ToolExecutionResult("a", content="HOOK_MARKER"),
+            )
+        elif isinstance(request, ProviderAvailable):
+            response = False
+        elif isinstance(request, core.CommitDispatch):
+            captured = request.records[0]
+            break
+        else:
+            raise AssertionError(f"unexpected dispatch request: {request!r}")
+    assert captured is not None and captured.kind == "op_prepared"
+
+    with sessions.store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+        prepared = publish_record_content(writer, (captured,)).records[0]
+        values = {
+            slot: writer.get_json(ContentRef.from_dict(prepared.payload[slot]))
+            for slot in ("request", "tool", "hook_result", "shared_state")
+        }
+        request_ref = ContentRef.from_dict(prepared.payload["request"])
+        assert values["request"]["arguments"] == {"text": "PATCHED_MARKER"}
+        assert values["tool"] == {}
+        assert values["hook_result"]["content"] == "HOOK_MARKER"
+        assert values["shared_state"] == {"shared_marker": "SHARED_MARKER"}
+        assert prepared.payload["request_digest"] == reference_digest(request_ref)
+        assert prepared.payload["request_digest"] != digest(values["request"])
+        assert b"PATCHED_MARKER" not in prepared.encode()
+    sessions.close()

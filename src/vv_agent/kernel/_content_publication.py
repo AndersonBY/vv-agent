@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ._content import ContentRef, ContentSessionWriter
 from ._hydration import reference_digest
-from ._records import Record, digest
+from ._records import Record, copy_json, digest, make_record, record_identity
 
 _CONTENT_REF_FIELDS = frozenset({"content_id", "mac", "size", "key_id", "labels"})
 _MISSING = object()
@@ -156,6 +156,48 @@ def declared_content_ref(value: Any) -> ContentRef | None:
         return None
 
 
+def make_record_before_publication(
+    kind: str,
+    *,
+    session_id: str,
+    payload: dict[str, Any],
+    turn_id: str | None = None,
+    operation_id: str | None = None,
+    attempt: int | None = None,
+) -> Record:
+    """Build a content record that must pass through ``publish_record_content`` before encoding."""
+
+    payload = copy_json(payload)
+    if kind == "turn_started":
+        payload.setdefault("policy_digest", None)
+        payload.setdefault(
+            "requirements",
+            {"level": 1, "handler_version": payload.get("handler_version"), "capabilities": []},
+        )
+        payload.setdefault("tokenizer_binding", None)
+        payload.setdefault("environment", None)
+    elif kind in {"op_planned", "op_prepared", "op_completed"}:
+        payload.setdefault("policy_decision", None)
+    if not has_record_content_payload(kind, payload):
+        return make_record(
+            kind,
+            session_id=session_id,
+            turn_id=turn_id,
+            operation_id=operation_id,
+            attempt=attempt,
+            payload=payload,
+        )
+    return Record(
+        record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
+        kind,
+        session_id,
+        turn_id,
+        operation_id,
+        attempt,
+        payload,
+    )
+
+
 def publish_json(writer: ContentSessionWriter, value: Any) -> ContentRef:
     """Preserve a legal reference and put only plain producer content."""
 
@@ -291,7 +333,8 @@ def _payload_slots(kind: str, source: dict[str, Any]) -> Iterable[tuple[tuple[st
         root = source.get("data")
         if isinstance(root, dict):
             for path, slot in rules:
-                yield from _expand_slot(root, path, slot)
+                for resolved, declared_slot, value in _expand_slot(root, path, slot):
+                    yield ("data", *resolved), declared_slot, value
         return
 
     for path, slot in _CONTENT_SLOTS.get(kind, ()):

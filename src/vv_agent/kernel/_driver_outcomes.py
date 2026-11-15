@@ -10,12 +10,13 @@ from typing import Any
 from vv_agent.kernel._budget import BudgetObservation, CoreBudgetEvaluator
 from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot, RunBudgetLimits
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import PlanningRequest
 from vv_agent.kernel._driver_planning import plan as plan_steps
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, validate_acceptance, validate_provider_result
 from vv_agent.kernel._record_codec import RecordError
-from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
+from vv_agent.kernel._records import InboxItem, Record, copy_json, digest
 from vv_agent.kernel._retained_budget import retained_budget_inputs, retained_evaluator
 from vv_agent.kernel._state import Attempt, child_handles
 from vv_agent.kernel._tool_result_checks import validate_definitive_result, validate_output_body
@@ -275,13 +276,13 @@ def completed_steps(self: CoreDriver, plan: Record, outcome: Definitive) -> Gene
             )
             due = (yield OutcomeRead.POLL_LEASE).db_now_ms + delay if delay else 0
             records.append(
-                make_record(
+                make_record_before_publication(
                     "op_planned",
                     session_id=self.sid,
                     turn_id=plan.turn_id,
                     operation_id=plan.operation_id,
                     attempt=plan.attempt + 1,
-                    payload=plan._payload | {"not_before_ms": due},
+                    payload=stored_plan._payload | {"not_before_ms": due},
                 )
             )
         return records

@@ -9,6 +9,7 @@ from enum import Enum, auto
 from typing import Any, Protocol
 
 from ._compaction_text import is_microcompacted_tool_content
+from ._content_publication import make_record_before_publication
 from ._context import protected_start
 from ._context_messages import retained_start
 from ._cycle_values import read_after_cycle_disallowed_tools
@@ -17,7 +18,7 @@ from ._hydration import DefinitionContent
 from ._message_values import Message
 from ._model_settings import ModelSettings, RetrySettings
 from ._record_codec import RecordError
-from ._records import Record, copy_json, digest, make_record
+from ._records import Record, _RetainedMessages, copy_json, digest
 from ._reducer import Fold
 from ._state import ExecutionState
 from ._store import StoredRecord
@@ -130,9 +131,10 @@ def plan(
             if isinstance(tools, list) and isinstance(frozen, list) and len(tools) == len(frozen) and tools == frozen:
                 request = request | {"tools": frozen}
         if kind == "model" and isinstance(request.get("messages"), list):
-            request = request | {"messages": view.fold._messages.retain_array(request["messages"])}
+            retained = view.fold._messages.retain_array(request["messages"])
+            request = request | {"messages": retained.value if isinstance(retained, _RetainedMessages) else retained}
         binding = "model" if kind == "model" else request["name"] if (yield ProviderAvailable(request["name"])) else "function"
-        return make_record(
+        return make_record_before_publication(
             "op_planned",
             session_id=view.sid,
             turn_id=view.state.active_turn_id,
