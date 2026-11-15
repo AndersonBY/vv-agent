@@ -10,7 +10,6 @@ from typing import Any
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
-from vv_agent.kernel._boundary_hydration import hydrate_stored_records
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._content import ContentRef
@@ -18,6 +17,7 @@ from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
 from vv_agent.kernel._hydration import DefinitionContent, TypedSchemaFailure
 from vv_agent.kernel._record_codec import RecordError
+from vv_agent.kernel._reducer import logical_inputs, logical_operation_payloads, logical_turn_wait_results
 from vv_agent.types import AgentTask, Message
 
 from . import _drive_phase, _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
@@ -26,6 +26,7 @@ from ._driver_scope import _LeaseHeartbeat as _LeaseHeartbeat
 from ._driver_scope import _Scope
 from .bindings import MissingHostBinding
 from .context import project_context
+from .projection import fold_hydrated_records, hydrate_input, hydrate_records, hydration_for_session_store
 from .providers import (
     Accepted,
     Definitive,
@@ -78,6 +79,51 @@ class _Driver(CoreDriver):
             content_reader=runtime.content_reader,
         )
 
+    def commit(
+        self,
+        records: list[Record],
+        consumed: tuple[str, ...] = (),
+        *,
+        guarded: bool = False,
+        prepare: Callable[[Any], list[Record]] | None = None,
+    ) -> None:
+        parked = [record for record in records if record.kind == "turn_parked"]
+        applied = [record for record in records if record.kind == "input_applied"]
+        if (parked or applied) and self.content_reader is not None:
+            hydration = hydration_for_session_store(self.store, self.sid)
+            logical_input_items = {
+                record.record_id: hydrate_input(InboxItem(**record._payload["input"]), hydration) for record in applied
+            }
+            operation_payloads = {record.record_id: record._payload for record in records if record.kind == "op_completed"}
+            logical_results = {}
+            if parked:
+                hydrated = hydrate_records(self.records, hydration)
+                state = fold_hydrated_records(hydrated, self.records, _fold_factory_for(self.store), hydration)
+                for record in parked:
+                    operation = state.operations.get(record._payload["source_operation_id"])
+                    attempt = operation.attempts.get(record._payload["source_attempt"]) if operation is not None else None
+                    if attempt is not None and attempt.result is not None:
+                        logical_results[record.record_id] = attempt.result._payload["result"]
+            with (
+                logical_turn_wait_results(logical_results),
+                logical_inputs(logical_input_items),
+                logical_operation_payloads(operation_payloads),
+            ):
+                return super().commit(records, consumed, guarded=guarded, prepare=prepare)
+        return super().commit(records, consumed, guarded=guarded, prepare=prepare)
+
+    def _logical_state(self) -> ExecutionState:
+        if self.content_reader is None:
+            return self.state
+        hydration = hydration_for_session_store(self.store, self.sid)
+        hydrated = hydrate_records(self.records, hydration)
+        return fold_hydrated_records(hydrated, self.records, _fold_factory_for(self.store), hydration)
+
+    def _logical_input(self, item: InboxItem) -> InboxItem:
+        if self.content_reader is None:
+            return item
+        return hydrate_input(item, hydration_for_session_store(self.store, self.sid))
+
     def live_budget(self) -> BudgetEvaluator | None:
         inputs = self._run_outcome_steps(_driver_outcomes.live_budget_inputs_steps(self))
         if inputs is None:
@@ -117,17 +163,40 @@ class _Driver(CoreDriver):
     def _hydrated_definition(self) -> DefinitionContent:
         assert self.state.active_turn_id is not None
         start = self.state.turns[self.state.active_turn_id].start
-        try:
-            ref = ContentRef.from_dict(start._payload["definition"])
-        except (TypeError, ValueError) as exc:
-            raise TypedSchemaFailure("turn_started.definition must be a ContentRef") from exc
         stored = next(
             (row for row in self.records if row.record is start or row.record.record_id == start.record_id),
             None,
         )
         if stored is None:
             raise RecordError("turn_started record is outside the retained ledger")
+        try:
+            ref = ContentRef.from_dict(stored.record._payload["definition"])
+        except (TypeError, ValueError) as exc:
+            raise TypedSchemaFailure("turn_started.definition must be a ContentRef") from exc
         return self.hydrator_for(stored.seq).definition(ref)
+
+    def hydrated_definition(self, record: Record) -> DefinitionContent:
+        return super().hydrated_definition(self.stored_record(record).record)
+
+    def record_content_ref(self, record: Record, slot: str) -> ContentRef | None:
+        stored = next(
+            (row for row in self.records if row.record is record or row.record.record_id == record.record_id),
+            None,
+        )
+        return super().record_content_ref(stored.record if stored is not None else record, slot)
+
+    def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any:
+        stored = next(
+            (row for row in self.records if row.record is record or row.record.record_id == record.record_id),
+            None,
+        )
+        if stored is None:
+            return super().hydrate_record_field(record, slot, ref)
+        raw = stored.record
+        return super().hydrate_record_field(raw, slot, self._content_field(raw, slot))
+
+    def hydrate_plan(self, record: Record) -> Record:
+        return super().hydrate_plan(self.stored_record(record).record)
 
     def effective_model(self) -> dict[str, Any]:
         return _driver_planning.effective_model(self)
@@ -276,8 +345,12 @@ class _Driver(CoreDriver):
         return _driver_inputs.start_turn(self)
 
     def transcript(self) -> list[Message]:
-        records = hydrate_stored_records(self, self.records) if self.content_reader is not None else self.records
-        return project_context(records, self.state, _fold_factory=_fold_factory_for(self.store))
+        if self.content_reader is None:
+            return project_context(self.records, self.state, _fold_factory=_fold_factory_for(self.store))
+        hydration = hydration_for_session_store(self.store, self.sid)
+        records = hydrate_records(self.records, hydration)
+        state = fold_hydrated_records(records, self.records, _fold_factory_for(self.store), hydration)
+        return project_context(records, state, _fold_factory=_fold_factory_for(self.store))
 
     def shared_state(self) -> dict[str, Any]:
         assert self.state.active_turn_id is not None

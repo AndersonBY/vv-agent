@@ -41,6 +41,7 @@ from .content_runtime import (
 from .content_store import LocalKeyProvider
 from .context import project_context
 from .kernel import drive
+from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
 from .records import InboxItem, SessionSpec
 from .reducer import _fold_factory_for
 from .result import project_result
@@ -414,7 +415,11 @@ class SessionDriver:
     def waits(
         self, sid: str, runtime: Runtime | None = None, *, snapshot=None
     ) -> list[tuple[str, Runtime | None, dict[str, Any]]]:
-        state, _records, _ = snapshot or self.store.read_state(sid)
+        state, records, _ = snapshot or self.store.read_state(sid)
+        if records and getattr(self.store, "tenant_id", None):
+            hydration = hydration_for_session_store(self.store, sid)
+            hydrated = hydrate_records(records, hydration)
+            state = fold_hydrated_records(hydrated, records, _fold_factory_for(self.store), hydration)
         from .interactions import user_interaction
 
         found = []
@@ -513,7 +518,11 @@ class SessionDriver:
         root_state, _, _ = captured[sid]
         if target.session_id != sid and root_turn != root_state.active_turn_id:
             raise InteractionError("stale_interaction")
-        state, _, _ = captured[target.session_id]
+        state, target_records, _ = captured[target.session_id]
+        if target_records and getattr(self.store, "tenant_id", None):
+            hydration = hydration_for_session_store(self.store, target.session_id)
+            hydrated = hydrate_records(target_records, hydration)
+            state = fold_hydrated_records(hydrated, target_records, _fold_factory_for(self.store), hydration)
         validate_reply(state, target.session_id, target, answer)
         with self.store.atomic() as tx:
             # Prepare outside row locks; recheck the captured heads before mutation.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Generator, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from hashlib import sha256
@@ -10,6 +12,7 @@ from typing import Any, Protocol
 
 from vv_agent.kernel import _summary_compaction
 from vv_agent.kernel._compaction_text import build_compacted_tool_content
+from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._context import InputProtection, message_ids, project_context, protected_start
 from vv_agent.kernel._context_messages import filter_empty_assistant_messages, retained_start
 from vv_agent.kernel._message_values import Message
@@ -25,6 +28,36 @@ from vv_agent.kernel._store import StoredRecord
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 
 NormalizeMemorySettings = Callable[[dict[str, Any], int | None], dict[str, Any]]
+_LOGICAL_WAIT_RESULTS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_turn_wait_results", default=None)
+_LOGICAL_INPUTS: ContextVar[dict[str, InboxItem] | None] = ContextVar("logical_inputs", default=None)
+_LOGICAL_OPERATION_PAYLOADS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_operation_payloads", default=None)
+
+
+@contextmanager
+def logical_turn_wait_results(results: dict[str, dict[str, Any]]):
+    token = _LOGICAL_WAIT_RESULTS.set(results)
+    try:
+        yield
+    finally:
+        _LOGICAL_WAIT_RESULTS.reset(token)
+
+
+@contextmanager
+def logical_inputs(items: dict[str, InboxItem]):
+    token = _LOGICAL_INPUTS.set(items)
+    try:
+        yield
+    finally:
+        _LOGICAL_INPUTS.reset(token)
+
+
+@contextmanager
+def logical_operation_payloads(payloads: dict[str, dict[str, Any]]):
+    token = _LOGICAL_OPERATION_PAYLOADS.set(payloads)
+    try:
+        yield
+    finally:
+        _LOGICAL_OPERATION_PAYLOADS.reset(token)
 
 
 class CountMessages(Protocol):
@@ -46,6 +79,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
     require(
         item.input_id in consumed and consumed[item.input_id].encode() == item.encode(), "input not consumed with identical bytes"
     )
+    item = (_LOGICAL_INPUTS.get() or {}).get(record.record_id, item)
     require(item.input_id not in state.applied_inputs, "input applied twice")
     state.applied_inputs[item.input_id] = record
     if p["disposition"] != "applied":
@@ -133,10 +167,12 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
         assert waiting is not None
         content = item.payload["content"]
         require(
-            isinstance(content, dict)
-            and content.get("interaction_id") == waiting._payload["interaction_id"]
-            and p["target_wait_id"] == waiting._payload["interaction_id"]
-            and p["target_operation_id"] is None,
+            p["target_wait_id"] == waiting._payload["interaction_id"]
+            and p["target_operation_id"] is None
+            and (
+                (isinstance(content, dict) and content.get("interaction_id") == waiting._payload["interaction_id"])
+                or declared_content_ref(content) is not None
+            ),
             "no-tool reply identity mismatch",
         )
         state.turns[tid].wait = None
@@ -235,7 +271,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
 
 
 def _operation(state: ExecutionState, record: Record) -> None:
-    p, oid, number = record._payload, record.operation_id, record.attempt
+    p = (_LOGICAL_OPERATION_PAYLOADS.get() or {}).get(record.record_id, record._payload)
+    oid, number = record.operation_id, record.attempt
     assert oid is not None and number is not None
     op = state.operations.get(oid)
     require(op is not None and op.turn_id == record.turn_id and number in op.attempts, "operation/attempt/turn mismatch")
@@ -412,15 +449,22 @@ def _operation(state: ExecutionState, record: Record) -> None:
                     "unfinished nonyieldable child blocks yielding",
                 )
         if attempt.child_handle and not attempt.child_handle["background"] and yielded is None:
+            evidence = p["evidence"]
+            # Persisted S1 records retain evidence behind a committed ContentRef.
+            # The producer validated the hydrated terminal marker before append.
+            retained_evidence = declared_content_ref(evidence) is not None
             require(
                 all(
                     state.child_completions is not None
                     and (receipt := state.child_completions.get((oid, number, h["session_id"]))) is not None
                     and (
-                        f"child/{receipt._payload['input']['payload']['terminal_seq']}/"
-                        f"{receipt._payload['input']['payload']['terminal_digest']}"
+                        retained_evidence
+                        or (
+                            f"child/{receipt._payload['input']['payload']['terminal_seq']}/"
+                            f"{receipt._payload['input']['payload']['terminal_digest']}"
+                        )
+                        in evidence
                     )
-                    in p["evidence"]
                     for h in child_handles(attempt.child_handle)
                 ),
                 "child completion needs terminal input",
@@ -836,22 +880,44 @@ class Fold:
                 )
                 assert source is not None
                 result = source.attempts[p["source_attempt"]].result
-                require(
-                    result is not None
+                result_value = (_LOGICAL_WAIT_RESULTS.get() or {}).get(record.record_id)
+                if type(result_value) is not dict:
+                    result_value = result._payload["result"] if result is not None else None
+                question = p["question"]
+                logical_result = record.record_id in (_LOGICAL_WAIT_RESULTS.get() or {})
+                if type(result_value) is dict and logical_result:
+                    question = result_value.get("metadata", {}).get("question", result_value["content"])
+                retained_source = (
+                    declared_content_ref(result_value) is not None
+                    and declared_content_ref(question) is not None
                     and (
                         (
                             source.kind == "model"
-                            and not result._payload["result"].get("tool_calls")
-                            and not result._payload["result"].get("error_code")
                             and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
-                            and p["question"] == result._payload["result"]["content"]
                             and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user"
                         )
+                        or source.kind == "tool"
+                    )
+                )
+                require(
+                    result is not None
+                    and type(result_value) is dict
+                    and (
+                        retained_source
                         or (
-                            source.kind == "tool"
-                            and result._payload["result"].get("directive") == "wait_user"
-                            and p["question"]
-                            == result._payload["result"].get("metadata", {}).get("question", result._payload["result"]["content"])
+                            (
+                                source.kind == "model"
+                                and not result_value.get("tool_calls")
+                                and not result_value.get("error_code")
+                                and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
+                                and question == result_value["content"]
+                                and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user"
+                            )
+                            or (
+                                source.kind == "tool"
+                                and result_value.get("directive") == "wait_user"
+                                and question == result_value.get("metadata", {}).get("question", result_value["content"])
+                            )
                         )
                     ),
                     "invalid user wait source",

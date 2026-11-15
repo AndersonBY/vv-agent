@@ -209,7 +209,8 @@ class _Host:
             self.dispatch().context = context
             return None
         if isinstance(request, inputs.ChildResult):
-            return result_for_children(driver.store, request.plan, request.handles, driver.runtime).to_dict()
+            plan = driver.hydrate_plan(request.plan)
+            return result_for_children(driver.store, plan, request.handles, driver.runtime).to_dict()
         if request is inputs.InputSetting.POLL_NOW:
             return driver.scope.poll(driver.store).db_now_ms
         if request is inputs.InputSetting.POLL_MS:

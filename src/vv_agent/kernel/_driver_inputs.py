@@ -394,7 +394,9 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                 from ._interactions import InteractionError, validate_inbox_reply
 
                 try:
-                    reply_target, answer = validate_inbox_reply(self.state, self.sid, item)
+                    validation_state = getattr(self, "_logical_state", lambda: self.state)()
+                    validation_item = getattr(self, "_logical_input", lambda value: value)(item)
+                    reply_target, answer = validate_inbox_reply(validation_state, self.sid, validation_item)
                 except InteractionError as exc:
                     disposition, reason = "rejected", exc.reason
                 else:

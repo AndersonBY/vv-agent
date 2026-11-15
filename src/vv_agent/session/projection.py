@@ -79,6 +79,7 @@ from vv_agent.kernel._hydration import (
     SessionHydrator,
     TypedSchemaFailure,
 )
+from vv_agent.kernel._reducer import logical_inputs
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .children import child_handles
@@ -316,12 +317,19 @@ def fold_hydrated_records(
     """Fold hydrated values while retaining the committed record encoding for dedupe."""
 
     consumed = [InboxItem(**row.record._payload["input"]) for row in source_records if row.record.kind == "input_applied"]
+    logical_items = {
+        row.record.record_id: hydrate_input(consumed_item, hydration)
+        for row, consumed_item in zip(
+            (row for row in source_records if row.record.kind == "input_applied"), consumed, strict=True
+        )
+    }
     fold_records = hydrate_records(source_records, hydration, include_input=False)
-    state = fold_factory().extend(
-        (row.record for row in fold_records),
-        consumed_inputs=consumed,
-        bodies=(row.record.encode() for row in source_records),
-    )
+    with logical_inputs(logical_items):
+        state = fold_factory().extend(
+            (row.record for row in fold_records),
+            consumed_inputs=consumed,
+            bodies=(row.record.encode() for row in source_records),
+        )
     hydrated_by_id = {row.record.record_id: row.record for row in records if row.record.kind == "input_applied"}
     state.applied_inputs = {
         input_id: hydrated_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()

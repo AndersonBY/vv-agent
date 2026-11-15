@@ -11,8 +11,11 @@ from vv_agent import Agent, InteractionAnswer, RunConfig
 from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.kernel._content import ContentRef
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
+from vv_agent.session.projection import hydrate_input, hydration_for_session_store
+from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
@@ -525,7 +528,11 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
 
     input_id = "controller/" + derive_controller_command_id("thread_1", parent_tid, "reply-child")
     child_state = surface.store.read_state(wait["sessionId"])[0]
-    assert child_state.applied_inputs[input_id]._payload["input"]["payload"]["content"]["text"] == "approved child answer"
+    applied = child_state.applied_inputs[input_id]
+    stored_item = InboxItem(**applied._payload["input"])
+    assert ContentRef.from_dict(stored_item.payload["content"]).content_id
+    hydrated = hydrate_input(stored_item, hydration_for_session_store(surface.store, wait["sessionId"]))
+    assert hydrated.payload["content"]["text"] == "approved child answer"
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
     receipt = surface.answer(
         "thread_1",
