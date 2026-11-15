@@ -101,9 +101,8 @@ def hydrate_stored_payload(
                 (("attributes",), SESSION_ATTRIBUTES, None),
             )
         )
+    # Publication and hydration share full payload paths; boundary slots already include data.
     for path, slot, _declared in slots:
-        if record.kind == "boundary_recorded":
-            path = ("data", *path)
         try:
             value = _path_get(payload, path)
         except (KeyError, IndexError):

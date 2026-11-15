@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ from vv_agent.kernel._boundary_hydration import (
 )
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, SourceKind
+from vv_agent.kernel._content_publication import _payload_slots, publish_record_content
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._hydration import MissingContentLink, ReferenceDigestMismatch, reference_digest
 from vv_agent.kernel._record_codec import RecordError
@@ -37,6 +39,16 @@ class _Reader:
             return self.links[(owner, slot, ref.content_id)]
         except KeyError as exc:
             raise MissingContentLink("owner/slot/ref link is absent") from exc
+
+
+class _Writer:
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+        self.values: list[Any] = []
+
+    def put_json(self, value: Any, *, labels: Any = ...) -> ContentRef:
+        self.values.append(value)
+        return _ref(f"{self.prefix}-{len(self.values)}", value)
 
 
 def _ref(label: str, value: Any) -> ContentRef:
@@ -76,6 +88,12 @@ def _driver(rows: tuple[StoredRecord, ...], reader: _Reader | None) -> CoreDrive
     driver._stored_by_id = {row.record.record_id: row for row in rows}
     driver.state = SimpleNamespace(operations={}, active_turn_id="turn")
     return driver
+
+
+def _path_get(value: Any, path: tuple[str, ...]) -> Any:
+    for part in path:
+        value = value[int(part)] if part.isdecimal() else value[part]
+    return value
 
 
 def test_context_compaction_keeps_array_order_and_source_digest() -> None:
@@ -185,6 +203,125 @@ def test_boundary_output_and_memory_entries_hydrate_only_content() -> None:
         ("key_fact", 7),
     ]
     assert state["last_extracted_message_index"] == 9
+
+
+@pytest.mark.parametrize(
+    ("stage", "data"),
+    [
+        pytest.param(
+            "before_memory",
+            {
+                "messages": [{"role": "user", "content": "before memory"}],
+                "shared_state": {"phase": "before_memory"},
+            },
+            id="before-memory",
+        ),
+        pytest.param(
+            "after_cycle",
+            {
+                "action": "continue",
+                "steering_messages": [{"role": "user", "content": "steer"}],
+                "disallow_tools": [],
+                "stop": {"code": "stopped", "message": "stop now"},
+                "shared_state": {"phase": "after_cycle"},
+                "error": "recoverable hook error",
+            },
+            id="after-cycle",
+        ),
+        pytest.param(
+            "memory_started",
+            {"event": {"type": "memory_compact_started", "boundary_id": "memory"}},
+            id="memory-started",
+        ),
+        pytest.param(
+            "memory_completed",
+            {"event": {"type": "memory_compact_completed", "boundary_id": "memory"}},
+            id="memory-completed",
+        ),
+        pytest.param(
+            "session_memory_saved",
+            {
+                "state": {
+                    "entries": [{"category": "decision", "content": "remember this", "source_cycle": 1, "importance": 8}],
+                    "last_extracted_message_index": 2,
+                    "tokens_at_last_extraction": 30,
+                    "initialized": True,
+                }
+            },
+            id="session-memory-saved",
+        ),
+        pytest.param(
+            "output_checked",
+            {
+                "status": "repair",
+                "reason": "missing citation",
+                "value": {"answer": "draft"},
+                "partial_output": {"answer": "partial"},
+            },
+            id="output-checked",
+        ),
+        pytest.param(
+            "budget",
+            {
+                "tool_names": ["echo"],
+                "usage": {
+                    "cycles": 1,
+                    "total_tokens": 12,
+                    "uncached_input_tokens": 10,
+                    "tool_calls": 1,
+                    "tool_calls_by_name": {"echo": 1},
+                    "elapsed_ms": 5,
+                    "host_cost": None,
+                    "unavailable_dimensions": [],
+                },
+                "exhaustion": {
+                    "dimension": "tool_calls",
+                    "tool_name": "echo",
+                    "reason": "limit_reached",
+                    "limit": 1,
+                    "observed": 1,
+                    "attempted_increment": 0,
+                    "overshoot": 0,
+                    "unit": "calls",
+                    "currency": None,
+                    "enforcement_boundary": "tool_batch_preflight",
+                    "unavailable_reason": None,
+                },
+            },
+            id="budget",
+        ),
+    ],
+)
+def test_boundary_publication_and_hydration_share_full_payload_paths(stage: str, data: dict[str, Any]) -> None:
+    stored = _stored(
+        10,
+        "boundary_recorded",
+        {
+            "stage": stage,
+            "boundary_id": stage,
+            "source_operation_id": None,
+            "source_digest": None,
+            "data": data,
+        },
+    )
+    declared = tuple(_payload_slots(stored.record.kind, stored.record.payload))
+    assert declared
+    assert all(path[0] == "data" for path, _slot, _value in declared)
+
+    writer = _Writer(stage)
+    publication = publish_record_content(writer, (stored.record,))
+    assert len(publication.links) == len(writer.values) == len(declared)
+    published = publication.records[0]
+    reader = _Reader()
+    for (path, slot, _value), link, value in zip(declared, publication.links, writer.values, strict=True):
+        assert link.slot == slot
+        assert _path_get(published.payload, path) == link.ref.to_dict()
+        reader.add("record:10", link.slot, link.ref, value)
+
+    driver = _driver((replace(stored, record=published),), reader)
+
+    assert hydrate_boundary_data(driver, published) == data
+    assert reader.calls == [("record:10", link.slot, link.ref.content_id) for link in publication.links]
 
 
 def test_turn_ended_hydrates_reason_result_and_budget() -> None:
