@@ -1499,14 +1499,28 @@ class SQLSessionTx:
                 s._prefix(session_id, row)
                 stored = {
                     r.record_id: s._one(
-                        "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
+                        "SELECT body,digest,seq FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
                         (s.tenant_id, session_id, r.record_id),
-                    )[0]
+                    )
                     for r in records
                 }
-                if old[0][0] != body or any(stored.get(r.record_id) != encoded[i] for i, r in enumerate(records)):
+                stored_manifest = json.loads(old[0][0])
+                stored_sequences = tuple((record_id, seq) for record_id, seq in json.loads(old[0][1]))
+                body = _commit_manifest(
+                    head_seq=stored_manifest["head_seq"],
+                    head_chain_digest=stored_manifest["head_chain_digest"],
+                    records=tuple((r.record_id, stored[r.record_id][1]) for r in records),
+                    consume_input_ids=tuple(consume_input_ids),
+                    consumers=tuple(stored_manifest["consumers"]),
+                )
+                if (
+                    old[0][0] != body
+                    or any(stored[r.record_id][0] != encoded[i] for i, r in enumerate(records))
+                    or tuple(record_id for record_id, _ in stored_sequences) != tuple(r.record_id for r in records)
+                    or old[0][2] != max([stored_manifest["head_seq"], *(seq for _, seq in stored_sequences)])
+                ):
                     raise Conflict("commit identity has different bytes")
-                return CommitReceipt(commit_id, tuple((rid, seq) for rid, seq in json.loads(old[0][1])), old[0][2], True)
+                return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
             s._check_lease(session_id, lease, row, s._now())
             if expected_seq != row[0] or (expected_inbox_seq is not None and expected_inbox_seq != row[1]):
                 raise SequenceConflict("head or inbox watermark changed")

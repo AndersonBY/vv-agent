@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,7 @@ from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record, SessionSpec, digest, make_record, record_identity
 from vv_agent.kernel._sql import SQLSessionTx
+from vv_agent.kernel._store import Conflict
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.content_runtime import SessionContentWriter
@@ -488,6 +490,18 @@ def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monke
         driver.commit([record], guarded=True)
         assert puts == [definition, budget]
         turn = driver.records[-1]
+        commit_id = digest({"record_ids": [record.record_id], "consumed": []})
+
+        def publication_counts() -> dict[str, int]:
+            return {
+                table: store._one(
+                    f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
+                    ("default", "s"),
+                )[0]
+                for table in ("sk_record", "sk_commit", "sk_content")
+            }
+
+        counts = publication_counts()
         store._rows(
             "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND record_seq=%s AND slot=%s",
             ("default", "s", turn.seq, "definition"),
@@ -501,6 +515,21 @@ def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monke
             ("default", "s", turn.seq),
         )
         assert [row[0] for row in links] == ["budget", "definition"]
+        assert publication_counts() == counts
+
+        changed_payload = deepcopy(record.payload)
+        changed_payload["definition"] = {"agent_name": "kernel", "task": {"user_prompt": "different"}}
+        with pytest.raises(Conflict, match="commit identity has different bytes"), store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            publication = publish_record_content(writer, (replace(record, payload=changed_payload),))
+            tx.append(
+                "s",
+                lease=lease,
+                expected_seq=driver.records[-1].seq,
+                commit_id=commit_id,
+                records=publication.records,
+            )
+        assert publication_counts() == counts
 
 
 def test_missing_transaction_capability_rejects_record_after_append(tmp_path) -> None:
