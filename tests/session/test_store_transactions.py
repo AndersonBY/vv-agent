@@ -1,11 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
+from hashlib import sha256
 from threading import Barrier
 from time import sleep
 
 import pytest
 
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.postgres import join_transaction
 from vv_agent.session.records import SessionSpec, digest
 from vv_agent.session.reducer import TransitionError, fold
@@ -90,8 +92,8 @@ def test_commit_replay_conflict_overlap_and_lost_ack(store):
     overlap = append(store, lease, [rec], commit="overlap")
     empty = append(store, lease, [], commit="empty")
     append(store, lease, [record("op_started")], commit="later")
-    assert replace(append(store, lease, [rec], commit="overlap", expected=0), replayed=False) == overlap
-    assert replace(append(store, lease, [], commit="empty", expected=0), replayed=False) == empty
+    assert replace(append(store, lease, [rec], commit="overlap", expected=3), replayed=False) == overlap
+    assert replace(append(store, lease, [], commit="empty", expected=3), replayed=False) == empty
     assert counts(store) == (4, 0, 0, 4)
 
 
@@ -421,14 +423,12 @@ def test_replayed_receipt_retains_original_timestamps(store):
     lease = lease_for(store)
     original = append(store, lease, [record("turn_started")])
     rows = store.read("s").records
-    assert append(store, lease, [record("turn_started")]).replayed
+    assert append(store, lease, [record("turn_started")], expected=1).replayed
     assert store.read("s").records == rows
     assert original.head_seq == 2
 
 
 def test_commit_metadata_retains_references_without_another_record_copy(store):
-    import json
-
     create(store)
     lease = lease_for(store)
     definition = content_ref("large-frozen-definition")
@@ -438,8 +438,17 @@ def test_commit_metadata_retains_references_without_another_record_copy(store):
         definition_digest=digest(definition),
     )
     append(store, lease, [rec])
-    body = store.connection.execute("SELECT body FROM sk_commit WHERE commit_id='c'").fetchone()[0]
-    assert json.loads(body) == {"record_ids": [rec.record_id], "consume_input_ids": []}
+    body, checksum = store.connection.execute("SELECT body,digest FROM sk_commit WHERE commit_id='c'").fetchone()
+    head_chain_digest = store.connection.execute("SELECT chain_digest FROM sk_record WHERE seq=1").fetchone()[0]
+    expected = {
+        "head_seq": 1,
+        "head_chain_digest": head_chain_digest,
+        "records": [{"record_id": rec.record_id, "digest": rec.digest}],
+        "consume_input_ids": [],
+        "consumers": [],
+    }
+    assert body == canonical_json_bytes(expected)
+    assert checksum == sha256(body).hexdigest()
     commits = store.connection.execute("SELECT count(*) FROM sk_commit").fetchone()[0]
     with pytest.raises(Conflict):
         append(store, lease, [record("turn_started", handler_version="different")], commit="conflict")

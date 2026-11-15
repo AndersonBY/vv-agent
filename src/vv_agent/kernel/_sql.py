@@ -44,10 +44,16 @@ _DRIVE_RUNNABLE_SQL = """
 """
 
 _INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
+_CHAIN_DOMAIN = b"vv-agent/S1"
+_CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
 
 
 class InputAdmissionProofError(Conflict):
     """A signed inbox row no longer matches its original trusted admission."""
+
+
+class LedgerIntegrityError(Conflict):
+    """Stored ledger bytes, chain positions, commit metadata or checkpoints do not agree."""
 
 
 class LedgerSigner(Protocol):
@@ -78,6 +84,70 @@ def _identity(value: str) -> None:
 def _tenant(value: str) -> None:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("tenant_id must be nonempty text without NUL")
+
+
+def _length_prefixed(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    if len(encoded) > 0xFFFFFFFF:
+        raise ValueError("chain identity exceeds U32 length framing")
+    return len(encoded).to_bytes(4, "big") + encoded
+
+
+def _initial_chain_digest(tenant_id: str, session_id: str) -> str:
+    return sha256(_CHAIN_DOMAIN + _length_prefixed(tenant_id) + _length_prefixed(session_id)).hexdigest()
+
+
+def _digest_bytes(value: str, name: str) -> bytes:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise LedgerIntegrityError(f"{name} must be a lowercase SHA-256 digest")
+    return bytes.fromhex(value)
+
+
+def _extend_chain_digest(previous: str, seq: int, record_digest: str) -> str:
+    _positive(seq, "chain seq")
+    return sha256(
+        _digest_bytes(previous, "previous chain digest") + seq.to_bytes(8, "big") + _digest_bytes(record_digest, "record digest")
+    ).hexdigest()
+
+
+def _checkpoint_message(
+    tenant_id: str,
+    session_id: str,
+    seq: int,
+    chain_digest: str,
+    key_id: str,
+    signed_ms: int,
+) -> bytes:
+    return canonical_json_bytes(
+        {
+            "domain": _CHECKPOINT_DOMAIN,
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "seq": seq,
+            "chain_digest": chain_digest,
+            "key_id": key_id,
+            "signed_ms": signed_ms,
+        }
+    )
+
+
+def _commit_manifest(
+    *,
+    head_seq: int,
+    head_chain_digest: str,
+    records: tuple[tuple[str, str], ...],
+    consume_input_ids: tuple[str, ...],
+    consumers: tuple[str, ...],
+) -> bytes:
+    return canonical_json_bytes(
+        {
+            "head_seq": head_seq,
+            "head_chain_digest": head_chain_digest,
+            "records": [{"record_id": record_id, "digest": digest} for record_id, digest in records],
+            "consume_input_ids": list(consume_input_ids),
+            "consumers": list(consumers),
+        }
+    )
 
 
 def _input_admission_message(
@@ -242,6 +312,167 @@ class SQLStore:
             root._input_admission_signer,
         )
 
+    def _bind_checkpoint_signer(self) -> Any | None:
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        if not configured or allow_unsigned:
+            return None
+        if signer is None:
+            raise LedgerIntegrityError("ledger signer is unavailable")
+        bound = signer.bind_key()
+        key_id = getattr(bound, "key_id", None)
+        if not isinstance(key_id, str) or not key_id or not callable(getattr(bound, "sign", None)):
+            raise LedgerIntegrityError("ledger signer returned an invalid key binding")
+        return bound
+
+    def _verify_checkpoints(self, session_id: str, chains: tuple[str, ...]) -> None:
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        signed = configured and not allow_unsigned
+        if signed and signer is None:
+            raise LedgerIntegrityError("ledger signer is unavailable for checkpoint verification")
+        rows = self._rows(
+            "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
+            "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
+            (self.tenant_id, session_id, len(chains)),
+        )
+        if not signed:
+            if rows:
+                raise LedgerIntegrityError("ledger signer is required to verify stored checkpoints")
+            return
+        if len(rows) != len(chains):
+            raise LedgerIntegrityError("ledger checkpoint is missing")
+        assert signer is not None
+        for expected_seq, row in enumerate(rows, 1):
+            seq, stored_chain, key_id, signature, signed_ms = row
+            if seq != expected_seq or stored_chain != chains[seq - 1]:
+                raise LedgerIntegrityError("ledger checkpoint does not match the record chain")
+            if not isinstance(key_id, str) or not key_id or not isinstance(signature, bytes):
+                raise LedgerIntegrityError("ledger checkpoint has invalid signing material")
+            _natural(signed_ms, "checkpoint signed_ms")
+            message = _checkpoint_message(self.tenant_id, session_id, seq, stored_chain, key_id, signed_ms)
+            if not signer.verify(key_id, message, bytes(signature)):
+                raise LedgerIntegrityError("ledger checkpoint signature is invalid")
+
+    def _verify_commits(self, session_id: str, chains: tuple[str, ...]) -> None:
+        record_rows = self._rows(
+            "SELECT seq,record_id,digest,commit_id,commit_digest,commit_position FROM sk_record "
+            "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+            (self.tenant_id, session_id),
+        )
+        if len(record_rows) != len(chains):
+            raise LedgerIntegrityError("ledger record count does not match the session head")
+        records_by_seq = {row[0]: row for row in record_rows}
+        records_by_id = {row[1]: row for row in record_rows}
+        if len(records_by_seq) != len(record_rows) or len(records_by_id) != len(record_rows):
+            raise LedgerIntegrityError("duplicate ledger record identity")
+
+        commits = self._rows(
+            "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
+            "WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
+            (self.tenant_id, session_id),
+        )
+        claimed: dict[int, tuple[str, str, int]] = {}
+        for commit_id, body, checksum, sequence_body, stored_head, created_ms in commits:
+            _identity(commit_id)
+            _natural(stored_head, "commit head_seq")
+            _natural(created_ms, "commit created_ms")
+            if not isinstance(body, bytes) or sha256(body).hexdigest() != checksum:
+                raise LedgerIntegrityError("commit body digest mismatch")
+            try:
+                manifest = json.loads(body)
+                sequences = json.loads(sequence_body)
+                canonical = canonical_json_bytes(manifest, "commit body")
+                canonical_sequences = canonical_json_bytes(sequences, "commit record_sequences")
+            except (TypeError, ValueError) as exc:
+                raise LedgerIntegrityError("commit metadata is not canonical JCS") from exc
+            if canonical != body or canonical_sequences != sequence_body:
+                raise LedgerIntegrityError("commit metadata is not canonical JCS")
+            expected_fields = {"head_seq", "head_chain_digest", "records", "consume_input_ids", "consumers"}
+            if not isinstance(manifest, dict) or set(manifest) != expected_fields:
+                raise LedgerIntegrityError("commit body has an invalid shape")
+            head_seq = manifest["head_seq"]
+            if type(head_seq) is not int or not 0 <= head_seq <= len(chains):
+                raise LedgerIntegrityError("commit head_seq is invalid")
+            expected_head_chain = _initial_chain_digest(self.tenant_id, session_id) if head_seq == 0 else chains[head_seq - 1]
+            if manifest["head_chain_digest"] != expected_head_chain:
+                raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
+
+            records = manifest["records"]
+            if not isinstance(records, list):
+                raise LedgerIntegrityError("commit records are invalid")
+            manifest_records: list[tuple[str, str]] = []
+            for item in records:
+                if not isinstance(item, dict) or set(item) != {"record_id", "digest"}:
+                    raise LedgerIntegrityError("commit record reference is invalid")
+                record_id, record_digest = item["record_id"], item["digest"]
+                _identity(record_id)
+                _digest_bytes(record_digest, "commit record digest")
+                manifest_records.append((record_id, record_digest))
+            if len({record_id for record_id, _ in manifest_records}) != len(manifest_records):
+                raise LedgerIntegrityError("commit repeats a record identity")
+
+            if not isinstance(sequences, list) or len(sequences) != len(manifest_records):
+                raise LedgerIntegrityError("commit record sequences do not match its body")
+            ordered_sequences: list[tuple[str, int]] = []
+            for item in sequences:
+                if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str):
+                    raise LedgerIntegrityError("commit record sequence is invalid")
+                if type(item[1]) is not int or item[1] <= 0:
+                    raise LedgerIntegrityError("commit record sequence is invalid")
+                ordered_sequences.append((item[0], item[1]))
+            if tuple(record_id for record_id, _ in ordered_sequences) != tuple(record_id for record_id, _ in manifest_records):
+                raise LedgerIntegrityError("commit record order does not match its body")
+
+            for position, ((record_id, record_digest), (sequence_id, seq)) in enumerate(
+                zip(manifest_records, ordered_sequences, strict=True)
+            ):
+                if record_id != sequence_id:
+                    raise LedgerIntegrityError("commit record identity does not match its sequence")
+                record = records_by_id.get(record_id)
+                if record is None or record[0] != seq or record[2] != record_digest:
+                    raise LedgerIntegrityError("commit record does not match the ledger")
+                if seq > head_seq:
+                    if (record[3], record[4], record[5]) != (commit_id, checksum, position):
+                        raise LedgerIntegrityError("commit record metadata does not match the ledger")
+                    if seq in claimed:
+                        raise LedgerIntegrityError("ledger record belongs to multiple commits")
+                    claimed[seq] = (commit_id, checksum, position)
+                elif (record[3], record[4]) == (commit_id, checksum):
+                    raise LedgerIntegrityError("overlapping commit extends the ledger chain")
+
+            resulting_head = max([head_seq, *(seq for _, seq in ordered_sequences)])
+            if stored_head != resulting_head:
+                raise LedgerIntegrityError("commit head_seq column does not match its body")
+
+            consume_ids = manifest["consume_input_ids"]
+            consumers = manifest["consumers"]
+            if not isinstance(consume_ids, list) or not all(isinstance(input_id, str) and input_id for input_id in consume_ids):
+                raise LedgerIntegrityError("commit identities are invalid")
+            if len(set(consume_ids)) != len(consume_ids):
+                raise LedgerIntegrityError("commit repeats a consumed input identity")
+            if not isinstance(consumers, list) or not all(isinstance(consumer, str) and consumer for consumer in consumers):
+                raise LedgerIntegrityError("commit identities are invalid")
+            if consumers != sorted(set(consumers)):
+                raise LedgerIntegrityError("commit consumers are not sorted and unique")
+            for input_id in consume_ids:
+                inbox = self._rows(
+                    "SELECT consumed_seq FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                    (self.tenant_id, session_id, input_id),
+                )
+                if len(inbox) != 1 or type(inbox[0][0]) is not int:
+                    raise LedgerIntegrityError("commit consumed input is missing or unconsumed")
+                applied = records_by_seq.get(inbox[0][0])
+                if applied is None or applied[3] != commit_id:
+                    raise LedgerIntegrityError("commit consumed input does not match an applied record")
+            for consumer in consumers:
+                if not self._rows(
+                    "SELECT 1 FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
+                    (self.tenant_id, session_id, consumer),
+                ):
+                    raise LedgerIntegrityError("commit creation consumer is missing")
+
+        if set(claimed) != set(range(1, len(chains) + 1)):
+            raise LedgerIntegrityError("ledger sequence is not fully claimed by commits")
+
     def _stored_input(self, session_id: str, row: tuple[Any, ...]) -> StoredInput:
         """Validate and reconstruct one inbox row before any content hydration."""
 
@@ -302,8 +533,7 @@ class SQLStore:
         return tuple(
             row[0]
             for row in self._rows(
-                "SELECT session_id FROM sk_session WHERE tenant_id=%s "
-                "AND (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
+                "SELECT session_id FROM sk_session WHERE tenant_id=%s AND (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
                 (self.tenant_id, after is None, after or "", limit),
             )
         )
@@ -343,56 +573,119 @@ class SQLStore:
                 # The same session/sequence and exact validated bytes can share the immutable record.
                 return StoredRecord(prior, seq, commit, epoch, created)
         record = Record.parse(body) if messages is None else Record._parse(body, messages)
+        if record.encode() != body:
+            raise LedgerIntegrityError("stored record body is not canonical JCS")
         return StoredRecord(record, seq, commit, epoch, created)
+
+    def _verified_records(self, session_id: str, through: int) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        rows = self._rows(
+            "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
+            "schema_version,kind,turn_id,operation_id,attempt,commit_position "
+            "FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
+            (self.tenant_id, session_id, through),
+        )
+        if len(rows) != through:
+            raise LedgerIntegrityError("log sequence gap")
+        previous = _initial_chain_digest(self.tenant_id, session_id)
+        chains: list[str] = []
+        stored_rows: list[tuple[Any, ...]] = []
+        for expected_seq, row in enumerate(rows, 1):
+            (
+                body,
+                seq,
+                commit_id,
+                epoch,
+                created_ms,
+                checksum,
+                stored_chain,
+                record_id,
+                schema_version,
+                kind,
+                turn_id,
+                operation_id,
+                attempt,
+                commit_position,
+            ) = row
+            if seq != expected_seq:
+                raise LedgerIntegrityError("log sequence gap or reorder")
+            actual_digest = sha256(body).hexdigest()
+            if actual_digest != checksum:
+                raise LedgerIntegrityError("stored record digest mismatch")
+            try:
+                value = json.loads(body)
+                if canonical_json_bytes(value, "stored record body") != body:
+                    raise LedgerIntegrityError("stored record body is not canonical JCS")
+            except (TypeError, ValueError) as exc:
+                raise LedgerIntegrityError("stored record body is not canonical JCS") from exc
+            if not isinstance(value, dict) or (
+                value.get("record_id"),
+                value.get("session_id"),
+                value.get("schema_version"),
+                value.get("kind"),
+                value.get("turn_id"),
+                value.get("operation_id"),
+                value.get("attempt"),
+            ) != (
+                record_id,
+                session_id,
+                schema_version,
+                kind,
+                turn_id,
+                operation_id,
+                attempt,
+            ):
+                raise LedgerIntegrityError("stored record SQL identity does not match its body")
+            _natural(epoch, "record writer_epoch")
+            _natural(created_ms, "record created_ms")
+            _natural(commit_position, "record commit_position")
+            actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
+            if stored_chain != actual_chain:
+                raise LedgerIntegrityError("stored record chain digest mismatch")
+            previous = actual_chain
+            chains.append(actual_chain)
+            stored_rows.append((body, seq, commit_id, epoch, created_ms, checksum))
+        self._verify_checkpoints(session_id, tuple(chains))
+        self._verify_commits(session_id, tuple(chains))
+        return stored_rows, tuple(chains)
 
     def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
         head, epoch = row[0], row[2]
+        if head == 0:
+            raise LedgerIntegrityError("log sequence gap")
+        stored_rows, chains = self._verified_records(session_id, head)
         cached = self._cached_prefix(session_id)
         if cached is not None:
             valid = (
                 (cached.tenant_id, cached.session_id) == (self.tenant_id, session_id)
                 and len(cached.records) <= head
+                and bool(cached.records)
             )
             if valid:
-                body, checksum = self._one(
-                    "SELECT body,digest FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=%s",
-                    (self.tenant_id, session_id, len(cached.records)),
-                )
-                valid = checksum == cached.head_digest and sha256(body).hexdigest() == checksum
+                valid = cached.head_digest == chains[len(cached.records) - 1]
             if not valid:
                 self._fold_cache = cached = None
                 self._previous_prefix = None
             elif cached.epoch != epoch:
                 # The immutable prefix survives a lease change; execution authority does not.
-                cached = _Prefix(
-                    self.tenant_id, session_id, epoch, cached.head_digest, cached.reducer, cached.records
-                )
+                cached = _Prefix(self.tenant_id, session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
-        if head == 0:
-            raise Conflict("log sequence gap")
         if cached is not None and through == head:
             self._retain_prefix(cached)
             return cached
         records, bodies = [], []
         reducer = cached.reducer.fork() if cached else self.fold_factory()
-        head_digest = cached.head_digest if cached else ""
+        head_digest = chains[-1]
         cursor = through
         while cursor < head:
-            rows = self._rows(
-                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
-                (self.tenant_id, session_id, cursor, head, 256),
-            )
-            if not rows:
-                raise Conflict("log sequence gap")
+            rows = stored_rows[cursor : min(head, cursor + 256)]
             for row_data in rows:
                 if row_data[1] != cursor + 1:
-                    raise Conflict("log sequence gap")
+                    raise LedgerIntegrityError("log sequence gap or reorder")
                 stored = self._stored(session_id, row_data, reducer._messages)
                 stored.record._share_messages(reducer._messages)
                 records.append(stored)
                 bodies.append(row_data[0])
-                cursor, head_digest = stored.seq, row_data[5]
+                cursor = stored.seq
         consumed = []
         for input_row in self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
@@ -426,6 +719,14 @@ class SQLStore:
             "SELECT head_seq,inbox_seq,lease_epoch FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
         )
+
+    def _chain_anchor(self, session_id: str, seq: int) -> str:
+        if seq == 0:
+            return _initial_chain_digest(self.tenant_id, session_id)
+        return self._one(
+            "SELECT chain_digest FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=%s",
+            (self.tenant_id, session_id, seq),
+        )[0]
 
     def _schedule(self, session_id: str, state: ExecutionState, *, preserve_due: bool = False) -> None:
         self._rows(
@@ -465,23 +766,14 @@ class SQLStore:
             "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
         )
-        rows = self._rows(
-            "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-            "WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
-            (
-                self.tenant_id,
-                session_id,
-                after_seq,
-                min(head, through_seq) if through_seq is not None else head,
-                limit,
-            ),
-        )
+        verified, _chains = self._verified_records(session_id, head)
+        boundary = min(head, through_seq) if through_seq is not None else head
+        rows = [row for row in verified if after_seq < row[1] <= boundary][:limit]
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
 
     def lease_status(self, session_id: str) -> tuple[int, int, int]:
         head, epoch, until, now = self._one(
-            f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} "
-            "FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
         )
         return head, epoch, max(0, (until or now) - now)
@@ -608,8 +900,7 @@ class SQLStore:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(
-                "UPDATE sk_session SET lease_epoch=%s,lease_owner=%s,lease_until_ms=%s "
-                "WHERE tenant_id=%s AND session_id=%s",
+                "UPDATE sk_session SET lease_epoch=%s,lease_owner=%s,lease_until_ms=%s WHERE tenant_id=%s AND session_id=%s",
                 (lease.epoch, owner, lease.expires_at_ms, self.tenant_id, session_id),
             )
             return lease
@@ -645,8 +936,7 @@ class SQLStore:
             except LeaseLost:
                 return False
             self._rows(
-                "UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL "
-                "WHERE tenant_id=%s AND session_id=%s",
+                "UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, lease.session_id),
             )
             return True
@@ -721,8 +1011,7 @@ class SQLStore:
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
             self._one(
-                f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s "
-                f"AND consumer=%s{self.lock_clause}",
+                f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s{self.lock_clause}",
                 (self.tenant_id, session_id, consumer),
             )
             until = self._now() + retry_after_ms
@@ -837,11 +1126,74 @@ class SQLSessionTx:
         session_id: str,
         commit_id: str,
         body: bytes,
-        manifest: bytes,
-        sequences: tuple[tuple[str, int], ...],
-        head: int,
-        now: int,
+        *metadata: Any,
     ) -> None:
+        if len(metadata) == 3:
+            sequences, head, now = metadata
+            manifest_body = body
+        elif len(metadata) == 4:
+            legacy_body, sequences, head, now = metadata
+            if commit_id != "session/create":
+                raise LedgerIntegrityError("legacy commit metadata is only valid for session creation")
+            try:
+                legacy = json.loads(legacy_body)
+                consumers = tuple(legacy["consumers"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LedgerIntegrityError("legacy commit body is invalid") from exc
+        else:
+            raise TypeError("commit metadata requires sequences, head and timestamp")
+        if not isinstance(body, bytes) or not isinstance(sequences, tuple):
+            raise LedgerIntegrityError("commit metadata is invalid")
+        if len(metadata) == 3:
+            try:
+                manifest = json.loads(manifest_body)
+                head_seq = manifest["head_seq"]
+                head_chain_digest = manifest["head_chain_digest"]
+                consume_input_ids = tuple(manifest["consume_input_ids"])
+                consumers = tuple(manifest["consumers"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LedgerIntegrityError("commit manifest is invalid") from exc
+        else:
+            head_seq, consume_input_ids = 0, ()
+        _natural(head, "commit resulting head")
+        _natural(now, "commit created_ms")
+        if head != max([head_seq, *(seq for _, seq in sequences)]):
+            raise LedgerIntegrityError("commit resulting head does not match its record sequences")
+        if len(metadata) == 3 and head_chain_digest != self.store._chain_anchor(session_id, head_seq):
+            raise LedgerIntegrityError("commit head_chain_digest does not match the persisted head")
+        record_refs: list[tuple[str, str]] = []
+        for record_id, seq in sequences:
+            _identity(record_id)
+            _positive(seq, "commit record seq")
+            record_refs.append(
+                (
+                    record_id,
+                    self.store._one(
+                        "SELECT digest FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s AND seq=%s",
+                        (self.store.tenant_id, session_id, record_id, seq),
+                    )[0],
+                )
+            )
+        stored_body = _commit_manifest(
+            head_seq=head_seq,
+            head_chain_digest=head_chain_digest if len(metadata) == 3 else self.store._chain_anchor(session_id, head_seq),
+            records=tuple(record_refs),
+            consume_input_ids=consume_input_ids,
+            consumers=consumers,
+        )
+        if len(metadata) == 3 and stored_body != manifest_body:
+            raise LedgerIntegrityError("commit manifest does not match persisted record digests")
+        stored_digest = sha256(stored_body).hexdigest()
+        for _record_id, seq in sequences:
+            if seq <= head_seq:
+                continue
+            updated = self.store._rows(
+                "UPDATE sk_record SET commit_digest=%s WHERE tenant_id=%s AND session_id=%s "
+                "AND seq=%s AND commit_id=%s RETURNING seq",
+                (stored_digest, self.store.tenant_id, session_id, seq, commit_id),
+            )
+            if len(updated) != 1:
+                raise LedgerIntegrityError("commit references a record outside its transaction")
         self.store._rows(
             "INSERT INTO sk_commit(tenant_id,session_id,commit_id,body,digest,record_sequences,head_seq,created_ms) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -849,8 +1201,8 @@ class SQLSessionTx:
                 self.store.tenant_id,
                 session_id,
                 commit_id,
-                manifest,
-                sha256(body).hexdigest(),
+                stored_body,
+                stored_digest,
                 canonical_json_bytes(sequences),
                 head,
                 now,
@@ -864,12 +1216,18 @@ class SQLSessionTx:
         seq: int,
         commit_id: str,
         commit_digest: str,
+        chain_digest: str | None = None,
         position: int,
         epoch: int,
         now: int,
         body: bytes | None = None,
     ) -> None:
         body = record.encode() if body is None else body
+        digest = sha256(body).hexdigest()
+        expected_chain = _extend_chain_digest(self.store._chain_anchor(record.session_id, seq - 1), seq, digest)
+        if chain_digest is not None and chain_digest != expected_chain:
+            raise LedgerIntegrityError("record chain digest does not extend the persisted head")
+        chain_digest = expected_chain
         self.store._rows(
             "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,schema_version,kind,turn_id,operation_id,"
             "attempt,body,digest,chain_digest,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
@@ -884,14 +1242,29 @@ class SQLSessionTx:
                 record.operation_id,
                 record.attempt,
                 body,
-                record.digest,
-                record.digest,
+                digest,
+                chain_digest,
                 commit_id,
                 commit_digest,
                 position,
                 epoch,
                 now,
             ),
+        )
+        bound = self.store._bind_checkpoint_signer()
+        if bound is not None:
+            self._checkpoint(bound, session_id=record.session_id, seq=seq, chain_digest=chain_digest, now=now)
+
+    def _checkpoint(self, bound: Any, *, session_id: str, seq: int, chain_digest: str, now: int) -> None:
+        key_id = bound.key_id
+        message = _checkpoint_message(self.store.tenant_id, session_id, seq, chain_digest, key_id, now)
+        signature = bound.sign(message)
+        if not isinstance(signature, bytes) or not signature:
+            raise LedgerIntegrityError("ledger signer returned an invalid signature")
+        self.store._rows(
+            "INSERT INTO sk_checkpoint(tenant_id,session_id,seq,chain_digest,key_id,signature,signed_ms) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (self.store.tenant_id, session_id, seq, chain_digest, key_id, signature, now),
         )
 
     def lock_session(self, session_id: str) -> None:
@@ -927,7 +1300,7 @@ class SQLSessionTx:
                 "ON CONFLICT(tenant_id,session_id) DO NOTHING RETURNING session_id",
                 (tenant_id, spec.session_id, spec.parent_session_id, spec.parent_operation_id, now),
             )
-            s._lock(spec.session_id)
+            row = s._lock(spec.session_id)
             existing = (
                 s._one(
                     "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=1",
@@ -937,20 +1310,37 @@ class SQLSessionTx:
                 else None
             )
             record = spec.record(_existing=Record.parse(existing)) if existing is not None else spec.record()
-            body = canonical_json_bytes({"create": record.to_dict(), "consumers": sorted(consumers)})
-            manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
+            ordered_consumers = tuple(sorted(consumers))
+            manifest = _commit_manifest(
+                head_seq=0,
+                head_chain_digest=_initial_chain_digest(tenant_id, spec.session_id),
+                records=((record.record_id, record.digest),),
+                consume_input_ids=(),
+                consumers=ordered_consumers,
+            )
             if not inserted:
+                s._prefix(spec.session_id, row)
                 old = s._one(
-                    "SELECT body,created_ms FROM sk_commit "
-                    "WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                    "SELECT body,created_ms FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
                     (tenant_id, spec.session_id, commit_id),
                 )
                 if old[0] != manifest or existing != record.encode():
                     raise Conflict("create identity has different bytes")
                 return CreateReceipt(spec.session_id, 1, old[1], True)
+            chain_digest = _extend_chain_digest(_initial_chain_digest(tenant_id, spec.session_id), 1, record.digest)
+            commit_digest = sha256(manifest).hexdigest()
             state = s.fold_factory().extend((record,))
-            self._write(record, seq=1, commit_id=commit_id, commit_digest=sha256(body).hexdigest(), position=0, epoch=0, now=now)
-            self._commit(spec.session_id, commit_id, body, manifest, ((record.record_id, 1),), 1, now)
+            self._write(
+                record,
+                seq=1,
+                commit_id=commit_id,
+                commit_digest=commit_digest,
+                chain_digest=chain_digest,
+                position=0,
+                epoch=0,
+                now=now,
+            )
+            self._commit(spec.session_id, commit_id, manifest, ((record.record_id, 1),), 1, now)
             for consumer in consumers:
                 s._rows(
                     "INSERT INTO sk_consumer(tenant_id,session_id,consumer) VALUES (%s,%s,%s)",
@@ -1077,12 +1467,6 @@ class SQLSessionTx:
                 raise Conflict("record belongs to another session")
         if len({r.record_id for r in records}) != len(records):
             raise Conflict("duplicate record_id in batch")
-        # encode() freezes producer records into the same JSON values as cold reads.
-        # CAS/lease are admission facts, not logical commit bytes: replay cannot renew authority.
-        body = b'{"consume_input_ids":' + canonical_json_bytes(consume_input_ids) + b',"records":[' + b",".join(encoded) + b"]}"
-        manifest = canonical_json_bytes(
-            {"record_ids": [r.record_id for r in records], "consume_input_ids": list(consume_input_ids)}
-        )
         s = self.store
         captured = s._head(session_id)
         prefix = None
@@ -1099,21 +1483,28 @@ class SQLSessionTx:
             lease = self._lease_guard()
         with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
             row = s._lock(session_id)
+            head_chain_digest = s._chain_anchor(session_id, expected_seq)
+            body = _commit_manifest(
+                head_seq=expected_seq,
+                head_chain_digest=head_chain_digest,
+                records=tuple((record.record_id, record.digest) for record in records),
+                consume_input_ids=tuple(consume_input_ids),
+                consumers=(),
+            )
             old = s._rows(
-                "SELECT body,record_sequences,head_seq FROM sk_commit "
-                "WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                "SELECT body,record_sequences,head_seq FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
                 (s.tenant_id, session_id, commit_id),
             )
             if old:
+                s._prefix(session_id, row)
                 stored = {
                     r.record_id: s._one(
-                        "SELECT body FROM sk_record "
-                        "WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
+                        "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
                         (s.tenant_id, session_id, r.record_id),
                     )[0]
                     for r in records
                 }
-                if old[0][0] != manifest or any(stored.get(r.record_id) != encoded[i] for i, r in enumerate(records)):
+                if old[0][0] != body or any(stored.get(r.record_id) != encoded[i] for i, r in enumerate(records)):
                     raise Conflict("commit identity has different bytes")
                 return CommitReceipt(commit_id, tuple((rid, seq) for rid, seq in json.loads(old[0][1])), old[0][2], True)
             s._check_lease(session_id, lease, row, s._now())
@@ -1121,13 +1512,14 @@ class SQLSessionTx:
                 raise SequenceConflict("head or inbox watermark changed")
             if prefix is None or reducer is None or row[2] != captured[2]:
                 raise SequenceConflict("head or epoch changed during append preparation")
+            if prefix.head_digest != head_chain_digest:
+                raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
             sequences: list[tuple[str, int]] = []
             new: list[tuple[int, Record, int]] = []
             head = row[0]
             for position, record in enumerate(records):
                 prior = s._rows(
-                    "SELECT body,seq FROM sk_record "
-                    "WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
+                    "SELECT body,seq FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
                     (s.tenant_id, session_id, record.record_id),
                 )
                 if prior:
@@ -1165,6 +1557,7 @@ class SQLSessionTx:
             now = s._now()
             s._check_lease(session_id, lease, row, now)  # Validation may outlive the lease.
             commit_digest = sha256(body).hexdigest()
+            previous_chain = prefix.head_digest
             for position, record, seq in new:
                 if record.kind == "op_started":
                     if record._payload["epoch"] != lease.epoch:
@@ -1174,20 +1567,22 @@ class SQLSessionTx:
                     planned = op.attempts[record.attempt].plan
                     if (planned._payload["not_before_ms"] or 0) > now:
                         raise Conflict("dispatch before not-before")
+                chain_digest = _extend_chain_digest(previous_chain, seq, record.digest)
                 self._write(
                     record,
                     seq=seq,
                     commit_id=commit_id,
                     commit_digest=commit_digest,
+                    chain_digest=chain_digest,
                     position=position,
                     epoch=lease.epoch,
                     now=now,
                     body=encoded[position],
                 )
+                previous_chain = chain_digest
             for input_id, (_, seq) in applications.items():
                 s._rows(
-                    "UPDATE sk_inbox SET consumed_seq=%s "
-                    "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                    "UPDATE sk_inbox SET consumed_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (seq, s.tenant_id, session_id, input_id),
                 )
             s._rows(
@@ -1204,11 +1599,9 @@ class SQLSessionTx:
             )
             added = tuple(StoredRecord(r, seq, commit_id, lease.epoch, now) for _, r, seq in new)
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
-            self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
-            checksum = new[-1][1].digest if new else prefix.head_digest
-            s._retain_prefix(
-                _Prefix(s.tenant_id, session_id, lease.epoch, checksum, reducer, prefix.records + added)
-            )
+            self._commit(session_id, commit_id, body, receipt.record_sequences, head, now)
+            checksum = previous_chain
+            s._retain_prefix(_Prefix(s.tenant_id, session_id, lease.epoch, checksum, reducer, prefix.records + added))
             s._check_lease(session_id, lease, row, s._now())
             return receipt
 
@@ -1217,8 +1610,7 @@ class SQLSessionTx:
         _positive(limit, "limit")
         s = self.store
         last = s._one(
-            f"SELECT last_seq FROM sk_consumer "
-            f"WHERE tenant_id=%s AND session_id=%s AND consumer=%s{s.lock_clause}",
+            f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s{s.lock_clause}",
             (s.tenant_id, session_id, consumer),
         )[0]
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
