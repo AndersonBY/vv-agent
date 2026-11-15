@@ -2,7 +2,7 @@
 
 L2, L3 and L4 reproduce lease/control robustness symptoms. The cuts below do
 not establish a violation of W1's invariants. They remain W4 backlog items;
-P1 does not repair them. L5 needs an error-classification decision in W4.
+P1 does not repair them. L5 is classified here for the W4 implementation contract; the runtime implementation remains a later milestone.
 
 The baseline is `d2d02c238cc8600d30aa9af87366ccba8fedba93` (0.35.0),
 contract 38.0.0 at `1f4e6ff891996f1199f02e6b65edb1305ec7d8ae`.
@@ -19,7 +19,7 @@ its named choices select timing; labels pin the specific interleaving.
 | L2 handoff | 2002; `l2/formal-driver-consumes-retained-control` | Losing an in-memory poll is not consuming its durable controls. |
 | L3 | 3003; `l3/target-matched-switch-turn-resume-control` | Replacement token is spuriously cancelled; durable cancellation still terminates the original turn and its child (I7). |
 | L4 | 4004; both wall-clock offsets, then `l4/recover-with-db-time` | Local false expiry or false liveness does not bypass SQL fencing (I2). |
-| L5 | Classification only; no seed required | SQLite busy/locked currently stops the heartbeat; W4 must decide bounded retry versus terminal loss. |
+| L5 | Classification only; no seed required | `SQLITE_BUSY`/`SQLITE_LOCKED` during renewal is retryable only while the last confirmed lease retains its safety margin; exhaustion becomes transient `TimeoutError`, and expiry/owner/epoch loss becomes `LeaseLost`. Busy is never treated as a successful renewal. |
 
 ## L2: a committed renewal can outlive its retained lease object
 
@@ -128,21 +128,35 @@ behavior, not correctness of arbitrary third-party stores or bounded liveness
 under endless clock faults. W4 should use a database-time acquisition/renewal
 anchor with a conservatively sampled monotonic start.
 
-## L5: SQLite busy/locked is currently terminal to the heartbeat
+## L5: SQLite busy/locked classification
 
-`SQLiteStore` uses WAL, `BEGIN IMMEDIATE`, and a five-second busy timeout.
-`sqlite3.OperationalError` is not in `_LeaseHeartbeat._heartbeat`'s transient
-set. That set contains `TimeoutError`, plus psycopg `OperationalError` for a
-`PostgresStore`. SQLite busy/locked therefore reaches the outer exception
-handler, marks ownership lost, and `_Scope._heartbeat` cancels its token with
-`lease_lost`. Fencing still applies; a busy error is not proof of an external
-operation's failure or stop.
+`SQLITE_BUSY` and `SQLITE_LOCKED` from a heartbeat renewal are contention, not
+proof that the lease was lost. The settled W4 values are
+`safety_margin = max(2 * heartbeat_interval, 1 second)` and
+`safety_deadline = lease_expiry - safety_margin`, both on the monotonic lease
+clock. Only those SQLite error codes (or the exact `database is locked` /
+`database table is locked` messages on Python builds without extended codes)
+are retryable while `now < safety_deadline`. Each attempt has a bounded
+`heartbeat_attempt_budget`; its retry deadline is
+`min(safety_deadline, now + heartbeat_attempt_budget)`. Exhaustion while the
+safety deadline is still ahead is `TimeoutError` with the original SQLite error
+as its cause. Reaching the safety deadline is `LeaseLost`.
 
-W4 must explicitly decide whether SQLite `SQLITE_BUSY`/`SQLITE_LOCKED` should
-receive deadline-bounded retry or remain terminal. Any classification should
-use SQLite error codes and a valid lease budget; arbitrary operational errors
-must not silently become retryable. P1 records this behavior and changes no
-error handling.
+A successful renewal must be confirmed by the database result; a busy response
+never extends the lease. Owner/epoch mismatch, a row that is no longer owned,
+or actual database-time expiry are `LeaseLost`. Malformed SQLite errors and
+connection failures propagate as storage errors; they are not silently turned
+into either contention or lease loss. No broad `OperationalError` catch is
+allowed.
+
+The current regression names are `test_file_heartbeat_recovers_from_sqlite_lock_without_duplicate_model_call`,
+`test_persistent_sqlite_lock_exhausts_retry_budget_as_transient_timeout`, and
+`test_sqlite_table_lock_message_is_retried`. W4 must add a real lease-margin
+case that proves retry stops at the deadline, an owner/epoch mismatch case that
+proves immediate loss, and a concurrent multi-agent write case that proves a
+successful renewal is never inferred from a busy response. These tests are
+implementation evidence for the settled classification; this design document
+does not claim that W4 has shipped.
 
 ## Reproduction and limits
 
@@ -160,4 +174,4 @@ calls. PostgreSQL execution, broad simulation campaigns and full-suite
 verification have not been performed for these probes. The P1 seam-based
 probes are not claimed to have executed the unmodified baseline; the baseline
 classifications above are grounded in its inspected implementation and contract.
-I9 and I11 await their planned W2c/W4 implementations.
+I9 and I11 await their planned W2c/W4 implementations; L5 itself is now a settled design classification, pending that implementation evidence.
