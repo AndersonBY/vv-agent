@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 
+DEFAULT_TENANT_ID = "default"
+
 
 class Conflict(ValueError):
     pass
@@ -30,6 +32,7 @@ class Lease:
     owner: str
     epoch: int
     expires_at_ms: int
+    tenant_id: str = DEFAULT_TENANT_ID
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,8 @@ class SessionTx(Protocol):
 
 
 class SessionStore(Protocol):
+    def for_tenant(self, tenant_id: str) -> SessionStore: ...
+
     def heartbeat_store(self) -> AbstractContextManager[SessionStore]:
         """Open a runtime-independent renewal connection; memory stores may share their lock."""
         ...

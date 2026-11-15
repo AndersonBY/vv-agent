@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from copy import copy
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
@@ -14,6 +15,7 @@ from vv_agent.kernel._records import InboxItem, Record, SessionSpec, _MessageCac
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._store import (
+    DEFAULT_TENANT_ID,
     CommitReceipt,
     Conflict,
     ConsumerBatch,
@@ -24,6 +26,7 @@ from vv_agent.kernel._store import (
     LeasePoll,
     ReadPage,
     SequenceConflict,
+    SessionStore,
     StoredInput,
     StoredRecord,
     WorkCursor,
@@ -34,7 +37,8 @@ _DRIVE_RUNNABLE_SQL = """
     (s.lease_until_ms IS NULL OR s.lease_until_ms<=t.ms)
     AND s.drive_retry_at_ms<=t.ms
     AND (s.next_drive_ms<=t.ms OR EXISTS (
-        SELECT 1 FROM sk_inbox i WHERE i.session_id=s.session_id
+        SELECT 1 FROM sk_inbox i
+        WHERE i.tenant_id=s.tenant_id AND i.session_id=s.session_id
         AND i.consumed_seq IS NULL AND i.available_ms<=t.ms))
 """
 
@@ -54,8 +58,14 @@ def _identity(value: str) -> None:
         raise ValueError("identity must be nonempty text without NUL")
 
 
+def _tenant(value: str) -> None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("tenant_id must be nonempty text without NUL")
+
+
 @dataclass
 class _Prefix:
+    tenant_id: str
     session_id: str
     epoch: int
     head_digest: str
@@ -70,9 +80,28 @@ class SQLStore:
     clock_sql = ""
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
+    _tenant_id = DEFAULT_TENANT_ID
+    _root_store: SQLStore | None = None
 
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
+
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    def for_tenant(self, tenant_id: str) -> SessionStore:
+        """Return a lightweight facade whose public operations are tenant-scoped."""
+        _tenant(tenant_id)
+        return _TenantSQLStore(self._root_store or self, tenant_id)
+
+    def _scoped(self, tenant_id: str) -> SQLStore:
+        scoped = copy(self)
+        scoped._root_store = self._root_store or self
+        scoped._tenant_id = tenant_id
+        scoped._fold_cache = None
+        scoped._previous_prefix = None
+        return scoped
 
     @property
     def fold_factory(self) -> Callable[[], Fold]:
@@ -88,16 +117,20 @@ class SQLStore:
         if cached is None:
             self._previous_prefix = None
             return None
-        if cached.session_id == session_id:
+        if cached.tenant_id == self.tenant_id and cached.session_id == session_id:
             return cached
         previous = self._previous_prefix
-        return previous if previous is not None and previous.session_id == session_id else None
+        return (
+            previous
+            if previous is not None and previous.tenant_id == self.tenant_id and previous.session_id == session_id
+            else None
+        )
 
     def _retain_prefix(self, prefix: _Prefix) -> None:
         # Two slots keep parent/child projection from evicting each other's validated log.
         if self._fold_cache is None:
             self._previous_prefix = None
-        elif self._fold_cache.session_id != prefix.session_id:
+        elif (self._fold_cache.tenant_id, self._fold_cache.session_id) != (prefix.tenant_id, prefix.session_id):
             self._previous_prefix = self._fold_cache
         self._fold_cache = prefix
 
@@ -133,8 +166,9 @@ class SQLStore:
         return tuple(
             row[0]
             for row in self._rows(
-                "SELECT session_id FROM sk_session WHERE (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
-                (after is None, after or "", limit),
+                "SELECT session_id FROM sk_session WHERE tenant_id=%s "
+                "AND (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
+                (self.tenant_id, after is None, after or "", limit),
             )
         )
 
@@ -146,13 +180,14 @@ class SQLStore:
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
             "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms "
-            f"FROM sk_session WHERE session_id=%s{self.lock_clause}",
-            (session_id,),
+            f"FROM sk_session WHERE tenant_id=%s AND session_id=%s{self.lock_clause}",
+            (self.tenant_id, session_id),
         )
 
     def _check_lease(self, session_id: str, lease: Lease, row: tuple[Any, ...], now: int) -> None:
         if (
-            lease.session_id != session_id
+            lease.tenant_id != self.tenant_id
+            or lease.session_id != session_id
             or row[2] != lease.epoch
             or row[3] != lease.owner
             or row[4] is None
@@ -178,11 +213,14 @@ class SQLStore:
         head, epoch = row[0], row[2]
         cached = self._cached_prefix(session_id)
         if cached is not None:
-            valid = cached.session_id == session_id and len(cached.records) <= head
+            valid = (
+                (cached.tenant_id, cached.session_id) == (self.tenant_id, session_id)
+                and len(cached.records) <= head
+            )
             if valid:
                 body, checksum = self._one(
-                    "SELECT body,digest FROM sk_record WHERE session_id=%s AND seq=%s",
-                    (session_id, len(cached.records)),
+                    "SELECT body,digest FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=%s",
+                    (self.tenant_id, session_id, len(cached.records)),
                 )
                 valid = checksum == cached.head_digest and sha256(body).hexdigest() == checksum
             if not valid:
@@ -190,7 +228,9 @@ class SQLStore:
                 self._previous_prefix = None
             elif cached.epoch != epoch:
                 # The immutable prefix survives a lease change; execution authority does not.
-                cached = _Prefix(session_id, epoch, cached.head_digest, cached.reducer, cached.records)
+                cached = _Prefix(
+                    self.tenant_id, session_id, epoch, cached.head_digest, cached.reducer, cached.records
+                )
         through = len(cached.records) if cached else 0
         if head == 0:
             raise Conflict("log sequence gap")
@@ -204,8 +244,8 @@ class SQLStore:
         while cursor < head:
             rows = self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
-                (session_id, cursor, head, 256),
+                "WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
+                (self.tenant_id, session_id, cursor, head, 256),
             )
             if not rows:
                 raise Conflict("log sequence gap")
@@ -219,15 +259,22 @@ class SQLStore:
                 cursor, head_digest = stored.seq, row_data[5]
         consumed = []
         for body, checksum in self._rows(
-            "SELECT body,digest FROM sk_inbox WHERE session_id=%s AND input_seq<=%s "
+            "SELECT body,digest FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s "
             "AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
-            (session_id, row[1], through, head),
+            (self.tenant_id, session_id, row[1], through, head),
         ):
             if sha256(body).hexdigest() != checksum:
                 raise Conflict("stored input digest mismatch")
             consumed.append(InboxItem.parse(body))
         reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=bodies)
-        prefix = _Prefix(session_id, epoch, head_digest, reducer, (cached.records if cached else ()) + tuple(records))
+        prefix = _Prefix(
+            self.tenant_id,
+            session_id,
+            epoch,
+            head_digest,
+            reducer,
+            (cached.records if cached else ()) + tuple(records),
+        )
         self._retain_prefix(prefix)
         return prefix
 
@@ -240,13 +287,24 @@ class SQLStore:
         return prefix.reducer.snapshot(), prefix.records, row[1]
 
     def _head(self, session_id: str) -> tuple[Any, ...]:
-        return self._one("SELECT head_seq,inbox_seq,lease_epoch FROM sk_session WHERE session_id=%s", (session_id,))
+        return self._one(
+            "SELECT head_seq,inbox_seq,lease_epoch FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )
 
     def _schedule(self, session_id: str, state: ExecutionState, *, preserve_due: bool = False) -> None:
         self._rows(
             "UPDATE sk_session SET phase=%s,next_drive_ms=CASE WHEN %s THEN next_drive_ms ELSE %s END,"
-            "active_turn_id=%s,terminal_seq=%s WHERE session_id=%s",
-            (state.phase, preserve_due, state.next_drive_ms, state.active_turn_id, state.terminal_seq, session_id),
+            "active_turn_id=%s,terminal_seq=%s WHERE tenant_id=%s AND session_id=%s",
+            (
+                state.phase,
+                preserve_due,
+                state.next_drive_ms,
+                state.active_turn_id,
+                state.terminal_seq,
+                self.tenant_id,
+                session_id,
+            ),
         )
 
     def rebuild_schedule(self, session_id: str) -> ExecutionState:
@@ -268,25 +326,36 @@ class SQLStore:
         if through_seq is not None:
             _natural(through_seq, "through_seq")
         # Records are immutable: cap by the captured head without locking writers.
-        head, inbox = self._one("SELECT head_seq,inbox_seq FROM sk_session WHERE session_id=%s", (session_id,))
+        head, inbox = self._one(
+            "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )
         rows = self._rows(
             "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-            "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
-            (session_id, after_seq, min(head, through_seq) if through_seq is not None else head, limit),
+            "WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
+            (
+                self.tenant_id,
+                session_id,
+                after_seq,
+                min(head, through_seq) if through_seq is not None else head,
+                limit,
+            ),
         )
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
 
     def lease_status(self, session_id: str) -> tuple[int, int, int]:
         head, epoch, until, now = self._one(
-            f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} FROM sk_session WHERE session_id=%s",
-            (session_id,),
+            f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} "
+            "FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
         )
         return head, epoch, max(0, (until or now) - now)
 
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox WHERE session_id=%s AND input_id=%s",
-            (session_id, input_id),
+            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox "
+            "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (self.tenant_id, session_id, input_id),
         )
         if not rows:
             return None
@@ -300,9 +369,11 @@ class SQLStore:
         _natural(through_seq, "through_seq")
         rows = self._rows(
             "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
-            "FROM sk_inbox i JOIN sk_record r ON r.session_id=i.session_id AND r.seq=i.consumed_seq "
-            "WHERE i.session_id=%s AND i.kind='control' AND r.seq<=%s ORDER BY r.seq",
-            (session_id, through_seq),
+            "FROM sk_inbox i JOIN sk_record r ON r.tenant_id=i.tenant_id "
+            "AND r.session_id=i.session_id AND r.seq=i.consumed_seq "
+            "WHERE i.tenant_id=%s AND i.session_id=%s AND i.kind='control' "
+            "AND r.seq<=%s ORDER BY r.seq",
+            (self.tenant_id, session_id, through_seq),
         )
         return tuple(self._stored(session_id, row) for row in rows)
 
@@ -319,9 +390,9 @@ class SQLStore:
             seen.add((oid, attempt))
             rows = self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE session_id=%s AND operation_id=%s AND attempt=%s AND seq<=%s "
+                "WHERE tenant_id=%s AND session_id=%s AND operation_id=%s AND attempt=%s AND seq<=%s "
                 "AND kind IN ('op_planned','op_prepared','op_parked') ORDER BY seq",
-                (session_id, oid, attempt, through),
+                (self.tenant_id, session_id, oid, attempt, through),
             )
             for row in rows:
                 stored = self._stored(session_id, row)
@@ -341,8 +412,9 @@ class SQLStore:
         for tid in turns:
             rows = self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE session_id=%s AND turn_id=%s AND kind='turn_started' AND seq<=%s ORDER BY seq LIMIT 1",
-                (session_id, tid, through),
+                "WHERE tenant_id=%s AND session_id=%s AND turn_id=%s AND kind='turn_started' "
+                "AND seq<=%s ORDER BY seq LIMIT 1",
+                (self.tenant_id, session_id, tid, through),
             )
             for row in rows:
                 stored = self._stored(session_id, row)
@@ -353,10 +425,11 @@ class SQLStore:
             # Read only this turn's indexed intent and lifecycle dependencies.
             rows = self._rows(
                 "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest FROM sk_record r "
-                "LEFT JOIN sk_inbox i ON i.session_id=r.session_id AND i.consumed_seq=r.seq "
-                "WHERE r.session_id=%s AND r.turn_id=%s AND r.seq<=%s AND "
+                "LEFT JOIN sk_inbox i ON i.tenant_id=r.tenant_id "
+                "AND i.session_id=r.session_id AND i.consumed_seq=r.seq "
+                "WHERE r.tenant_id=%s AND r.session_id=%s AND r.turn_id=%s AND r.seq<=%s AND "
                 "(r.kind='boundary_recorded' OR (r.kind='input_applied' AND i.input_id LIKE 'compaction/%%')) ORDER BY r.seq",
-                (session_id, r.record.turn_id, through),
+                (self.tenant_id, session_id, r.record.turn_id, through),
             )
             for row in rows:
                 stored = self._stored(session_id, row)
@@ -384,9 +457,10 @@ class SQLStore:
             _natural(through_input_seq, "through_input_seq")
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox WHERE session_id=%s "
+            "SELECT body,input_seq,received_ms,consumed_seq,digest FROM sk_inbox "
+            "WHERE tenant_id=%s AND session_id=%s "
             "AND consumed_seq IS NULL " + readiness + "AND (%s OR input_seq<=%s) ORDER BY input_seq LIMIT %s",
-            (session_id, through_input_seq is None, through_input_seq or 0, limit),
+            (self.tenant_id, session_id, through_input_seq is None, through_input_seq or 0, limit),
         )
         result = []
         for body, seq, received, consumed, checksum in rows:
@@ -403,10 +477,11 @@ class SQLStore:
             now = self._now()  # Must be read after the row lock, not at transaction start.
             if (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
-            lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms)
+            lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(
-                "UPDATE sk_session SET lease_epoch=%s,lease_owner=%s,lease_until_ms=%s WHERE session_id=%s",
-                (lease.epoch, owner, lease.expires_at_ms, session_id),
+                "UPDATE sk_session SET lease_epoch=%s,lease_owner=%s,lease_until_ms=%s "
+                "WHERE tenant_id=%s AND session_id=%s",
+                (lease.epoch, owner, lease.expires_at_ms, self.tenant_id, session_id),
             )
             return lease
 
@@ -416,14 +491,17 @@ class SQLStore:
             row = self._lock(lease.session_id)
             now = self._now()
             self._check_lease(lease.session_id, lease, row, now)
-            renewed = Lease(lease.session_id, lease.owner, lease.epoch, now + ttl_ms)
-            self._rows("UPDATE sk_session SET lease_until_ms=%s WHERE session_id=%s", (renewed.expires_at_ms, lease.session_id))
+            renewed = Lease(lease.session_id, lease.owner, lease.epoch, now + ttl_ms, lease.tenant_id)
+            self._rows(
+                "UPDATE sk_session SET lease_until_ms=%s WHERE tenant_id=%s AND session_id=%s",
+                (renewed.expires_at_ms, self.tenant_id, lease.session_id),
+            )
             controls = tuple(
                 InboxItem.parse(r[0])
                 for r in self._rows(
-                    "SELECT body FROM sk_inbox WHERE session_id=%s AND consumed_seq IS NULL AND available_ms<=%s "
-                    "AND kind='control' ORDER BY input_seq",
-                    (lease.session_id, now),
+                    "SELECT body FROM sk_inbox WHERE tenant_id=%s AND session_id=%s "
+                    "AND consumed_seq IS NULL AND available_ms<=%s AND kind='control' ORDER BY input_seq",
+                    (self.tenant_id, lease.session_id, now),
                 )
             )
             return LeasePoll(renewed, now, row[1], controls)
@@ -435,7 +513,11 @@ class SQLStore:
                 self._check_lease(lease.session_id, lease, row, self._now())
             except LeaseLost:
                 return False
-            self._rows("UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL WHERE session_id=%s", (lease.session_id,))
+            self._rows(
+                "UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL "
+                "WHERE tenant_id=%s AND session_id=%s",
+                (self.tenant_id, lease.session_id),
+            )
             return True
 
     def next_drive_delay_ms(self, session_id: str, *, lease: Lease | None = None) -> int | None:
@@ -445,7 +527,10 @@ class SQLStore:
             now = self._now()
             if lease is not None:
                 self._check_lease(session_id, lease, row, now)
-            due = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (session_id,))[0]
+            due = self._one(
+                "SELECT next_drive_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (self.tenant_id, session_id),
+            )[0]
             return None if due is None else max(0, due - now)
 
     def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
@@ -463,22 +548,27 @@ class SQLStore:
             row = self._lock(sid)
             now = self._now()
             self._check_lease(sid, lease, row, now)
-            scheduled = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (sid,))[0]
+            scheduled = self._one(
+                "SELECT next_drive_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (self.tenant_id, sid),
+            )[0]
             if scheduled is None or scheduled > now:
                 return False
             if row[:3] != captured:
                 raise SequenceConflict("head or inbox watermark changed")
             due = [now + poll_ms, *(t for t in state.due_ms if t > now)]
             available = self._one(
-                "SELECT min(available_ms) FROM sk_inbox WHERE session_id=%s AND consumed_seq IS NULL AND available_ms>%s",
-                (sid, now),
+                "SELECT min(available_ms) FROM sk_inbox WHERE tenant_id=%s AND session_id=%s "
+                "AND consumed_seq IS NULL AND available_ms>%s",
+                (self.tenant_id, sid, now),
             )[0]
             if available is not None:
                 due.append(available)
             return bool(
                 self._rows(
-                    "UPDATE sk_session SET next_drive_ms=%s WHERE session_id=%s AND next_drive_ms<=%s RETURNING session_id",
-                    (min(due), sid, now),
+                    "UPDATE sk_session SET next_drive_ms=%s "
+                    "WHERE tenant_id=%s AND session_id=%s AND next_drive_ms<=%s RETURNING session_id",
+                    (min(due), self.tenant_id, sid, now),
                 )
             )
 
@@ -491,8 +581,8 @@ class SQLStore:
             self._check_lease(lease.session_id, lease, row, now)
             self._rows(
                 "UPDATE sk_session SET drive_retry_at_ms=CASE WHEN drive_retry_at_ms>%s "
-                "THEN drive_retry_at_ms ELSE %s END WHERE session_id=%s",
-                (now + retry_after_ms, now + retry_after_ms, lease.session_id),
+                "THEN drive_retry_at_ms ELSE %s END WHERE tenant_id=%s AND session_id=%s",
+                (now + retry_after_ms, now + retry_after_ms, self.tenant_id, lease.session_id),
             )
 
     def defer_projection(self, session_id: str, consumer: str, *, retry_after_ms: int) -> None:
@@ -500,14 +590,16 @@ class SQLStore:
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
             self._one(
-                f"SELECT last_seq FROM sk_consumer WHERE session_id=%s AND consumer=%s{self.lock_clause}",
-                (session_id, consumer),
+                f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s "
+                f"AND consumer=%s{self.lock_clause}",
+                (self.tenant_id, session_id, consumer),
             )
             until = self._now() + retry_after_ms
             self._rows(
                 "UPDATE sk_consumer SET project_retry_at_ms=CASE WHEN project_retry_at_ms>%s "
-                "THEN project_retry_at_ms ELSE %s END WHERE session_id=%s AND consumer=%s",
-                (until, until, session_id, consumer),
+                "THEN project_retry_at_ms ELSE %s END "
+                "WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
+                (until, until, self.tenant_id, session_id, consumer),
             )
 
     def is_runnable(self, session_id: str) -> bool:
@@ -517,8 +609,8 @@ class SQLStore:
                 self._rows(
                     f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
                     "SELECT 1 FROM sk_session s CROSS JOIN clock t "
-                    f"WHERE s.session_id=%s AND {_DRIVE_RUNNABLE_SQL}",
-                    (session_id,),
+                    f"WHERE s.tenant_id=%s AND s.session_id=%s AND {_DRIVE_RUNNABLE_SQL}",
+                    (self.tenant_id, session_id),
                 )
             )
 
@@ -530,13 +622,16 @@ class SQLStore:
             WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms), driving AS (
                 SELECT s.session_id,'drive' AS work_kind,'' AS consumer
                 FROM sk_session s CROSS JOIN clock t
-                WHERE s.session_id >= %s AND (s.session_id,'drive','')>(%s,%s,%s)
+                WHERE s.tenant_id=%s AND s.session_id >= %s
+                  AND (s.session_id,'drive','')>(%s,%s,%s)
                   AND {_DRIVE_RUNNABLE_SQL}
                 ORDER BY s.session_id LIMIT %s
             ), projecting AS (
                 SELECT c.session_id,'project' AS work_kind,c.consumer FROM sk_consumer c
-                JOIN sk_session s USING(session_id) CROSS JOIN clock t
-                WHERE c.session_id >= %s AND (c.session_id,'project',c.consumer)>(%s,%s,%s)
+                JOIN sk_session s ON s.tenant_id=c.tenant_id AND s.session_id=c.session_id
+                CROSS JOIN clock t
+                WHERE c.tenant_id=%s AND c.session_id >= %s
+                  AND (c.session_id,'project',c.consumer)>(%s,%s,%s)
                   AND c.last_seq<s.head_seq AND c.project_retry_at_ms<=t.ms
                 ORDER BY c.session_id,c.consumer LIMIT %s
             ), work AS (
@@ -544,9 +639,55 @@ class SQLStore:
             ) SELECT session_id,work_kind,consumer FROM work
             ORDER BY session_id,work_kind,consumer LIMIT %s
             """,
-            (cursor[0], *cursor, limit, cursor[0], *cursor, limit, limit),
+            (
+                self.tenant_id,
+                cursor[0],
+                *cursor,
+                limit,
+                self.tenant_id,
+                cursor[0],
+                *cursor,
+                limit,
+                limit,
+            ),
         )
         return tuple(WorkItem(*row) for row in rows)
+
+
+class _TenantSQLStore:
+    """Tenant-bound public view over one concrete SQL store."""
+
+    def __init__(self, root: SQLStore, tenant_id: str):
+        _tenant(tenant_id)
+        self._root = root
+        self._bound = root._scoped(tenant_id)
+        self.tenant_id = tenant_id
+
+    def for_tenant(self, tenant_id: str) -> SessionStore:
+        _tenant(tenant_id)
+        if tenant_id == self.tenant_id:
+            return self
+        return self._root.for_tenant(tenant_id)
+
+    @property
+    def fold_factory(self) -> Callable[[], Fold]:
+        return self._root.fold_factory
+
+    @fold_factory.setter
+    def fold_factory(self, factory: Callable[[], Fold]) -> None:
+        self._root.fold_factory = factory
+        self._bound.fold_factory = factory
+
+    def heartbeat_store(self) -> AbstractContextManager[SessionStore]:
+        @contextmanager
+        def scoped() -> Iterator[SessionStore]:
+            with self._root.heartbeat_store() as store:
+                yield store.for_tenant(self.tenant_id)
+
+        return scoped()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._bound, name)
 
 
 class SQLSessionTx:
@@ -571,8 +712,18 @@ class SQLSessionTx:
         now: int,
     ) -> None:
         self.store._rows(
-            "INSERT INTO sk_commit VALUES (%s,%s,%s,%s,%s,%s,%s)",
-            (session_id, commit_id, manifest, sha256(body).hexdigest(), canonical_json_bytes(sequences), head, now),
+            "INSERT INTO sk_commit(tenant_id,session_id,commit_id,body,digest,record_sequences,head_seq,created_ms) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                self.store.tenant_id,
+                session_id,
+                commit_id,
+                manifest,
+                sha256(body).hexdigest(),
+                canonical_json_bytes(sequences),
+                head,
+                now,
+            ),
         )
 
     def _write(
@@ -589,8 +740,11 @@ class SQLSessionTx:
     ) -> None:
         body = record.encode() if body is None else body
         self.store._rows(
-            "INSERT INTO sk_record VALUES (%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,schema_version,kind,turn_id,operation_id,"
+            "attempt,body,digest,chain_digest,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
+            "VALUES (%s,%s,%s,%s,'S1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
+                self.store.tenant_id,
                 record.session_id,
                 seq,
                 record.record_id,
@@ -599,6 +753,7 @@ class SQLSessionTx:
                 record.operation_id,
                 record.attempt,
                 body,
+                record.digest,
                 record.digest,
                 commit_id,
                 commit_digest,
@@ -620,15 +775,33 @@ class SQLSessionTx:
             raise Conflict("duplicate consumer")
         commit_id = "session/create"
         s = self.store
+        principal = spec.principal
+        tenant_id = principal.get("tenant_id") if isinstance(principal, dict) else None
+        if not isinstance(tenant_id, str):
+            raise Conflict("session principal requires a tenant_id")
+        _tenant(tenant_id)
+        if tenant_id != s.tenant_id:
+            raise Conflict("session principal belongs to another tenant")
         with s._transaction():
+            if spec.parent_session_id is not None and not s._rows(
+                "SELECT 1 FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (tenant_id, spec.parent_session_id),
+            ):
+                raise Conflict("parent session not found in tenant")
+            now = s._now()
             inserted = s._rows(
-                "INSERT INTO sk_session(session_id,schema_version,parent_session_id,parent_operation_id,phase) "
-                "VALUES (%s,1,%s,%s,'idle') ON CONFLICT(session_id) DO NOTHING RETURNING session_id",
-                (spec.session_id, spec.parent_session_id, spec.parent_operation_id),
+                "INSERT INTO sk_session(tenant_id,session_id,schema_version,parent_session_id,parent_operation_id,"
+                "phase,level,deletion_state,created_ms) "
+                "VALUES (%s,%s,'S1',%s,%s,'idle',1,'live',%s) "
+                "ON CONFLICT(tenant_id,session_id) DO NOTHING RETURNING session_id",
+                (tenant_id, spec.session_id, spec.parent_session_id, spec.parent_operation_id, now),
             )
             s._lock(spec.session_id)
             existing = (
-                s._one("SELECT body FROM sk_record WHERE session_id=%s AND seq=1", (spec.session_id,))[0]
+                s._one(
+                    "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=1",
+                    (tenant_id, spec.session_id),
+                )[0]
                 if not inserted
                 else None
             )
@@ -637,18 +810,25 @@ class SQLSessionTx:
             manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
             if not inserted:
                 old = s._one(
-                    "SELECT body,created_ms FROM sk_commit WHERE session_id=%s AND commit_id=%s", (spec.session_id, commit_id)
+                    "SELECT body,created_ms FROM sk_commit "
+                    "WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                    (tenant_id, spec.session_id, commit_id),
                 )
                 if old[0] != manifest or existing != record.encode():
                     raise Conflict("create identity has different bytes")
                 return CreateReceipt(spec.session_id, 1, old[1], True)
-            now = s._now()
             state = s.fold_factory().extend((record,))
             self._write(record, seq=1, commit_id=commit_id, commit_digest=sha256(body).hexdigest(), position=0, epoch=0, now=now)
             self._commit(spec.session_id, commit_id, body, manifest, ((record.record_id, 1),), 1, now)
             for consumer in consumers:
-                s._rows("INSERT INTO sk_consumer(session_id,consumer) VALUES (%s,%s)", (spec.session_id, consumer))
-            s._rows("UPDATE sk_session SET head_seq=1 WHERE session_id=%s", (spec.session_id,))
+                s._rows(
+                    "INSERT INTO sk_consumer(tenant_id,session_id,consumer) VALUES (%s,%s,%s)",
+                    (tenant_id, spec.session_id, consumer),
+                )
+            s._rows(
+                "UPDATE sk_session SET head_seq=1 WHERE tenant_id=%s AND session_id=%s",
+                (tenant_id, spec.session_id),
+            )
             s._schedule(spec.session_id, state)
             return CreateReceipt(spec.session_id, 1, now)
 
@@ -656,10 +836,15 @@ class SQLSessionTx:
         self._active()
         body = item.encode()
         s = self.store
+        assert item.actor is not None
+        if item.actor["tenant_id"] != s.tenant_id:
+            raise Conflict("input actor belongs to another tenant")
         with s._transaction():
             row = s._lock(session_id)
             old = s._rows(
-                "SELECT body,input_seq,received_ms FROM sk_inbox WHERE session_id=%s AND input_id=%s", (session_id, item.input_id)
+                "SELECT body,input_seq,received_ms FROM sk_inbox "
+                "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                (s.tenant_id, session_id, item.input_id),
             )
             if old:
                 if old[0][0] != body:
@@ -667,10 +852,24 @@ class SQLSessionTx:
                 return InputReceipt(item.input_id, old[0][1], old[0][2], True)
             now, seq = s._now(), row[1] + 1
             s._rows(
-                "INSERT INTO sk_inbox VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL)",
-                (session_id, item.input_id, seq, item.kind, body, sha256(body).hexdigest(), item.available_ms, now),
+                "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,available_ms,received_ms) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    s.tenant_id,
+                    session_id,
+                    item.input_id,
+                    seq,
+                    item.kind,
+                    body,
+                    sha256(body).hexdigest(),
+                    item.available_ms,
+                    now,
+                ),
             )
-            s._rows("UPDATE sk_session SET inbox_seq=%s WHERE session_id=%s", (seq, session_id))
+            s._rows(
+                "UPDATE sk_session SET inbox_seq=%s WHERE tenant_id=%s AND session_id=%s",
+                (seq, s.tenant_id, session_id),
+            )
             return InputReceipt(item.input_id, seq, now)
 
     def append(
@@ -728,7 +927,8 @@ class SQLSessionTx:
         # Commit replay needs no history or live lease. Prepare new immutable history
         # before the write lock; locked admission below rechecks both CAS and epoch.
         if expected_seq == captured[0] and not s._rows(
-            "SELECT 1 FROM sk_commit WHERE session_id=%s AND commit_id=%s", (session_id, commit_id)
+            "SELECT 1 FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+            (s.tenant_id, session_id, commit_id),
         ):
             prefix = s._prefix(session_id, captured)
             reducer = prefix.reducer.fork()
@@ -737,13 +937,16 @@ class SQLSessionTx:
         with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
             row = s._lock(session_id)
             old = s._rows(
-                "SELECT body,record_sequences,head_seq FROM sk_commit WHERE session_id=%s AND commit_id=%s",
-                (session_id, commit_id),
+                "SELECT body,record_sequences,head_seq FROM sk_commit "
+                "WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (s.tenant_id, session_id, commit_id),
             )
             if old:
                 stored = {
                     r.record_id: s._one(
-                        "SELECT body FROM sk_record WHERE session_id=%s AND record_id=%s", (session_id, r.record_id)
+                        "SELECT body FROM sk_record "
+                        "WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
+                        (s.tenant_id, session_id, r.record_id),
                     )[0]
                     for r in records
                 }
@@ -760,7 +963,9 @@ class SQLSessionTx:
             head = row[0]
             for position, record in enumerate(records):
                 prior = s._rows(
-                    "SELECT body,seq FROM sk_record WHERE session_id=%s AND record_id=%s", (session_id, record.record_id)
+                    "SELECT body,seq FROM sk_record "
+                    "WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
+                    (s.tenant_id, session_id, record.record_id),
                 )
                 if prior:
                     if prior[0][0] != encoded[position]:
@@ -777,8 +982,9 @@ class SQLSessionTx:
             now = s._now()
             for input_id in consume_input_ids:
                 incoming = s._one(
-                    "SELECT body,consumed_seq,available_ms FROM sk_inbox WHERE session_id=%s AND input_id=%s",
-                    (session_id, input_id),
+                    "SELECT body,consumed_seq,available_ms FROM sk_inbox "
+                    "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                    (s.tenant_id, session_id, input_id),
                 )
                 applied = applications[input_id][0]
                 if incoming[1] is not None or incoming[2] > now or incoming[0] != canonical_json_bytes(applied._payload["input"]):
@@ -808,8 +1014,15 @@ class SQLSessionTx:
                     body=encoded[position],
                 )
             for input_id, (_, seq) in applications.items():
-                s._rows("UPDATE sk_inbox SET consumed_seq=%s WHERE session_id=%s AND input_id=%s", (seq, session_id, input_id))
-            s._rows("UPDATE sk_session SET head_seq=%s WHERE session_id=%s", (head, session_id))
+                s._rows(
+                    "UPDATE sk_inbox SET consumed_seq=%s "
+                    "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                    (seq, s.tenant_id, session_id, input_id),
+                )
+            s._rows(
+                "UPDATE sk_session SET head_seq=%s WHERE tenant_id=%s AND session_id=%s",
+                (head, s.tenant_id, session_id),
+            )
             # Consuming unrelated input must not erase an idle provider's SQL deferral.
             s._schedule(
                 session_id,
@@ -822,7 +1035,9 @@ class SQLSessionTx:
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
             self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
             checksum = new[-1][1].digest if new else prefix.head_digest
-            s._retain_prefix(_Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added))
+            s._retain_prefix(
+                _Prefix(s.tenant_id, session_id, lease.epoch, checksum, reducer, prefix.records + added)
+            )
             s._check_lease(session_id, lease, row, s._now())
             return receipt
 
@@ -831,21 +1046,26 @@ class SQLSessionTx:
         _positive(limit, "limit")
         s = self.store
         last = s._one(
-            f"SELECT last_seq FROM sk_consumer WHERE session_id=%s AND consumer=%s{s.lock_clause}", (session_id, consumer)
+            f"SELECT last_seq FROM sk_consumer "
+            f"WHERE tenant_id=%s AND session_id=%s AND consumer=%s{s.lock_clause}",
+            (s.tenant_id, session_id, consumer),
         )[0]
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
         rows = s._rows(
             """
             WITH page AS MATERIALIZED (
-                SELECT seq,commit_id FROM sk_record WHERE session_id=%s AND seq>%s ORDER BY seq LIMIT %s
+                SELECT seq,commit_id FROM sk_record
+                WHERE tenant_id=%s AND session_id=%s AND seq>%s ORDER BY seq LIMIT %s
             ), boundary AS (
-                SELECT max(r.seq) AS seq FROM sk_record r WHERE r.session_id=%s
+                SELECT max(r.seq) AS seq FROM sk_record r
+                WHERE r.tenant_id=%s AND r.session_id=%s
                 AND r.commit_id=(SELECT commit_id FROM page ORDER BY seq DESC LIMIT 1)
             )
             SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record
-            WHERE session_id=%s AND seq>%s AND seq<=(SELECT seq FROM boundary) ORDER BY seq
+            WHERE tenant_id=%s AND session_id=%s AND seq>%s
+              AND seq<=(SELECT seq FROM boundary) ORDER BY seq
             """,
-            (session_id, last, limit, session_id, session_id, last),
+            (s.tenant_id, session_id, last, limit, s.tenant_id, session_id, s.tenant_id, session_id, last),
         )
         key = (session_id, consumer)
         if not rows:
@@ -862,8 +1082,10 @@ class SQLSessionTx:
         if self.batches.get(key) is not batch:
             raise Conflict("ack requires the batch issued by this transaction")
         updated = self.store._rows(
-            "UPDATE sk_consumer SET last_seq=%s WHERE session_id=%s AND consumer=%s AND last_seq=%s RETURNING last_seq",
-            (batch.through_seq, *key, batch.from_seq - 1),
+            "UPDATE sk_consumer SET last_seq=%s "
+            "WHERE tenant_id=%s AND session_id=%s AND consumer=%s "
+            "AND last_seq=%s RETURNING last_seq",
+            (batch.through_seq, self.store.tenant_id, *key, batch.from_seq - 1),
         )
         if not updated:
             raise Conflict("consumer cursor changed")
