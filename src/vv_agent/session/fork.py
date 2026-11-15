@@ -15,8 +15,8 @@ from vv_agent.workspace.streaming import scan_text
 from .compaction import memory_settings
 from .content_runtime import SESSION_ATTRIBUTES
 from .context_view import context_messages, project_view
-from .projection import hydration_for_session_store
-from .records import InboxItem, SessionSpec, copy_json, digest, inherited_seed_policies
+from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
+from .records import SessionSpec, copy_json, digest, inherited_seed_policies
 from .reducer import _fold_factory_for
 from .store import Conflict
 
@@ -91,17 +91,16 @@ def fork_thread(kernel, host, params):
             raise ValueError("Fork cut turn has not ended")
         ended = [r for r in ended if r.seq <= terminal.seq and ("beforeTurnId" not in params or r.seq < terminal.seq)]
     cut = ended[-1] if ended else records[0]
-    records = tuple(r for r in records if r.seq <= cut.seq)
+    source_records = tuple(r for r in records if r.seq <= cut.seq)
     factory = _fold_factory_for(kernel.store)
-    state = factory().extend(
-        (r.record for r in records),
-        consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
-    )
+    hydration = hydration_for_session_store(kernel.store, source)
+    records = hydrate_records(source_records, hydration)
+    state = fold_hydrated_records(records, source_records, factory, hydration)
     view = project_view(
         source,
-        records,
+        source_records,
         _fold_factory=factory,
-        _hydration=hydration_for_session_store(kernel.store, source),
+        _hydration=hydration,
     )
     definition = copy_json(
         state.turns[next(reversed(state.turns))].start._payload["definition"]
@@ -122,7 +121,13 @@ def fork_thread(kernel, host, params):
             "route": {},
             "binding": definition["model_binding"],
         }
-    messages = context_messages(records, state, definition, _fold_factory=factory)
+    messages = context_messages(
+        records,
+        state,
+        definition,
+        _fold_factory=factory,
+        _source_records=source_records,
+    )
     copied = [m.to_dict() for m in messages]
     lineage = {
         "sourceThreadId": source,
