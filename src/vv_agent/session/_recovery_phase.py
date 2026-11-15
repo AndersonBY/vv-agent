@@ -15,6 +15,7 @@ from vv_agent.kernel import _driver_recovery as core
 from vv_agent.kernel import _output_phase as output_core
 from vv_agent.kernel._budget import BudgetObservation
 from vv_agent.kernel._child_store import cancel_children
+from vv_agent.kernel._content_publication import publish_turn_started
 from vv_agent.kernel._cycles import project_cycles, turn_result_prefix
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput
@@ -148,6 +149,33 @@ class _Host:
             )
         if isinstance(request, CommitRecords):
             return driver.commit(request.records, guarded=True)
+        if isinstance(request, inputs.PublishTurnStarted):
+
+            def prepare_turn_started(tx):
+                writer = driver.content_writer(tx)
+                content = publish_turn_started(
+                    writer,
+                    request.definition,
+                    request.budget,
+                    admission_definition_digest=request.admission_definition_digest,
+                )
+                return [
+                    driver.record(
+                        "turn_started",
+                        {
+                            "input_ids": [request.input_id],
+                            "definition": content.definition.to_dict(),
+                            "definition_digest": content.definition_digest,
+                            "handler_version": request.handler_version,
+                            "budget": content.budget.to_dict(),
+                            "binding": None,
+                            "generation": request.generation,
+                        },
+                        tid=request.tid,
+                    )
+                ]
+
+            return driver.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, inputs.CommitInput):
             return driver.commit(request.records, (request.input_id,), guarded=True)
         if isinstance(request, inputs.CompileTurn):

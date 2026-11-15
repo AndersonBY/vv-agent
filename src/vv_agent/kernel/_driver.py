@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Any, Protocol
 
-from vv_agent.kernel._content import ContentSessionWriter
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter
+from vv_agent.kernel._content_publication import declared_record_content, link_declared_record_content
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import ContentReader, MissingContentLink, SessionHydrator
 from vv_agent.kernel._lease_scope import Clock
@@ -120,24 +123,7 @@ class CoreDriver:
     def hydrator_for(self, record_owner: int | str) -> SessionHydrator:
         """Create the one owner-scoped hydrator over this driver's session reader."""
 
-        reader = self.content_reader
-        if reader is None:
-            raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
-        if self.store is None:
-            raise RecordError("S1 content hydration requires a session store")
-
-        binding = getattr(reader, "binding", None)
-        store_tenant = getattr(self.store, "tenant_id", None)
-        if binding is None:
-            if not isinstance(store_tenant, str) or not store_tenant:
-                raise RecordError("S1 content reader must have an explicit tenant and session binding")
-            tenant_id = store_tenant
-        else:
-            if not isinstance(binding, tuple) or len(binding) != 2 or not all(isinstance(item, str) and item for item in binding):
-                raise MissingContentLink("content reader binding is invalid")
-            tenant_id, bound_session_id = binding
-            if bound_session_id != self.sid or (store_tenant is not None and store_tenant != tenant_id):
-                raise MissingContentLink("content reader does not match the driver store and session")
+        reader, tenant_id = self._content_reader_binding()
 
         if type(record_owner) is int:
             if record_owner < 1:
@@ -150,6 +136,67 @@ class CoreDriver:
         else:
             raise ValueError("record_owner must be a positive record sequence or input id")
         return SessionHydrator(reader, tenant_id=tenant_id, session_id=self.sid, owner=owner)
+
+    def _content_reader_binding(self) -> tuple[ContentReader, str]:
+        reader = self.content_reader
+        if reader is None:
+            raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
+        if self.store is None:
+            raise RecordError("S1 content hydration requires a session store")
+
+        binding = getattr(reader, "binding", None)
+        store_tenant = getattr(self.store, "tenant_id", None)
+        if binding is None:
+            if not isinstance(store_tenant, str) or not store_tenant:
+                raise RecordError("S1 content reader must have an explicit tenant and session binding")
+            return reader, store_tenant
+        if not isinstance(binding, tuple) or len(binding) != 2 or not all(isinstance(item, str) and item for item in binding):
+            raise MissingContentLink("content reader binding is invalid")
+        tenant_id, bound_session_id = binding
+        if bound_session_id != self.sid or (store_tenant is not None and store_tenant != tenant_id):
+            raise MissingContentLink("content reader does not match the driver store and session")
+        return reader, tenant_id
+
+    def read_content_json(self, owner: str, slot: str, ref: ContentRef | dict[str, Any]) -> Any:
+        """Read one already-linked JSON object through the bound content reader."""
+
+        parsed = ref if isinstance(ref, ContentRef) else ContentRef.from_dict(ref)
+        reader, tenant_id = self._content_reader_binding()
+        body = reader.read(tenant_id, self.sid, owner, slot, parsed)
+        if type(body) is not bytes or len(body) != parsed.size:
+            raise RecordError("S1 content reader returned bytes that do not match the reference")
+        try:
+            value = json.loads(body)
+            if canonical_json_bytes(value) != body:
+                raise ValueError("content is not canonical JSON")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RecordError("S1 content must be canonical JSON") from exc
+        return value
+
+    def session_attributes(self) -> dict[str, Any]:
+        """Hydrate the creation record's attributes or fail closed on a ref."""
+
+        created = self.records[0]
+        attributes = created.record._payload["attributes"]
+        try:
+            ref = ContentRef.from_dict(attributes)
+        except (TypeError, ValueError):
+            if type(attributes) is not dict:
+                raise RecordError("session attributes require an object or ContentRef") from None
+            return copy_json(attributes)
+        value = self.read_content_json(f"record:{created.seq}", SESSION_ATTRIBUTES, ref)
+        if type(value) is not dict:
+            raise RecordError("session attributes must be a JSON object")
+        return value
+
+    def input_content(self, input_id: str, value: Any) -> Any:
+        """Hydrate a session input only when its payload carries a ContentRef."""
+
+        try:
+            ref = ContentRef.from_dict(value)
+        except (TypeError, ValueError):
+            return copy_json(value)
+        return self.read_content_json(f"input:{input_id}", INPUT_CONTENT, ref)
 
     def content_writer(self, tx: SessionTx | None = None) -> ContentSessionWriter:
         """Return a writer bound to the caller-owned transaction, when it carries content capability."""
@@ -215,6 +262,11 @@ class CoreDriver:
                         consume_input_ids=consumed,
                         expected_inbox_seq=self.watermark if guarded else None,
                     )
+                links = declared_record_content(records, receipt.record_sequences)
+                if links:
+                    with phase("finalize"):
+                        writer = self.content_writer(tx)
+                        link_declared_record_content(writer, links)
         except BaseException as exc:
             atomic_error = type(exc).__name__
             raise

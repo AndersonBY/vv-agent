@@ -10,9 +10,9 @@ from typing import Any
 from ._budget_values import RunBudgetLimits
 from ._canonical_json import canonical_json_bytes
 from ._child_store import child_handles, verify_completion
+from ._content_publication import declared_content_ref
 from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import CoreDriver
-from ._driver_requests import CommitRecords
 from ._execution_values import AgentTask
 from ._message_values import Message
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance, validate_provider_result
@@ -39,6 +39,17 @@ class InputSetting(Enum):
 class CommitInput:
     records: list[Record]
     input_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublishTurnStarted:
+    input_id: str
+    tid: str
+    definition: dict[str, Any]
+    budget: dict[str, Any]
+    handler_version: str
+    generation: int
+    admission_definition_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +125,16 @@ def _check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) 
     attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
     handle = attempt.wait["handle"] if attempt.wait and attempt.wait["handle"]["kind"] == "provider" else None
     validate_provider_result(plan, outcome, handle)
+
+
+def _hydratable_definition(value: Any) -> Any:
+    if declared_content_ref(value) is not None or type(value) is not dict:
+        return value
+    definition = copy_json(value)
+    binding = definition.get("model_binding")
+    if type(binding) is dict:
+        binding.setdefault("endpoints", [])
+    return definition
 
 
 def _yieldable_batch(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, list[Attempt]]:
@@ -487,18 +508,20 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
 
 def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
     inputs = sorted(self.state.applied_inputs.items(), key=lambda pair: pair[1]._payload["input"]["kind"] == "follow_up")
+    attributes = self.session_attributes()
     for input_id, applied in inputs:
         if applied._payload["disposition"] != "queued" or input_id in self.state.admitted_inputs:
             continue
         item = applied._payload["input"]
         tid = item["target_turn_id"] or f"{self.sid}/turn/{input_id}"
-        content = item["payload"]["content"]
+        content = self.input_content(input_id, item["payload"]["content"])
+        seed_attributes = attributes.get("seed")
         task = yield CompileTurn(
             content["text"] if isinstance(content, dict) and "messages" in content else str(content),
             tid,
             seed=(
-                self.records[0].record._payload["attributes"].get("seed")
-                if not self.state.turns and "messages" in self.records[0].record._payload["attributes"].get("seed", {})
+                seed_attributes
+                if not self.state.turns and isinstance(seed_attributes, dict) and "messages" in seed_attributes
                 else None
             ),
             control=compaction_request(InboxItem(**item)) is not None,
@@ -512,7 +535,7 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             task.metadata.setdefault("vv_session", {})["input_messages"] = content["messages"]
         task.task_id = tid
         if not self.state.turns:
-            seed = self.records[0].record._payload["attributes"].get("seed")
+            seed = seed_attributes
             if seed is not None and "messages" in seed:
                 task.initial_messages = [Message.from_dict(copy_json(m)) for m in seed["messages"]]
                 task.initial_shared_state = copy_json(seed["shared_state"])
@@ -523,35 +546,36 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
         except StopIteration as exc:
             raise _StopIterationTransport(exc) from exc
         prior = definitions._retained_task_key
+        stored_definition = _hydratable_definition(definition)
         if prior is not None:
             retained = _RetainedTools(prior[0])
             if retained.encode() == definitions._definition_suffix[len(b',"tools":') : -1]:
                 definition = definition | {"tools": retained}
+                stored_definition = _hydratable_definition(definition | {"tools": retained.value})
         limits = (yield InputSetting.BUDGET_LIMITS) or RunBudgetLimits()
-        admission = self.records[0].record._payload["attributes"].get("child_admission") if input_id == "start" else None
+        handler_version = yield InputSetting.HANDLER_VERSION
+        admission = attributes.get("child_admission") if input_id == "start" else None
+        admission_digest: str | None = None
+        budget: dict[str, Any] = limits.to_dict()
         if admission is not None:
-            if admission["handler_version"] != (yield InputSetting.HANDLER_VERSION):
+            if admission["handler_version"] != handler_version:
                 raise Conflict("child admission handler version mismatch")
-            definition = admission["definition"]
-            limits = RunBudgetLimits.from_dict(admission["budget"])
-            if digest(definition) != admission["definition_digest"]:
+            admitted_definition = admission["definition"]
+            budget = admission["budget"]
+            if (
+                declared_content_ref(admitted_definition) is None
+                and digest(admitted_definition) != admission["definition_digest"]
+            ):
                 raise Conflict("child admission definition digest mismatch")
-        yield CommitRecords(
-            [
-                self.record(
-                    "turn_started",
-                    {
-                        "input_ids": [input_id],
-                        "definition": definition,
-                        "definition_digest": admission["definition_digest"] if admission else definitions._definition_digest,
-                        "handler_version": (yield InputSetting.HANDLER_VERSION),
-                        "budget": limits.to_dict(),
-                        "binding": None,
-                        "generation": item["generation"] or 0,
-                    },
-                    tid=tid,
-                )
-            ]
+            stored_definition = _hydratable_definition(admitted_definition)
+        yield PublishTurnStarted(
+            input_id=input_id,
+            tid=tid,
+            definition=stored_definition,
+            budget=budget,
+            handler_version=handler_version,
+            generation=item["generation"] or 0,
+            admission_definition_digest=admission_digest,
         )
         yield InputSetting.RESET_TOKEN
         return True
