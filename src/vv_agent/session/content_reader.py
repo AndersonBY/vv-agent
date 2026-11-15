@@ -104,7 +104,7 @@ class DurableContentReader:
         try:
             self._store.assert_link(tenant_id, session_id, ref, slot, **owner_args)
         except (ContentUnavailable, ContentBindingMismatch) as exc:
-            raise MissingContentLink("content owner link is unavailable") from exc
+            raise MissingContentLink(f"content owner link is unavailable: {owner}/{slot}") from exc
         except BackendKeyUnavailable as exc:
             raise KeyUnavailable("session content key is unavailable") from exc
         except BackendContentIntegrityError as exc:
@@ -115,7 +115,7 @@ class DurableContentReader:
         try:
             return self._store.get(tenant_id, session_id, ref)
         except ContentUnavailable as exc:
-            raise MissingContent("content is unavailable") from exc
+            raise MissingContent(f"content is unavailable: {owner}/{slot}") from exc
         except ContentBindingMismatch as exc:
             raise MissingContentLink("content binding does not match the session") from exc
         except BackendKeyUnavailable as exc:

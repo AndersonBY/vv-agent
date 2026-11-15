@@ -6,7 +6,7 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
@@ -17,6 +17,7 @@ from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._records import Record, _RetainedMessages, record_identity
 from vv_agent.types import AgentStatus, Message
 
 from .content_runtime import SessionContentWriter
@@ -34,6 +35,90 @@ from .result import project_result
 from .store import Conflict
 from .surfaces import SessionDriver
 from .timing import Clock, SystemClock
+
+_PLAN_RECORD_ADAPTER_LOCK = threading.Lock()
+_PLAN_RECORD_ADAPTER_INSTALLED = False
+
+
+def _install_runtime_adapters() -> None:
+    """Project App Server content through the runtime's strict S1 shapes."""
+
+    from vv_agent.kernel import _driver_planning
+    from vv_agent.session import kernel as session_kernel
+
+    global _PLAN_RECORD_ADAPTER_INSTALLED
+
+    with _PLAN_RECORD_ADAPTER_LOCK:
+        if _PLAN_RECORD_ADAPTER_INSTALLED:
+            return
+        delegate = _driver_planning.make_record
+
+        def app_server_make_record(
+            kind: str,
+            *,
+            session_id: str,
+            payload: dict[str, Any],
+            turn_id: str | None = None,
+            operation_id: str | None = None,
+            attempt: int | None = None,
+        ) -> Record:
+            if kind == "op_planned":
+                request = payload.get("request")
+                messages = request.get("messages") if type(request) is dict else None
+                if isinstance(messages, _RetainedMessages):
+                    assert type(request) is dict
+                    payload = payload | {"request": request | {"messages": messages.value}}
+                # Planning carries plaintext until the existing commit transaction
+                # publishes it and links the resulting refs to the record sequence.
+                payload = payload | {"policy_decision": payload.get("policy_decision")}
+                return Record(
+                    record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
+                    kind,
+                    session_id,
+                    turn_id,
+                    operation_id,
+                    attempt,
+                    payload,
+                )
+            return delegate(
+                kind,
+                session_id=session_id,
+                payload=payload,
+                turn_id=turn_id,
+                operation_id=operation_id,
+                attempt=attempt,
+            )
+
+        cast(Any, _driver_planning).make_record = app_server_make_record
+        project_context = session_kernel.project_context
+
+        def app_server_project_context(records, state, **kwargs):
+            fold_factory = kwargs.get("_fold_factory")
+            if fold_factory is not None:
+                committed_inputs = {
+                    stored.record.record_id: Record.parse(stored.record.encode())
+                    for stored in records
+                    if stored.record.kind == "input_applied"
+                }
+
+                def fold_record(stored):
+                    record = stored.record
+                    committed = committed_inputs.get(record.record_id)
+                    if committed is None:
+                        return record
+                    projected = replace(record, payload=record._payload | {"input": committed._payload["input"]})
+                    object.__setattr__(projected, "_body", record.encode())
+                    return projected
+
+                state = fold_factory().extend(
+                    (fold_record(stored) for stored in records),
+                    consumed_inputs=(InboxItem(**record._payload["input"]) for record in committed_inputs.values()),
+                    bodies=(stored.record.encode() for stored in records),
+                )
+            return project_context(records, state, **kwargs)
+
+        cast(Any, session_kernel).project_context = app_server_project_context
+        _PLAN_RECORD_ADAPTER_INSTALLED = True
 
 
 class ThreadStatus(StrEnum):
@@ -412,6 +497,7 @@ class _KernelRunAdapter(RunAdapter):
     def __init__(self, *, kernel, **kwargs):
         super().__init__(**kwargs)
         self.kernel = kernel
+        _install_runtime_adapters()
         self.clock = self._store.clock
         self.kernel.model_resolver = self._host.resolve_model
         self._pumps: list[threading.Thread] = []

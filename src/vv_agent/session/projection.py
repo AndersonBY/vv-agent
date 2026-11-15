@@ -289,7 +289,9 @@ def hydrate_stored_record(
     include_input: bool = True,
 ) -> StoredRecord:
     payload = hydrate_record_payload(stored, hydration, include_input=include_input)
+    retained_body = stored.record.encode()
     record = replace(stored.record, payload=payload)
+    object.__setattr__(record, "_body", retained_body)
     if record.kind == "turn_started":
         task_data = copy_json(payload["definition"]["task"])
         object.__setattr__(record, "_task", lambda: AgentTask.from_dict(copy_json(task_data)))
@@ -646,7 +648,9 @@ def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydrat
                         **common, **tool, arguments=copy_json(request["arguments"]), tool_metadata=copy_json(plan["tool"]) or None
                     )
                 elif r.kind == "op_completed":
-                    descriptor = project_tool_result(stored)
+                    projected_record = replace(r, payload=p)
+                    object.__setattr__(projected_record, "_body", r.encode())
+                    descriptor = project_tool_result(replace(stored, record=projected_record))
                     common["metadata"] = common["metadata"] | {"tool_result": descriptor}
                     result = ToolExecutionResult.from_dict(p["result"])
                     tool_result_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/diagnostic"}
