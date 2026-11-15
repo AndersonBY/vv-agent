@@ -10,8 +10,9 @@ from __future__ import annotations
 import base64
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, Protocol, cast, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes
@@ -29,6 +30,11 @@ APPROVAL_SCOPE = "approval.scope"
 APPROVAL_REASON = "approval.reason"
 APPROVAL_METADATA = "approval.metadata"
 CHILD_RESULT = "child.result"
+
+_CHAIN_DOMAIN = b"vv-agent/S1"
+_CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
+_INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
+_PURGE_DOMAIN = "vv-agent/S1/purge"
 
 
 class ContentErrorCode(StrEnum):
@@ -144,6 +150,15 @@ def _signature(value: Any, field_name: str, error: type[ContentLifecycleError]) 
     if not decoded or base64.b64encode(decoded).decode("ascii") != text:
         raise error(f"{field_name} must be canonical base64")
     return text
+
+
+def _signature_bytes(value: Any, field_name: str, error: type[ContentLifecycleError]) -> bytes:
+    return base64.b64decode(_signature(value, field_name, error), validate=True)
+
+
+def _require_ledger_verifier(signer: Any | None, error: type[ContentLifecycleError], label: str) -> None:
+    if signer is not None and not callable(getattr(signer, "verify", None)):
+        raise error(f"{label} signer must provide verify(key_id, message, signature)")
 
 
 def _validate_shared(value: dict[str, Any], schema: dict[str, Any], error: type[ContentLifecycleError], label: str) -> None:
@@ -485,6 +500,20 @@ class TombstoneState(StrEnum):
     COMPLETE = "complete"
 
 
+def _tombstone_message(tombstone: ForgetTombstone) -> bytes:
+    return canonical_json_bytes(
+        {
+            "domain": _PURGE_DOMAIN,
+            "tenant_id": tombstone.tenant_id,
+            "session_id": tombstone.session_id,
+            "final_seq": tombstone.final_seq,
+            "chain_digest": tombstone.chain_digest,
+            "deleted_ms": tombstone.deleted_ms,
+            "actor": tombstone.actor.to_dict(),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ForgetTombstone:
     tenant_id: str
@@ -514,8 +543,13 @@ class ForgetTombstone:
             raise InvalidTombstone("tombstone state is not recognized") from exc
         _text(self.scope_root_session_id, "tombstone scope_root_session_id", InvalidTombstone)
 
-    def verify(self, head: SessionHead) -> None:
-        """Verify that a complete tombstone still identifies the forgotten head."""
+    def verify(self, head: SessionHead, signer: Any | None = None) -> None:
+        """Verify tombstone binding and, when supplied, its Ed25519 signature.
+
+        Without ``signer`` this is an explicit hash-only mode: bindings are checked,
+        but a canonical-base64 signature is not evidence of authenticity.
+        """
+        _require_ledger_verifier(signer, InvalidTombstone, "tombstone")
         if (
             self.tenant_id != head.tenant_id
             or self.session_id != head.session_id
@@ -530,6 +564,10 @@ class ForgetTombstone:
             raise InvalidTombstone("forget verification requires a complete tombstone")
         if (self.final_seq, self.chain_digest) != (head.final_seq, head.chain_digest):
             raise TombstoneHeadMismatch("The tombstone head must match the retained final record.")
+        if signer is not None:
+            signature = _signature_bytes(self.signature, "tombstone signature", InvalidTombstone)
+            if not signer.verify(self.key_id, _tombstone_message(self), signature):
+                raise InvalidTombstone("tombstone signature is invalid")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ForgetTombstone:
@@ -751,13 +789,149 @@ def _content_refs(value: Any) -> list[ContentRef]:
     return refs
 
 
+def _length_prefixed(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    if len(encoded) > 0xFFFFFFFF:
+        raise InvalidExport("export identity exceeds U32 length framing")
+    return len(encoded).to_bytes(4, "big") + encoded
+
+
+def _initial_chain_digest(tenant_id: str, session_id: str) -> str:
+    return sha256(_CHAIN_DOMAIN + _length_prefixed(tenant_id) + _length_prefixed(session_id)).hexdigest()
+
+
+def _extend_chain_digest(previous: str, seq: int, record_digest: str) -> str:
+    return sha256(bytes.fromhex(previous) + seq.to_bytes(8, "big") + bytes.fromhex(record_digest)).hexdigest()
+
+
+def _checkpoint_message(tenant_id: str, session_id: str, seq: int, chain_digest: str, key_id: str, signed_ms: int) -> bytes:
+    return canonical_json_bytes(
+        {
+            "domain": _CHECKPOINT_DOMAIN,
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "seq": seq,
+            "chain_digest": chain_digest,
+            "key_id": key_id,
+            "signed_ms": signed_ms,
+        }
+    )
+
+
+def _input_admission_message(
+    tenant_id: str,
+    session_id: str,
+    input_id: str,
+    input_seq: int,
+    received_ms: int,
+    body_digest: str,
+    key_id: str,
+    signed_ms: int,
+) -> bytes:
+    return canonical_json_bytes(
+        {
+            "domain": _INPUT_ADMISSION_DOMAIN,
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "input_id": input_id,
+            "input_seq": input_seq,
+            "received_ms": received_ms,
+            "body_digest": body_digest,
+            "key_id": key_id,
+            "signed_ms": signed_ms,
+        }
+    )
+
+
+def _input_body_digest(item: InboxItem) -> str:
+    return sha256(replace(item, admission_proof=None).encode()).hexdigest()
+
+
+def _verify_input_admission(
+    item: InboxItem,
+    *,
+    input_seq: int,
+    received_ms: int,
+    tenant_id: str,
+    session_id: str,
+    signer: Any | None,
+) -> dict[str, Any] | None:
+    proof = item.admission_proof
+    if proof is None:
+        if signer is not None:
+            raise InvalidExport("signed export input admission proof is missing")
+        return None
+    key_id = proof["admission_key_id"]
+    signed_ms = proof["admission_signed_ms"]
+    signature = _signature_bytes(proof["admission_signature"], "input admission signature", InvalidExport)
+    if signer is not None:
+        message = _input_admission_message(
+            tenant_id,
+            session_id,
+            item.input_id,
+            input_seq,
+            received_ms,
+            _input_body_digest(item),
+            key_id,
+            signed_ms,
+        )
+        if not signer.verify(key_id, message, signature):
+            raise InvalidExport("input admission signature is invalid")
+    return proof
+
+
+def _verify_record_input_proof(
+    item: InboxItem,
+    proof: dict[str, Any],
+    *,
+    tenant_id: str,
+    session_id: str,
+    signer: Any | None,
+) -> None:
+    if proof["input_seq"] < 1 or proof["signed_ms"] < 0:
+        raise InvalidExport("input proof contains invalid sequence or time")
+    signature = _signature_bytes(proof["signature"], "input proof signature", InvalidExport)
+    if signer is not None:
+        message = _input_admission_message(
+            tenant_id,
+            session_id,
+            item.input_id,
+            proof["input_seq"],
+            proof["received_ms"],
+            _input_body_digest(item),
+            proof["key_id"],
+            proof["signed_ms"],
+        )
+        if not signer.verify(proof["key_id"], message, signature):
+            raise InvalidExport("record input admission signature is invalid")
+
+
+def _verify_export_tenants(value: Any, tenant_id: str, label: str) -> None:
+    for node in _walk(value):
+        if type(node) is dict and "tenant_id" in node and node["tenant_id"] != tenant_id:
+            raise ContentBindingMismatch(f"{label} tenant does not match the export")
+
+
 @dataclass(frozen=True, slots=True)
 class ExportDocument:
     header: ExportHeader
     lines: tuple[ExportLine, ...]
 
-    def verify(self, head: SessionHead) -> None:
-        """Verify export framing, manifest counts, and content-mode isolation."""
+    def verify(
+        self,
+        head: SessionHead,
+        signer: Any | None = None,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> None:
+        """Verify a skeleton export without requiring content decryption.
+
+        ``signer`` enables authenticity checks for every checkpoint and input
+        proof. Without it, only canonical framing, manifests, bodies, and hash
+        chains are verified. ``expected_head`` is an independently trusted
+        ``(final_seq, chain_digest)`` anchor and is required to claim rollback
+        resistance.
+        """
+        _require_ledger_verifier(signer, InvalidExport, "export")
         if (
             self.header.tenant_id != head.tenant_id
             or self.header.session_id != head.session_id
@@ -765,6 +939,31 @@ class ExportDocument:
             or self.header.chain_digest != head.chain_digest
         ):
             raise ContentBindingMismatch("export header does not match the retained session head")
+        if expected_head is not None:
+            if isinstance(expected_head, SessionHead):
+                expected = (
+                    expected_head.tenant_id,
+                    expected_head.session_id,
+                    expected_head.final_seq,
+                    expected_head.chain_digest,
+                    expected_head.key_id,
+                )
+                actual_expected = (head.tenant_id, head.session_id, head.final_seq, head.chain_digest, head.key_id)
+            elif (
+                type(expected_head) is tuple
+                and len(expected_head) == 2
+                and type(expected_head[0]) is int
+                and isinstance(expected_head[1], str)
+            ):
+                expected = (expected_head[0], expected_head[1])
+                actual_expected = (head.final_seq, head.chain_digest)
+            else:
+                raise InvalidExport("expected_head must be SessionHead or (final_seq, chain_digest)")
+            if expected != actual_expected:
+                raise ContentBindingMismatch("export head does not match the expected head")
+
+        for line in self.lines:
+            _validate_export_line(line.kind, line.value)
         manifests = [line for line in self.lines if line.kind is ExportLineKind.MANIFEST]
         if len(manifests) != 1 or self.lines[-1].kind is not ExportLineKind.MANIFEST:
             raise InvalidExport("export requires exactly one final manifest line")
@@ -790,17 +989,144 @@ class ExportDocument:
         ):
             raise InvalidExport("manifest line counts do not match the export")
 
+        phase = {
+            ExportLineKind.RECORD: 0,
+            ExportLineKind.INBOX: 1,
+            ExportLineKind.CONTENT: 2,
+            ExportLineKind.CHECKPOINT: 3,
+            ExportLineKind.MANIFEST: 4,
+        }
+        previous_phase = 0
+        for line in self.lines:
+            current_phase = phase[line.kind]
+            if current_phase < previous_phase:
+                raise InvalidExport("export line sections are out of order")
+            previous_phase = current_phase
+
+        record_lines = [line for line in self.lines if line.kind is ExportLineKind.RECORD]
+        inbox_lines = [line for line in self.lines if line.kind is ExportLineKind.INBOX]
+        checkpoint_lines = [line for line in self.lines if line.kind is ExportLineKind.CHECKPOINT]
+        if len(record_lines) != self.header.head_seq:
+            raise InvalidExport("export record lines are not complete to the manifest head")
+
+        previous_chain = _initial_chain_digest(self.header.tenant_id, self.header.session_id)
+        records_by_seq: dict[int, Record] = {}
+        record_ids: set[str] = set()
+        for expected_seq, line in enumerate(record_lines, 1):
+            envelope = line.value["storage_envelope"]
+            if (
+                envelope["tenant_id"] != self.header.tenant_id
+                or envelope["session_id"] != self.header.session_id
+                or envelope["seq"] != expected_seq
+            ):
+                raise ContentBindingMismatch("record envelope is not bound to the export session")
+            record = Record.parse(canonical_json_bytes(line.value["record"]))
+            if record.session_id != self.header.session_id or envelope["record_digest"] != record.digest:
+                raise ContentBindingMismatch("record does not match its export session and envelope digest")
+            if record.record_id in record_ids:
+                raise InvalidExport("export contains duplicate record identities")
+            record_ids.add(record.record_id)
+            _verify_export_tenants(record.to_dict(), self.header.tenant_id, "record")
+            previous_chain = _extend_chain_digest(previous_chain, expected_seq, record.digest)
+            if envelope["chain_digest"] != previous_chain:
+                raise InvalidExport("record chain digest does not match C0/Cn")
+            records_by_seq[expected_seq] = record
+        if previous_chain != self.header.chain_digest:
+            raise InvalidExport("final record chain does not match the export head")
+
+        if (signer is not None or checkpoint_lines) and len(checkpoint_lines) != len(record_lines):
+            raise InvalidExport("export checkpoints do not cover every record")
+        for expected_seq, line in enumerate(checkpoint_lines, 1):
+            checkpoint = line.value
+            if (
+                checkpoint["seq"] != expected_seq
+                or checkpoint["chain_digest"] != record_lines[expected_seq - 1].value["storage_envelope"]["chain_digest"]
+            ):
+                raise InvalidExport("checkpoint does not match the ordered record chain")
+            if signer is not None:
+                message = _checkpoint_message(
+                    self.header.tenant_id,
+                    self.header.session_id,
+                    checkpoint["seq"],
+                    checkpoint["chain_digest"],
+                    checkpoint["key_id"],
+                    checkpoint["signed_ms"],
+                )
+                signature = _signature_bytes(checkpoint["signature"], "checkpoint signature", InvalidExport)
+                if not signer.verify(checkpoint["key_id"], message, signature):
+                    raise InvalidExport("checkpoint signature is invalid")
+
+        inboxes_by_id: dict[str, tuple[InboxItem, dict[str, Any]]] = {}
+        inboxes_by_seq: dict[int, tuple[InboxItem, dict[str, Any]]] = {}
+        for expected_seq, line in enumerate(inbox_lines, 1):
+            value = line.value
+            if value["input_seq"] != expected_seq:
+                raise InvalidExport("inbox lines must retain a contiguous original sequence")
+            item = InboxItem.parse(canonical_json_bytes(value["input"]))
+            if item.input_id in inboxes_by_id or value["input_seq"] in inboxes_by_seq:
+                raise InvalidExport("export contains duplicate inbox identities")
+            _verify_export_tenants(item.to_dict(), self.header.tenant_id, "inbox input")
+            _verify_input_admission(
+                item,
+                input_seq=value["input_seq"],
+                received_ms=value["received_ms"],
+                tenant_id=self.header.tenant_id,
+                session_id=self.header.session_id,
+                signer=signer,
+            )
+            inboxes_by_id[item.input_id] = (item, value)
+            inboxes_by_seq[value["input_seq"]] = (item, value)
+
+        applied_by_seq: dict[int, Record] = {}
+        for record in records_by_seq.values():
+            if record.kind != "input_applied":
+                continue
+            payload = record._payload
+            item = InboxItem.parse(canonical_json_bytes(payload["input"]))
+            proof = payload["input_proof"]
+            original = inboxes_by_id.get(item.input_id)
+            if original is None or proof is None:
+                raise InvalidExport("applied input proof has no matching exported inbox item")
+            original_item, inbox_line = original
+            if inbox_line["consumed_seq"] != record.seq or original_item.to_dict() != item.to_dict():
+                raise InvalidExport("applied input proof does not match its consumed inbox item")
+            admission = item.admission_proof
+            if admission is None or (
+                proof["input_seq"],
+                proof["received_ms"],
+                proof["key_id"],
+                proof["signature"],
+                proof["signed_ms"],
+            ) != (
+                inbox_line["input_seq"],
+                inbox_line["received_ms"],
+                admission["admission_key_id"],
+                admission["admission_signature"],
+                admission["admission_signed_ms"],
+            ):
+                raise InvalidExport("record input proof does not copy the inbox admission proof")
+            _verify_record_input_proof(
+                item,
+                proof,
+                tenant_id=self.header.tenant_id,
+                session_id=self.header.session_id,
+                signer=signer,
+            )
+            applied_by_seq[record.seq] = record
+
+        for item, line in inboxes_by_seq.values():
+            consumed_seq = line["consumed_seq"]
+            if consumed_seq is None:
+                continue
+            applied = applied_by_seq.get(consumed_seq)
+            if applied is None or applied._payload["input"]["input_id"] != item.input_id:
+                raise InvalidExport("inbox consumption does not identify its applied record")
+
         available_refs: dict[str, ContentRef] = {}
         for line in self.lines:
             if line.kind is ExportLineKind.RECORD:
-                envelope = line.value["storage_envelope"]
-                if envelope["tenant_id"] != self.header.tenant_id:
-                    raise ContentBindingMismatch("record envelope tenant does not match the export")
                 refs = _content_refs(line.value["record"])
             elif line.kind is ExportLineKind.INBOX:
-                item = InboxItem.parse(canonical_json_bytes(line.value["input"]))
-                if item.actor is None or item.actor["tenant_id"] != self.header.tenant_id:
-                    raise ContentBindingMismatch("inbox actor tenant does not match the export")
                 refs = _content_refs(line.value["input"])
             else:
                 continue
