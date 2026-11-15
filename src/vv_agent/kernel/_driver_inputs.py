@@ -419,6 +419,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
             {
                 "input": item.to_dict(),
                 "input_digest": item.digest,
+                "input_proof": None,
                 "disposition": disposition,
                 "reason": reason,
                 "target_operation_id": target,
