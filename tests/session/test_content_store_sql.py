@@ -16,13 +16,12 @@ from uuid import uuid4
 import pytest
 
 from vv_agent.kernel import _content as content
-from vv_agent.kernel import _content_store as content_store
+from vv_agent.kernel import _content_store as content_store_contract
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._postgres import PostgresContentStore
 from vv_agent.kernel._records import InboxItem, SessionSpec
-from vv_agent.kernel._sqlite import SQLiteContentStore
-from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session import content_store
+from vv_agent.session.postgres import PostgresContentStore, PostgresStore
+from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 
 MASTER_KEY = b"k" * 32
 TENANT = "tenant-a"
@@ -114,9 +113,9 @@ def test_sqlite_file_round_trip_survives_reopen_and_rejects_other_owner(tmp_path
     with _open_sqlite(path) as recovered:
         adapter = SQLiteContentStore(recovered, recovered_provider)
         assert adapter.get(TENANT, SESSION, ref) == plaintext
-        with pytest.raises(content_store.ContentUnavailable):
+        with pytest.raises(content.ContentUnavailable):
             adapter.get("tenant-b", SESSION, ref)
-        with pytest.raises(content_store.ContentUnavailable):
+        with pytest.raises(content.ContentUnavailable):
             adapter.get(TENANT, "session-b", ref)
 
 
@@ -129,7 +128,7 @@ def test_duplicate_put_and_owner_links_are_scoped_and_idempotent(tmp_path: Path)
         _push_input(store, "input-1")
         with store.atomic() as tx:
             adapter = SQLiteContentStore(tx, provider)
-            assert isinstance(adapter, content_store.DurableContentStore)
+            assert isinstance(adapter, content_store_contract.DurableContentStore)
             first = adapter.put(TENANT, SESSION, b"same plaintext", content.ContentLabels())
             repeated = adapter.put(TENANT, SESSION, b"same plaintext", content.ContentLabels())
             assert repeated == first
@@ -149,11 +148,11 @@ def test_duplicate_put_and_owner_links_are_scoped_and_idempotent(tmp_path: Path)
 
         with store.atomic(), pytest.raises(content.ContentBindingMismatch):
             adapter.link_record(TENANT, SESSION, 1, replace(first, key_id="key/other"), "other")
-        with store.atomic(), pytest.raises(content_store.ContentIntegrityError):
+        with store.atomic(), pytest.raises(content.ContentIntegrityError):
             adapter.link_record(TENANT, SESSION, 1, replace(first, mac="0" * 64), "other")
-        with store.atomic(), pytest.raises(content_store.ContentUnavailable):
+        with store.atomic(), pytest.raises(content.ContentUnavailable):
             adapter.link_record(TENANT, "session-b", 1, first, "workspace")
-        with pytest.raises(content_store.ContentUnavailable):
+        with pytest.raises(content.ContentUnavailable):
             adapter.assert_link(TENANT, "session-b", first, "workspace", record_seq=1)
 
 
@@ -205,7 +204,7 @@ def test_sqlite_get_rejects_tampered_content_and_reference(tmp_path: Path, field
         else:
             ref = replace(ref, mac="0" * 64)
 
-        expected = content.ContentBindingMismatch if field == "key_id" else content_store.ContentIntegrityError
+        expected = content.ContentBindingMismatch if field == "key_id" else content.ContentIntegrityError
         with pytest.raises(expected):
             adapter.get(TENANT, SESSION, ref)
 
@@ -220,7 +219,7 @@ def test_owner_slot_conflict_requires_different_content(tmp_path: Path) -> None:
             first = adapter.put(TENANT, SESSION, b"first", content.ContentLabels())
             second = adapter.put(TENANT, SESSION, b"second", content.ContentLabels())
             adapter.link_record(TENANT, SESSION, 1, first, "body")
-            with pytest.raises(content_store.ContentLinkConflict):
+            with pytest.raises(content.ContentLinkConflict):
                 adapter.link_record(TENANT, SESSION, 1, second, "body")
 
 
@@ -271,7 +270,7 @@ def test_unconfirmed_destroy_preserves_all_content_rows(tmp_path: Path, monkeypa
             return content.KeyDestroyOutcome(True, content.KeyDestroyStatus.DESTROYING, None)
 
         monkeypatch.setattr(provider, "destroy", pending_destroy)
-        with store.atomic(), pytest.raises(content_store.KeyUnavailable):
+        with store.atomic(), pytest.raises(content.KeyUnavailable):
             adapter.forget_session(TENANT, SESSION)
 
         assert _count(store, "sk_content") == 1
@@ -300,7 +299,7 @@ def test_key_creation_is_saved_and_already_destroyed_key_can_finish_forget(tmp_p
         assert provider.unwrap(TENANT, SESSION, wrapped) not in key_row[2]
 
         assert provider.destroy(TENANT, wrapped.key_id).status is content.KeyDestroyStatus.DESTROYED
-        with pytest.raises(content_store.KeyUnavailable):
+        with pytest.raises(content.KeyUnavailable):
             adapter.get(TENANT, SESSION, ref)
         with store.atomic():
             adapter.forget_session(TENANT, SESSION)
@@ -341,12 +340,12 @@ def test_adapter_requires_callers_transaction_and_rejects_non_active_key_state(t
         )
         key = content_store._key_from_row(TENANT, SESSION, key_row)
         with store.atomic():
-            adapter.put_session_key(replace(key, state=content_store.SessionKeyState.DESTROYING))
-        with pytest.raises(content_store.KeyUnavailable):
+            adapter.put_session_key(replace(key, state=content_store_contract.SessionKeyState.DESTROYING))
+        with pytest.raises(content.KeyUnavailable):
             adapter.get(TENANT, SESSION, ref)
-        with pytest.raises(content_store.KeyUnavailable):
+        with pytest.raises(content.KeyUnavailable):
             content_store._key_from_row(TENANT, SESSION, (*key_row[:3], "destroyed"))
-        with pytest.raises(content_store.KeyUnavailable):
+        with pytest.raises(content.KeyUnavailable):
             content_store._key_from_row(TENANT, SESSION, (*key_row[:3], "unknown"))
 
 

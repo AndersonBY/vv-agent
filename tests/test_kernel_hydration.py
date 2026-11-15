@@ -7,10 +7,19 @@ from typing import cast
 
 import pytest
 
-from vv_agent.kernel import _content_store
 from vv_agent.kernel._budget_values import RunBudgetLimits
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, SourceKind
+from vv_agent.kernel._content import (
+    Classification,
+    ContentIntegrityError,
+    ContentLabels,
+    ContentRef,
+    ContentUnavailable,
+    SourceKind,
+)
+from vv_agent.kernel._content import (
+    KeyUnavailable as StoreKeyUnavailable,
+)
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import (
     IntegrityFailure,
@@ -109,9 +118,9 @@ def test_reader_is_called_with_the_exact_tenant_session_owner_slot_and_ref() -> 
         (MissingContent("missing content"), MissingContent),
         (KeyUnavailable("key service down"), KeyUnavailable),
         (IntegrityFailure("tampered"), IntegrityFailure),
-        (_content_store.ContentUnavailable("missing"), MissingContent),
-        (_content_store.KeyUnavailable("unavailable"), KeyUnavailable),
-        (_content_store.ContentIntegrityError("tampered"), IntegrityFailure),
+        (ContentUnavailable("missing"), MissingContent),
+        (StoreKeyUnavailable("unavailable"), KeyUnavailable),
+        (ContentIntegrityError("tampered"), IntegrityFailure),
     ],
 )
 def test_reader_failures_have_stable_kernel_boundaries(failure: Exception, error: type[Exception]) -> None:

@@ -46,6 +46,26 @@ class ContentBindingMismatch(ContentLifecycleError):
     code = ContentErrorCode.BINDING_MISMATCH
 
 
+class ContentStoreError(RuntimeError):
+    """Base class for content backend failures."""
+
+
+class ContentUnavailable(ContentStoreError):
+    """The requested tenant, session, or content object is absent."""
+
+
+class KeyUnavailable(ContentStoreError):
+    """The session data key is absent, destroyed, or cannot be unwrapped."""
+
+
+class ContentIntegrityError(ContentStoreError):
+    """Content metadata, ciphertext, or authentication material is invalid."""
+
+
+class ContentLinkConflict(ContentStoreError):
+    """An owner slot is already linked to different content."""
+
+
 class InvalidDestroyOutcome(ContentLifecycleError):
     code = ContentErrorCode.INVALID_DESTROY_OUTCOME
 
@@ -763,9 +783,13 @@ __all__ = [
     "ContentBindingMismatch",
     "ContentErrorCode",
     "ContentIdentity",
+    "ContentIntegrityError",
     "ContentLabels",
     "ContentLifecycleError",
+    "ContentLinkConflict",
     "ContentRef",
+    "ContentStoreError",
+    "ContentUnavailable",
     "ExportContentMode",
     "ExportDocument",
     "ExportHeader",
@@ -783,6 +807,7 @@ __all__ = [
     "KeyDestroyRequest",
     "KeyDestroyStatus",
     "KeyProvider",
+    "KeyUnavailable",
     "Principal",
     "SessionHead",
     "SessionKeyCapability",

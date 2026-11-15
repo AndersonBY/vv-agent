@@ -267,6 +267,13 @@ use the same fold factory. The outer context adapter also uses that
 factory when a historical prefix must be rebuilt. Replacing a store's factory
 clears both validated-prefix caches.
 
+`kernel/_content.py` and `kernel/_content_store.py` own the standard-library
+content lifecycle values, error classes and store protocols.
+`session/content_store.py` owns encryption, process locks and shared SQL content
+operations; `session/sqlite.py` and `session/postgres.py` bind those operations
+to their driver-specific connections. Kernel hydration imports the content
+contract errors directly and has no dependency on a concrete content backend.
+
 `kernel/_child_store.py` owns child admission, cancellation, terminal delivery,
 authenticity checks and ordinary child-result assembly over the store ports.
 `session/children.py` exports the same objects; configured-agent and handoff

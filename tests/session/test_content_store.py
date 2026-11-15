@@ -8,8 +8,9 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from vv_agent.kernel import _content as content
-from vv_agent.kernel import _content_store as content_store
+from vv_agent.kernel import _content_store as content_store_contract
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.session import content_store
 
 MASTER_KEY = b"m" * 32
 TENANT = "tenant-a"
@@ -31,7 +32,7 @@ def test_store_protocol_and_round_trip_keep_plaintext_out_of_backend() -> None:
     ref = store.put(TENANT, SESSION, plaintext, content.ContentLabels())
 
     assert isinstance(provider, content.KeyProvider)
-    assert isinstance(store, content_store.ContentStore)
+    assert isinstance(store, content_store_contract.ContentStore)
     assert store.get(TENANT, SESSION, ref) == plaintext
     stored = _stored(store, ref)
     assert stored.ciphertext != plaintext
@@ -98,7 +99,7 @@ def test_tampered_backend_or_reference_is_rejected(field: str) -> None:
     else:
         ref = replace(ref, labels=content.ContentLabels(classification=content.Classification.CONFIDENTIAL))
 
-    with pytest.raises(content_store.ContentIntegrityError):
+    with pytest.raises(content.ContentIntegrityError):
         store.get(TENANT, SESSION, ref)
 
 
@@ -106,7 +107,7 @@ def test_wrong_content_id_and_key_binding_are_classified() -> None:
     _provider, store = _store()
     ref = store.put(TENANT, SESSION, b"bound content", content.ContentLabels())
 
-    with pytest.raises(content_store.ContentUnavailable):
+    with pytest.raises(content.ContentUnavailable):
         store.get(TENANT, SESSION, replace(ref, content_id="content_missing"))
     with pytest.raises(content.ContentBindingMismatch):
         store.get(TENANT, SESSION, replace(ref, key_id="key_other"))
@@ -133,7 +134,7 @@ def test_wrong_aad_is_rejected_even_with_new_authentication_tag() -> None:
     tampered = AESGCM(data_key).encrypt(stored.nonce, plaintext, wrong_aad)
     store._contents[(TENANT, SESSION, ref.content_id)] = replace(stored, ciphertext=tampered)
 
-    with pytest.raises(content_store.ContentIntegrityError):
+    with pytest.raises(content.ContentIntegrityError):
         store.get(TENANT, SESSION, ref)
 
 
@@ -141,9 +142,9 @@ def test_unknown_tenant_or_session_cannot_read_content() -> None:
     _provider, store = _store()
     ref = store.put(TENANT, SESSION, b"isolated", content.ContentLabels())
 
-    with pytest.raises(content_store.ContentUnavailable):
+    with pytest.raises(content.ContentUnavailable):
         store.get("tenant-b", SESSION, ref)
-    with pytest.raises(content_store.ContentUnavailable):
+    with pytest.raises(content.ContentUnavailable):
         store.get(TENANT, "session-b", ref)
 
 
@@ -153,7 +154,7 @@ def test_destroyed_key_and_forgotten_session_fail_closed() -> None:
     wrapped_key = store._session_keys[(TENANT, SESSION)]
 
     assert provider.destroy(TENANT, wrapped_key.key_id).status is content.KeyDestroyStatus.DESTROYED
-    with pytest.raises(content_store.KeyUnavailable):
+    with pytest.raises(content.KeyUnavailable):
         store.get(TENANT, SESSION, ref)
     assert provider.destroy(TENANT, wrapped_key.key_id).status is content.KeyDestroyStatus.ALREADY_DESTROYED
 
@@ -168,7 +169,7 @@ def test_forget_destroys_key_before_purging_content() -> None:
     assert provider.destroy(TENANT, wrapped_key.key_id).status is content.KeyDestroyStatus.ALREADY_DESTROYED
     assert not store._contents
     assert not store._session_keys
-    with pytest.raises(content_store.ContentUnavailable):
+    with pytest.raises(content.ContentUnavailable):
         store.get(TENANT, SESSION, ref)
 
 
@@ -186,6 +187,6 @@ def test_forget_does_not_purge_when_key_destroy_is_unconfirmed(monkeypatch: pyte
         )
 
     monkeypatch.setattr(provider, "destroy", reject_destroy)
-    with pytest.raises(content_store.KeyUnavailable):
+    with pytest.raises(content.KeyUnavailable):
         store.forget_session(TENANT, SESSION)
     assert store.get(TENANT, SESSION, ref) == plaintext
