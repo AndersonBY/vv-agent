@@ -90,7 +90,7 @@ class ThreadModelSelectParams:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ThreadModelSelectParams:
-        from vv_agent.session.records import InboxItem
+        from vv_agent.session.records import MODEL_SELECTION, validate
 
         if set(value) != {"threadId", "inputId", "selection"}:
             raise ValueError("thread/model/select requires exactly threadId, inputId and selection")
@@ -100,7 +100,8 @@ class ThreadModelSelectParams:
         from .identity import client_id
 
         client_id(value["inputId"], "inputId")
-        InboxItem(value["inputId"], "model_selection", {"selection": value["selection"]}).encode()
+        if value["selection"] is not None:
+            validate(value["selection"], MODEL_SELECTION)
         return cls(value["threadId"], value["inputId"], value["selection"])
 
     def to_dict(self) -> dict[str, Any]:
