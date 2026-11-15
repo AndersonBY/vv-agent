@@ -14,7 +14,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.kernel._content import ContentRef
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
-from vv_agent.session.projection import hydrate_input, hydration_for_session_store
+from vv_agent.session.projection import hydrate_input, hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -141,6 +141,13 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
             status_changes.append(cast(dict[str, object], params).get("status"))
 
     assert status_changes == ["running", "terminal"]
+    records = server.kernel.store.read("thread_1").records
+    applied = next(row for row in records if row.record.kind == "input_applied")
+    content_ref = applied.record._payload["input"]["payload"]["content"]
+    assert ContentRef.from_dict(content_ref).content_id
+    planned = next(row for row in records if row.record.kind == "op_planned")
+    hydrated = hydrate_record_payload(planned, hydration_for_session_store(server.kernel.store, "thread_1"))
+    assert "hello" in [message.get("content") for message in hydrated["request"]["messages"]]
 
 
 def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:

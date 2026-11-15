@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 from collections.abc import Callable, Iterable
 from copy import deepcopy
@@ -40,14 +41,8 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.interaction import HostInteractionRequest
-from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
 from vv_agent.kernel._content import (
-    APPROVAL_METADATA,
-    APPROVAL_REASON,
-    APPROVAL_SCOPE,
-    CHILD_RESULT,
-    INPUT_CONTENT,
-    INPUT_SELECTION,
     SESSION_ATTRIBUTES,
     SESSION_PRINCIPAL_ATTRIBUTES,
     SESSION_WORKSPACE,
@@ -63,9 +58,14 @@ from vv_agent.kernel._content import (
     KeyUnavailable as BackendKeyUnavailable,
 )
 from vv_agent.kernel._content_publication import (
+    _MISSING,
     _REFERENCE_DIGESTS,
+    NestedContentSlot,
+    _content_slot_specs,
+    _expand_nested_slots,
     _payload_slots,
     declared_content_ref,
+    input_content_slots,
 )
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import (
@@ -76,8 +76,11 @@ from vv_agent.kernel._hydration import (
     KeyUnavailable,
     MissingContent,
     MissingContentLink,
+    ReferenceDigestMismatch,
     SessionHydrator,
     TypedSchemaFailure,
+    _parse_definition,
+    reference_digest,
 )
 from vv_agent.kernel._reducer import logical_inputs
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
@@ -123,6 +126,8 @@ class SessionHydration:
         ref: ContentRef,
         *,
         expected_reference_digest: str | None = None,
+        record_kind: str | None = None,
+        record_payload: dict[str, Any] | None = None,
     ) -> Any:
         hydrator = SessionHydrator(
             self.reader,
@@ -133,14 +138,68 @@ class SessionHydration:
         try:
             selected = HydrationSlot(slot)
         except ValueError:
-            value = self._read_exact_json(hydrator, owner, slot, ref)
+            selected = None
+        nested = _nested_content_slots(record_kind, slot, record_payload)
+        if nested:
+            value = self._read_exact_json(
+                hydrator,
+                owner,
+                slot,
+                ref,
+                expected_reference_digest=expected_reference_digest,
+            )
+            for path, nested_slot, nested_value in _expand_nested_slots(value, nested, slot):
+                if nested_value is _MISSING or nested_value is None:
+                    continue
+                nested_ref = declared_content_ref(nested_value)
+                if nested_ref is None:
+                    raise TypedSchemaFailure(f"{nested_slot} requires a ContentRef")
+                _path_set(
+                    value,
+                    path,
+                    self.read(
+                        owner,
+                        nested_slot,
+                        nested_ref,
+                        record_kind=record_kind,
+                        record_payload=record_payload,
+                    ),
+                )
+            if selected is HydrationSlot.DEFINITION:
+                value = _parse_definition(value)
+        elif selected is None:
+            value = self._read_exact_json(
+                hydrator,
+                owner,
+                slot,
+                ref,
+                expected_reference_digest=expected_reference_digest,
+            )
         else:
             value = hydrator.hydrate(selected, ref, expected_reference_digest=expected_reference_digest)
         return _projection_value(slot, value)
 
-    def _read_exact_json(self, hydrator: SessionHydrator, owner: str, slot: str, ref: ContentRef) -> Any:
+    def _read_exact_json(
+        self,
+        hydrator: SessionHydrator,
+        owner: str,
+        slot: str,
+        ref: ContentRef,
+        *,
+        expected_reference_digest: str | None = None,
+    ) -> Any:
         if hydrator.binding != (self.tenant_id, self.session_id, owner):
             raise MissingContentLink("content hydrator owner binding does not match")
+        if expected_reference_digest is not None:
+            try:
+                expected_reference_digest = validate_sha256(
+                    expected_reference_digest,
+                    f"{slot} expected reference digest",
+                )
+            except ValueError as exc:
+                raise TypedSchemaFailure(str(exc)) from exc
+            if not hmac.compare_digest(reference_digest(ref), expected_reference_digest):
+                raise ReferenceDigestMismatch(f"{slot} reference digest does not match")
         try:
             body = self.reader.read(self.tenant_id, self.session_id, owner, slot, ref)
         except (HydrationError, MissingContentLink, MissingContent, KeyUnavailable, IntegrityFailure):
@@ -179,6 +238,17 @@ def hydration_for_session_store(store: Any, session_id: str) -> SessionHydration
     return hydration_for_store(store, tenant_id=tenant_id, session_id=session_id)
 
 
+class _RetainedInboxItem(InboxItem):
+    """Logical input fields with the committed S1 encoding used for identity checks."""
+
+    def __init__(self, item: InboxItem, body: bytes) -> None:
+        super().__init__(**item.to_dict())
+        object.__setattr__(self, "_retained_body", body)
+
+    def encode(self) -> bytes:
+        return self._retained_body
+
+
 def _projection_value(slot: str, value: Any) -> Any:
     if slot == HydrationSlot.DEFINITION.value:
         return {
@@ -201,29 +271,17 @@ def _projection_value(slot: str, value: Any) -> Any:
 
 def hydrate_input_payload(item: InboxItem, hydration: SessionHydration | None) -> dict[str, Any]:
     payload = copy_json(item.payload)
-    paths: tuple[tuple[str, str], ...]
-    if item.kind in {"user", "steer", "follow_up"}:
-        paths = (("content", INPUT_CONTENT),)
-    elif item.kind == "model_selection":
-        paths = (("selection", INPUT_SELECTION),)
-    elif item.kind == "approval_answer":
-        paths = (
-            ("scope", APPROVAL_SCOPE),
-            ("reason", APPROVAL_REASON),
-            ("metadata", APPROVAL_METADATA),
-        )
-    elif item.kind == "child_result":
-        paths = (("result", CHILD_RESULT),)
-    else:
-        paths = ()
-    for key, slot in paths:
-        value = payload.get(key)
+    for content_slot in input_content_slots(item.kind):
+        try:
+            value = _path_get(payload, content_slot.path)
+        except (KeyError, IndexError):
+            continue
         ref = declared_content_ref(value)
         if ref is None:
             continue
         if hydration is None:
-            raise MissingContentLink(f"input:{item.input_id}/{slot} requires a content hydration reader")
-        payload[key] = hydration.read(input_owner(item.input_id), slot, ref)
+            raise MissingContentLink(f"input:{item.input_id}/{content_slot.slot} requires a content hydration reader")
+        _path_set(payload, content_slot.path, hydration.read(input_owner(item.input_id), content_slot.slot, ref))
     return payload
 
 
@@ -253,6 +311,8 @@ def hydrate_record_payload(
             )
         )
     for path, slot, _value in declared_slots:
+        if not include_input and record.kind == "input_applied" and path[:1] == ("input",):
+            continue
         try:
             value = _path_get(payload, path)
         except (KeyError, IndexError):
@@ -275,6 +335,8 @@ def hydrate_record_payload(
                 slot,
                 ref,
                 expected_reference_digest=payload.get(expected) if expected is not None else None,
+                record_kind=record.kind,
+                record_payload=source,
             ),
         )
     if record.kind == "input_applied" and include_input:
@@ -316,18 +378,16 @@ def fold_hydrated_records(
 ) -> Any:
     """Fold hydrated values while retaining the committed record encoding for dedupe."""
 
-    consumed = [InboxItem(**row.record._payload["input"]) for row in source_records if row.record.kind == "input_applied"]
-    logical_items = {
-        row.record.record_id: hydrate_input(consumed_item, hydration)
-        for row, consumed_item in zip(
-            (row for row in source_records if row.record.kind == "input_applied"), consumed, strict=True
-        )
-    }
+    input_rows = tuple(row for row in source_records if row.record.kind == "input_applied")
+    logical_items = {}
+    for row in input_rows:
+        committed = InboxItem(**row.record._payload["input"])
+        logical_items[row.record.record_id] = _RetainedInboxItem(hydrate_input(committed, hydration), committed.encode())
     fold_records = hydrate_records(source_records, hydration, include_input=False)
     with logical_inputs(logical_items):
         state = fold_factory().extend(
             (row.record for row in fold_records),
-            consumed_inputs=consumed,
+            consumed_inputs=logical_items.values(),
             bodies=(row.record.encode() for row in source_records),
         )
     hydrated_by_id = {row.record.record_id: row.record for row in records if row.record.kind == "input_applied"}
@@ -337,9 +397,23 @@ def fold_hydrated_records(
     return state
 
 
+def _path_part(part: str | int) -> str | int:
+    return int(part) if isinstance(part, str) and part.isdecimal() else part
+
+
+def _nested_content_slots(
+    kind: str | None,
+    slot: str,
+    payload: dict[str, Any] | None,
+) -> tuple[NestedContentSlot, ...]:
+    if kind is None or payload is None:
+        return ()
+    return next((content_slot.nested for content_slot in _content_slot_specs(kind, payload) if content_slot.slot == slot), ())
+
+
 def _path_get(value: Any, path: tuple[str | int, ...]) -> Any:
     for part in path:
-        value = value[part]
+        value = value[_path_part(part)]
     return value
 
 
@@ -347,7 +421,7 @@ def _path_set(value: Any, path: tuple[str | int, ...], replacement: Any) -> None
     if not path:
         raise ValueError("content slot path cannot be empty")
     parent = _path_get(value, path[:-1]) if len(path) > 1 else value
-    parent[path[-1]] = replacement
+    parent[_path_part(path[-1])] = replacement
 
 
 def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydration | None = None) -> list[RunEvent]:
