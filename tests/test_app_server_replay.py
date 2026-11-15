@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+from session.app_server_s1_helpers import bind_development_content
 from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig
@@ -17,6 +18,11 @@ from vv_agent.llm.scripted import ScriptStep
 from vv_agent.types import LLMResponse
 
 pytestmark = pytest.mark.usefixtures("surface")
+
+
+@pytest.fixture(autouse=True)
+def explicit_development_content_keys(surface) -> None:
+    bind_development_content(surface)
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:

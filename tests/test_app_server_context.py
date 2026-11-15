@@ -7,13 +7,16 @@ from threading import Event
 
 import pytest
 from jsonschema import Draft202012Validator
-from test_app_server_distributed import node, request, submission
+from session.app_server_s1_helpers import bind_development_content, create_s1_session
+from test_app_server_distributed import request, submission
 
-from vv_agent import Agent, ScriptedModelProvider
+from vv_agent import Agent, RunConfig, ScriptedModelProvider
+from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.schema import json_schema_bundle
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydration_for_session_store, project_records
 from vv_agent.session.replay import list_events
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, Message
 
 SUMMARY = json.dumps({"original_user_messages": ["original request"], "current_work_state": "Continue the task"})
@@ -23,23 +26,34 @@ def history():
     return [Message("user", "original request"), Message("assistant", "old facts " * 4000)]
 
 
+def node(stack, path, connection, provider, *, agent=None):
+    store = stack.enter_context(SQLiteStore.standalone(str(path)))
+    bind_development_content(store)
+    server = AppServer(
+        transport=ChannelTransport(connection_id=connection, outbound_capacity=10000),
+        store=store,
+        host=DefaultAppServerHost(
+            agent=agent or Agent("test", "Answer."),
+            run_config=RunConfig(model_provider=provider, approval_timeout_seconds=5),
+        ),
+    )
+    stack.callback(server.kernel.close)
+    stack.callback(server.run_adapter.join)
+    stack.callback(lambda: [handle.cancel("teardown") for handle in server.kernel.handles])
+    assert "result" in request(server, "init", "initialize", {"clientInfo": {"name": connection}})
+    return server
+
+
 def create(server, *, seeded=False):
     if seeded:
-        from vv_agent.session.records import SessionSpec
-
-        with server.kernel.store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "thread",
-                    "local",
-                    ".",
-                    attributes={
-                        "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
-                        "seed": {"messages": [m.to_dict() for m in history()], "shared_state": {}},
-                    },
-                ),
-                consumers=("app_server", "events", "traces"),
-            )
+        create_s1_session(
+            server.kernel.store,
+            "thread",
+            {
+                "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
+                "seed": {"messages": [message.to_dict() for message in history()], "shared_state": {}},
+            },
+        )
         server.run_adapter.subscribe("thread", server.transport.connection_id)
         return
     result = request(server, "create", "thread/start", {"inputId": "thread"})
@@ -141,7 +155,8 @@ def test_manual_compaction_idle_receipt_replay_conflict_stale_and_reuse(tmp_path
         lifecycle = notices(a.kernel.store)
         # Full and one-record replay produce identical stable event IDs.
         projected = []
-        for e in project_records(a.kernel.store.read_state("thread")[1]):
+        hydration = hydration_for_session_store(a.kernel.store, "thread")
+        for e in project_records(a.kernel.store.read_state("thread")[1], hydration=hydration):
             projected.extend(map_run_event(e, thread_id="thread", turn_id=e.run_id).additional_notifications)
         assert lifecycle == [(m, p) for m, p in projected if m.startswith("contextCompaction/")]
 
@@ -442,9 +457,6 @@ def test_creation_replay_uses_frozen_baseline_after_node_config_changes(tmp_path
 @pytest.mark.parametrize("baseline", [False, True])
 @pytest.mark.parametrize("seed", [{}, {"response_rejection": False}, {"unseen_input_protection": False}])
 def test_creation_conflict_retry_delegates_policy_and_consumers_to_transaction(tmp_path, baseline, seed):
-    from unittest.mock import patch
-
-    from vv_agent.session.records import SessionSpec
     from vv_agent.session.store import Conflict
 
     with ExitStack() as stack:
@@ -455,15 +467,13 @@ def test_creation_conflict_retry_delegates_policy_and_consumers_to_transaction(t
             attributes["app_server_context"] = runtime._definition(runtime.compile("", "thread/context", control=True))
         if seed:
             attributes["seed"] = seed
-        creation = SessionSpec("thread", "local", ".", attributes=attributes).record()
-        # An actual pre-declaration creation must stay undeclared on retry.
-        payload = creation.payload
-        payload["attributes"]["seed"] = seed
-        if not seed:
-            payload["attributes"].pop("seed")
-        creation = replace(creation, payload=payload)
-        with patch.object(SessionSpec, "record", return_value=creation), server.kernel.store.atomic() as tx:
-            tx.create(SessionSpec("thread", "local", "."), consumers=("events", "app_server", "traces"))
+        create_s1_session(
+            server.kernel.store,
+            "thread",
+            attributes,
+            consumers=("events", "app_server", "traces"),
+        )
+        creation = server.kernel.store.read("thread", limit=1).records[0].record
         args = {
             "input_id": "thread",
             "agent_key": "default",

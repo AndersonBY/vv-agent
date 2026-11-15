@@ -6,6 +6,12 @@ from threading import Event
 from typing import Any, cast
 
 import pytest
+from session.app_server_s1_helpers import (
+    declared_content_ref,
+    development_key_provider,
+    hydrate_stored_payload,
+    push_s1_input,
+)
 from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, function_tool
@@ -15,7 +21,9 @@ from vv_agent.app_server import (
     DefaultAppServerHost,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.kernel._sqlite import SCHEMA_TABLES
 from vv_agent.llm import ScriptedLLM
+from vv_agent.session.content_runtime import INPUT_CONTENT
 from vv_agent.types import LLMResponse, ToolCall
 
 TURN_INPUT = [{"type": "text", "text": "hello"}]
@@ -69,6 +77,19 @@ class _KernelTestTransport(ChannelTransport):
             self.turn_completed.set()
 
 
+def _hydrated_result_for_record(store, session_id: str, record) -> dict[str, Any]:
+    stored = next(row for row in store.read_state(session_id)[1] if row.record.record_id == record.record_id)
+    result = hydrate_stored_payload(store, session_id, stored)["result"]
+    assert isinstance(result, dict)
+    return result
+
+
+def _hydrated_result(driver, record) -> dict[str, Any]:
+    result = driver.hydrate_record_field(record, "result", record._payload["result"])
+    assert isinstance(result, dict)
+    return result
+
+
 def _kernel_server(path: Path, cut: str | None = None):
     import os
 
@@ -92,7 +113,7 @@ def _kernel_server(path: Path, cut: str | None = None):
             f.write("tool\n")
         return "worked"
 
-    kernel = SessionDriver(path)
+    kernel = SessionDriver(path, content_key_provider=development_key_provider())
     original_runtime = kernel.runtime
 
     def runtime(*args, **kwargs):
@@ -105,7 +126,11 @@ def _kernel_server(path: Path, cut: str | None = None):
                 and record is not None
                 and (
                     (cut == "model" and record.kind == "op_planned" and record._payload["op_kind"] != "model")
-                    or (cut == "tool" and record.kind == "op_completed" and record._payload["result"].get("content") == "worked")
+                    or (
+                        cut == "tool"
+                        and record.kind == "op_completed"
+                        and _hydrated_result_for_record(kernel.store, "thread_1", record).get("content") == "worked"
+                    )
                 )
             ):
                 from vv_agent.session.replay import list_events
@@ -264,7 +289,7 @@ def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(t
         assert cursor_seq == records[-1].seq
         assert state.active_turn_id is None
         tables = {row[0] for row in kernel.store.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert tables == {"sk_session", "sk_record", "sk_inbox", "sk_consumer", "sk_commit"}
+        assert tables == SCHEMA_TABLES
     finally:
         server.router.cancel_matching_server_requests()
         server.run_adapter.join()
@@ -273,7 +298,6 @@ def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(t
 
 def _inject_lease_loss(monkeypatch: pytest.MonkeyPatch, cut: str, loss: str, *, takeover: bool = False):
     from vv_agent.session.kernel import _Driver
-    from vv_agent.session.records import InboxItem
 
     original_step = _Driver.step
     leases = []
@@ -283,8 +307,8 @@ def _inject_lease_loss(monkeypatch: pytest.MonkeyPatch, cut: str, loss: str, *, 
         advanced = original_step(driver)
         matches = any(
             (cut == "admission" and record.kind == "turn_started")
-            or (cut == "model" and record.kind == "op_completed" and "tool_calls" in record._payload["result"])
-            or (cut == "tool" and record.kind == "op_completed" and record._payload["result"].get("content") == "worked")
+            or (cut == "model" and record.kind == "op_completed" and "tool_calls" in _hydrated_result(driver, record))
+            or (cut == "tool" and record.kind == "op_completed" and _hydrated_result(driver, record).get("content") == "worked")
             or (cut == "terminal" and record.kind == "turn_ended")
             for record in (stored.record for stored in driver.records[before:])
         )
@@ -297,9 +321,11 @@ def _inject_lease_loss(monkeypatch: pytest.MonkeyPatch, cut: str, loss: str, *, 
                 driver.store._rows("UPDATE sk_session SET lease_until_ms=0 WHERE session_id=%s", (driver.sid,))
             if cut == "terminal":
                 turn = driver.state.turns[driver.records[-1].record.turn_id]
-                initial = driver.state.applied_inputs[turn.start._payload["input_ids"][0]].payload["input"]
-                with driver.store.atomic() as tx:
-                    tx.push(driver.sid, InboxItem("next-turn", "user", initial["payload"]))
+                input_id = turn.start._payload["input_ids"][0]
+                applied = driver.state.applied_inputs[input_id]
+                content_ref = declared_content_ref(applied._payload["input"]["payload"]["content"])
+                content = driver.read_content_json(f"input:{input_id}", INPUT_CONTENT, content_ref)
+                push_s1_input(driver.store, driver.sid, "next-turn", content)
             if takeover:
                 leases.append(driver.store.acquire(driver.sid, owner="other-writer", ttl_ms=60_000))
             if loss == "heartbeat":
@@ -331,7 +357,7 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
         calls.append("tool")
         return "worked"
 
-    kernel = SessionDriver(tmp_path / "lease.sqlite")
+    kernel = SessionDriver(tmp_path / "lease.sqlite", content_key_provider=development_key_provider())
     agent = Agent("assistant", "Work.", model="test-model", tools=[work])
     provider = FixedModelProvider(ScriptedLLM([model, model]), _resolved_model())
     server = None

@@ -3,12 +3,18 @@ from __future__ import annotations
 import queue
 
 import pytest
+from session.app_server_s1_helpers import bind_development_content
 
 from vv_agent.app_server import AppServerErrorCode, ChannelTransport, MessageProcessor, OutgoingRouter
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.session.app_server import _KernelThreadStore
 from vv_agent.session.store import SessionStore
+
+
+@pytest.fixture(autouse=True)
+def explicit_development_content_keys(surface) -> None:
+    bind_development_content(surface)
 
 
 def _initialized_processor(
