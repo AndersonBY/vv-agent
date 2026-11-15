@@ -184,7 +184,10 @@ class _Host:
             client, resolved = driver.runtime.resolve_model(request.selection)
             return driver.runtime.model_binding(client, resolved)
         if isinstance(request, inputs.AuthenticateProvider):
-            return driver.provider(request.plan).authenticate(request.item, request.plan)
+            return driver.provider(request.plan).authenticate(
+                inputs.ProviderAuthentication(request.item, request.retained_item),
+                request.plan,
+            )
         if isinstance(request, inputs.ProjectProviderResult):
             return project_tool_content(
                 request.plan,

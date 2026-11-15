@@ -173,14 +173,15 @@ def live_budget_inputs_steps(
     self: CoreDriver,
 ) -> Generator[OutcomeRequest, Any, tuple[RunBudgetLimits, BudgetUsageSnapshot] | None]:
     try:
-        tid = self.state.active_turn_id
+        state = self._logical_state() if self.content_reader is not None and hasattr(self, "_logical_state") else self.state
+        tid = state.active_turn_id
         assert tid is not None
-        inputs = retained_budget_inputs(self.state, tid)
+        inputs = retained_budget_inputs(state, tid)
         if inputs is None:
             return None
         evaluator = retained_evaluator(inputs)
         current_meter = f"active/{tid}/{self.scope.lease.epoch}"
-        saved = self.state.usage_values.get(current_meter)
+        saved = state.usage_values.get(current_meter)
         usage = self.hydrate_record_field(saved, "usage", saved._payload["usage"]) if saved else None
         if usage is not None and type(usage) is not dict:
             raise RecordError("usage observation must be an object")

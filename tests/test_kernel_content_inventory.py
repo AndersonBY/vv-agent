@@ -7,11 +7,13 @@ from typing import Any
 import pytest
 
 from vv_agent.kernel._boundary_hydration import hydrate_input, hydrate_stored_payload
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import ContentBindingMismatch, ContentRef, ContentUnavailable
 from vv_agent.kernel._content_publication import (
     _BOUNDARY_CONTENT_SLOTS,
     _CONTENT_SLOTS,
     _INPUT_SLOTS,
+    declared_content_ref,
     link_declared_record_content,
     publish_record_content,
     publish_turn_started,
@@ -27,9 +29,23 @@ from vv_agent.session.content_runtime import SessionContentWriter, durable_conte
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
-from vv_agent.types import Message
+from vv_agent.types import Message, ToolExecutionResult
 
 MASTER_KEY = b"k" * 32
+
+
+class _OwnerMapReader:
+    binding = ("default", "s")
+
+    def __init__(self, values: dict[tuple[str, str, str], bytes]) -> None:
+        self.values = values
+
+    def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
+        assert (tenant_id, session_id) == self.binding
+        try:
+            return self.values[(owner, slot, ref.content_id)]
+        except KeyError as exc:
+            raise AssertionError(f"missing owner link: {owner}/{slot}/{ref.content_id}") from exc
 
 
 @contextmanager
@@ -71,13 +87,14 @@ def _link_count(store: SQLiteStore) -> int:
     )[0]
 
 
-def _definition(message: dict[str, Any]) -> dict[str, Any]:
+def _definition(message: dict[str, Any], *, input_message: dict[str, Any] | None = None) -> dict[str, Any]:
     task = AgentTask(
         task_id="task",
         model="scripted",
         prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="work",
         initial_messages=[Message.from_dict(message)],
+        metadata={"vv_session": {"input_messages": [input_message]}} if input_message is not None else {},
     ).to_dict()
     return {
         "agent_name": "kernel",
@@ -219,6 +236,7 @@ def test_provider_inbox_round_trip_idempotence_and_opaque_content(tmp_path) -> N
 
 def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) -> None:
     message = Message(role="user", content="shared-message-secret").to_dict()
+    input_message = Message(role="user", content="turn-input-secret").to_dict()
     with _sessions(tmp_path, attributes={"seed": {"messages": [message], "shared_state": {"seed": "state"}}}) as (
         store,
         _sessions_driver,
@@ -229,7 +247,7 @@ def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) 
         assert hydrated_creation["attributes"]["seed"]["messages"] == [message]
         assert "session.attributes.seed.messages[0]" in {link.slot for link in _links(store, record_seq=1)}
 
-        definition = _definition(message)
+        definition = _definition(message, input_message=input_message)
         request = {
             "model": "scripted",
             "messages": [message, message, Message(role="assistant", content="second-message-secret").to_dict()],
@@ -315,13 +333,26 @@ def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) 
         hydrated_started = hydrate_stored_payload(driver, records["turn_started"])
         hydrated_planned = hydrate_stored_payload(driver, records["op_planned"])
         assert hydrated_started["definition"]["task"]["initial_messages"] == [message]
+        assert hydrated_started["definition"]["task"]["metadata"]["vv_session"]["input_messages"] == [input_message]
         assert hydrated_planned["request"]["messages"] == request["messages"]
         assert "shared-message-secret" not in records["turn_started"].record.encode().decode()
+        assert "turn-input-secret" not in records["turn_started"].record.encode().decode()
         assert "second-message-secret" not in records["op_planned"].record.encode().decode()
 
-        started_slots = {link.slot for link in _links(store, record_seq=records["turn_started"].seq)}
+        started_links = {link.slot: link for link in _links(store, record_seq=records["turn_started"].seq)}
         planned_slots = {link.slot for link in _links(store, record_seq=records["op_planned"].seq)}
-        assert "definition.task.initial_messages[0]" in started_slots
+        assert "definition.task.initial_messages[0]" in started_links
+        assert "definition.task.metadata.vv_session.input_messages[0]" in started_links
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            published_definition = writer.get_json(ContentRef.from_dict(records["turn_started"].record.payload["definition"]))
+        published_task = published_definition["task"]
+        initial_ref = declared_content_ref(published_task["initial_messages"][0])
+        input_ref = declared_content_ref(published_task["metadata"]["vv_session"]["input_messages"][0])
+        assert initial_ref is not None
+        assert input_ref is not None
+        assert started_links["definition.task.initial_messages[0]"].ref == initial_ref
+        assert started_links["definition.task.metadata.vv_session.input_messages[0]"].ref == input_ref
         assert {"request", "request.messages[0]", "request.messages[1]", "request.messages[2]"} <= planned_slots
 
         before_content, before_links = _content_count(store), _link_count(store)
@@ -336,6 +367,125 @@ def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) 
             link_declared_record_content(writer, replay_links)
         assert _content_count(store) == before_content
         assert _link_count(store) == before_links
+
+
+def test_child_admission_definition_messages_publish_and_hydrate_in_place(tmp_path) -> None:
+    initial_message = Message(role="user", content="child-initial-secret").to_dict()
+    input_message = Message(role="user", content="child-input-secret").to_dict()
+    definition = _definition(initial_message, input_message=input_message)
+    admission = {
+        "mode": "configured",
+        "selector": "kernel",
+        "definition": definition,
+        "definition_digest": digest(definition),
+        "budget": {
+            "max_total_tokens": 100,
+            "max_uncached_input_tokens": None,
+            "max_tool_calls": 2,
+            "max_tool_calls_by_name": {},
+            "max_wall_time_ms": None,
+            "max_host_cost": None,
+            "unavailable_metric_policy": "continue_and_mark",
+        },
+        "handler_version": "1",
+        "sub_config": None,
+        "exclude_files_pattern": None,
+        "handoff_count": 0,
+        "max_handoffs": 100,
+        "handoff_metadata": {},
+    }
+    with _sessions(tmp_path, attributes={"child_admission": admission}) as (store, _sessions_driver):
+        creation = store.read("s").records[0]
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            attributes_ref = ContentRef.from_dict(creation.record.payload["attributes"])
+            attributes = writer.get_json(attributes_ref)
+
+        task = attributes["child_admission"]["definition"]["task"]
+        initial_ref = declared_content_ref(task["initial_messages"][0])
+        input_ref = declared_content_ref(task["metadata"]["vv_session"]["input_messages"][0])
+        assert initial_ref is not None
+        assert input_ref is not None
+
+        links = {link.slot: link for link in _links(store, record_seq=creation.seq)}
+        initial_slot = "session.attributes.child_admission.definition.task.initial_messages[0]"
+        input_slot = "session.attributes.child_admission.definition.task.metadata.vv_session.input_messages[0]"
+        assert links[initial_slot].ref == initial_ref
+        assert links[input_slot].ref == input_ref
+
+        hydrated = hydrate_stored_payload(_boundary_driver(store), creation)
+        hydrated_task = hydrated["attributes"]["child_admission"]["definition"]["task"]
+        assert hydrated_task["initial_messages"] == [initial_message]
+        assert hydrated_task["metadata"]["vv_session"]["input_messages"] == [input_message]
+
+
+def test_prepared_hook_result_publishes_producer_arrays_without_recursing_opaque_provider_data(tmp_path) -> None:
+    opaque_provider_data = {"content_id": "provider-selected-id", "detail": {"content_id": "nested-id"}}
+    assert declared_content_ref(opaque_provider_data) is None
+    hook_result = ToolExecutionResult(
+        tool_call_id="call",
+        content="hook-short-circuit",
+        metadata={
+            "children": [{"session_id": "child-a", "status": "running"}],
+            "running_children": ["child-a"],
+            "provider_observation": opaque_provider_data,
+        },
+    ).to_dict()
+    request = {"id": "call", "name": "tool", "arguments": {}}
+    turn_id = "s/turn/hook"
+    operation_id = "operation/hook"
+    record = Record(
+        record_identity("op_prepared", "s", turn_id, operation_id, 1, {}),
+        "op_prepared",
+        "s",
+        turn_id,
+        operation_id,
+        1,
+        {
+            "request": request,
+            "request_digest": digest(request),
+            "op_kind": "tool",
+            "tool": {},
+            "provider_binding": "function",
+            "idempotency_key": None,
+            "hook_result": hook_result,
+            "shared_state": {},
+            "policy_decision": None,
+        },
+    )
+    with _sessions(tmp_path) as (store, _sessions_driver):
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            publication = publish_record_content(writer, (record,))
+            links = {link.slot: link for link in publication.links}
+            assert {"request", "tool", "hook_result", "shared_state"} <= set(links)
+            published_content = {slot: writer.get_json(link.ref) for slot, link in links.items()}
+            published_hook = published_content["hook_result"]
+            owner = "record:2"
+            owner_values = {
+                (owner, slot, link.ref.content_id): canonical_json_bytes(writer.get_json(link.ref))
+                for slot, link in links.items()
+            }
+
+        children = published_hook["metadata"]["children"]
+        running_children = published_hook["metadata"]["running_children"]
+        assert declared_content_ref(children[0]) is not None
+        assert declared_content_ref(running_children[0]) is not None
+        assert published_hook["metadata"]["provider_observation"] == opaque_provider_data
+
+        stored = StoredRecord(publication.records[0], 2, "prepared-hook-content", 1, 1)
+        hook_ref = declared_content_ref(stored.record.payload["hook_result"])
+        assert hook_ref is not None
+        assert links["hook_result"].ref == hook_ref
+        assert links["hook_result.metadata.children[0]"].ref == declared_content_ref(children[0])
+        assert links["hook_result.metadata.running_children[0]"].ref == declared_content_ref(running_children[0])
+
+        driver = _boundary_driver(store)
+        driver.content_reader = _OwnerMapReader(owner_values)
+        driver._hydrators = {}
+        hydrated = hydrate_stored_payload(driver, stored)
+        assert hydrated["hook_result"] == hook_result
+        assert hydrated["hook_result"]["metadata"]["provider_observation"] == opaque_provider_data
 
 
 def test_input_applied_provider_copy_uses_record_owner_slots(tmp_path) -> None:

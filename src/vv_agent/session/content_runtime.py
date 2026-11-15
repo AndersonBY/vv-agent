@@ -31,6 +31,7 @@ from vv_agent.kernel._content import (
     SourceKind,
 )
 from vv_agent.kernel._content_publication import (
+    _CONTENT_SLOTS,
     PROVIDER_EVIDENCE,
     PROVIDER_HANDLE_CANCEL_REF,
     PROVIDER_HANDLE_EVIDENCE,
@@ -81,9 +82,13 @@ _SLOTS = frozenset(
     }
 )
 _PROVIDER_ATTRIBUTE = "_vv_agent_content_key_provider"
-_NESTED_SEED_MESSAGE_SLOT = re.compile(
-    r"^(?:session\.attributes|session\.principal\.attributes)\.seed\.messages\[(?:0|[1-9][0-9]*)\]$"
+_DECLARED_NESTED_SLOT_BASES = frozenset(
+    f"{content_slot.slot}.{nested_slot.slot}"
+    for content_slots in _CONTENT_SLOTS.values()
+    for content_slot in content_slots
+    for nested_slot in content_slot.nested
 )
+_NESTED_SLOT = re.compile(r"^(?P<base>.+)\[(?P<index>0|[1-9][0-9]*)\]$")
 
 INTERNAL_LABELS = ContentLabels(source=(SourceKind.INTERNAL,), classification=Classification.INTERNAL)
 HOST_LABELS = ContentLabels(source=(SourceKind.USER,), classification=Classification.INTERNAL)
@@ -181,7 +186,10 @@ def _root_store(store: object) -> object:
 
 
 def _slot(value: str) -> str:
-    if value not in _SLOTS and _NESTED_SEED_MESSAGE_SLOT.fullmatch(value) is None:
+    if value in _SLOTS:
+        return value
+    match = _NESTED_SLOT.fullmatch(value)
+    if match is None or match.group("base") not in _DECLARED_NESTED_SLOT_BASES:
         raise ValueError("content links require a stable declared slot")
     return value
 

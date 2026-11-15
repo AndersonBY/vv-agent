@@ -59,8 +59,29 @@ class ContentSlot:
 
 
 _REQUEST_NESTED = (NestedContentSlot(("messages", "*"), "messages"),)
-_DEFINITION_NESTED = (NestedContentSlot(("task", "initial_messages", "*"), "task.initial_messages"),)
 _SEED_MESSAGES = (NestedContentSlot(("seed", "messages", "*"), "seed.messages"),)
+_DEFINITION_NESTED = (
+    NestedContentSlot(("task", "initial_messages", "*"), "task.initial_messages"),
+    NestedContentSlot(
+        ("task", "metadata", "vv_session", "input_messages", "*"),
+        "task.metadata.vv_session.input_messages",
+    ),
+)
+_CHILD_ADMISSION_DEFINITION_NESTED = (
+    NestedContentSlot(
+        ("child_admission", "definition", "task", "initial_messages", "*"),
+        "child_admission.definition.task.initial_messages",
+    ),
+    NestedContentSlot(
+        ("child_admission", "definition", "task", "metadata", "vv_session", "input_messages", "*"),
+        "child_admission.definition.task.metadata.vv_session.input_messages",
+    ),
+)
+_SESSION_ATTRIBUTES_NESTED = _SEED_MESSAGES + _CHILD_ADMISSION_DEFINITION_NESTED
+_HOOK_RESULT_NESTED = (
+    NestedContentSlot(("metadata", "children", "*"), "metadata.children"),
+    NestedContentSlot(("metadata", "running_children", "*"), "metadata.running_children"),
+)
 
 # Each path is explicit. ``*`` expands one declared JSON array element and the
 # resulting link slot is the field name followed by its stable zero-based index.
@@ -68,7 +89,7 @@ _CONTENT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
     "session_created": (
         ContentSlot(("principal", "attributes"), SESSION_PRINCIPAL_ATTRIBUTES, _SEED_MESSAGES),
         ContentSlot(("workspace",), SESSION_WORKSPACE),
-        ContentSlot(("attributes",), SESSION_ATTRIBUTES, _SEED_MESSAGES),
+        ContentSlot(("attributes",), SESSION_ATTRIBUTES, _SESSION_ATTRIBUTES_NESTED),
     ),
     "turn_started": (
         ContentSlot(("definition",), "definition", _DEFINITION_NESTED),
@@ -89,7 +110,7 @@ _CONTENT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
     "op_prepared": (
         ContentSlot(("request",), "request", _REQUEST_NESTED),
         ContentSlot(("tool",), "tool"),
-        ContentSlot(("hook_result",), "hook_result"),
+        ContentSlot(("hook_result",), "hook_result", _HOOK_RESULT_NESTED),
         ContentSlot(("shared_state",), "shared_state"),
     ),
     "turn_parked": (ContentSlot(("question",), "turn_question"),),
@@ -359,7 +380,12 @@ def publish_content_container(
     if declared is not None:
         if not nested:
             return PublishedContentValue(declared)
-        content = writer.get_json(declared)
+        # Reused refs need no publication; inspect them only when the writer
+        # exposes its bound read capability.
+        read_json = getattr(writer, "get_json", None)
+        if not callable(read_json):
+            return PublishedContentValue(declared)
+        content = read_json(declared)
         return PublishedContentValue(declared, _declared_nested_links(content, nested, slot))
 
     prepared = deepcopy(value)
@@ -396,7 +422,7 @@ def publish_session_created_content(
     workspace: Any,
     attributes: Any,
 ) -> SessionCreatedContent:
-    """Publish creation values while keeping seed messages as owned child objects."""
+    """Publish creation values while keeping declared message arrays as owned child objects."""
 
     published_principal = copy_json(principal)
     principal_attributes = publish_content_container(
@@ -411,7 +437,7 @@ def publish_session_created_content(
         writer,
         attributes,
         slot=SESSION_ATTRIBUTES,
-        nested=_SEED_MESSAGES,
+        nested=_SESSION_ATTRIBUTES_NESTED,
     )
     return SessionCreatedContent(
         principal=published_principal,

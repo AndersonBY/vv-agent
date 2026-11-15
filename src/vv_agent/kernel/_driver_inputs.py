@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
 from ._canonical_json import canonical_json_bytes
 from ._child_store import child_handles, verify_completion
@@ -15,7 +16,14 @@ from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import CoreDriver
 from ._execution_values import AgentTask
 from ._message_values import Message
-from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance, validate_provider_result
+from ._provider_outcomes import (
+    Accepted,
+    Definitive,
+    ProviderResultInvalid,
+    validate_acceptance,
+    validate_provider_result,
+    validate_reference_provider_handle,
+)
 from ._records import InboxItem, Record, _RetainedTools, copy_json, digest
 from ._sql import stored_input_proof
 from ._state import Attempt
@@ -81,7 +89,19 @@ class ResolveModelSelection:
 @dataclass(frozen=True, slots=True)
 class AuthenticateProvider:
     item: InboxItem
+    retained_item: InboxItem
     plan: Record
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAuthentication:
+    """Expose logical provider fields while retaining the authenticated raw item."""
+
+    item: InboxItem
+    retained_item: InboxItem
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.item, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +141,26 @@ class YieldResults:
     item: InboxItem
 
 
+def _hydrated_provider_wait(self: CoreDriver, attempt: Attempt) -> dict[str, Any] | None:
+    if attempt.wait is None:
+        return None
+    operation_id = attempt.plan.operation_id
+    assert operation_id is not None
+    if self.content_reader is not None and getattr(self, "records", None):
+        return self.hydrate_parked_wait(operation_id, attempt.plan.attempt or 1, attempt.wait)
+    return attempt.wait
+
+
 def _check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) -> None:
     assert plan.operation_id is not None and plan.attempt is not None
     attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
     handle = attempt.wait["handle"] if attempt.wait and attempt.wait["handle"]["kind"] == "provider" else None
-    validate_provider_result(plan, outcome, handle)
+    if handle is not None:
+        hydrated_wait = _hydrated_provider_wait(self, attempt)
+        assert hydrated_wait is not None
+        handle = hydrated_wait["handle"]
+    logical_plan = self.hydrate_plan(plan) if self.content_reader is not None and getattr(self, "records", None) else plan
+    validate_provider_result(logical_plan, outcome, handle)
 
 
 def _hydratable_definition(value: Any) -> Any:
@@ -261,71 +296,96 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                 or not attempt.started
                 or item.generation != self.state.turns[op.turn_id].start._payload["generation"]
                 or item.payload["request_digest"] != attempt.execution_plan._payload["request_digest"]
-                or not (yield AuthenticateProvider(item, attempt.execution_plan))
             ):
                 disposition, reason = "rejected", "untrusted or mismatched provider evidence"
-            elif item.kind == "provider_result":
-                if item.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
-                    disposition, reason = "rejected", "provider binding mismatch"
-                elif attempt.yielded:
-                    disposition, reason = "noop", "yielded provider handle: audit only"
-                elif attempt.result is not None:
-                    equal = True
-                    for key in ("result", "usage"):
-                        retained = canonical_json_bytes(
-                            provider_result_identity(attempt.result._payload[key])
-                            if key == "result"
-                            else attempt.result._payload[key]
-                        )
-                        incoming = item.payload[key]
-                        if key == "result":
-                            incoming = yield ProjectProviderResult(
-                                attempt.execution_plan, incoming, attempt.result._payload["result"].get("artifact")
-                            )
-                            incoming = provider_result_identity(incoming)
-                        if retained != canonical_json_bytes(incoming):
-                            equal = False
-                            break
-                    disposition = "noop" if equal else "rejected"
-                    reason = "retained result" if disposition == "noop" else "result conflict"
-                else:
-                    outcome = Definitive(item.payload["result"], tuple(item.payload["evidence"]), usage=item.payload["usage"])
-                    try:
-                        _check_provider_result(self, attempt.execution_plan, outcome)
-                    except ProviderResultInvalid:
-                        disposition, reason = "rejected", "provider_result_invalid"
-                    else:
-                        extra = yield CompleteResult(attempt.execution_plan, outcome)
-            elif attempt.yielded:
-                disposition, reason = "noop", "yielded provider handle: audit only"
-            elif attempt.state == "started":
+            else:
                 try:
-                    accepted = Accepted(item.payload["handle"], yield_on_steer=item.payload.get("yield_on_steer", False))
-                    validate_acceptance(attempt.execution_plan, accepted)
-                    now = yield InputSetting.POLL_NOW
-                    parked = self.record(
-                        "op_parked",
-                        {
-                            "phase": "after_dispatch",
-                            "handle": accepted.handle,
-                            "poll_at_ms": now + (yield InputSetting.POLL_MS),
-                            "deadline_ms": None,
-                        },
-                        attempt.execution_plan,
-                    )
-                    if accepted.yield_on_steer:
-                        parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
+                    if item.kind == "provider_evidence" and self.content_reader is not None:
+                        validate_reference_provider_handle(attempt.execution_plan, item.payload["handle"])
                 except ProviderResultInvalid:
                     disposition, reason = "rejected", "provider_result_invalid"
+                    reference_invalid = True
                 else:
-                    extra = [parked]
-            elif attempt.wait and attempt.wait["handle"] == item.payload["handle"]:
-                if attempt.wait.get("yield_on_steer", False) == item.payload.get("yield_on_steer", False):
-                    disposition = "noop"
-                else:
-                    disposition, reason = "rejected", "acceptance declaration conflict"
-            else:
-                disposition, reason = "rejected", "acceptance is not attachable"
+                    reference_invalid = False
+                if not reference_invalid:
+                    logical = hydrate_input(self, item)
+                    if not (yield AuthenticateProvider(logical, item, attempt.execution_plan)):
+                        disposition, reason = "rejected", "untrusted or mismatched provider evidence"
+                    elif item.kind == "provider_result":
+                        retained_result = hydrate_record(self, attempt.result) if attempt.result is not None else None
+                        if logical.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
+                            disposition, reason = "rejected", "provider binding mismatch"
+                        elif attempt.yielded:
+                            disposition, reason = "noop", "yielded provider handle: audit only"
+                        elif retained_result is not None:
+                            equal = True
+                            for key in ("result", "usage"):
+                                retained = canonical_json_bytes(
+                                    provider_result_identity(retained_result._payload[key])
+                                    if key == "result"
+                                    else retained_result._payload[key]
+                                )
+                                incoming = logical.payload[key]
+                                if key == "result":
+                                    incoming = yield ProjectProviderResult(
+                                        attempt.execution_plan,
+                                        incoming,
+                                        retained_result._payload["result"].get("artifact"),
+                                    )
+                                    incoming = provider_result_identity(incoming)
+                                if retained != canonical_json_bytes(incoming):
+                                    equal = False
+                                    break
+                            disposition = "noop" if equal else "rejected"
+                            reason = "retained result" if disposition == "noop" else "result conflict"
+                        else:
+                            outcome = Definitive(
+                                logical.payload["result"], tuple(logical.payload["evidence"]), usage=logical.payload["usage"]
+                            )
+                            try:
+                                _check_provider_result(self, attempt.execution_plan, outcome)
+                            except ProviderResultInvalid:
+                                disposition, reason = "rejected", "provider_result_invalid"
+                            else:
+                                extra = yield CompleteResult(attempt.execution_plan, outcome)
+                    elif attempt.yielded:
+                        disposition, reason = "noop", "yielded provider handle: audit only"
+                    elif attempt.state == "started":
+                        try:
+                            accepted = Accepted(
+                                logical.payload["handle"], yield_on_steer=logical.payload.get("yield_on_steer", False)
+                            )
+                            if self.content_reader is not None:
+                                validate_reference_provider_handle(attempt.execution_plan, item.payload["handle"])
+                            validate_acceptance(attempt.execution_plan, accepted)
+                            now = yield InputSetting.POLL_NOW
+                            parked = self.record(
+                                "op_parked",
+                                {
+                                    "phase": "after_dispatch",
+                                    "handle": accepted.handle,
+                                    "poll_at_ms": now + (yield InputSetting.POLL_MS),
+                                    "deadline_ms": None,
+                                },
+                                attempt.execution_plan,
+                            )
+                            if accepted.yield_on_steer:
+                                parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
+                        except ProviderResultInvalid:
+                            disposition, reason = "rejected", "provider_result_invalid"
+                        else:
+                            extra = [parked]
+                    elif attempt.wait:
+                        hydrated_wait = _hydrated_provider_wait(self, attempt)
+                        assert hydrated_wait is not None
+                        if hydrated_wait["handle"] != logical.payload["handle"]:
+                            disposition, reason = "rejected", "acceptance is not attachable"
+                        elif hydrated_wait.get("yield_on_steer", False) == logical.payload.get("yield_on_steer", False):
+                            disposition = "noop"
+                        else:
+                            disposition, reason = "rejected", "acceptance declaration conflict"
+                    else:
+                        disposition, reason = "rejected", "acceptance is not attachable"
         elif item.kind == "approval_answer":
             target = item.payload["operation_id"]
             op = self.state.operations.get(target)
@@ -517,7 +577,12 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             continue
         item = applied._payload["input"]
         tid = item["target_turn_id"] or f"{self.sid}/turn/{input_id}"
-        content = self.input_content(input_id, item["payload"]["content"])
+        retained_content = item["payload"]["content"]
+        content = (
+            self.input_content(input_id, retained_content)
+            if declared_content_ref(retained_content) is not None
+            else retained_content
+        )
         seed_attributes = attributes.get("seed")
         task = yield CompileTurn(
             content["text"] if isinstance(content, dict) and "messages" in content else str(content),

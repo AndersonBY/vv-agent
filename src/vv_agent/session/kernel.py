@@ -15,8 +15,7 @@ from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
-from vv_agent.kernel._hydration import DefinitionContent, TypedSchemaFailure
-from vv_agent.kernel._record_codec import RecordError
+from vv_agent.kernel._hydration import DefinitionContent
 from vv_agent.kernel._reducer import logical_inputs, logical_operation_payloads, logical_turn_wait_results
 from vv_agent.types import AgentTask, Message
 
@@ -26,7 +25,12 @@ from ._driver_scope import _LeaseHeartbeat as _LeaseHeartbeat
 from ._driver_scope import _Scope
 from .bindings import MissingHostBinding
 from .context import project_context
-from .projection import fold_hydrated_records, hydrate_input, hydrate_records, hydration_for_session_store
+from .projection import (
+    fold_hydrated_records,
+    hydrate_input,
+    hydrate_records,
+    hydration_for_session_store,
+)
 from .providers import (
     Accepted,
     Definitive,
@@ -109,8 +113,16 @@ class _Driver(CoreDriver):
                 logical_inputs(logical_input_items),
                 logical_operation_payloads(operation_payloads),
             ):
-                return super().commit(records, consumed, guarded=guarded, prepare=prepare)
-        return super().commit(records, consumed, guarded=guarded, prepare=prepare)
+                result = super().commit(records, consumed, guarded=guarded, prepare=prepare)
+        else:
+            result = super().commit(records, consumed, guarded=guarded, prepare=prepare)
+        if self.content_reader is not None and any(
+            record.kind == "op_completed" and (not record._payload["execution_started"] or record._payload["evidence"])
+            for record in records
+        ):
+            self.state = self._logical_state()
+            self.fold.state = self.state
+        return result
 
     def _logical_state(self) -> ExecutionState:
         if self.content_reader is None:
@@ -125,7 +137,13 @@ class _Driver(CoreDriver):
         return hydrate_input(item, hydration_for_session_store(self.store, self.sid))
 
     def live_budget(self) -> BudgetEvaluator | None:
-        inputs = self._run_outcome_steps(_driver_outcomes.live_budget_inputs_steps(self))
+        state = self.state
+        if self.content_reader is not None:
+            self.state = self._logical_state()
+        try:
+            inputs = self._run_outcome_steps(_driver_outcomes.live_budget_inputs_steps(self))
+        finally:
+            self.state = state
         if inputs is None:
             return None
         limits, initial = inputs
@@ -163,17 +181,7 @@ class _Driver(CoreDriver):
     def _hydrated_definition(self) -> DefinitionContent:
         assert self.state.active_turn_id is not None
         start = self.state.turns[self.state.active_turn_id].start
-        stored = next(
-            (row for row in self.records if row.record is start or row.record.record_id == start.record_id),
-            None,
-        )
-        if stored is None:
-            raise RecordError("turn_started record is outside the retained ledger")
-        try:
-            ref = ContentRef.from_dict(stored.record._payload["definition"])
-        except (TypeError, ValueError) as exc:
-            raise TypedSchemaFailure("turn_started.definition must be a ContentRef") from exc
-        return self.hydrator_for(stored.seq).definition(ref)
+        return self.hydrated_definition(start)
 
     def hydrated_definition(self, record: Record) -> DefinitionContent:
         return super().hydrated_definition(self.stored_record(record).record)

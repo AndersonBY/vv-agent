@@ -20,19 +20,60 @@ class ProviderResultInvalid(ValueError):
         super().__init__(self.code)
 
 
-def validate_provider_handle(plan: Record, handle: dict[str, Any]) -> None:
+def _validate_provider_identity(plan: Record, handle: dict[str, Any]) -> None:
+    if handle["kind"] != "provider" or any(
+        handle[key] != expected
+        for key, expected in (
+            ("provider", plan._payload["provider_binding"]),
+            ("operation_id", plan.operation_id),
+            ("attempt", plan.attempt),
+            ("request_digest", plan._payload["request_digest"]),
+        )
+    ):
+        raise ValueError("provider handle mismatch")
+
+
+def validate_reference_provider_handle(plan: Record, handle: dict[str, Any]) -> None:
+    """Validate the S1 record-boundary shape of a retained provider handle."""
     try:
         validate(handle, HANDLE)
-        if handle["kind"] != "provider" or any(
-            handle[key] != expected
-            for key, expected in (
-                ("provider", plan._payload["provider_binding"]),
-                ("operation_id", plan.operation_id),
-                ("attempt", plan.attempt),
-                ("request_digest", plan._payload["request_digest"]),
-            )
-        ):
-            raise ValueError("provider handle mismatch")
+        _validate_provider_identity(plan, handle)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ProviderResultInvalid() from exc
+
+
+def _provider_evidence(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = tuple(value)
+    else:
+        raise ValueError("provider handle evidence must be a string or string list")
+    if not values or any(not item.strip() for item in values):
+        raise ValueError("provider handle evidence must be non-empty")
+    return values
+
+
+def validate_provider_handle(plan: Record, handle: dict[str, Any]) -> None:
+    """Validate a provider-owned logical handle without the S1 content schema."""
+    try:
+        if type(handle) is not dict:
+            raise TypeError("provider handle must be an object")
+        if set(handle) != {
+            "kind",
+            "provider",
+            "job_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "evidence",
+            "query_ref",
+            "cancel_ref",
+        }:
+            raise ValueError("provider handle members mismatch")
+        _validate_provider_identity(plan, handle)
+        _provider_evidence(handle["evidence"])
+        canonical_json_bytes(handle)
     except (ValueError, TypeError, KeyError) as exc:
         raise ProviderResultInvalid() from exc
 
@@ -60,7 +101,7 @@ def validate_provider_result(plan: Record, outcome: Definitive, handle: dict[str
         canonical_json_bytes([list(outcome.evidence), outcome.usage, outcome.shared_state])
         if handle is not None:
             validate_provider_handle(plan, handle)
-            if handle["evidence"] not in outcome.evidence:
+            if not set(_provider_evidence(handle["evidence"])).issubset(outcome.evidence):
                 raise ValueError("provider result lost acceptance evidence")
     except (ValueError, TypeError, KeyError) as exc:
         raise ProviderResultInvalid() from exc

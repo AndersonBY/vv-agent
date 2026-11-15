@@ -1078,41 +1078,51 @@ class ExportDocument:
             inboxes_by_seq[value["input_seq"]] = (item, value)
 
         applied_by_seq: dict[int, Record] = {}
-        for record in records_by_seq.values():
+        for record_seq, record in records_by_seq.items():
             if record.kind != "input_applied":
                 continue
             payload = record._payload
             item = InboxItem.parse(canonical_json_bytes(payload["input"]))
             proof = payload["input_proof"]
             original = inboxes_by_id.get(item.input_id)
-            if original is None or proof is None:
+            if original is None:
                 raise InvalidExport("applied input proof has no matching exported inbox item")
             original_item, inbox_line = original
-            if inbox_line["consumed_seq"] != record.seq or original_item.to_dict() != item.to_dict():
+            if inbox_line["consumed_seq"] != record_seq or original_item.to_dict() != item.to_dict():
                 raise InvalidExport("applied input proof does not match its consumed inbox item")
             admission = item.admission_proof
-            if admission is None or (
-                proof["input_seq"],
-                proof["received_ms"],
-                proof["key_id"],
-                proof["signature"],
-                proof["signed_ms"],
-            ) != (
-                inbox_line["input_seq"],
-                inbox_line["received_ms"],
-                admission["admission_key_id"],
-                admission["admission_signature"],
-                admission["admission_signed_ms"],
+            if signer is not None and (proof is None or admission is None):
+                raise InvalidExport("signed export input admission proof is missing")
+            if (proof is None) != (admission is None):
+                raise InvalidExport("record input proof does not copy the inbox admission proof")
+            if (
+                proof is not None
+                and admission is not None
+                and (
+                    proof["input_seq"],
+                    proof["received_ms"],
+                    proof["key_id"],
+                    proof["signature"],
+                    proof["signed_ms"],
+                )
+                != (
+                    inbox_line["input_seq"],
+                    inbox_line["received_ms"],
+                    admission["admission_key_id"],
+                    admission["admission_signature"],
+                    admission["admission_signed_ms"],
+                )
             ):
                 raise InvalidExport("record input proof does not copy the inbox admission proof")
-            _verify_record_input_proof(
-                item,
-                proof,
-                tenant_id=self.header.tenant_id,
-                session_id=self.header.session_id,
-                signer=signer,
-            )
-            applied_by_seq[record.seq] = record
+            if proof is not None:
+                _verify_record_input_proof(
+                    item,
+                    proof,
+                    tenant_id=self.header.tenant_id,
+                    session_id=self.header.session_id,
+                    signer=signer,
+                )
+            applied_by_seq[record_seq] = record
 
         for item, line in inboxes_by_seq.values():
             consumed_seq = line["consumed_seq"]

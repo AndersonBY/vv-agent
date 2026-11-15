@@ -21,6 +21,7 @@ from vv_agent.kernel._child_store import (
     ordinary_result_for_children,
 )
 from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._hydration import SessionHydrator
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -73,7 +74,7 @@ def _record_content(store: SessionStore, sid: str, raw, slot: str):
         ContentRef.from_dict(raw)
     except (TypeError, ValueError):
         return raw
-    return read_record_json(
+    value = read_record_json(
         store,
         tenant_id=_store_tenant_id(store),
         session_id=sid,
@@ -81,6 +82,15 @@ def _record_content(store: SessionStore, sid: str, raw, slot: str):
         ref=raw,
         slot=slot,
     )
+    if slot != SESSION_ATTRIBUTES:
+        return value
+    hydrator = SessionHydrator(
+        durable_content_reader(store, tenant_id=_store_tenant_id(store), session_id=sid),
+        tenant_id=_store_tenant_id(store),
+        session_id=sid,
+        owner="record:1",
+    )
+    return hydrator.nested("session_created", {"attributes": raw}, slot, value)
 
 
 def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:

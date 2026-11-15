@@ -328,18 +328,36 @@ class CoreDriver:
         owner = self._prepared_source_record(record, slot) or self.stored_record(record)
         return self.read_content_json(f"record:{owner.seq}", slot, parsed)
 
+    def _hydrate_record_nested_field(self, record: Record, slot: str, value: Any) -> Any:
+        """Hydrate nested refs declared by the closed inventory for one record slot."""
+
+        owner = self._prepared_source_record(record, slot) or self.stored_record(record)
+        return self.hydrator_for(owner.seq).nested(owner.record.kind, owner.record._payload, slot, value)
+
     def hydrate_plan(self, record: Record) -> Record:
         """Hydrate one operation plan for dispatch without replacing retained state."""
 
+        operation = self.state.operations.get(record.operation_id or "")
+        attempt = operation.attempts.get(record.attempt) if operation is not None and record.attempt is not None else None
+        if attempt is not None and attempt.prepared is not None:
+            prepared = self.stored_record(attempt.prepared).record._payload
+            record = replace(
+                record,
+                payload=record._payload
+                | {
+                    key: prepared[key]
+                    for key in ("request", "request_digest", "tool", "op_kind", "provider_binding", "idempotency_key")
+                }
+                | {"budget_admission": {"hook_result": prepared["hook_result"], "shared_state": prepared["shared_state"]}},
+            )
         value = record._payload
         payload = value | {
             "request": self.hydrate_record_field(record, "request", value["request"]),
             "tool": self.hydrate_record_field(record, "tool", value["tool"]),
         }
+        payload["request"] = self._hydrate_record_nested_field(record, "request", payload["request"])
         if type(payload["request"]) is not dict or (payload["tool"] is not None and type(payload["tool"]) is not dict):
             raise RecordError("operation plan request/tool hydration has the wrong JSON shape")
-        operation = self.state.operations.get(record.operation_id or "")
-        attempt = operation.attempts.get(record.attempt) if operation is not None and record.attempt is not None else None
         if attempt is not None and attempt.prepared is not None:
             admission = value["budget_admission"]
             if type(admission) is not dict:
@@ -348,6 +366,7 @@ class CoreDriver:
                 "hook_result": self.hydrate_record_field(record, "hook_result", admission["hook_result"]),
                 "shared_state": self.hydrate_record_field(record, "shared_state", admission["shared_state"]),
             }
+            admission["hook_result"] = self._hydrate_record_nested_field(record, "hook_result", admission["hook_result"])
             if admission["hook_result"] is not None and type(admission["hook_result"]) is not dict:
                 raise RecordError("prepared hook result must be an object or null")
             if type(admission["shared_state"]) is not dict:
@@ -422,7 +441,7 @@ class CoreDriver:
         value = self.hydrate_record_field(created.record, SESSION_ATTRIBUTES, created.record._payload["attributes"])
         if type(value) is not dict:
             raise RecordError("session attributes must be a JSON object")
-        return value
+        return self._hydrate_record_nested_field(created.record, SESSION_ATTRIBUTES, value)
 
     def input_content(self, input_id: str, value: Any) -> Any:
         """Hydrate one explicitly owned session input."""

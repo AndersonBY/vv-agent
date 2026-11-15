@@ -470,7 +470,19 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 "child completion needs terminal input",
             )
         if attempt.wait and attempt.wait["handle"]["kind"] == "provider":
-            require(attempt.wait["handle"]["evidence"] == p["evidence"], "result does not bind parked evidence")
+            parked_evidence = attempt.wait["handle"]["evidence"]
+            result_evidence = p["evidence"]
+            retained_evidence = (
+                declared_content_ref(parked_evidence) is not None or declared_content_ref(result_evidence) is not None
+            )
+            if not retained_evidence:
+                from vv_agent.kernel._provider_outcomes import _provider_evidence
+
+                try:
+                    bound = set(_provider_evidence(parked_evidence)).issubset(_provider_evidence(result_evidence))
+                except (TypeError, ValueError):
+                    bound = False
+                require(bound, "result does not bind parked evidence")
         later_started = any(a.started for n, a in op.attempts.items() if n > number)
         audit = turn.cancelled or turn.ended or op.turn_id != state.active_turn_id or later_started
         context = "audit" if audit else "correction" if attempt.unknown_consumed else "normal"

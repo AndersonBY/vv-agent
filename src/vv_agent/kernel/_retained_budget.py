@@ -14,8 +14,14 @@ from vv_agent.kernel._budget_values import (
     BudgetUsageSnapshot,
     RunBudgetLimits,
 )
+from vv_agent.kernel._content_publication import declared_content_ref
+from vv_agent.kernel._hydration import KeyUnavailable, TypedSchemaFailure
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._usage import model_usage
+
+
+class RetainedBudgetHydrationRequired(KeyUnavailable):
+    """The budget was retained as a reference and needs a logical-state retry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +37,13 @@ class RetainedBudgetInputs:
 
 
 def retained_budget_inputs(state: ExecutionState, tid: str) -> RetainedBudgetInputs | None:
-    parsed = RunBudgetLimits.from_dict(state.turns[tid].start._payload["budget"])
+    retained = state.turns[tid].start._payload["budget"]
+    try:
+        if declared_content_ref(retained) is not None:
+            raise RetainedBudgetHydrationRequired("turn_started.budget requires hydrated logical state")
+    except ValueError as exc:
+        raise TypedSchemaFailure("turn_started.budget contains a malformed ContentRef") from exc
+    parsed = RunBudgetLimits.from_dict(retained)
     if not parsed.has_limits:
         return None
     observations = [r._payload["usage"] for r in state.usage_values.values() if r.turn_id == tid]

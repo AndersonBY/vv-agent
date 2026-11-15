@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hmac
 import json
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -173,17 +175,18 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
-def _decode_json(body: bytes, slot: HydrationSlot) -> Any:
+def _decode_json(body: bytes, slot: HydrationSlot | str) -> Any:
+    label = slot.value if isinstance(slot, HydrationSlot) else slot
     if type(body) is not bytes:
-        raise TypedSchemaFailure(f"{slot.value} reader must return bytes")
+        raise TypedSchemaFailure(f"{label} reader must return bytes")
     try:
         text = body.decode("utf-8", errors="strict")
         value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject_constant)
-        canonical = canonical_json_bytes(value, slot.value)
+        canonical = canonical_json_bytes(value, label)
     except (UnicodeError, ValueError, TypeError) as exc:
-        raise TypedSchemaFailure(f"{slot.value} is not valid canonical JSON") from exc
+        raise TypedSchemaFailure(f"{label} is not valid canonical JSON") from exc
     if canonical != body:
-        raise TypedSchemaFailure(f"{slot.value} is not canonical JSON")
+        raise TypedSchemaFailure(f"{label} is not canonical JSON")
     return value
 
 
@@ -313,21 +316,24 @@ class SessionHydrator:
         return self._tenant_id, self._session_id, self._owner
 
     def _read(self, slot: HydrationSlot, ref: ContentRef, expected_reference_digest: str | None) -> Any:
+        return self._read_link(slot.value, ref, expected_reference_digest)
+
+    def _read_link(self, slot: str, ref: ContentRef, expected_reference_digest: str | None = None) -> Any:
         if not isinstance(ref, ContentRef):
-            raise TypedSchemaFailure(f"{slot.value} requires ContentRef")
+            raise TypedSchemaFailure(f"{slot} requires ContentRef")
         if expected_reference_digest is not None:
             try:
                 expected_reference_digest = validate_sha256(
                     expected_reference_digest,
-                    f"{slot.value} expected reference digest",
+                    f"{slot} expected reference digest",
                 )
             except ValueError as exc:
                 raise TypedSchemaFailure(str(exc)) from exc
             actual = reference_digest(ref)
             if not hmac.compare_digest(actual, expected_reference_digest):
-                raise ReferenceDigestMismatch(f"{slot.value} reference digest does not match")
+                raise ReferenceDigestMismatch(f"{slot} reference digest does not match")
         try:
-            body = self._reader.read(self._tenant_id, self._session_id, self._owner, slot.value, ref)
+            body = self._reader.read(self._tenant_id, self._session_id, self._owner, slot, ref)
         except (MissingContent, MissingContentLink, KeyUnavailable, IntegrityFailure):
             raise
         except (
@@ -338,10 +344,37 @@ class SessionHydrator:
         ) as exc:
             raise _translate_backend_error(exc) from exc
         if type(body) is not bytes:
-            raise IntegrityFailure(f"{slot.value} reader returned a non-bytes value")
+            raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
         if len(body) != ref.size:
-            raise IntegrityFailure(f"{slot.value} size does not match ContentRef")
+            raise IntegrityFailure(f"{slot} size does not match ContentRef")
         return _decode_json(body, slot)
+
+    def nested(self, kind: str, source: Mapping[str, Any], outer_slot: str, value: Any) -> Any:
+        """Hydrate only the nested links declared by the closed publication inventory."""
+
+        from ._content_publication import (
+            _MISSING,
+            _content_slot_specs,
+            _expand_nested_slots,
+            _set_path,
+            declared_content_ref,
+        )
+
+        nested = next((slot.nested for slot in _content_slot_specs(kind, dict(source)) if slot.slot == outer_slot), ())
+        if not nested:
+            return value
+        hydrated = deepcopy(value)
+        for path, nested_slot, nested_value in _expand_nested_slots(hydrated, nested, outer_slot):
+            if nested_value is _MISSING or nested_value is None:
+                continue
+            try:
+                nested_ref = declared_content_ref(nested_value)
+            except ValueError as exc:
+                raise TypedSchemaFailure(f"{kind}/{nested_slot} contains a malformed ContentRef") from exc
+            if nested_ref is None:
+                raise TypedSchemaFailure(f"{kind}/{nested_slot} must be a ContentRef, not plaintext")
+            _set_path(hydrated, path, self._read_link(nested_slot, nested_ref))
+        return hydrated
 
     def hydrate(
         self,
@@ -416,7 +449,8 @@ class SessionHydrator:
         *,
         expected_reference_digest: str | None = None,
     ) -> DefinitionContent:
-        return _parse_definition(self._read(HydrationSlot.DEFINITION, ref, expected_reference_digest))
+        value = self._read(HydrationSlot.DEFINITION, ref, expected_reference_digest)
+        return _parse_definition(self.nested("turn_started", value, "definition", value))
 
     def input_content(
         self,
