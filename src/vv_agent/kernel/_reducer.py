@@ -426,7 +426,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 "child completion needs terminal input",
             )
         if attempt.wait and attempt.wait["handle"]["kind"] == "provider":
-            require(attempt.wait["handle"]["evidence"] in p["evidence"], "result does not bind parked evidence")
+            require(attempt.wait["handle"]["evidence"] == p["evidence"], "result does not bind parked evidence")
         later_started = any(a.started for n, a in op.attempts.items() if n > number)
         audit = turn.cancelled or turn.ended or op.turn_id != state.active_turn_id or later_started
         context = "audit" if audit else "correction" if attempt.unknown_consumed else "normal"

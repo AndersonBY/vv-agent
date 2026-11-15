@@ -9,7 +9,7 @@ from vv_agent.kernel._schema import _compile_check
 from vv_agent.session.records import InboxItem, Record, RecordError, digest
 from vv_agent.session.reducer import TransitionError, fold
 
-from .helpers import base, item, record
+from .helpers import base, content_ref, item, principal, record
 
 
 @pytest.mark.parametrize(
@@ -60,11 +60,11 @@ def test_strict_records(mutation):
 
 def test_inbox_closed_and_duplicate_json_keys():
     assert InboxItem.parse(item().encode()) == item()
-    for key, val in [("kind", "other"), ("schema_version", 0), ("extra", True)]:
+    for key, val in [("kind", "other"), ("schema_version", 3), ("feature_level", 2), ("extra", True)]:
         with pytest.raises(RecordError):
             InboxItem.parse(canonical_json_bytes(item().to_dict() | {key: val}))
     with pytest.raises(RecordError):
-        InboxItem.parse(item().encode().replace(b'"schema_version":3', b'"schema_version":3,"schema_version":3'))
+        InboxItem.parse(item().encode().replace(b'"schema_version":"S1"', b'"schema_version":"S1","schema_version":"S1"'))
     with pytest.raises(RecordError):
         replace(item(), payload={"content": "x", "extra": 1}).encode()
 
@@ -144,11 +144,12 @@ def test_mismatched_result_rejected(kw):
 def test_parked_provider_evidence_and_duplicate_result():
     log = [*base(), record("op_parked")]
     with pytest.raises(TransitionError):
-        fold([*log, record("op_completed", evidence=[])])
+        fold([*log, record("op_completed", evidence=content_ref("other-evidence"))])
     done = record("op_completed")
     assert fold([*log, done, done]).operations["o"].selected_attempt == 1
+    different_result = content_ref("different-result")
     with pytest.raises(TransitionError):
-        fold([*log, done, record("op_completed", result={"ok": False}, result_digest=digest({"ok": False}))])
+        fold([*log, done, record("op_completed", result=different_result, result_digest=digest(different_result))])
 
 
 def test_controls_require_consumed_input_and_matching_generation():
@@ -163,9 +164,9 @@ def test_controls_require_consumed_input_and_matching_generation():
 @pytest.mark.parametrize(
     "kind,payload",
     [
-        ("user", {"content": "hello"}),
-        ("steer", {"content": "continue"}),
-        ("follow_up", {"content": "later"}),
+        ("user", {"content": content_ref("hello")}),
+        ("steer", {"content": content_ref("continue")}),
+        ("follow_up", {"content": content_ref("later")}),
         ("control", {"action": "archive"}),
         (
             "approval_answer",
@@ -175,7 +176,7 @@ def test_controls_require_consumed_input_and_matching_generation():
                 "request_id": "q",
                 "request_digest": digest({}),
                 "decision": "approve",
-                "scope": [],
+                "scope": content_ref("scope"),
             },
         ),
         (
@@ -185,9 +186,9 @@ def test_controls_require_consumed_input_and_matching_generation():
                 "attempt": 1,
                 "request_digest": digest({}),
                 "provider_binding": "p",
-                "result": {},
-                "usage": {},
-                "evidence": ["receipt"],
+                "result": content_ref("result"),
+                "usage": content_ref("usage"),
+                "evidence": content_ref("receipt"),
             },
         ),
         (
@@ -197,7 +198,7 @@ def test_controls_require_consumed_input_and_matching_generation():
                 "turn_id": "ct",
                 "operation_id": "o",
                 "attempt": 1,
-                "result": {},
+                "result": content_ref("child-result"),
                 "terminal_seq": 1,
                 "terminal_digest": digest({}),
                 "status": "completed",
@@ -212,11 +213,11 @@ def test_controls_require_consumed_input_and_matching_generation():
                 "handle": {
                     "kind": "provider",
                     "provider": "p",
-                    "job_id": "j",
+                    "job_id": content_ref("job"),
                     "operation_id": "o",
                     "attempt": 1,
                     "request_digest": digest({}),
-                    "evidence": "e",
+                    "evidence": content_ref("evidence"),
                     "query_ref": None,
                     "cancel_ref": None,
                 },
@@ -225,7 +226,7 @@ def test_controls_require_consumed_input_and_matching_generation():
     ],
 )
 def test_all_inbox_variants_closed(kind, payload):
-    incoming = InboxItem("stable-source-id", kind, payload)
+    incoming = InboxItem("stable-source-id", kind, payload, actor=principal(subject_kind="service"))
     assert InboxItem.parse(incoming.encode()) == incoming
     with pytest.raises(RecordError):
         replace(incoming, payload=payload | {"unexpected": None}).encode()
@@ -233,13 +234,13 @@ def test_all_inbox_variants_closed(kind, payload):
         replace(incoming, payload={}).encode()
 
 
-@pytest.mark.parametrize("codec,current,stale", [(Record, 1, 2), (InboxItem, 3, 2)])
-@pytest.mark.parametrize("value", [1.0, True, "1", None, -1, 0, "stale"])
-def test_version_requires_exact_integer(codec, current, stale, value):
+@pytest.mark.parametrize("codec", [Record, InboxItem])
+@pytest.mark.parametrize("value", [1.0, True, "1", None, -1, 0, 1, 2, 3, "stale"])
+def test_removed_versions_have_no_decoder(codec, value):
     wire = record("session_created").to_dict() if codec is Record else item().to_dict()
-    assert wire["schema_version"] == current
+    assert wire["schema_version"] == "S1"
     with pytest.raises(RecordError):
-        codec.parse(json.dumps(wire | {"schema_version": stale if value == "stale" else value}).encode())
+        codec.parse(json.dumps(wire | {"schema_version": value}).encode())
 
 
 @pytest.mark.parametrize("action", ["close", "archive"])
@@ -255,11 +256,12 @@ def test_session_control_while_idle(action):
 @pytest.mark.parametrize("decision", ["approve", "deny"])
 def test_approval_answer_schedules_resolution_and_enforces_permission(decision):
     planned = record("op_planned", op_kind="tool", purpose=None)
+    scope = content_ref("approval-scope")
     handle = {
         "kind": "approval",
         "request_id": "approval",
         "request_digest": planned.payload["request_digest"],
-        "scope": ["write"],
+        "scope": scope,
     }
     parked = record("op_parked", phase="before_dispatch", handle=handle)
     incoming = InboxItem(
@@ -271,10 +273,11 @@ def test_approval_answer_schedules_resolution_and_enforces_permission(decision):
             "request_id": "approval",
             "request_digest": planned.payload["request_digest"],
             "decision": decision,
-            "scope": ["write"],
+            "scope": scope,
         },
         target_turn_id="t",
         generation=1,
+        actor=principal("answer"),
     )
     applied = record(
         "input_applied",
@@ -298,11 +301,16 @@ def test_approval_answer_schedules_resolution_and_enforces_permission(decision):
 
 
 def test_waiting_dependency_does_not_spin():
+    planned = record("op_planned", op_kind="interaction", purpose=None)
     log = [
         record("session_created"),
         record("turn_started"),
-        record("op_planned", op_kind="interaction", purpose=None),
-        record("op_parked", phase="before_dispatch", handle={"kind": "user", "interaction_id": "q", "question": "?"}),
+        planned,
+        record(
+            "op_parked",
+            phase="before_dispatch",
+            handle={"kind": "user", "interaction_id": "q", "question": content_ref("question")},
+        ),
         record("op_planned", oid="dependent", dependencies=["o"]),
     ]
     state = fold(log)
@@ -360,7 +368,7 @@ def test_duplicate_consumed_input_identity_cannot_overwrite():
     with pytest.raises(TransitionError):
         fold(
             [record("session_created"), record("input_applied")],
-            consumed_inputs=(replace(incoming, payload={"content": "other"}), incoming),
+            consumed_inputs=(replace(incoming, payload={"content": content_ref("other")}), incoming),
         )
 
 
@@ -399,13 +407,13 @@ def test_hash_rejects_trailing_newline(field):
             "turn_id": "turn",
             "operation_id": "op",
             "attempt": 1,
-            "result": {},
+            "result": content_ref("child-result"),
             "status": "completed",
             "terminal_seq": 1,
             "terminal_digest": "a" * 64 + "\n",
         }
         with pytest.raises(RecordError):
-            InboxItem("result", "child_result", payload).encode()
+            InboxItem("result", "child_result", payload, actor=principal(subject_kind="agent")).encode()
         return
     value = original.to_dict()
     value["payload"][field] += "\n"
@@ -422,9 +430,9 @@ def test_compaction_identity_omits_absent_summary_segment():
     assert summary.record_id == f"compact/{summary.payload['source_digest']}/summary/summary/op"
 
 
-@pytest.mark.parametrize("seed", [{"messages": []}, {"messages": [], "shared_state": {}, "extra": True}])
-def test_creation_seed_is_closed(seed):
+@pytest.mark.parametrize("attributes", [{"seed": {"messages": []}}, {"seed": {"untrusted": True}}])
+def test_creation_attributes_require_hydrated_content_ref(attributes):
     from vv_agent.session.records import RecordError, SessionSpec
 
-    with pytest.raises(RecordError):
-        SessionSpec("seed", "test", ".", attributes={"seed": seed}).record()
+    with pytest.raises(RecordError, match="requires a ContentRef"):
+        SessionSpec("seed", principal(), content_ref("workspace"), attributes=attributes).record()

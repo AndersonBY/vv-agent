@@ -54,11 +54,14 @@ def test_kernel_schema_import_is_isolated_without_site_packages(tmp_path):
         assert len(_record_schema.INPUT_PAYLOADS) == 9
         assert len(_record_schema.BOUNDARY_DATA) == 7
         assert len(_record_schema.HANDLE["oneOf"]) == 4
+        ref = {"content_id": "content/test", "mac": "a" * 64, "size": 1,
+               "key_id": "key/test", "labels": {"source": [], "classification": "internal"}}
+        principal = {"tenant_id": "default", "subject_id": "p", "subject_kind": "user", "attributes": ref}
         envelope = {
-            "schema_version": 1, "record_id": "s", "kind": "session_created", "session_id": "s",
-            "turn_id": None, "operation_id": None, "attempt": None,
-            "payload": {"principal": "p", "workspace": "w", "parent_session_id": None,
-                        "parent_operation_id": None, "attributes": {}}
+            "schema_version": "S1", "feature_level": 1, "record_id": "s", "kind": "session_created",
+            "session_id": "s", "turn_id": None, "operation_id": None, "attempt": None,
+            "payload": {"principal": principal, "workspace": ref, "parent_session_id": None,
+                        "parent_operation_id": None, "attributes": ref}
         }
         assert _record_schema._CHECKS[id(_record_schema.RECORD_SCHEMA)](envelope)
         assert _record_schema._CHECKS[id(_record_schema.PAYLOADS["session_created"])](envelope["payload"])
@@ -138,7 +141,49 @@ def test_record_schemas_and_checks_have_one_owner():
         assert getattr(records, name) is getattr(_record_schema, name), name
     assert _record_schema._CHECKS.keys() == {id(s) for s in _record_schema._SCHEMAS}
     assert _record_schema.PAYLOADS["input_applied"]["properties"]["input"] is _record_schema.INPUT_SCHEMA
-    assert _record_schema.INPUT_PAYLOADS["provider_evidence"]["properties"]["handle"] is _record_schema.HANDLE
+    assert _record_schema.INPUT_PAYLOADS["provider_evidence"]["properties"]["handle"] is _record_schema.PROVIDER_HANDLE
+
+
+def test_contract_40_logical_schema_has_closed_s1_shapes():
+    assert set(_record_schema.RECORD_SCHEMA["properties"]) == {
+        "schema_version",
+        "feature_level",
+        "record_id",
+        "kind",
+        "session_id",
+        "turn_id",
+        "operation_id",
+        "attempt",
+        "payload",
+    }
+    assert "chain_digest" not in _record_schema.RECORD_SCHEMA["properties"]
+    assert _record_schema.RECORD_SCHEMA["properties"]["schema_version"] == {"const": "S1"}
+    assert _record_schema.RECORD_SCHEMA["properties"]["feature_level"] == {"const": 1, "type": "integer"}
+    assert set(_record_schema.INPUT_SCHEMA["properties"]) == {
+        "schema_version",
+        "feature_level",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload",
+    }
+    assert _record_schema.INPUT_SCHEMA["properties"]["schema_version"] == {"const": "S1"}
+    assert _record_schema.INPUT_SCHEMA["properties"]["actor"] is _record_schema.PRINCIPAL
+    assert _record_schema.INPUT_SCHEMA["properties"]["admission_proof"] is _record_schema.ADMISSION_PROOF
+    assert _record_schema.PRINCIPAL["properties"]["subject_kind"]["enum"] == ["user", "service", "agent"]
+    assert set(_record_schema.CONTENT_REF["properties"]) == {"content_id", "mac", "size", "key_id", "labels"}
+    for kind in ("op_planned", "op_prepared", "op_completed"):
+        assert _record_schema.PAYLOADS[kind]["properties"]["policy_decision"] is _record_schema.POLICY_DECISION
+        assert "policy_decision" in _record_schema.PAYLOADS[kind]["required"]
+    environment = _record_schema.ENVIRONMENT_BINDING["anyOf"][0]["properties"]
+    assert environment["operational_policy"]["anyOf"][0] is _record_schema.CONTENT_REF
+    assert environment["operational_policy"]["anyOf"][1] == {"type": "null"}
+    assert _record_schema.PAYLOADS["turn_started"]["properties"]["tokenizer_binding"] is _record_schema.TOKENIZER_BINDING
+    assert set(_record_schema.USAGE_COUNTS["properties"]) == {"tokens", "budget"}
 
 
 @pytest.mark.parametrize("value,expected", [(0, True), (1, True), (-1, False), (True, False), (1.0, False), ("1", False)])

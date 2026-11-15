@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from copy import deepcopy
@@ -12,21 +13,68 @@ from typing import Any
 from vv_agent.kernel._canonical_json import _stdlib_compatible, canonical_json_bytes, utf16_sort_key
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._message_values import Message
-from vv_agent.kernel._model_settings import ModelSettings, ResponseFormat
+from vv_agent.kernel._model_settings import ResponseFormat
 from vv_agent.kernel._record_codec import RecordError, _load, validate
 from vv_agent.kernel._record_schema import (
-    APP_SERVER_ATTRIBUTES,
     BOUNDARY_DATA,
-    CHILD_ADMISSION,
+    CONTENT_REF,
     INPUT_PAYLOADS,
     INPUT_SCHEMA,
     PAYLOADS,
+    PRINCIPAL,
     RECORD_SCHEMA,
-    REQUEST_SESSION_METADATA,
-    SEED,
     SEED_POLICIES,
-    TASK_SESSION_METADATA,
 )
+from vv_agent.kernel._record_schema import CHILD_ADMISSION as CHILD_ADMISSION
+
+
+def _walk(value: Any):
+    yield value
+    if type(value) is dict:
+        for item in value.values():
+            yield from _walk(item)
+    elif type(value) is list:
+        for item in value:
+            yield from _walk(item)
+
+
+def _validate_content_refs(value: Any) -> None:
+    source_order = {"system": 0, "user": 1, "internal": 2, "untrusted": 3}
+    for node in _walk(value):
+        if type(node) is dict and set(node) == {"content_id", "mac", "size", "key_id", "labels"}:
+            source = node["labels"]["source"]
+            if len(source) != len(set(source)):
+                raise RecordError("ContentRef labels.source contains duplicates")
+            if [source_order[item] for item in source] != sorted(source_order[item] for item in source):
+                raise RecordError("ContentRef labels.source is not in source-kind order")
+
+
+def _validate_signature(value: str) -> None:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except ValueError as exc:
+        raise RecordError("proof signature is not canonical base64") from exc
+    if not decoded or base64.b64encode(decoded).decode("ascii") != value:
+        raise RecordError("proof signature is not canonical base64")
+
+
+def _validate_admission_proof(proof: dict[str, Any] | None) -> None:
+    if proof is not None:
+        _validate_signature(proof["admission_signature"])
+
+
+def _validate_input_proof(proof: dict[str, Any] | None) -> None:
+    if proof is not None:
+        _validate_signature(proof["signature"])
+
+
+def _validate_ref(value: Any, label: str) -> None:
+    if not isinstance(value, dict):
+        raise RecordError(f"{label} requires a ContentRef produced by the content store")
+    try:
+        validate(value, CONTENT_REF, canonical=False)
+    except RecordError as exc:
+        raise RecordError(f"{label} requires a ContentRef produced by the content store") from exc
 
 
 def copy_json(value: Any) -> Any:
@@ -139,6 +187,8 @@ class _MessageCache:
 
 def inherited_seed_policies(attributes: dict[str, Any]) -> dict[str, bool]:
     """Derivation freezes each source choice, including an undeclared source's false."""
+    if set(attributes) == set(CONTENT_REF["properties"]):
+        raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
     seed = attributes.get("seed", {})
     return {name: seed.get(name, False) for name in SEED_POLICIES}
 
@@ -227,23 +277,24 @@ class InboxItem:
     target_turn_id: str | None = None
     generation: int | None = None
     available_ms: int = 0
-    schema_version: int = 3
+    actor: dict[str, Any] | None = None
+    admission_proof: dict[str, Any] | None = None
+    schema_version: str = "S1"
+    feature_level: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def _validate(self, value: dict[str, Any]) -> None:
+        if self.actor is None:
+            raise RecordError("S1 actor requires a closed Principal")
         validate(value, INPUT_SCHEMA, canonical=False)
         validate(self.payload, INPUT_PAYLOADS[self.kind], canonical=False)
-        if self.kind == "model_selection":
-            if self.target_turn_id is not None or self.generation is not None:
-                raise RecordError("model_selection requires session scope")
-            selection = self.payload["selection"]
-            if selection is not None:
-                try:
-                    ModelSettings.from_dict(selection.get("model_settings", {}))
-                except (ValueError, TypeError) as exc:
-                    raise RecordError(str(exc)) from exc
+        validate(self.actor, PRINCIPAL, canonical=False)
+        _validate_content_refs(value)
+        _validate_admission_proof(self.admission_proof)
+        if self.kind == "model_selection" and (self.target_turn_id is not None or self.generation is not None):
+            raise RecordError("model_selection requires session scope")
 
     def encode(self) -> bytes:
         value = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -305,7 +356,8 @@ class Record:
     operation_id: str | None
     attempt: int | None
     payload: dict[str, Any]
-    schema_version: int = 1
+    schema_version: str = "S1"
+    feature_level: int = 1
 
     _body: bytes | None = field(default=None, init=False, repr=False, compare=False)
     _digest: str | None = field(default=None, init=False, repr=False, compare=False)
@@ -315,10 +367,7 @@ class Record:
     _message_cache_id: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def _task(self) -> AgentTask:
-        if self._task_value is None:
-            object.__setattr__(self, "_task_value", AgentTask.from_dict(copy_json(self._payload["definition"]["task"])))
-        assert self._task_value is not None
-        return self._task_value
+        raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
 
     def task(self) -> AgentTask:
         task = self._task()
@@ -366,70 +415,21 @@ class Record:
 
     def _retain(self, body: bytes, value: dict[str, Any] | None = None) -> None:
         value = value if value is not None else json.loads(body)
-        for container_field in ("definition", "request"):
-            container = self._payload.get(container_field)
-            if isinstance(container, dict) and isinstance(container.get("tools"), _RetainedTools):
-                retained = container["tools"]
-                value["payload"][container_field]["tools"] = retained.value
-                if container_field == "definition":
-                    object.__setattr__(self, "_tools_body", retained.encode())
-            if isinstance(container, dict) and isinstance(container.get("messages"), _RetainedMessages):
-                value["payload"][container_field]["messages"] = container["messages"].value
         object.__setattr__(self, "_value", value)
         object.__setattr__(self, "payload", {})
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
         object.__setattr__(self, "_body", body)
 
     def _share_messages(self, messages: _MessageCache) -> None:
-        # Retained JSON is private and read-only; public payloads still detach it.
-        # This marker only avoids repeated interning, never validation or digest checks.
-        if self._message_cache_id == id(messages):
-            return
-        p = self._payload
-        snapshots = []
-        if self.kind == "op_planned" and p["op_kind"] == "model":
-            snapshots = p["request"].get("messages", [])
-        elif self.kind == "boundary_recorded" and p["stage"] == "before_memory":
-            snapshots = p["data"]["messages"]
-        if isinstance(snapshots, list):
-            for index, message in enumerate(snapshots):
-                if isinstance(message, dict):
-                    snapshots[index] = messages.share(message)
         object.__setattr__(self, "_message_cache_id", id(messages))
 
     def _validate(self, value: dict[str, Any], messages: _MessageCache | None = None) -> dict[str, bytes]:
         validate(value, RECORD_SCHEMA, canonical=False)
         validate(self.payload, PAYLOADS[self.kind], canonical=False)
+        _validate_content_refs(value)
         op = self.kind.startswith("op_")
         if op != (self.operation_id is not None) or op != (self.attempt is not None):
             raise RecordError("operation and attempt required only for operation records")
-        encoded_fields = {}
-        if self.kind == "session_created" and "seed" in self.payload["attributes"]:
-            validate(self.payload["attributes"]["seed"], SEED, canonical=False)
-            for message in self.payload["attributes"]["seed"].get("messages", []):
-                try:
-                    Message.from_dict(message)
-                except (ValueError, TypeError, KeyError) as exc:
-                    raise RecordError(str(exc)) from exc
-        for field_name, schema in (("definition", TASK_SESSION_METADATA), ("request", REQUEST_SESSION_METADATA)):
-            container = self.payload.get(field_name, {})
-            if field_name == "definition" and self.kind == "session_created":
-                container = self.payload["attributes"].get("child_admission", {}).get("definition", {})
-            metadata = (
-                container.get("task", {}).get("metadata", {}) if field_name == "definition" else container.get("metadata", {})
-            )
-            if "vv_session" in metadata:
-                validate(metadata["vv_session"], schema, canonical=False)
-        if self.kind == "session_created" and "app_server" in self.payload["attributes"]:
-            validate(self.payload["attributes"]["app_server"], APP_SERVER_ATTRIBUTES, canonical=False)
-        if self.kind == "session_created" and "child_admission" in self.payload["attributes"]:
-            attributes = self.payload["attributes"]
-            admission = attributes["child_admission"]
-            validate(admission, CHILD_ADMISSION, canonical=False)
-            definition = _check_digest(admission, "definition")
-            encoded_fields["attributes"] = _object_bytes(
-                attributes, {"child_admission": _object_bytes(admission, {"definition": definition})}
-            )
         if self.kind == "session_created" and self.turn_id is not None:
             raise RecordError("session_created has no turn")
         if self.kind not in {"session_created", "input_applied", "usage_observed"} and self.turn_id is None:
@@ -446,27 +446,43 @@ class Record:
             ("input_applied", "input"),
         ):
             if self.kind == kind:
-                encoded = None
-                if self.kind == "op_planned" and self.payload["op_kind"] == "model" and messages is not None:
-                    request = self.payload["request"]
-                    if isinstance(request.get("messages"), list) and _stdlib_compatible(request["messages"]):
-                        encoded = _object_bytes(request, {"messages": messages.wire_array(request["messages"])})
-                encoded_fields[digest_field] = _check_digest(self.payload, digest_field, encoded)
+                _check_digest(self.payload, digest_field)
         if self.kind == "input_applied":
             incoming = self.payload["input"]
             InboxItem(**incoming)._validate(incoming)
+            proof = self.payload["input_proof"]
+            admission = incoming["admission_proof"]
+            if (proof is None) != (admission is None):
+                raise RecordError("input proof admission mismatch")
+            _validate_input_proof(proof)
+            if (
+                proof is not None
+                and admission is not None
+                and (
+                    proof["key_id"] != admission["admission_key_id"]
+                    or proof["signature"] != admission["admission_signature"]
+                    or proof["signed_ms"] != admission["admission_signed_ms"]
+                )
+            ):
+                raise RecordError("input proof does not copy admission proof")
+        if self.kind == "turn_started":
+            requirements = self.payload["requirements"]
+            if requirements["capabilities"] != sorted(requirements["capabilities"]):
+                raise RecordError("requirements capabilities are not sorted")
+            if len(requirements["capabilities"]) != len(set(requirements["capabilities"])):
+                raise RecordError("requirements capabilities contain duplicates")
+            environment = self.payload["environment"]
+            if environment is not None:
+                capabilities = environment["environment_capabilities"]
+                if capabilities != sorted(capabilities):
+                    raise RecordError("environment capabilities are not sorted")
+                if len(capabilities) != len(set(capabilities)):
+                    raise RecordError("environment capabilities contain duplicates")
         if self.kind == "boundary_recorded":
             validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
-            if self.payload["stage"] == "before_memory" and messages is not None:
-                data = self.payload["data"]
-                if _stdlib_compatible(data["messages"]):
-                    try:
-                        encoded_fields["data"] = _object_bytes(data, {"messages": messages.wire_array(data["messages"])})
-                    except (ValueError, TypeError) as exc:
-                        raise RecordError(str(exc)) from exc
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
-        return encoded_fields
+        return {}
 
     def encode(self) -> bytes:
         if self._body is None:
@@ -493,6 +509,7 @@ class Record:
     @classmethod
     def _parse(cls, body: bytes, messages: _MessageCache | None = None) -> Record:
         value = _load(body)
+        validate(value, RECORD_SCHEMA, canonical=False)
         try:
             record = cls(**value)
         except TypeError as exc:
@@ -522,6 +539,17 @@ def make_record(
 ) -> Record:
     if kind not in PAYLOADS:
         raise RecordError("unknown record kind")
+    payload = copy_json(payload)
+    if kind == "turn_started":
+        payload.setdefault("policy_digest", None)
+        payload.setdefault(
+            "requirements",
+            {"level": 1, "handler_version": payload.get("handler_version"), "capabilities": []},
+        )
+        payload.setdefault("tokenizer_binding", None)
+        payload.setdefault("environment", None)
+    elif kind in {"op_planned", "op_prepared", "op_completed"}:
+        payload.setdefault("policy_decision", None)
     validate(payload, PAYLOADS[kind], canonical=False)
     record = Record(
         record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
@@ -539,29 +567,21 @@ def make_record(
 @dataclass(frozen=True)
 class SessionSpec:
     session_id: str
-    principal: str
-    workspace: str
+    principal: dict[str, Any]
+    workspace: dict[str, Any]
     parent_session_id: str | None = None
     parent_operation_id: str | None = None
     attributes: dict[str, Any] | None = None
 
     def record(self, *, _existing: Record | None = None) -> Record:
-        attributes = copy_json(self.attributes) if self.attributes is not None else {}
-        if not isinstance(attributes, dict):
-            raise RecordError("attributes must be an object")
-        if "seed" in attributes and not isinstance(attributes["seed"], dict):
-            raise RecordError("seed must be an object")
-        if _existing is None:
-            for name in SEED_POLICIES:
-                attributes.setdefault("seed", {}).setdefault(name, True)
-        else:
-            original = _existing._payload["attributes"].get("seed", {})
-            declarations = {name: original[name] for name in SEED_POLICIES if name in original}
-            if "seed" in attributes:
-                for name, value in declarations.items():
-                    attributes["seed"].setdefault(name, value)
-            elif original and set(original) <= set(SEED_POLICIES):
-                attributes["seed"] = copy_json(original)
+        attributes = copy_json(self.attributes)
+        if attributes is None and _existing is not None:
+            attributes = copy_json(_existing._payload["attributes"])
+        if attributes is None:
+            raise RecordError("attributes requires a ContentRef produced by the content store")
+        validate(self.principal, PRINCIPAL, canonical=False)
+        _validate_ref(self.workspace, "workspace")
+        _validate_ref(attributes, "attributes")
         return make_record(
             "session_created",
             session_id=self.session_id,

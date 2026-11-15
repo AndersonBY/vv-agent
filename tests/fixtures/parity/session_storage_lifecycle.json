@@ -1,0 +1,608 @@
+{
+  "schema_version": "vv-agent.session-storage-lifecycle.v1",
+  "status": "contract-allocation-only",
+  "key_capability": {
+    "tenant_id": "default",
+    "session_id": "c1c/disabled",
+    "key_id": "key/04c18f8aa145f438",
+    "provider_id": "provider/local-fixture",
+    "capability_id": "capability/session-key-1",
+    "state": "active"
+  },
+  "destroy_cases": [
+    {
+      "name": "destroy_active_capability",
+      "request": {
+        "domain": "vv-agent/S1/key-destroy",
+        "tenant_id": "default",
+        "key_id": "key/04c18f8aa145f438"
+      },
+      "accepted": true,
+      "status": "destroyed",
+      "evidence_id": "destroy/evidence/1",
+      "reason": null
+    },
+    {
+      "name": "destroy_is_idempotent",
+      "request": {
+        "domain": "vv-agent/S1/key-destroy",
+        "tenant_id": "default",
+        "key_id": "key/04c18f8aa145f438"
+      },
+      "accepted": true,
+      "status": "already_destroyed",
+      "evidence_id": "destroy/evidence/2",
+      "reason": null
+    },
+    {
+      "name": "tenant_identity_mismatch",
+      "request": {
+        "domain": "vv-agent/S1/key-destroy",
+        "tenant_id": "other",
+        "key_id": "key/04c18f8aa145f438"
+      },
+      "accepted": false,
+      "status": "binding_mismatch",
+      "evidence_id": null,
+      "reason": "Capability identity includes tenant."
+    }
+  ],
+  "forget_tombstone": {
+    "tenant_id": "default",
+    "session_id": "c1c/disabled",
+    "final_seq": 1,
+    "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+    "deleted_ms": 1800000000100,
+    "actor": {
+      "attributes": {
+        "content_id": "content/8c546a1d27abb36e501ebd79",
+        "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+        "size": 2,
+        "key_id": "key/04c18f8aa145f438",
+        "labels": {
+          "source": [],
+          "classification": "internal"
+        }
+      },
+      "subject_id": "local",
+      "subject_kind": "user",
+      "tenant_id": "default"
+    },
+    "key_id": "key/04c18f8aa145f438",
+    "signature": "AAECAwQ=",
+    "state": "complete",
+    "scope_root_session_id": "c1c/disabled"
+  },
+  "forget_verification_cases": [
+    {
+      "name": "verified_complete_tombstone",
+      "tombstone": {
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "final_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "deleted_ms": 1800000000100,
+        "actor": {
+          "attributes": {
+            "content_id": "content/8c546a1d27abb36e501ebd79",
+            "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+            "size": 2,
+            "key_id": "key/04c18f8aa145f438",
+            "labels": {
+              "source": [],
+              "classification": "internal"
+            }
+          },
+          "subject_id": "local",
+          "subject_kind": "user",
+          "tenant_id": "default"
+        },
+        "key_id": "key/04c18f8aa145f438",
+        "signature": "AAECAwQ=",
+        "state": "complete",
+        "scope_root_session_id": "c1c/disabled"
+      },
+      "accepted": true,
+      "reason": null
+    },
+    {
+      "name": "tombstone_head_mismatch",
+      "tombstone": {
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "final_seq": 1,
+        "chain_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "deleted_ms": 1800000000100,
+        "actor": {
+          "attributes": {
+            "content_id": "content/8c546a1d27abb36e501ebd79",
+            "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+            "size": 2,
+            "key_id": "key/04c18f8aa145f438",
+            "labels": {
+              "source": [],
+              "classification": "internal"
+            }
+          },
+          "subject_id": "local",
+          "subject_kind": "user",
+          "tenant_id": "default"
+        },
+        "key_id": "key/04c18f8aa145f438",
+        "signature": "AAECAwQ=",
+        "state": "complete",
+        "scope_root_session_id": "c1c/disabled"
+      },
+      "accepted": false,
+      "reason": "The tombstone head must match the retained final record."
+    },
+    {
+      "name": "tombstone_session_reuse",
+      "tombstone": {
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "final_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "deleted_ms": 1800000000100,
+        "actor": {
+          "attributes": {
+            "content_id": "content/8c546a1d27abb36e501ebd79",
+            "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+            "size": 2,
+            "key_id": "key/04c18f8aa145f438",
+            "labels": {
+              "source": [],
+              "classification": "internal"
+            }
+          },
+          "subject_id": "local",
+          "subject_kind": "user",
+          "tenant_id": "default"
+        },
+        "key_id": "key/04c18f8aa145f438",
+        "signature": "AAECAwQ=",
+        "state": "complete",
+        "scope_root_session_id": "other"
+      },
+      "accepted": false,
+      "reason": "A forgotten session identity cannot be reused."
+    }
+  ],
+  "export_cases": [
+    {
+      "name": "skeleton_export",
+      "accepted": true,
+      "header": {
+        "line": "header",
+        "export_version": 1,
+        "storage_major": "S1",
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "head_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "content_mode": "skeleton"
+      },
+      "lines": [
+        {
+          "line": "record",
+          "storage_envelope": {
+            "schema_version": "S1",
+            "tenant_id": "default",
+            "session_id": "c1c/disabled",
+            "seq": 1,
+            "record_digest": "edefb10cf7c23bf5ee76fbd63a860b1f6bbdc93272510cc6b1c00e16f37776c1",
+            "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+            "writer_epoch": 7,
+            "created_ms": 1800000000000
+          },
+          "record": {
+            "attempt": null,
+            "feature_level": 1,
+            "kind": "session_created",
+            "operation_id": null,
+            "payload": {
+              "attributes": {
+                "content_id": "content/ac7d6458fd1a56c447897d9f",
+                "mac": "05e6ac3c8bd314db88034dc483283cf5c32a3b7ea1b65ac5bead2203eb19fc5e",
+                "size": 99,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              },
+              "parent_operation_id": null,
+              "parent_session_id": null,
+              "principal": {
+                "attributes": {
+                  "content_id": "content/8c546a1d27abb36e501ebd79",
+                  "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+                  "size": 2,
+                  "key_id": "key/04c18f8aa145f438",
+                  "labels": {
+                    "source": [],
+                    "classification": "internal"
+                  }
+                },
+                "subject_id": "local",
+                "subject_kind": "user",
+                "tenant_id": "default"
+              },
+              "workspace": {
+                "content_id": "content/21bc628377d20260e2f8add6",
+                "mac": "aa39d1dcc71a5b472d63ebae29479edb4a441f7af2933ab731c1f5cecc460d99",
+                "size": 10,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              }
+            },
+            "record_id": "session/c1c/disabled/created",
+            "schema_version": "S1",
+            "session_id": "c1c/disabled",
+            "turn_id": null
+          }
+        },
+        {
+          "line": "inbox",
+          "input_seq": 1,
+          "received_ms": 1800000000001,
+          "consumed_seq": null,
+          "input": {
+            "actor": {
+              "attributes": {
+                "content_id": "content/bd3dc97b1f986f78cbeafb67",
+                "mac": "0f9878604e7c093f59b711aea32ff7f2b6d1aabbaeaff631158242dd4f3581d6",
+                "size": 2,
+                "key_id": "key/412d5980f170617f",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              },
+              "subject_id": "initial",
+              "subject_kind": "user",
+              "tenant_id": "default"
+            },
+            "admission_proof": null,
+            "available_ms": 0,
+            "feature_level": 1,
+            "generation": null,
+            "input_id": "initial",
+            "kind": "user",
+            "payload": {
+              "content": {
+                "content_id": "content/511f47d6509caa6bac3d6053",
+                "mac": "15f106bc8fc07649de45754ff9e89e5c583896020109338e65cad9c1344090ae",
+                "size": 4,
+                "key_id": "key/412d5980f170617f",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              }
+            },
+            "schema_version": "S1",
+            "target_turn_id": null
+          }
+        },
+        {
+          "line": "checkpoint",
+          "seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+          "key_id": "ledger/key-1",
+          "signature": "AAECAwQ=",
+          "signed_ms": 1800000000000
+        },
+        {
+          "line": "manifest",
+          "record_lines": 1,
+          "inbox_lines": 1,
+          "checkpoint_lines": 1,
+          "head_seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b"
+        }
+      ],
+      "reason": null
+    },
+    {
+      "name": "explicit_content_export",
+      "accepted": true,
+      "header": {
+        "line": "header",
+        "export_version": 1,
+        "storage_major": "S1",
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "head_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "content_mode": "include-content"
+      },
+      "lines": [
+        {
+          "line": "record",
+          "storage_envelope": {
+            "schema_version": "S1",
+            "tenant_id": "default",
+            "session_id": "c1c/disabled",
+            "seq": 1,
+            "record_digest": "edefb10cf7c23bf5ee76fbd63a860b1f6bbdc93272510cc6b1c00e16f37776c1",
+            "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+            "writer_epoch": 7,
+            "created_ms": 1800000000000
+          },
+          "record": {
+            "attempt": null,
+            "feature_level": 1,
+            "kind": "session_created",
+            "operation_id": null,
+            "payload": {
+              "attributes": {
+                "content_id": "content/ac7d6458fd1a56c447897d9f",
+                "mac": "05e6ac3c8bd314db88034dc483283cf5c32a3b7ea1b65ac5bead2203eb19fc5e",
+                "size": 99,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              },
+              "parent_operation_id": null,
+              "parent_session_id": null,
+              "principal": {
+                "attributes": {
+                  "content_id": "content/8c546a1d27abb36e501ebd79",
+                  "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+                  "size": 2,
+                  "key_id": "key/04c18f8aa145f438",
+                  "labels": {
+                    "source": [],
+                    "classification": "internal"
+                  }
+                },
+                "subject_id": "local",
+                "subject_kind": "user",
+                "tenant_id": "default"
+              },
+              "workspace": {
+                "content_id": "content/21bc628377d20260e2f8add6",
+                "mac": "aa39d1dcc71a5b472d63ebae29479edb4a441f7af2933ab731c1f5cecc460d99",
+                "size": 10,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              }
+            },
+            "record_id": "session/c1c/disabled/created",
+            "schema_version": "S1",
+            "session_id": "c1c/disabled",
+            "turn_id": null
+          }
+        },
+        {
+          "line": "inbox",
+          "input_seq": 1,
+          "received_ms": 1800000000001,
+          "consumed_seq": null,
+          "input": {
+            "actor": {
+              "attributes": {
+                "content_id": "content/bd3dc97b1f986f78cbeafb67",
+                "mac": "0f9878604e7c093f59b711aea32ff7f2b6d1aabbaeaff631158242dd4f3581d6",
+                "size": 2,
+                "key_id": "key/412d5980f170617f",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              },
+              "subject_id": "initial",
+              "subject_kind": "user",
+              "tenant_id": "default"
+            },
+            "admission_proof": null,
+            "available_ms": 0,
+            "feature_level": 1,
+            "generation": null,
+            "input_id": "initial",
+            "kind": "user",
+            "payload": {
+              "content": {
+                "content_id": "content/511f47d6509caa6bac3d6053",
+                "mac": "15f106bc8fc07649de45754ff9e89e5c583896020109338e65cad9c1344090ae",
+                "size": 4,
+                "key_id": "key/412d5980f170617f",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              }
+            },
+            "schema_version": "S1",
+            "target_turn_id": null
+          }
+        },
+        {
+          "line": "content",
+          "content_id": "content/21bc628377d20260e2f8add6",
+          "key_id": "key/04c18f8aa145f438",
+          "slot": "fixture.content",
+          "decoded_value": "/fixture"
+        },
+        {
+          "line": "checkpoint",
+          "seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+          "key_id": "ledger/key-1",
+          "signature": "AAECAwQ=",
+          "signed_ms": 1800000000000
+        },
+        {
+          "line": "manifest",
+          "record_lines": 1,
+          "inbox_lines": 1,
+          "checkpoint_lines": 1,
+          "head_seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b"
+        }
+      ],
+      "reason": null
+    },
+    {
+      "name": "unknown_content_mode",
+      "accepted": false,
+      "header": {
+        "line": "header",
+        "export_version": 1,
+        "storage_major": "S1",
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "head_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "content_mode": "body"
+      },
+      "lines": [
+        {
+          "line": "manifest",
+          "record_lines": 1,
+          "inbox_lines": 1,
+          "checkpoint_lines": 1,
+          "head_seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b"
+        }
+      ],
+      "reason": "content_mode is closed."
+    },
+    {
+      "name": "skeleton_export_contains_content",
+      "accepted": false,
+      "header": {
+        "line": "header",
+        "export_version": 1,
+        "storage_major": "S1",
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "head_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "content_mode": "skeleton"
+      },
+      "lines": [
+        {
+          "line": "record",
+          "storage_envelope": {
+            "schema_version": "S1",
+            "tenant_id": "default",
+            "session_id": "c1c/disabled",
+            "seq": 1,
+            "record_digest": "edefb10cf7c23bf5ee76fbd63a860b1f6bbdc93272510cc6b1c00e16f37776c1",
+            "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+            "writer_epoch": 7,
+            "created_ms": 1800000000000
+          },
+          "record": {
+            "attempt": null,
+            "feature_level": 1,
+            "kind": "session_created",
+            "operation_id": null,
+            "payload": {
+              "attributes": {
+                "content_id": "content/ac7d6458fd1a56c447897d9f",
+                "mac": "05e6ac3c8bd314db88034dc483283cf5c32a3b7ea1b65ac5bead2203eb19fc5e",
+                "size": 99,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              },
+              "parent_operation_id": null,
+              "parent_session_id": null,
+              "principal": {
+                "attributes": {
+                  "content_id": "content/8c546a1d27abb36e501ebd79",
+                  "mac": "ec028c3dccde3e38ea801619f2737e69ebc1b3e52e52b7f372f92456a5dc03b9",
+                  "size": 2,
+                  "key_id": "key/04c18f8aa145f438",
+                  "labels": {
+                    "source": [],
+                    "classification": "internal"
+                  }
+                },
+                "subject_id": "local",
+                "subject_kind": "user",
+                "tenant_id": "default"
+              },
+              "workspace": {
+                "content_id": "content/21bc628377d20260e2f8add6",
+                "mac": "aa39d1dcc71a5b472d63ebae29479edb4a441f7af2933ab731c1f5cecc460d99",
+                "size": 10,
+                "key_id": "key/04c18f8aa145f438",
+                "labels": {
+                  "source": [],
+                  "classification": "internal"
+                }
+              }
+            },
+            "record_id": "session/c1c/disabled/created",
+            "schema_version": "S1",
+            "session_id": "c1c/disabled",
+            "turn_id": null
+          }
+        },
+        {
+          "line": "content",
+          "content_id": "content/21bc628377d20260e2f8add6",
+          "key_id": "key/04c18f8aa145f438",
+          "slot": "fixture.content",
+          "decoded_value": "/fixture"
+        },
+        {
+          "line": "checkpoint",
+          "seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+          "key_id": "ledger/key-1",
+          "signature": "AAECAwQ=",
+          "signed_ms": 1800000000000
+        },
+        {
+          "line": "manifest",
+          "record_lines": 1,
+          "inbox_lines": 1,
+          "checkpoint_lines": 1,
+          "head_seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b"
+        }
+      ],
+      "reason": "skeleton content_mode excludes content lines."
+    },
+    {
+      "name": "unsupported_export_version",
+      "accepted": false,
+      "header": {
+        "line": "header",
+        "export_version": 2,
+        "storage_major": "S1",
+        "tenant_id": "default",
+        "session_id": "c1c/disabled",
+        "head_seq": 1,
+        "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b",
+        "content_mode": "skeleton"
+      },
+      "lines": [
+        {
+          "line": "manifest",
+          "record_lines": 1,
+          "inbox_lines": 1,
+          "checkpoint_lines": 1,
+          "head_seq": 1,
+          "chain_digest": "7374eb38a4cc108eded05beb87e0990940c7727dd055bb2d3103a72b6c6aad7b"
+        }
+      ],
+      "reason": "Only export_version 1 is current."
+    }
+  ]
+}

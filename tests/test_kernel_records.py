@@ -6,25 +6,43 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 import vv_agent
 from vv_agent.kernel import _records as core
-from vv_agent.kernel._execution_values import AgentTask, SubAgentConfig
-from vv_agent.kernel._message_values import Message
-from vv_agent.kernel._model_settings import ModelSettings
-from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.session import records
 
 
+def content_ref(label: str = "content"):
+    payload = label.encode()
+    return {
+        "content_id": f"content/test/{label}",
+        "mac": sha256(payload).hexdigest(),
+        "size": len(payload),
+        "key_id": "key/test",
+        "labels": {"source": [], "classification": "internal"},
+    }
+
+
+def principal():
+    return {
+        "tenant_id": "default",
+        "subject_id": "p",
+        "subject_kind": "user",
+        "attributes": content_ref("principal"),
+    }
+
+
 @pytest.mark.parametrize("site_flags", [[], ["-S"]], ids=["normal", "no-site"])
-def test_records_import_and_task_decode_are_core_only(tmp_path, site_flags):
+def test_records_import_and_s1_encode_are_core_only(tmp_path, site_flags):
     source = Path(__file__).resolve().parents[1] / "src"
     script = """
 import importlib.abc
 import sys
+from hashlib import sha256
 sys.path.insert(0, sys.argv[1])
 class CoreOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -33,20 +51,26 @@ class CoreOnly(importlib.abc.MetaPathFinder):
                 or fullname.split(".")[0] in sys.stdlib_module_names), fullname
 sys.meta_path.insert(0, CoreOnly())
 from vv_agent.kernel import _records as r
-from vv_agent.kernel._execution_values import AgentTask
-from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
-spec = r.SessionSpec("s", "p", "w").record()
+def ref(label):
+    payload = label.encode()
+    return {"content_id": "content/" + label, "mac": sha256(payload).hexdigest(), "size": len(payload),
+            "key_id": "key/test", "labels": {"source": [], "classification": "internal"}}
+principal = {"tenant_id": "default", "subject_id": "p", "subject_kind": "user", "attributes": ref("principal")}
+spec = r.SessionSpec("s", principal, ref("workspace"), attributes=ref("attributes")).record()
 assert r.Record.parse(spec.encode()).digest == spec.digest
-assert r.InboxItem.parse(r.InboxItem("i", "user", {"content": "go"}).encode()).input_id == "i"
-task = AgentTask("t", "m", PromptBundle((PromptSection("system", "Answer."),)), "go")
-definition = {"task": task.to_dict()}
+item = r.InboxItem("i", "user", {"content": ref("go")}, actor=principal)
+assert r.InboxItem.parse(item.encode()).input_id == "i"
+definition = ref("definition")
 record = r.make_record("turn_started", session_id="s", turn_id="t", payload={
     "input_ids": [], "definition": definition, "definition_digest": r.digest(definition),
-    "handler_version": "1", "budget": {}, "binding": "task", "generation": 1,
+    "handler_version": "1", "budget": ref("budget"), "binding": "task", "generation": 1,
 })
-assert type(record._task()) is AgentTask
-assert record._task() is record._task()
-assert record.task().to_dict() == task.to_dict()
+try:
+    record._task()
+except r.RecordError as error:
+    assert str(error) == "S1 content hydration is unavailable in the producer/codec phase"
+else:
+    raise AssertionError("unhydrated S1 content decoded")
 assert all(name in {"vv_agent", "vv_agent.kernel"} or name.startswith("vv_agent.kernel.")
            for name in sys.modules if name.startswith("vv_agent"))
 """
@@ -111,37 +135,24 @@ def test_private_keys_defer_message_argument_validation():
 
 def test_record_freezes_but_inbox_reencodes_mutable_payload():
     source = {"nested": [1]}
-    created = core.SessionSpec("s", "p", "w").record()
+    created = core.SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")).record()
     record = replace(created, payload=created.payload | {"attributes": source})
-    source["nested"].append(2)
+    with pytest.raises(core.RecordError, match="invalid session schema"):
+        record.encode()
+    record = replace(created, payload=created.payload | {"attributes": content_ref("attributes-2")})
     body = record.encode()
-    source["nested"].append(3)
-    record.payload["attributes"]["nested"].clear()
     assert record.encode() is body
-    assert record.payload["attributes"] == {"nested": [1, 2]}
+    assert record.payload["attributes"] == content_ref("attributes-2")
     assert deepcopy(record) is record
-    item = core.InboxItem("i", "user", {"content": {"nested": [1]}})
+    item = core.InboxItem("i", "user", {"content": content_ref("nested")}, actor=principal())
     first = item.encode()
-    item.payload["content"]["nested"].append(2)
+    item = replace(item, payload={"content": content_ref("nested-2")})
     assert item.encode() != first
     assert core.InboxItem.parse(item.encode()).payload == item.payload
 
 
-def test_cached_core_task_remains_detached_at_every_mutable_boundary(monkeypatch):
-    task = AgentTask(
-        "t",
-        "m",
-        PromptBundle((PromptSection("system", "Answer."),)),
-        "go",
-        metadata={"nested": [1]},
-        initial_shared_state={"nested": [1]},
-        initial_messages=[Message("user", "before", metadata={"nested": [1]})],
-        sub_agents={"child": SubAgentConfig("m", "child", metadata={"nested": [1]})},
-        model_settings=ModelSettings(extra_body={"nested": [1]}),
-        extra_tool_names=["tool"],
-        exclude_tools=["excluded"],
-    )
-    definition = {"task": task.to_dict()}
+def test_unhydrated_content_never_falls_back_to_plaintext():
+    definition = content_ref("definition")
     record = core.make_record(
         "turn_started",
         session_id="s",
@@ -151,26 +162,72 @@ def test_cached_core_task_remains_detached_at_every_mutable_boundary(monkeypatch
             "definition": definition,
             "definition_digest": core.digest(definition),
             "handler_version": "1",
-            "budget": {},
+            "budget": content_ref("budget"),
             "binding": "task",
             "generation": 1,
         },
     )
-    cached = record._task()
-    assert type(cached) is AgentTask and record._task() is cached
-    expected = record.task().to_dict()
-    detached = record.task()
-    detached.metadata["nested"].clear()
-    detached.initial_shared_state["nested"].clear()
-    detached.initial_messages[0].metadata["nested"].clear()
-    detached.sub_agents["child"].metadata["nested"].clear()
-    assert detached.model_settings is not None and detached.model_settings.extra_body is not None
-    detached.model_settings.extra_body["nested"].clear()
-    detached.extra_tool_names.clear()
-    detached.exclude_tools.clear()
+    with pytest.raises(core.RecordError, match="content hydration is unavailable"):
+        record.task()
+    wrong = record.to_dict()
+    wrong["payload"]["definition"] = {"plaintext": "do not accept"}
+    with pytest.raises(core.RecordError, match="invalid session schema"):
+        core.Record(**wrong).encode()
 
-    def unexpected(*args, **kwargs):
-        raise AssertionError("cached core task must not be decoded again")
 
-    monkeypatch.setattr(AgentTask, "from_dict", unexpected)
-    assert record.task().to_dict() == expected
+def test_s1_builder_defaults_are_contract_defaults_only():
+    definition = content_ref("definition")
+    turn = core.make_record(
+        "turn_started",
+        session_id="s",
+        turn_id="t",
+        payload={
+            "input_ids": [],
+            "definition": definition,
+            "definition_digest": core.digest(definition),
+            "handler_version": "1",
+            "budget": content_ref("budget"),
+            "binding": None,
+            "generation": 0,
+        },
+    )
+    assert turn.payload["policy_digest"] is None
+    assert turn.payload["requirements"] == {"level": 1, "handler_version": "1", "capabilities": []}
+    assert turn.payload["tokenizer_binding"] is None
+    assert turn.payload["environment"] is None
+
+    request = content_ref("request")
+    planned = core.make_record(
+        "op_planned",
+        session_id="s",
+        turn_id="t",
+        operation_id="o",
+        attempt=1,
+        payload={
+            "op_kind": "tool",
+            "purpose": None,
+            "request": request,
+            "request_digest": core.digest(request),
+            "context_version": "1",
+            "dependencies": [],
+            "tool": content_ref("tool"),
+            "idempotency_key": None,
+            "budget_admission": content_ref("budget"),
+            "not_before_ms": None,
+            "provider_binding": None,
+            "consumed_unknowns": [],
+        },
+    )
+    assert planned.payload["policy_decision"] is None
+
+
+def test_inbox_s1_requires_actor_and_reference_form_without_fallback():
+    with pytest.raises(core.RecordError, match="requires a closed Principal"):
+        core.InboxItem("i", "user", {"content": content_ref("go")}).encode()
+    with pytest.raises(core.RecordError, match="invalid session schema"):
+        core.InboxItem("i", "user", {"content": "plaintext"}, actor=principal()).encode()
+
+
+def test_logical_seed_reference_never_silently_uses_seed_defaults():
+    with pytest.raises(core.RecordError, match="content hydration is unavailable"):
+        core.inherited_seed_policies(content_ref("attributes"))

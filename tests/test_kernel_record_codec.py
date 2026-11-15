@@ -1,9 +1,10 @@
-"""Real record producers share the pure codec and concise schema diagnostics."""
+"""The stdlib record codec accepts exactly the canonical contract 40 shapes."""
 
+import base64
 import json
-import runpy
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,26 @@ from vv_agent.kernel import _record_codec as codec
 from vv_agent.kernel import _record_schema as schemas
 from vv_agent.kernel import _records as core_records
 from vv_agent.session import records
+
+
+def ref(label: str = "content"):
+    payload = label.encode()
+    return {
+        "content_id": f"content/test/{label}",
+        "mac": sha256(payload).hexdigest(),
+        "size": len(payload),
+        "key_id": "key/test",
+        "labels": {"source": [], "classification": "internal"},
+    }
+
+
+def principal():
+    return {
+        "tenant_id": "default",
+        "subject_id": "p",
+        "subject_kind": "user",
+        "attributes": ref("principal"),
+    }
 
 
 @pytest.mark.parametrize("site_flags", [[], ["-S"]], ids=["normal", "no-site"])
@@ -80,22 +101,23 @@ def test_duplicate_unescaped_fields_keep_the_specific_error(parse):
 @pytest.mark.parametrize("parse", [records.Record.parse, records.InboxItem.parse])
 def test_schema_rejection_never_contains_customer_or_schema_details(parse):
     if parse.__self__ is records.Record:
-        value = records.SessionSpec("s", "p", "w").record().to_dict()
+        value = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().to_dict()
         value["payload"]["workspace"] = ["CUSTOMER_CONTENT"]
     else:
-        value = records.InboxItem("i", "user", {"content": "go"}).to_dict() | {"available_ms": "CUSTOMER_CONTENT"}
+        value = records.InboxItem("i", "user", {"content": ref("go")}, actor=principal()).to_dict() | {
+            "available_ms": "CUSTOMER_CONTENT"
+        }
     with pytest.raises(codec.RecordError, match=r"^invalid session schema$"):
         parse(json.dumps(value).encode())
 
 
-def test_record_and_inbox_keep_specific_semantic_and_settings_errors():
-    wire = records.SessionSpec("s", "p", "w").record().to_dict()
+def test_record_and_inbox_keep_specific_semantic_and_content_ref_errors():
+    wire = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().to_dict()
     wire["record_id"] = "wrong"
     with pytest.raises(codec.RecordError, match=r"^record_id does not match semantic position$"):
         records.Record.parse(json.dumps(wire).encode())
-    selection = {"model": "m", "route": {}, "model_settings": {"tool_choice": {"type": "function", "function": {"name": " "}}}}
-    with pytest.raises(codec.RecordError, match=r"^named tool_choice requires a non-empty function name$"):
-        records.InboxItem("i", "model_selection", {"selection": selection}).encode()
+    with pytest.raises(codec.RecordError, match=r"^invalid session schema$"):
+        records.InboxItem("i", "model_selection", {"selection": {"model": "m"}}, actor=principal()).encode()
 
 
 def test_canonical_rejection_keeps_precedence_and_original_cause():
@@ -109,56 +131,97 @@ def test_canonical_rejection_keeps_precedence_and_original_cause():
 
 @pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
 def test_accepted_bom_inputs_keep_canonical_bytes(encoding):
-    expected = records.SessionSpec("s", "p", "w").record().encode()
+    expected = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().encode()
     parsed = records.Record.parse(expected.decode().encode(encoding))
     assert parsed.encode() == expected
 
 
-def test_real_diagnostic_producer_is_deterministic():
-    script = Path(__file__).resolve().parents[1] / "scripts/record_codec_fixtures.py"
-    produce = runpy.run_path(str(script))["produce"]
-    first, second = produce(), produce()
-    assert first == second
-    assert first["app_server_error"] == {"code": -32603, "message": "invalid session schema"}
-    assert first["provider_reason"] == "provider_result_invalid"
-    assert first["model_selection_reason"] == "model_selection_unresolvable"
-    assert "CUSTOMER_CONTENT" not in json.dumps(first)
-
-
-def test_app_server_schema_errors_and_their_chains_do_not_dump_values(monkeypatch):
-    errors: list[BaseException] = []
-    original = core_records.validate
-
-    def observed(*args, **kwargs):
-        try:
-            original(*args, **kwargs)
-        except codec.RecordError as error:
-            errors.append(error)
-            raise
-
-    monkeypatch.setattr(core_records, "validate", observed)
-    script = Path(__file__).resolve().parents[1] / "scripts/record_codec_fixtures.py"
-    error = runpy.run_path(str(script))["app_server_error"]()
-    assert error == {"code": -32603, "message": "invalid session schema"}
-    assert errors
-    seen = set()
-    while errors:
-        current = errors.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        text = str(current) + repr(current.args) + repr(vars(current))
-        for excluded in ("CUSTOMER_CONTENT", "additionalProperties", "Failed validating", "properties"):
-            assert excluded not in text
-        errors.extend(e for e in (current.__cause__, current.__context__) if e is not None)
-
-
-def test_real_diagnostic_producer_matches_canonical_fixture():
+def test_all_canonical_record_and_inbox_vectors_are_real_codec_inputs():
     from support.contract import fixture_root
 
-    fixture = fixture_root() / "session_record_diagnostics.json"
-    if not fixture.is_file():
-        pytest.skip("Contract 39 fixture is pending adoption; set VV_AGENT_CONTRACT_SOURCE for preview coverage")
-    script = Path(__file__).resolve().parents[1] / "scripts/record_codec_fixtures.py"
-    actual = json.dumps(runpy.run_path(str(script))["produce"](), ensure_ascii=True, sort_keys=True, indent=2) + "\n"
-    assert actual.encode() == fixture.read_bytes()
+    corpus = json.loads((fixture_root() / "session_codec_vectors.json").read_text())
+    seen = {"record": 0, "inbox": 0}
+    for vector in corpus["vectors"]:
+        wire = vector.get("wire")
+        if wire is None:
+            continue
+        body = base64.b64decode(vector["bytes_base64"], validate=True)
+        codec_type = records.InboxItem if "actor" in wire else records.Record
+        parsed = codec_type.parse(body)
+        assert parsed.to_dict() == wire
+        assert parsed.encode() == body
+        seen["inbox" if codec_type is records.InboxItem else "record"] += 1
+    assert seen == {"record": 67, "inbox": 18}
+
+
+def test_all_canonical_codec_rejections_reject_without_historical_fallback():
+    from support.contract import fixture_root
+
+    corpus = json.loads((fixture_root() / "session_invalid.json").read_text())
+    rejected_layers = 0
+    for vector in corpus["vectors"]:
+        if vector["layer"] != "codec":
+            continue
+        body = base64.b64decode(vector["bytes_base64"], validate=True)
+        with pytest.raises(codec.RecordError):
+            records.Record.parse(body)
+        rejected_layers += 1
+    assert rejected_layers
+
+
+def test_trusted_storage_allocation_cases_are_enforced_by_the_python_codec():
+    from support.contract import fixture_root
+
+    fixture = json.loads((fixture_root() / "trusted_storage_s1.json").read_text())
+    assert fixture["status"] == "contract-allocation-only"
+    bases = {case["name"]: case["wire"] for case in fixture["accepted_cases"]}
+    for case in fixture["accepted_cases"]:
+        body = base64.b64decode(case["bytes_base64"], validate=True)
+        codec_type = records.InboxItem if "actor" in case["wire"] else records.Record
+        parsed = codec_type.parse(body)
+        assert parsed.to_dict() == case["wire"]
+        assert parsed.encode() == body
+    for case in fixture["rejected_cases"]:
+        wire = json.loads(json.dumps(bases[case["base"]]))
+        for patch in case["patch"]:
+            target = wire
+            for part in patch["path"][:-1]:
+                target = target[part]
+            if patch.get("delete"):
+                del target[patch["path"][-1]]
+            else:
+                target[patch["path"][-1]] = patch["set"]
+        codec_type = records.InboxItem if "actor" in wire else records.Record
+        with pytest.raises(codec.RecordError):
+            codec_type.parse(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def test_chain_digest_is_not_part_of_logical_record_identity():
+    wire = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().to_dict()
+    wire["chain_digest"] = "0" * 64
+    with pytest.raises(codec.RecordError, match="invalid session schema"):
+        records.Record.parse(json.dumps(wire).encode())
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, True])
+def test_removed_record_versions_have_no_decoder(version):
+    wire = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().to_dict()
+    wire["schema_version"] = version
+    with pytest.raises(codec.RecordError, match="invalid session schema"):
+        records.Record.parse(json.dumps(wire).encode())
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, True])
+def test_removed_inbox_versions_have_no_decoder(version):
+    wire = records.InboxItem("i", "user", {"content": ref("go")}, actor=principal()).to_dict()
+    wire["schema_version"] = version
+    with pytest.raises(codec.RecordError, match="invalid session schema"):
+        records.InboxItem.parse(json.dumps(wire).encode())
+
+
+@pytest.mark.parametrize("field", ["workspace", "attributes"])
+def test_creation_content_slots_reject_plaintext(field):
+    wire = records.SessionSpec("s", principal(), ref("workspace"), attributes=ref("attributes")).record().to_dict()
+    wire["payload"][field] = {"plaintext": "CUSTOMER_CONTENT"}
+    with pytest.raises(codec.RecordError, match="invalid session schema"):
+        records.Record.parse(json.dumps(wire).encode())

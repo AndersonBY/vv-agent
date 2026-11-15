@@ -1,37 +1,74 @@
+from hashlib import sha256
 from typing import Any
 
 from vv_agent.session.records import InboxItem, Record, digest, make_record
 
 
+def content_ref(label: str = "content") -> dict[str, Any]:
+    """Deterministic ContentRef double; no plaintext is stored in the skeleton."""
+    payload = label.encode("utf-8")
+    return {
+        "content_id": f"content/test/{label}",
+        "mac": sha256(payload).hexdigest(),
+        "size": len(payload),
+        "key_id": "key/test",
+        "labels": {"source": [], "classification": "internal"},
+    }
+
+
+def principal(subject_id: str = "p", subject_kind: str = "user") -> dict[str, Any]:
+    return {
+        "tenant_id": "default",
+        "subject_id": subject_id,
+        "subject_kind": subject_kind,
+        "attributes": content_ref(f"principal/{subject_id}"),
+    }
+
+
 def item(input_id: str = "i", kind: str = "user", **kw: Any) -> InboxItem:
-    payload = {"content": "hello"}
+    payload = {"content": content_ref("hello")}
     if kind == "control":
         payload = {"action": kw.pop("action", "cancel")}
-    return InboxItem(input_id=input_id, kind=kind, payload=payload, **kw)
+    actor = kw.pop("actor", principal(input_id, "service" if kind == "provider_evidence" else "user"))
+    admission_proof = kw.pop("admission_proof", None)
+    return InboxItem(
+        input_id=input_id,
+        kind=kind,
+        payload=payload,
+        actor=actor,
+        admission_proof=admission_proof,
+        **kw,
+    )
 
 
 def record(kind: str, *, sid: str = "s", tid: str = "t", oid: str = "o", attempt: int = 1, **kw: Any) -> Record:
-    request = {"messages": []}
+    request = content_ref("request")
+    result = content_ref("result")
     payloads: dict[str, dict[str, Any]] = {
         "session_created": {
-            "principal": "p",
-            "workspace": "w",
+            "principal": principal(),
+            "workspace": content_ref("workspace"),
             "parent_session_id": None,
             "parent_operation_id": None,
-            "attributes": {},
+            "attributes": content_ref("attributes"),
         },
         "turn_started": {
             "input_ids": [],
-            "definition": {},
-            "definition_digest": digest({}),
+            "definition": content_ref("definition"),
+            "definition_digest": digest(content_ref("definition")),
             "handler_version": "1",
-            "budget": {},
+            "budget": content_ref("budget"),
             "binding": "task",
             "generation": 1,
+            "policy_digest": None,
+            "requirements": {"level": 1, "handler_version": "1", "capabilities": []},
+            "tokenizer_binding": None,
+            "environment": None,
         },
         "input_applied": {
             "input": item().to_dict(),
             "input_digest": digest(item().to_dict()),
+            "input_proof": None,
             "disposition": "applied",
             "reason": None,
             "target_operation_id": None,
@@ -47,10 +84,11 @@ def record(kind: str, *, sid: str = "s", tid: str = "t", oid: str = "o", attempt
             "dependencies": [],
             "tool": None,
             "idempotency_key": "key",
-            "budget_admission": {},
+            "budget_admission": content_ref("budget-admission"),
             "not_before_ms": None,
             "provider_binding": "provider",
             "consumed_unknowns": [],
+            "policy_decision": None,
         },
         "op_started": {"dispatch_id": "d", "authorization_version": "v1", "epoch": 1, "mode": "sync"},
         "op_parked": {
@@ -58,53 +96,60 @@ def record(kind: str, *, sid: str = "s", tid: str = "t", oid: str = "o", attempt
             "handle": {
                 "kind": "provider",
                 "provider": "provider",
-                "job_id": "job",
+                "job_id": content_ref("job"),
                 "operation_id": oid,
                 "attempt": attempt,
                 "request_digest": digest(request),
-                "evidence": "accepted",
-                "query_ref": "query",
+                "evidence": content_ref("evidence"),
+                "query_ref": content_ref("query"),
                 "cancel_ref": None,
             },
             "poll_at_ms": None,
             "deadline_ms": None,
         },
         "op_completed": {
-            "result": {"ok": True},
-            "result_digest": digest({"ok": True}),
-            "usage": {},
+            "result": result,
+            "result_digest": digest(result),
+            "usage": content_ref("usage"),
             "shared_state": None,
-            "evidence": ["accepted"],
+            "evidence": content_ref("evidence"),
             "execution_started": True,
             "context": "normal",
             "request_digest": digest(request),
             "provider_binding": "provider",
+            "policy_decision": None,
         },
         "op_unknown": {
-            "reason": "lost",
-            "dispatch_evidence": ["d"],
-            "observation": {},
+            "reason": content_ref("lost"),
+            "dispatch_evidence": content_ref("dispatch"),
+            "observation": content_ref("observation"),
             "retry": "retry",
             "retry_at_ms": 0,
             "duplicate_cost_risk": True,
             "measurement_missing": True,
         },
         "context_compacted": {
-            "source_digest": digest({}),
+            "source_digest": digest(content_ref("source")),
             "prefix_ids": [],
             "tail_ids": [],
             "mode": "micro",
             "summary_operation_id": None,
             "replacement": [],
-            "evidence_manifest": {},
+            "evidence_manifest": content_ref("manifest"),
         },
-        "usage_observed": {"meter_id": "m", "observation": 1, "mode": "cumulative", "usage": {}, "source": "host"},
+        "usage_observed": {
+            "meter_id": "m",
+            "observation": 1,
+            "mode": "cumulative",
+            "usage": content_ref("usage"),
+            "source": content_ref("host"),
+        },
         "turn_ended": {
             "status": "completed",
             "reason": None,
-            "result": {},
+            "result": None,
             "adopted_results": [],
-            "budget": {},
+            "budget": content_ref("budget"),
             "unconfirmed_operations": [],
         },
     }
@@ -124,9 +169,5 @@ def base() -> list[Record]:
 
 
 def runtime_turn_record(tid: str = "t") -> Record:
-    """Transaction probes under the new default still need a real frozen task."""
-    from .test_recovery_matrix import runtime
-
-    rt = runtime(None, [])
-    definition = rt.definition(rt.compile("go", tid))
-    return record("turn_started", tid=tid, definition=definition, definition_digest=digest(definition))
+    """Keep transaction probes at the logical boundary until hydration lands."""
+    return record("turn_started", tid=tid)
