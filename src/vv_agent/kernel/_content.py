@@ -8,7 +8,7 @@ persist atomically. Identifier fields are opaque, non-empty strings.
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -17,7 +17,18 @@ from typing import Any, Protocol, cast, runtime_checkable
 from ._canonical_json import canonical_json_bytes
 from ._record_codec import RecordError, validate
 from ._record_schema import CONTENT_LABELS, CONTENT_REF, PRINCIPAL
-from ._records import InboxItem, Record
+from ._records import InboxItem, Record, SessionSpec
+
+SESSION_PRINCIPAL_ATTRIBUTES = "session.principal.attributes"
+SESSION_WORKSPACE = "session.workspace"
+SESSION_ATTRIBUTES = "session.attributes"
+INPUT_CONTENT = "input.content"
+INPUT_SELECTION = "input.selection"
+INPUT_ACTOR_ATTRIBUTES = "input.actor.attributes"
+APPROVAL_SCOPE = "approval.scope"
+APPROVAL_REASON = "approval.reason"
+APPROVAL_METADATA = "approval.metadata"
+CHILD_RESULT = "child.result"
 
 
 class ContentErrorCode(StrEnum):
@@ -223,6 +234,45 @@ class ContentRef:
             key_id=payload["key_id"],
             labels=ContentLabels.from_dict(payload["labels"]),
         )
+
+
+@runtime_checkable
+class ContentSessionWriter(Protocol):
+    """Kernel-visible content operations already bound to one session transaction."""
+
+    def put_json(self, value: Any, *, labels: ContentLabels = ...) -> ContentRef: ...
+
+    def get_json(self, ref: ContentRef | Mapping[str, Any]) -> Any: ...
+
+    def copy_json_from(
+        self,
+        source: ContentSessionWriter,
+        ref: ContentRef | Mapping[str, Any],
+    ) -> ContentRef: ...
+
+    def service_principal(
+        self,
+        subject_id: str,
+        *,
+        attributes: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], ContentRef]: ...
+
+    def link_input_actor(self, input_id: str, ref: ContentRef) -> None: ...
+
+    def link_input_content(self, input_id: str, ref: ContentRef) -> None: ...
+
+    def link_child_result(self, input_id: str, ref: ContentRef) -> None: ...
+
+    def assert_input(self, input_id: str, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef: ...
+
+    def assert_record(self, record_seq: int, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef: ...
+
+    def create_session(
+        self,
+        spec_factory: Callable[[ContentSessionWriter], SessionSpec],
+        *,
+        consumers: tuple[str, ...],
+    ) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,6 +828,16 @@ class ExportDocument:
 
 
 __all__ = [
+    "APPROVAL_METADATA",
+    "APPROVAL_REASON",
+    "APPROVAL_SCOPE",
+    "CHILD_RESULT",
+    "INPUT_ACTOR_ATTRIBUTES",
+    "INPUT_CONTENT",
+    "INPUT_SELECTION",
+    "SESSION_ATTRIBUTES",
+    "SESSION_PRINCIPAL_ATTRIBUTES",
+    "SESSION_WORKSPACE",
     "Classification",
     "ContentBinding",
     "ContentBindingMismatch",
@@ -788,6 +848,7 @@ __all__ = [
     "ContentLifecycleError",
     "ContentLinkConflict",
     "ContentRef",
+    "ContentSessionWriter",
     "ContentStoreError",
     "ContentUnavailable",
     "ExportContentMode",

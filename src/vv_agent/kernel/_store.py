@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from vv_agent.kernel._state import ExecutionState
 
+from vv_agent.kernel._content import ContentSessionWriter
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 
 DEFAULT_TENANT_ID = "default"
@@ -138,6 +139,13 @@ class SessionTx(Protocol):
     ) -> CommitReceipt: ...
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None: ...
     def ack(self, batch: ConsumerBatch) -> None: ...
+
+
+@runtime_checkable
+class ContentSessionTx(SessionTx, Protocol):
+    """A session transaction with an explicitly bound trusted-content capability."""
+
+    def content_writer(self, *, tenant_id: str, session_id: str) -> ContentSessionWriter: ...
 
 
 class SessionStore(Protocol):

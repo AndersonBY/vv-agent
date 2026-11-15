@@ -36,6 +36,7 @@ from .content_runtime import (
     durable_content_reader,
     read_input_json,
     read_record_json,
+    wrap_session_content_store,
 )
 from .content_store import LocalKeyProvider
 from .context import project_context
@@ -80,6 +81,7 @@ class SessionDriver:
         self.uses_development_content_key_provider = content_key_provider is None and bound_provider is None
         self.content_key_provider = content_key_provider or bound_provider or LocalKeyProvider(secrets.token_bytes(32))
         bind_content_key_provider(self._root_store, self.content_key_provider)
+        self.store = wrap_session_content_store(self.store, self.content_key_provider)
         self.path = self._root_store.path if isinstance(self._root_store, CoreSQLiteStore) else None
         if (
             isinstance(self._root_store, CoreSQLiteStore)

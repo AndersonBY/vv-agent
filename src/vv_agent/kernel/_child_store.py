@@ -8,11 +8,17 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import ContentRef, Principal
+from vv_agent.kernel._content import (
+    CHILD_RESULT,
+    INPUT_ACTOR_ATTRIBUTES,
+    SESSION_ATTRIBUTES,
+    ContentRef,
+    Principal,
+)
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._state import child_handles as child_handles
-from vv_agent.kernel._store import SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._store import ContentSessionTx, SessionStore, SessionTx, StoredRecord
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
 
 
@@ -49,9 +55,9 @@ def _store_tenant_id(store: SessionStore) -> str:
 
 
 def _content_writer(tx: SessionTx, *, tenant_id: str, session_id: str):
-    from vv_agent.session.content_runtime import SessionContentWriter
-
-    return SessionContentWriter.bind(tx, tenant_id=tenant_id, session_id=session_id)
+    if not isinstance(tx, ContentSessionTx):
+        raise ValueError("trusted child content requires an explicit transaction capability")
+    return tx.content_writer(tenant_id=tenant_id, session_id=session_id)
 
 
 @dataclass(frozen=True)
@@ -236,7 +242,6 @@ def child_delivery(
         raise ValueError("child delivery requires a parent session")
     child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=session_id)
     parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=parent_id)
-    from vv_agent.session.content_runtime import SESSION_ATTRIBUTES
 
     attributes_ref = created.payload["attributes"]
     if is_content_ref(attributes_ref):
@@ -285,16 +290,10 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
     created = created_stored.record
     created_attributes_ref = created.payload["attributes"]
     if is_content_ref(created_attributes_ref):
-        from vv_agent.session.content_runtime import SESSION_ATTRIBUTES, read_record_json
-
-        created_attributes = read_record_json(
-            store,
-            tenant_id=_store_tenant_id(store),
-            session_id=p["session_id"],
-            record_seq=created_stored.seq,
-            ref=created_attributes_ref,
-            slot=SESSION_ATTRIBUTES,
-        )
+        with store.atomic() as tx:
+            writer = _content_writer(tx, tenant_id=_store_tenant_id(store), session_id=p["session_id"])
+            writer.assert_record(created_stored.seq, created_attributes_ref, SESSION_ATTRIBUTES)
+            created_attributes = writer.get_json(created_attributes_ref)
     else:
         created_attributes = created_attributes_ref
     if (
@@ -319,8 +318,6 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
         return None
     tenant_id = _store_tenant_id(store)
     with store.atomic() as tx:
-        from vv_agent.session.content_runtime import CHILD_RESULT, INPUT_ACTOR_ATTRIBUTES
-
         parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=parent_id)
         child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=p["session_id"])
         if item.actor is None:

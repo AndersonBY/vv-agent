@@ -214,7 +214,7 @@ def test_child_admission_copies_parent_content_into_child_key_and_links(tmp_path
                 attempt=1,
             ),
         )
-        with store.atomic() as tx:
+        with driver.store.atomic() as tx:
             handle = create_child(tx, child, plan, generation=1)
 
         assert handle["session_id"] == "child"
@@ -255,5 +255,35 @@ def test_child_admission_copies_parent_content_into_child_key_and_links(tmp_path
             ),
             "foreign task",
         )
-        with pytest.raises(ValueError, match="transaction tenant"), store.atomic() as tx:
+        with pytest.raises(ValueError, match="transaction tenant"), driver.store.atomic() as tx:
             create_child(tx, cross_tenant, plan, generation=1)
+
+
+def test_child_admission_rejects_transaction_without_content_capability(tmp_path: Path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY)
+    with SQLiteStore.standalone(str(tmp_path / "child-capability.sqlite")) as store:
+        store.install_schema()
+        driver = SessionDriver(store=store, content_key_provider=provider)
+        driver.create("parent", "/workspace", {"seed": {}})
+        parent_creation = store.read("parent", limit=1).records[0].record
+        child = ChildSession(
+            SessionSpec(
+                "child",
+                parent_creation.payload["principal"],
+                parent_creation.payload["workspace"],
+                attributes={},
+            ),
+            "child task",
+        )
+        plan = cast(
+            Record,
+            SimpleNamespace(
+                session_id="parent",
+                turn_id="parent/turn/start",
+                operation_id="operation-a",
+                attempt=1,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="transaction capability"), store.atomic() as tx:
+            create_child(tx, child, plan, generation=1)

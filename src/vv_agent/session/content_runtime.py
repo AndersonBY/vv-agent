@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import (
+    APPROVAL_METADATA,
+    APPROVAL_REASON,
+    APPROVAL_SCOPE,
+    CHILD_RESULT,
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    INPUT_SELECTION,
+    SESSION_ATTRIBUTES,
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    SESSION_WORKSPACE,
     Classification,
     ContentLabels,
     ContentRef,
+    ContentSessionWriter,
     KeyProvider,
     Principal,
     SourceKind,
@@ -19,22 +31,21 @@ from vv_agent.kernel._content import (
 from vv_agent.kernel._content_store import DurableContentStore
 from vv_agent.kernel._records import Record, SessionSpec
 from vv_agent.kernel._sql import SQLSessionTx
-from vv_agent.kernel._store import Conflict, CreateReceipt, SessionStore, SessionTx
+from vv_agent.kernel._store import (
+    CommitReceipt,
+    Conflict,
+    ConsumerBatch,
+    ContentSessionTx,
+    CreateReceipt,
+    InputReceipt,
+    Lease,
+    SessionStore,
+    SessionTx,
+)
 
 from .content_store import SQLContentStore
 from .postgres import PostgresContentStore, PostgresStore
 from .sqlite import SQLiteContentStore, SQLiteStore
-
-SESSION_PRINCIPAL_ATTRIBUTES = "session.principal.attributes"
-SESSION_WORKSPACE = "session.workspace"
-SESSION_ATTRIBUTES = "session.attributes"
-INPUT_CONTENT = "input.content"
-INPUT_SELECTION = "input.selection"
-INPUT_ACTOR_ATTRIBUTES = "input.actor.attributes"
-APPROVAL_SCOPE = "approval.scope"
-APPROVAL_REASON = "approval.reason"
-APPROVAL_METADATA = "approval.metadata"
-CHILD_RESULT = "child.result"
 
 _SLOTS = frozenset(
     {
@@ -111,7 +122,7 @@ def read_record_json(
     tenant_id: str,
     session_id: str,
     record_seq: int,
-    ref: ContentRef | dict[str, Any],
+    ref: ContentRef | Mapping[str, Any],
     slot: str,
 ) -> Any:
     with store.atomic() as tx:
@@ -126,7 +137,7 @@ def read_input_json(
     tenant_id: str,
     session_id: str,
     input_id: str,
-    ref: ContentRef | dict[str, Any],
+    ref: ContentRef | Mapping[str, Any],
     slot: str,
 ) -> Any:
     with store.atomic() as tx:
@@ -201,6 +212,10 @@ class SessionContentWriter:
         session_id: str,
         key_provider: KeyProvider | None = None,
     ) -> SessionContentWriter:
+        if isinstance(tx, ContentSessionTx):
+            if key_provider is not None:
+                raise ValueError("provider is already bound by the transaction content capability")
+            return cast(SessionContentWriter, tx.content_writer(tenant_id=tenant_id, session_id=session_id))
         if not isinstance(tx, SQLSessionTx):
             raise ContentRuntimeUnavailable("content writes require a caller-owned SQL session transaction")
         provider = key_provider or content_key_provider_for(tx.store)
@@ -217,18 +232,18 @@ class SessionContentWriter:
     def put_json(self, value: Any, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
         return self.put_bytes(canonical_json_bytes(value), labels=labels)
 
-    def get_bytes(self, ref: ContentRef | dict[str, Any]) -> bytes:
+    def get_bytes(self, ref: ContentRef | Mapping[str, Any]) -> bytes:
         return self.durable.get(self.tenant_id, self.session_id, _content_ref(ref))
 
-    def get_json(self, ref: ContentRef | dict[str, Any]) -> Any:
+    def get_json(self, ref: ContentRef | Mapping[str, Any]) -> Any:
         try:
             return json.loads(self.get_bytes(ref))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("stored content is not JSON") from exc
 
-    def copy_json_from(self, source: SessionContentWriter, ref: ContentRef | dict[str, Any]) -> ContentRef:
+    def copy_json_from(self, source: ContentSessionWriter, ref: ContentRef | Mapping[str, Any]) -> ContentRef:
         parsed = _content_ref(ref)
-        return self.put_bytes(source.get_bytes(parsed), labels=parsed.labels)
+        return self.put_json(source.get_json(parsed), labels=parsed.labels)
 
     def service_principal(
         self,
@@ -263,7 +278,7 @@ class SessionContentWriter:
     def link_record(self, record_seq: int, ref: ContentRef, slot: str) -> None:
         self.durable.link_record(self.tenant_id, self.session_id, record_seq, ref, _slot(slot))
 
-    def assert_input(self, input_id: str, ref: ContentRef | dict[str, Any], slot: str) -> ContentRef:
+    def assert_input(self, input_id: str, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef:
         return self.durable.assert_link(
             self.tenant_id,
             self.session_id,
@@ -272,7 +287,7 @@ class SessionContentWriter:
             input_id=input_id,
         )
 
-    def assert_record(self, record_seq: int, ref: ContentRef | dict[str, Any], slot: str) -> ContentRef:
+    def assert_record(self, record_seq: int, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef:
         return self.durable.assert_link(
             self.tenant_id,
             self.session_id,
@@ -401,7 +416,96 @@ class SessionContentWriter:
             return receipt
 
 
-def _content_ref(value: ContentRef | dict[str, Any]) -> ContentRef:
+class _ContentSessionTxAdapter:
+    """Expose the session writer as an explicit kernel transaction capability."""
+
+    def __init__(self, tx: SessionTx, key_provider: KeyProvider) -> None:
+        if not isinstance(tx, SQLSessionTx):
+            raise ContentRuntimeUnavailable("content capability requires a caller-owned SQL transaction")
+        self._tx = tx
+        self._key_provider = key_provider
+
+    def content_writer(self, *, tenant_id: str, session_id: str):
+        return SessionContentWriter(
+            tx=self._tx,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            key_provider=self._key_provider,
+        )
+
+    def lock_session(self, session_id: str) -> None:
+        self._tx.lock_session(session_id)
+
+    def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
+        return self._tx.create(spec, consumers=consumers)
+
+    def push(self, session_id: str, item) -> InputReceipt:
+        return self._tx.push(session_id, item)
+
+    def append(
+        self,
+        session_id: str,
+        *,
+        lease: Lease,
+        expected_seq: int,
+        commit_id: str,
+        records,
+        consume_input_ids: tuple[str, ...] = (),
+        expected_inbox_seq: int | None = None,
+    ) -> CommitReceipt:
+        return self._tx.append(
+            session_id,
+            lease=lease,
+            expected_seq=expected_seq,
+            commit_id=commit_id,
+            records=records,
+            consume_input_ids=consume_input_ids,
+            expected_inbox_seq=expected_inbox_seq,
+        )
+
+    def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None:
+        return self._tx.consumer_batch(session_id, consumer, limit=limit)
+
+    def ack(self, batch: ConsumerBatch) -> None:
+        self._tx.ack(batch)
+
+
+class _ContentSessionStoreAdapter:
+    """Decorate a tenant store so every transaction carries content capability."""
+
+    def __init__(self, store: SessionStore, key_provider: KeyProvider) -> None:
+        self._store = store
+        self._key_provider = key_provider
+
+    @property
+    def _root(self):
+        return _root_store(self._store)
+
+    def for_tenant(self, tenant_id: str) -> SessionStore:
+        return cast(SessionStore, _ContentSessionStoreAdapter(self._store.for_tenant(tenant_id), self._key_provider))
+
+    @contextmanager
+    def heartbeat_store(self) -> Iterator[SessionStore]:
+        with self._store.heartbeat_store() as store:
+            yield cast(SessionStore, _ContentSessionStoreAdapter(store, self._key_provider))
+
+    @contextmanager
+    def atomic(self) -> Iterator[SessionTx]:
+        with self._store.atomic() as tx:
+            yield cast(SessionTx, _ContentSessionTxAdapter(tx, self._key_provider))
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+
+def wrap_session_content_store(store: SessionStore, key_provider: KeyProvider) -> SessionStore:
+    if isinstance(store, _ContentSessionStoreAdapter):
+        store._key_provider = key_provider
+        return store
+    return cast(SessionStore, _ContentSessionStoreAdapter(store, key_provider))
+
+
+def _content_ref(value: ContentRef | Mapping[str, Any]) -> ContentRef:
     return value if isinstance(value, ContentRef) else ContentRef.from_dict(value)
 
 
@@ -426,4 +530,5 @@ __all__ = [
     "durable_content_store",
     "read_input_json",
     "read_record_json",
+    "wrap_session_content_store",
 ]
