@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, contextmanager
+from dataclasses import replace
 from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
@@ -18,13 +19,58 @@ from vv_agent.kernel._content_publication import (
     resolve_record_content_links,
 )
 from vv_agent.kernel._execution_values import AgentTask
-from vv_agent.kernel._hydration import ContentReader, MissingContentLink, SessionHydrator
+from vv_agent.kernel._hydration import (
+    ContentReader,
+    DefinitionContent,
+    IntegrityFailure,
+    MissingContentLink,
+    SessionHydrator,
+    TypedSchemaFailure,
+)
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx
 from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, SessionStore, SessionTx, StoredRecord
+
+_RECORD_CONTENT_PATHS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("session_created", SESSION_ATTRIBUTES): ("attributes",),
+    ("turn_started", "definition"): ("definition",),
+    ("turn_started", "budget"): ("budget",),
+    ("op_planned", "request"): ("request",),
+    ("op_planned", "tool"): ("tool",),
+    ("op_planned", "budget_admission"): ("budget_admission",),
+    ("op_planned", "hook_result"): ("budget_admission", "hook_result"),
+    ("op_planned", "shared_state"): ("budget_admission", "shared_state"),
+    ("op_prepared", "request"): ("request",),
+    ("op_prepared", "tool"): ("tool",),
+    ("op_prepared", "hook_result"): ("hook_result",),
+    ("op_prepared", "shared_state"): ("shared_state",),
+    ("op_parked", "provider_handle_job_id"): ("handle", "job_id"),
+    ("op_parked", "provider_handle_evidence"): ("handle", "evidence"),
+    ("op_parked", "provider_handle_query_ref"): ("handle", "query_ref"),
+    ("op_parked", "provider_handle_cancel_ref"): ("handle", "cancel_ref"),
+    ("op_parked", "approval_scope"): ("handle", "scope"),
+    ("op_parked", "user_question"): ("handle", "question"),
+    ("op_parked", "interaction_result"): ("interaction_result",),
+    ("op_parked", "delegation_agent_name"): ("delegation", "agent_name"),
+    ("op_parked", "delegation_metadata"): ("delegation", "metadata"),
+    ("op_completed", "result"): ("result",),
+    ("op_completed", "usage"): ("usage",),
+    ("op_completed", "shared_state"): ("shared_state",),
+    ("op_completed", "evidence"): ("evidence",),
+    ("op_unknown", "op_unknown_reason"): ("reason",),
+    ("op_unknown", "op_unknown_dispatch_evidence"): ("dispatch_evidence",),
+    ("op_unknown", "op_unknown_observation"): ("observation",),
+    ("turn_ended", "turn_ended_reason"): ("reason",),
+    ("turn_ended", "turn_ended_result"): ("result",),
+    ("turn_ended", "turn_ended_budget"): ("budget",),
+    ("usage_observed", "usage"): ("usage",),
+    ("usage_observed", "usage_source"): ("source",),
+    ("boundary_recorded", "shared_state"): ("data", "shared_state"),
+}
+_PREPARED_PLAN_CONTENT_SLOTS = frozenset({"request", "tool", "hook_result", "shared_state"})
 
 
 class DriverLeaseScope(Protocol):
@@ -53,6 +99,7 @@ class CoreDriver:
         self._fold_factory, self._clock = fold_factory, clock
         self._observe_cost, self._hook, self._emit_phase = observe_cost, hook, emit_phase
         self.content_reader = content_reader
+        self._hydrators: dict[int, SessionHydrator] = {}
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
         self.active_since = self.clock.monotonic_ns()
@@ -64,6 +111,7 @@ class CoreDriver:
 
     def load_state(self) -> None:
         self.state, self.records, self.watermark = self.store.read_state(self.sid)
+        self._stored_by_id = {stored.record.record_id: stored for stored in self.records}
         self.fold = self._fold_factory()
         self.fold.state = self.state
         self.fold.history = list(self.records)
@@ -95,6 +143,7 @@ class CoreDriver:
             consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
         )
         self.records += records
+        self._stored_by_id.update((stored.record.record_id, stored) for stored in records)
 
     def bind_turn(self) -> None:
         tid = self.state.active_turn_id
@@ -141,19 +190,24 @@ class CoreDriver:
     def hydrator_for(self, record_owner: int | str) -> SessionHydrator:
         """Create the one owner-scoped hydrator over this driver's session reader."""
 
-        reader, tenant_id = self._content_reader_binding()
-
         if type(record_owner) is int:
             if record_owner < 1:
                 raise ValueError("record_owner must be a positive record sequence or input id")
             owner = f"record:{record_owner}"
+            cached = self._hydrators.get(record_owner)
+            if cached is not None:
+                return cached
         elif isinstance(record_owner, str) and record_owner:
             if record_owner == self.sid:
                 raise ValueError("session_id cannot be used as a content owner")
             owner = record_owner if record_owner.startswith(("record:", "input:")) else f"input:{record_owner}"
         else:
             raise ValueError("record_owner must be a positive record sequence or input id")
-        return SessionHydrator(reader, tenant_id=tenant_id, session_id=self.sid, owner=owner)
+        reader, tenant_id = self._content_reader_binding()
+        hydrator = SessionHydrator(reader, tenant_id=tenant_id, session_id=self.sid, owner=owner)
+        if type(record_owner) is int:
+            self._hydrators[record_owner] = hydrator
+        return hydrator
 
     def _content_reader_binding(self) -> tuple[ContentReader, str]:
         reader = self.content_reader
@@ -178,42 +232,205 @@ class CoreDriver:
     def read_content_json(self, owner: str, slot: str, ref: ContentRef | dict[str, Any]) -> Any:
         """Read one already-linked JSON object through the bound content reader."""
 
-        parsed = ref if isinstance(ref, ContentRef) else ContentRef.from_dict(ref)
+        if owner.startswith("record:") and owner.removeprefix("record:").isdecimal():
+            hydrator = self.hydrator_for(int(owner.removeprefix("record:")))
+        elif owner.startswith("input:") and owner.removeprefix("input:"):
+            hydrator = self.hydrator_for(owner)
+        else:
+            raise RecordError("content owner must use a record sequence or input id")
+        try:
+            parsed = ref if isinstance(ref, ContentRef) else ContentRef.from_dict(ref)
+        except (TypeError, ValueError) as exc:
+            raise RecordError(f"S1 content slot {slot} requires a valid ContentRef") from exc
         reader, tenant_id = self._content_reader_binding()
-        body = reader.read(tenant_id, self.sid, owner, slot, parsed)
+        body = reader.read(tenant_id, self.sid, hydrator.binding[2], slot, parsed)
         if type(body) is not bytes or len(body) != parsed.size:
-            raise RecordError("S1 content reader returned bytes that do not match the reference")
+            raise IntegrityFailure(f"{slot} reader bytes do not match the ContentRef")
         try:
             value = json.loads(body)
             if canonical_json_bytes(value) != body:
                 raise ValueError("content is not canonical JSON")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RecordError("S1 content must be canonical JSON") from exc
+            raise TypedSchemaFailure(f"{slot} must be canonical JSON") from exc
         return value
 
+    def stored_record(self, record: Record) -> StoredRecord:
+        """Return the retained ledger row for one record identity."""
+
+        if not isinstance(record, Record):
+            raise TypeError("record must be a Record")
+        if record.session_id != self.sid:
+            raise RecordError("record belongs to another session")
+        stored = self._stored_by_id.get(record.record_id)
+        if stored is None:
+            raise RecordError(f"record is outside the retained ledger: {record.record_id}")
+        return stored
+
+    @staticmethod
+    def _content_field(record: Record, slot: str) -> Any:
+        try:
+            path = _RECORD_CONTENT_PATHS[(record.kind, slot)]
+        except KeyError:
+            raise RecordError(f"unknown content slot for {record.kind}: {slot}") from None
+        value: Any = record._payload
+        for part in path:
+            if type(value) is not dict or part not in value:
+                raise RecordError(f"missing content field for {record.kind}/{slot}: {'/'.join(path)}")
+            value = value[part]
+        return value
+
+    def _prepared_source_record(self, record: Record, slot: str) -> StoredRecord | None:
+        if record.kind != "op_planned" or slot not in _PREPARED_PLAN_CONTENT_SLOTS:
+            return None
+        if record.operation_id is None or record.attempt is None:
+            return None
+        operation = self.state.operations.get(record.operation_id)
+        attempt = operation.attempts.get(record.attempt) if operation is not None else None
+        if attempt is None or attempt.prepared is None:
+            return None
+        prepared = self.stored_record(attempt.prepared)
+        try:
+            value = self._content_field(attempt.prepared, slot)
+        except RecordError:
+            return None
+        return prepared if value == self._content_field(record, slot) else None
+
+    def record_content_ref(self, record: Record, slot: str) -> ContentRef | None:
+        """Return the declared reference for one record slot, preserving nulls."""
+
+        value = self._content_field(record, slot)
+        if value is None:
+            return None
+        try:
+            return ContentRef.from_dict(value)
+        except (TypeError, ValueError) as exc:
+            raise RecordError(f"content field requires a valid ContentRef: {record.kind}/{slot}") from exc
+
+    def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any:
+        """Hydrate one declared C field from the record that actually owns it."""
+
+        value = self._content_field(record, slot)
+        if value is None:
+            if ref is not None:
+                raise RecordError(f"content field disagrees with record payload: {record.kind}/{slot}")
+            return None
+        parsed = self.record_content_ref(record, slot)
+        assert parsed is not None
+        if isinstance(ref, ContentRef):
+            supplied = ref
+        else:
+            try:
+                supplied = ContentRef.from_dict(ref)
+            except (TypeError, ValueError) as exc:
+                raise RecordError(f"content field requires a valid ContentRef: {record.kind}/{slot}") from exc
+        if supplied != parsed or value != parsed.to_dict():
+            raise RecordError(f"content field disagrees with record payload: {record.kind}/{slot}")
+        owner = self._prepared_source_record(record, slot) or self.stored_record(record)
+        return self.read_content_json(f"record:{owner.seq}", slot, parsed)
+
+    def hydrate_plan(self, record: Record) -> Record:
+        """Hydrate one operation plan for dispatch without replacing retained state."""
+
+        value = record._payload
+        payload = value | {
+            "request": self.hydrate_record_field(record, "request", value["request"]),
+            "tool": self.hydrate_record_field(record, "tool", value["tool"]),
+        }
+        if type(payload["request"]) is not dict or (payload["tool"] is not None and type(payload["tool"]) is not dict):
+            raise RecordError("operation plan request/tool hydration has the wrong JSON shape")
+        operation = self.state.operations.get(record.operation_id or "")
+        attempt = operation.attempts.get(record.attempt) if operation is not None and record.attempt is not None else None
+        if attempt is not None and attempt.prepared is not None:
+            admission = value["budget_admission"]
+            if type(admission) is not dict:
+                raise RecordError("prepared operation budget admission must be an object")
+            admission = admission | {
+                "hook_result": self.hydrate_record_field(record, "hook_result", admission["hook_result"]),
+                "shared_state": self.hydrate_record_field(record, "shared_state", admission["shared_state"]),
+            }
+            if admission["hook_result"] is not None and type(admission["hook_result"]) is not dict:
+                raise RecordError("prepared hook result must be an object or null")
+            if type(admission["shared_state"]) is not dict:
+                raise RecordError("prepared shared state must be an object")
+            payload["budget_admission"] = admission
+        else:
+            payload["budget_admission"] = self.hydrate_record_field(record, "budget_admission", value["budget_admission"])
+            if type(payload["budget_admission"]) is not dict:
+                raise RecordError("operation budget admission must be an object")
+        return replace(record, payload=payload)
+
+    def hydrate_parked_wait(self, operation_id: str, attempt: int, wait: dict[str, Any]) -> dict[str, Any]:
+        """Hydrate the stored observation selected by the reducer for one attempt."""
+
+        stored = next(
+            (
+                row
+                for row in reversed(self.records)
+                if row.record.kind == "op_parked"
+                and row.record.operation_id == operation_id
+                and row.record.attempt == attempt
+                and row.record._payload == wait
+            ),
+            None,
+        )
+        if stored is None:
+            raise RecordError("parked wait is outside the retained ledger")
+        record = stored.record
+        payload = wait | {}
+        handle = payload.get("handle")
+        if type(handle) is not dict:
+            raise RecordError("parked wait handle must be an object")
+        handle = handle | {}
+        for key, slot in (
+            ("job_id", "provider_handle_job_id"),
+            ("evidence", "provider_handle_evidence"),
+            ("query_ref", "provider_handle_query_ref"),
+            ("cancel_ref", "provider_handle_cancel_ref"),
+            ("scope", "approval_scope"),
+            ("question", "user_question"),
+        ):
+            if key in handle:
+                handle[key] = self.hydrate_record_field(record, slot, handle[key])
+        payload["handle"] = handle
+        if "interaction_result" in payload:
+            payload["interaction_result"] = self.hydrate_record_field(record, "interaction_result", payload["interaction_result"])
+        delegation = payload.get("delegation")
+        if delegation is not None:
+            if type(delegation) is not dict:
+                raise RecordError("parked delegation must be an object")
+            delegation = delegation | {}
+            if "agent_name" in delegation:
+                delegation["agent_name"] = self.hydrate_record_field(record, "delegation_agent_name", delegation["agent_name"])
+            if "metadata" in delegation:
+                delegation["metadata"] = self.hydrate_record_field(record, "delegation_metadata", delegation["metadata"])
+            payload["delegation"] = delegation
+        return copy_json(payload)
+
+    def hydrated_definition(self, record: Record) -> DefinitionContent:
+        """Hydrate a frozen turn definition through the typed definition parser."""
+
+        stored = self.stored_record(record)
+        ref = self.record_content_ref(record, "definition")
+        if ref is None:
+            raise RecordError("turn definition cannot be null")
+        return self.hydrator_for(stored.seq).definition(ref, expected_reference_digest=record._payload["definition_digest"])
+
     def session_attributes(self) -> dict[str, Any]:
-        """Hydrate the creation record's attributes or fail closed on a ref."""
+        """Hydrate the creation record's attributes."""
 
         created = self.records[0]
-        attributes = created.record._payload["attributes"]
-        try:
-            ref = ContentRef.from_dict(attributes)
-        except (TypeError, ValueError):
-            if type(attributes) is not dict:
-                raise RecordError("session attributes require an object or ContentRef") from None
-            return copy_json(attributes)
-        value = self.read_content_json(f"record:{created.seq}", SESSION_ATTRIBUTES, ref)
+        value = self.hydrate_record_field(created.record, SESSION_ATTRIBUTES, created.record._payload["attributes"])
         if type(value) is not dict:
             raise RecordError("session attributes must be a JSON object")
         return value
 
     def input_content(self, input_id: str, value: Any) -> Any:
-        """Hydrate a session input only when its payload carries a ContentRef."""
+        """Hydrate one explicitly owned session input."""
 
         try:
             ref = ContentRef.from_dict(value)
-        except (TypeError, ValueError):
-            return copy_json(value)
+        except (TypeError, ValueError) as exc:
+            raise RecordError("session input requires a ContentRef") from exc
         return self.read_content_json(f"input:{input_id}", INPUT_CONTENT, ref)
 
     def content_writer(self, tx: SessionTx | None = None) -> ContentSessionWriter:
@@ -228,7 +445,7 @@ class CoreDriver:
 
     def _task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
-        return self.state.turns[self.state.active_turn_id].start._task()
+        return self.hydrated_definition(self.state.turns[self.state.active_turn_id].start).task
 
     def commit(
         self,
@@ -363,12 +580,20 @@ class CoreDriver:
             if r.turn_id != self.state.active_turn_id:
                 continue
             if r.kind == "boundary_recorded" and "shared_state" in r._payload["data"]:
-                return copy_json(r._payload["data"]["shared_state"])
+                shared = self.hydrate_record_field(r, "shared_state", r._payload["data"]["shared_state"])
+                if type(shared) is not dict:
+                    raise RecordError("durable boundary shared state must be an object")
+                return copy_json(shared)
             if r.kind == "op_prepared":
-                return copy_json(r._payload["shared_state"])
+                shared = self.hydrate_record_field(r, "shared_state", r._payload["shared_state"])
+                if type(shared) is not dict:
+                    raise RecordError("prepared shared state must be an object")
+                return copy_json(shared)
             if r.kind == "op_completed" and r._payload["context"] == "normal":
-                snapshot = r._payload["shared_state"]
+                snapshot = self.hydrate_record_field(r, "shared_state", r._payload["shared_state"])
                 if snapshot is not None:
+                    if type(snapshot) is not dict:
+                        raise RecordError("completed shared state must be an object or null")
                     return copy_json(snapshot)
         assert self.state.active_turn_id is not None
         return copy_json(self._task().initial_shared_state)

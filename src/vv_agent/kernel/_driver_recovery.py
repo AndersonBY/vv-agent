@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
+from typing import Any, cast
 
 from . import _after_cycle as cycle
 from . import _compaction_phase as compaction
@@ -17,8 +18,10 @@ from ._context import protected_start
 from ._driver import CoreDriver
 from ._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from ._execution_values import AgentTask
+from ._hydration import reference_digest
 from ._message_values import Message
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance
+from ._record_codec import RecordError
 from ._records import InboxItem, Record, copy_json, digest, make_record
 from ._retained_budget import retained_budget_inputs, retained_evaluator
 from ._state import Attempt
@@ -127,7 +130,31 @@ class PushApprovalAnswer:
 def _task(driver: CoreDriver, *, copy: bool = False):
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
-    return start.task() if copy else start._task()
+    task = driver.hydrated_definition(start).task
+    return task if not copy else deepcopy(task)
+
+
+def _completed_values(driver: CoreDriver, record: Record) -> tuple[dict[str, Any], tuple[str, ...], dict[str, Any] | None]:
+    result = driver.hydrate_record_field(record, "result", record._payload["result"])
+    evidence = driver.hydrate_record_field(record, "evidence", record._payload["evidence"])
+    usage = driver.hydrate_record_field(record, "usage", record._payload["usage"])
+    if type(result) is not dict or type(evidence) is not list or not all(isinstance(item, str) for item in evidence):
+        raise RecordError("completed result/evidence hydration has the wrong JSON shape")
+    if usage is not None and type(usage) is not dict:
+        raise RecordError("completed usage hydration has the wrong JSON shape")
+    return result, tuple(evidence), usage
+
+
+def _result(driver: CoreDriver, record: Record) -> dict[str, Any]:
+    value = driver.hydrate_record_field(record, "result", record._payload["result"])
+    if type(value) is not dict:
+        raise RecordError("completed result hydration must return an object")
+    return value
+
+
+def _hydrated_wait(driver: CoreDriver, attempt: Attempt) -> dict[str, Any]:
+    assert attempt.plan.operation_id is not None and attempt.plan.attempt is not None and attempt.wait is not None
+    return driver.hydrate_parked_wait(attempt.plan.operation_id, attempt.plan.attempt, attempt.wait)
 
 
 def _retained_budget(state, tid):
@@ -136,8 +163,11 @@ def _retained_budget(state, tid):
 
 
 def _definition_digest(driver, start):
-    facts = yield Definition(start)
-    return facts.definitions.definition_digest(start, facts.bindings, facts.catalog)
+    definition = driver.hydrated_definition(start)
+    yield Definition(definition.task)
+    ref = driver.record_content_ref(start, "definition")
+    assert ref is not None
+    return reference_digest(ref)
 
 
 def _compact(driver, *, requested_by=None):
@@ -191,7 +221,9 @@ def _compose(driver: CoreDriver, steps):
                 elif isinstance(request, inputs.FinalizeTool):
                     from ._driver_dispatch import finalize_tool
 
-                    response = yield from _compose(driver, finalize_tool(driver, request.plan, request.outcome))
+                    response = yield from _compose(
+                        driver, finalize_tool(driver, driver.hydrate_plan(request.plan), request.outcome)
+                    )
                 elif isinstance(request, compaction.CloseCompaction):
                     response = yield from close(driver, "failed", request.reason)
                 elif isinstance(request, planning.ClosePlanning):
@@ -217,11 +249,12 @@ def _compose(driver: CoreDriver, steps):
 
 def _approval(driver: CoreDriver, attempt: Attempt):
     assert attempt.wait is not None
-    plan = attempt.execution_plan
+    plan = driver.hydrate_plan(attempt.execution_plan)
     assert plan.turn_id is not None
-    handle = attempt.wait["handle"]
+    wait = _hydrated_wait(driver, attempt)
+    handle = wait["handle"]
     has_provider, has_broker = yield BeginApproval(plan, handle)
-    deadline = attempt.wait["deadline_ms"]
+    deadline = wait["deadline_ms"]
     decision = None
     if has_broker:
         decision = yield ApprovalRead.DRAIN
@@ -312,7 +345,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
         if turn.start._payload["handler_version"] != (yield Read.HANDLER_VERSION):
             yield from close(self, "failed", "handler_version_mismatch")
             return True
-        task = turn.start._task()
+        task = self.hydrated_definition(turn.start).task
         if task.metadata.get("vv_session", {}).get("host_binding_names"):
             yield BindHostState(task)
         if task.metadata.get("vv_session", {}).get("input_blocked"):
@@ -337,31 +370,31 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
             if op.kind == "model" or op.selected_attempt is None:
                 continue
             result = op.attempts[op.selected_attempt].result
+            result_value = _result(self, result) if result is not None else None
             dependencies = op.attempts[1].plan._payload["dependencies"]
             decision = self.boundary("after_cycle", dependencies[0]) if dependencies else None
             if decision and decision._payload["data"]["action"] == "steer":
                 continue
-            if result and result._payload["result"].get("directive") == ToolDirective.FINISH.value:
+            if result is not None and result_value and result_value.get("directive") == ToolDirective.FINISH.value:
                 if (yield Read.AFTER_CYCLE_CONFIGURED) and decision is None:
                     continue
                 repair = self.state.operations.get(f"{tid}/model/output_repair/1")
                 if repair and repair.state in {"planned", "started", "parked"}:
                     continue
                 transfer_failed = (
-                    result._payload["result"].get("metadata", {}).get("mode") == "handoff"
-                    and result._payload["result"].get("status_code") == "ERROR"
+                    result_value.get("metadata", {}).get("mode") == "handoff" and result_value.get("status_code") == "ERROR"
                 )
                 yield from close(
                     self,
                     "failed" if transfer_failed else "completed",
-                    result._payload["result"].get("error_code")
+                    result_value.get("error_code")
                     if transfer_failed
-                    else result._payload["result"].get("metadata", {}).get("completion_reason", "tool_finish"),
-                    result._payload["result"].get("metadata", {}).get("final_message", result._payload["result"]["content"]),
-                    transferred=result._payload["result"].get("metadata", {}).get("mode") == "handoff",
+                    else result_value.get("metadata", {}).get("completion_reason", "tool_finish"),
+                    result_value.get("metadata", {}).get("final_message", result_value["content"]),
+                    transferred=result_value.get("metadata", {}).get("mode") == "handoff",
                 )
                 return True
-            if result and result._payload["result"].get("directive") == ToolDirective.WAIT_USER.value:
+            if result is not None and result_value and result_value.get("directive") == ToolDirective.WAIT_USER.value:
                 interaction_id = f"interaction/{result.operation_id}/{result.attempt}"
                 if any(
                     r._payload["disposition"] == "applied" and r._payload["target_wait_id"] == interaction_id
@@ -372,8 +405,9 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                 for other_id, other in operations:
                     pending = other.attempts[max(other.attempts)]
                     if other_id != result.operation_id and pending.state == "planned":
+                        pending_plan = self.hydrate_plan(pending.execution_plan)
                         value = build_skipped_result(
-                            ToolCall.from_dict(pending.execution_plan.payload["request"]),
+                            ToolCall.from_dict(pending_plan.payload["request"]),
                             error_code="skipped_due_to_wait_user",
                             message="Tool skipped because a previous tool requested user input.",
                         )
@@ -395,9 +429,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                             "turn_parked",
                             {
                                 "interaction_id": interaction_id,
-                                "question": result._payload["result"]
-                                .get("metadata", {})
-                                .get("question", result._payload["result"]["content"]),
+                                "question": result_value.get("metadata", {}).get("question", result_value["content"]),
                                 "source_operation_id": result.operation_id,
                                 "source_attempt": result.attempt,
                             },
@@ -409,16 +441,13 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
             if op.kind == "model" and op.attempts[1].plan._payload["purpose"] == "primary" and (op.selected_attempt is not None):
                 known = op.attempts[op.selected_attempt]
                 if known.result and known.context == "normal":
+                    result, evidence, usage = _completed_values(self, known.result)
                     repairs = yield from _compose(
                         self,
                         outcomes.completion_effects_steps(
                             self,
                             known.plan,
-                            Definitive(
-                                known.result._payload["result"],
-                                tuple(known.result._payload["evidence"]),
-                                known.result._payload["usage"],
-                            ),
+                            Definitive(result, evidence, cast(dict[str, Any], usage)),
                             known.context,
                         ),
                     )
@@ -426,13 +455,14 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         yield CommitRecords(repairs)
                         return True
             a = op.attempts[max(op.attempts)]
+            rejected = _result(self, a.result) if a.result is not None else None
             if (
                 op.kind == "model"
-                and a.result
-                and (a.result._payload["result"].get("error_code") == "model_request_rejected")
+                and rejected
+                and (rejected.get("error_code") == "model_request_rejected")
                 and (a.plan._payload["purpose"] != "compaction")
             ):
-                yield from close(self, "failed", "model_request_rejected", a.result._payload["result"]["content"])
+                yield from close(self, "failed", "model_request_rejected", rejected["content"])
                 return True
             if a.state == "started":
                 yield CommitRecords(
@@ -483,8 +513,10 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     if (yield Read.NEXT_DRIVE_DELAY) != 0:
                         return False
                     self.polled.add(key)
-                    handle = copy_json(a.wait["handle"])
-                    yield SelectProvider(a.execution_plan)
+                    wait = _hydrated_wait(self, a)
+                    handle = wait["handle"]
+                    plan = self.hydrate_plan(a.execution_plan)
+                    yield SelectProvider(plan)
                     outcome = yield ProviderCall("query", handle, 1)
                     if isinstance(outcome, Definitive):
                         outcomes.check_provider_result(self, a.execution_plan, outcome)
@@ -493,8 +525,8 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         )
                         return True
                     if isinstance(outcome, Accepted):
-                        validate_acceptance(a.execution_plan, outcome)
-                        if outcome.handle != handle or outcome.yield_on_steer != a.wait.get("yield_on_steer", False):
+                        validate_acceptance(plan, outcome)
+                        if outcome.handle != handle or outcome.yield_on_steer != wait.get("yield_on_steer", False):
                             raise ProviderResultInvalid()
                 return False
         if self.pending_batch():
@@ -512,6 +544,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
             _, last = models[-1]
             a = last.attempts[last.selected_attempt or max(last.attempts)]
             if a.result:
+                result_value = _result(self, a.result)
                 plan_seq = next(r.seq for r in self.records if r.record.record_id == last.attempts[1].plan.record_id)
                 changed = any(
                     r.seq > plan_seq
@@ -532,13 +565,13 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                 )
                 cycle_decision = self.boundary("after_cycle", a.plan.operation_id or "")
                 if (
-                    not a.result._payload["result"].get("tool_calls")
-                    and (not a.result._payload["result"].get("error_code"))
+                    not result_value.get("tool_calls")
+                    and (not result_value.get("error_code"))
                     and (not changed)
                     and (not (cycle_decision and cycle_decision._payload["data"]["action"] == "steer"))
                 ):
                     if task.no_tool_policy == "finish":
-                        yield from close(self, "completed", None, a.result._payload["result"]["content"])
+                        yield from close(self, "completed", None, result_value["content"])
                         return True
                     if task.no_tool_policy == "wait_user":
                         yield CommitRecords(
@@ -547,7 +580,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                                     "turn_parked",
                                     {
                                         "interaction_id": f"interaction/{a.plan.operation_id}/{a.plan.attempt}",
-                                        "question": a.result._payload["result"]["content"],
+                                        "question": result_value["content"],
                                         "source_operation_id": a.plan.operation_id,
                                         "source_attempt": a.plan.attempt,
                                     },
@@ -557,7 +590,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         return True
         cycles = sum(
             (
-                not (a.result and a.result._payload["result"].get("error_code") == "prompt_too_long")
+                not (a.result and _result(self, a.result).get("error_code") == "prompt_too_long")
                 for _, op in models
                 for a in [op.attempts[op.selected_attempt or max(op.attempts)]]
             )
@@ -623,6 +656,7 @@ def close(
                 continue
             for a in op.attempts.values():
                 if a.state != "completed" and (not a.started):
+                    completion_plan = self.hydrate_plan(a.execution_plan)
                     records.extend(
                         (
                             yield from _compose(
@@ -633,13 +667,13 @@ def close(
                                     Definitive(
                                         (
                                             build_skipped_result(
-                                                ToolCall.from_dict(a.execution_plan.payload["request"]),
+                                                ToolCall.from_dict(completion_plan.payload["request"]),
                                                 error_code="skipped_due_to_finish",
                                                 message="Tool skipped because a previous tool finished the task.",
                                             )
                                             if status == "completed" and op.kind != "model"
                                             else ToolExecutionResult(
-                                                tool_call_id=a.plan._payload["request"].get("id", "model"),
+                                                tool_call_id=completion_plan._payload["request"].get("id", "model"),
                                                 content=reason or "not executed",
                                                 status_code=ToolResultStatus.ERROR,
                                                 error_code="not_executed",
@@ -658,8 +692,10 @@ def close(
                         can_be_unknown = a.state == "started" or (
                             a.state == "parked" and a.started and self.state.turns[tid].cancelled
                         )
-                        handle = copy_json(a.wait["handle"])
-                        yield SelectProvider(a.execution_plan)
+                        wait = _hydrated_wait(self, a)
+                        handle = wait["handle"]
+                        plan = self.hydrate_plan(a.execution_plan)
+                        yield SelectProvider(plan)
                         outcome = yield ProviderCall("cancel", handle, 1)
                         if isinstance(outcome, Definitive):
                             try:

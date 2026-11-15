@@ -14,6 +14,7 @@ from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import PlanningRequest
 from vv_agent.kernel._driver_planning import plan as plan_steps
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, validate_acceptance, validate_provider_result
+from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
 from vv_agent.kernel._retained_budget import retained_budget_inputs, retained_evaluator
 from vv_agent.kernel._state import Attempt, child_handles
@@ -69,10 +70,11 @@ MODEL_REJECTION_BACKOFF_SECONDS = 2
 
 
 def compaction_intent(self: CoreDriver, plan: Record, result: dict[str, Any]) -> dict[str, Any]:
+    plan = self.hydrate_plan(plan)
     if plan._payload["op_kind"] == "model" or result.get("metadata", {}).get("request_compaction") is not True:
         return result
     source = self.state.operations[plan._payload["dependencies"][0]]
-    source_plan = source.attempts[source.selected_attempt or 1].plan
+    source_plan = self.hydrate_plan(source.attempts[source.selected_attempt or 1].plan)
     return result | {
         "metadata": result["metadata"]
         | {
@@ -88,7 +90,10 @@ def check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) -
     assert plan.operation_id is not None and plan.attempt is not None
     attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
     handle = attempt.wait["handle"] if attempt.wait and attempt.wait["handle"]["kind"] == "provider" else None
-    validate_provider_result(plan, outcome, handle)
+    if handle is not None:
+        assert attempt.wait is not None
+        handle = self.hydrate_parked_wait(plan.operation_id, plan.attempt, attempt.wait)["handle"]
+    validate_provider_result(self.hydrate_plan(plan), outcome, handle)
 
 
 def parked_steps(
@@ -124,6 +129,7 @@ def accepted_steps(self: CoreDriver, plan: Record, outcome: Accepted) -> Generat
 
 def unknown_steps(self: CoreDriver, plan: Record, reason: str) -> Generator[OutcomeRequest, Any, Record]:
     try:
+        plan = self.hydrate_plan(plan)
         assert plan.operation_id is not None and plan.attempt is not None
         attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
         is_model = plan._payload["op_kind"] == "model"
@@ -174,7 +180,10 @@ def live_budget_inputs_steps(
         evaluator = retained_evaluator(inputs)
         current_meter = f"active/{tid}/{self.scope.lease.epoch}"
         saved = self.state.usage_values.get(current_meter)
-        retained_ms = saved._payload["usage"].get("elapsed_ms", 0) if saved else 0
+        usage = self.hydrate_record_field(saved, "usage", saved._payload["usage"]) if saved else None
+        if usage is not None and type(usage) is not dict:
+            raise RecordError("usage observation must be an object")
+        retained_ms = usage.get("elapsed_ms", 0) if usage else 0
         initial = evaluator.snapshot()
         initial = replace(
             initial,
@@ -220,7 +229,9 @@ def budget_record(
 
 def completed_steps(self: CoreDriver, plan: Record, outcome: Definitive) -> Generator[OutcomeRequest, Any, list[Record]]:
     try:
-        result = compaction_intent(self, plan, outcome.result)
+        stored_plan = plan
+        result = compaction_intent(self, stored_plan, outcome.result)
+        plan = self.hydrate_plan(stored_plan)
         if plan._payload["op_kind"] != "model":
             result = yield PrepareToolResources(plan, result)
         outcome = replace(outcome, result=result)
@@ -245,7 +256,7 @@ def completed_steps(self: CoreDriver, plan: Record, outcome: Definitive) -> Gene
             },
             plan,
         )
-        records = [result, *(yield from completion_effects_steps(self, plan, outcome, context))]
+        records = [result, *(yield from completion_effects_steps(self, stored_plan, outcome, context))]
         rejection = outcome.result.get("rejection", {})
         order = plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
         if (
@@ -282,6 +293,7 @@ def completion_effects_steps(
     self: CoreDriver, plan: Record, outcome: Definitive, context: str
 ) -> Generator[OutcomeRequest, Any, list[Record]]:
     try:
+        plan = self.hydrate_plan(plan)
         assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
         records = []
         op = self.state.operations[plan.operation_id]
@@ -326,7 +338,7 @@ def completion_effects_steps(
                         return records
             if plan._payload["purpose"] != "primary":
                 return records
-            definition = turn.start._payload["definition"]
+            definition = self.hydrated_definition(turn.start)
             for i, call in enumerate(outcome.result.get("tool_calls", [])):
                 oid = f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}"
                 if oid not in self.state.operations:
@@ -336,7 +348,7 @@ def completion_effects_steps(
                         call,
                         "interaction" if call["name"] == "ask_user" else "tool",
                         dependencies=[plan.operation_id],
-                        capability=definition["capabilities"].get(call["name"], {}),
+                        capability=definition.capabilities.get(call["name"], {}),
                     )
                     records.append(planned)
         elif op.kind != "model" and context == "normal":
@@ -369,7 +381,8 @@ def yield_results_steps(
     try:
         records = []
         for a in attempts:
-            plan = a.execution_plan
+            stored_plan = a.execution_plan
+            plan = self.hydrate_plan(stored_plan)
             assert plan.operation_id is not None and plan.attempt is not None
             assert a.wait is not None
             handle = a.wait["handle"]
@@ -423,7 +436,7 @@ def yield_results_steps(
             evidence = (f"steer/{item.input_id}",)
             if not a.child_handle:
                 evidence += (handle["evidence"],)
-            completed_records = yield from completed_steps(self, plan, Definitive(result.to_dict(), evidence))
+            completed_records = yield from completed_steps(self, stored_plan, Definitive(result.to_dict(), evidence))
             records.extend(
                 replace(r, payload=r._payload | {"yielded_by": item.input_id}) if r.kind == "op_completed" else r
                 for r in completed_records

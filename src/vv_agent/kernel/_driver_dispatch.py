@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import Any
@@ -120,6 +121,7 @@ class AdmitChildren:
     plan: Record
     summary: str | None
     child_specs: Any
+    stored_plan: Record | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +215,8 @@ class EndPreflight(Enum):
 def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
-    return start.task() if copy else start._task()
+    task = driver.hydrated_definition(start).task
+    return task if not copy else deepcopy(task)
 
 
 def preflight(plan: Record) -> Generator[object, Any, ToolExecutionResult | None]:
@@ -293,7 +296,7 @@ def admit_children(driver: CoreDriver, tx: SessionTx, request: AdmitChildren) ->
             raise InvalidChildBatch("Only foreground children may declare yield_on_steer=True")
         assert specs is not None
         generation = driver.state.turns[plan.turn_id or ""].start._payload["generation"]
-        inherited = inherited_seed_policies(driver.records[0].record._payload["attributes"])
+        inherited = inherited_seed_policies(driver.session_attributes())
         inherited_specs = []
         for child in specs:
             attributes = copy_json(child.spec.attributes or {})
@@ -319,7 +322,7 @@ def admit_children(driver: CoreDriver, tx: SessionTx, request: AdmitChildren) ->
             finalized = yield from finalize_tool(
                 driver, plan, Definitive(result.to_dict(), tuple(f"session/{h['session_id']}/created" for h in handles))
             )
-            records.extend((yield from outcomes.completed_steps(driver, plan, finalized)))
+            records.extend((yield from outcomes.completed_steps(driver, request.stored_plan or plan, finalized)))
             records[-1] = replace(records[-1], payload=records[-1]._payload | {"execution_started": True})
         return records
     except StopIteration as error:
@@ -328,7 +331,8 @@ def admit_children(driver: CoreDriver, tx: SessionTx, request: AdmitChildren) ->
 
 def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, None]:
     try:
-        plan = attempt.execution_plan
+        stored_plan = attempt.execution_plan
+        plan = driver.hydrate_plan(stored_plan)
         kind = plan._payload["op_kind"]
         assert driver.state.active_turn_id is not None
         task = _task(driver) if kind == "model" and not (yield DispatchRead.HAS_HOOKS) else _task(driver, copy=True)
@@ -337,7 +341,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         metadata["fence_epoch"] = driver.scope.lease.epoch
         if kind != "model":
             parent = driver.state.operations[plan._payload["dependencies"][0]]
-            source = parent.attempts[parent.selected_attempt or max(parent.attempts)].plan
+            source = driver.hydrate_plan(parent.attempts[parent.selected_attempt or max(parent.attempts)].plan)
             metadata["session_tool_names"] = [s["function"]["name"] for s in source._payload["request"]["tools"]]
             yield SetContextCycle(
                 source._payload["request"]
@@ -347,7 +351,8 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             )
         if kind != "model" and (yield DispatchRead.HAS_HOOKS) and attempt.prepared is None:
             patched, short = yield BeforeTool(task, ToolCall.from_dict(plan.payload["request"]))
-            capabilities = driver.state.turns[plan.turn_id or ""].start._payload["definition"]["capabilities"]
+            start = driver.state.turns[plan.turn_id or ""].start
+            capabilities = driver.hydrated_definition(start).capabilities
             prepared = yield from plan_steps(
                 driver,
                 plan.operation_id or "",
@@ -384,14 +389,14 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         hook_result = plan._payload["budget_admission"].get("hook_result")
         if hook_result is not None:
             final = yield from finalize_tool(driver, plan, Definitive(hook_result))
-            yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)), guarded=True)
+            yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
             return
         if attempt.approval in {"deny", "timeout"}:
             assert attempt.approval_answer is not None
             answer = attempt.approval_answer._payload["input"]["payload"]
             result = yield ApprovalDenied(plan, answer, attempt.approval)
             final = yield from finalize_tool(driver, plan, Definitive(result.to_dict(), ()))
-            yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)))
+            yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)))
             return
         if kind != "model":
             name = plan._payload["request"]["name"]
@@ -415,13 +420,15 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                     yield CommitDispatch([(yield from outcomes.parked_steps(driver, plan, handle, after=False))], guarded=True)
                 else:
                     final = yield from finalize_tool(driver, plan, Definitive(result.to_dict(), ()))
-                    yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)), guarded=True)
+                    yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
                 return
         if kind == "model" and not (yield PrepareModel(plan)):
             yield CommitDispatch(
                 (
                     yield from outcomes.completed_steps(
-                        driver, plan, Definitive({"content": "", "tool_calls": [], "error_code": "endpoint_unavailable"}, ())
+                        driver,
+                        stored_plan,
+                        Definitive({"content": "", "tool_calls": [], "error_code": "endpoint_unavailable"}, ()),
                     )
                 ),
                 guarded=True,
@@ -464,7 +471,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 raise ValueError("ask_user must be a synchronous interaction")
             if outcome.result.get("directive") != "wait_user":
                 final = yield from finalize_tool(driver, plan, outcome)
-                yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)), guarded=True)
+                yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
                 return
             question = outcome.result.get("metadata", {}).get("question", outcome.result["content"])
             parked = yield from outcomes.parked_steps(
@@ -490,7 +497,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 )
                 invalid.tool_call_id = plan._payload["request"]["id"]
                 final = yield from finalize_tool(driver, plan, Definitive(invalid.to_dict(), ()))
-                yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)), guarded=True)
+                yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
                 return
             skipped = []
             for oid, op in driver.state.operations.items():
@@ -502,8 +509,9 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                     and pending.state == "planned"
                     and pending.plan._payload["dependencies"] == plan._payload["dependencies"]
                 ):
+                    pending_plan = driver.hydrate_plan(pending.execution_plan)
                     result = build_skipped_result(
-                        ToolCall.from_dict(pending.execution_plan.payload["request"]),
+                        ToolCall.from_dict(pending_plan.payload["request"]),
                         error_code="skipped_due_to_wait_user",
                         message="Tool skipped because a previous tool requested user input.",
                     )
@@ -537,11 +545,11 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             if isinstance(child_specs, ToolExecutionResult):
                 child_specs.tool_call_id = plan._payload["request"]["id"]
                 final = yield from finalize_tool(driver, plan, Definitive(child_specs.to_dict()))
-                yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, final)), guarded=True)
+                yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
                 return
             if child_specs is not None or (yield HasChild(name)):
                 assert plan.turn_id is not None
-                yield AdmitChildren([*budget_records, started], plan, summary, child_specs)
+                yield AdmitChildren([*budget_records, started], plan, summary, child_specs, stored_plan)
                 return
         yield CommitDispatch([*budget_records, started], guarded=True)
         yield DispatchHook("before_external_call", plan)
@@ -550,7 +558,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         if has_provider and plan._payload["provider_binding"] != "function":
             try:
                 if isinstance(outcome, Definitive):
-                    outcomes.check_provider_result(driver, plan, outcome)
+                    outcomes.check_provider_result(driver, stored_plan, outcome)
                 elif isinstance(outcome, Accepted):
                     validate_acceptance(plan, outcome)
             except ProviderResultInvalid:
@@ -560,15 +568,17 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 outcome = yield from finalize_tool(driver, plan, outcome)
                 if plan._payload["provider_binding"] != "function":
                     try:
-                        outcomes.check_provider_result(driver, plan, outcome)
+                        outcomes.check_provider_result(driver, stored_plan, outcome)
                     except ProviderResultInvalid:
-                        yield CommitDispatch([(yield from outcomes.unknown_steps(driver, plan, "provider_result_invalid"))])
+                        yield CommitDispatch(
+                            [(yield from outcomes.unknown_steps(driver, stored_plan, "provider_result_invalid"))]
+                        )
                         return
             outcome = replace(outcome, shared_state=(yield DispatchRead.DURABLE_CONTEXT))
-            yield CommitDispatch((yield from outcomes.completed_steps(driver, plan, outcome)))
+            yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, outcome)))
         elif isinstance(outcome, Accepted):
-            yield CommitDispatch([(yield from outcomes.accepted_steps(driver, plan, outcome))])
+            yield CommitDispatch([(yield from outcomes.accepted_steps(driver, stored_plan, outcome))])
         else:
-            yield CommitDispatch([(yield from outcomes.unknown_steps(driver, plan, outcome.reason))])
+            yield CommitDispatch([(yield from outcomes.unknown_steps(driver, stored_plan, outcome.reason))])
     except StopIteration as error:
         raise _StopIterationTransport(error) from error

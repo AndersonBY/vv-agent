@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import Any, Protocol
@@ -12,9 +13,11 @@ from ._context import protected_start
 from ._context_messages import retained_start
 from ._cycle_values import read_after_cycle_disallowed_tools
 from ._execution_values import AgentTask
+from ._hydration import DefinitionContent
 from ._message_values import Message
 from ._model_settings import ModelSettings, RetrySettings
-from ._records import Record, _RetainedTools, copy_json, digest, make_record
+from ._record_codec import RecordError
+from ._records import Record, copy_json, digest, make_record
 from ._reducer import Fold
 from ._state import ExecutionState
 from ._store import StoredRecord
@@ -29,6 +32,8 @@ class PlanningView(Protocol):
     def fold(self) -> Fold: ...
     @property
     def sid(self) -> str: ...
+    def hydrated_definition(self, record: Record) -> DefinitionContent: ...
+    def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any: ...
 
 
 class PlanningRead(Enum):
@@ -119,15 +124,11 @@ def plan(
             request = request | {"metadata": request["metadata"] | {"vv_session": session}}
         if kind == "model" and view.state.active_turn_id is not None:
             source = view.state.turns[view.state.active_turn_id].start
+            definition = view.hydrated_definition(source)
             tools = request.get("tools")
-            frozen = source._payload["definition"].get("tools")
-            if (
-                isinstance(tools, list)
-                and isinstance(frozen, list)
-                and len(tools) == len(frozen)
-                and all(a is b for a, b in zip(tools, frozen, strict=True))
-            ):
-                request = request | {"tools": _RetainedTools(source)}
+            frozen = list(definition.tools)
+            if isinstance(tools, list) and isinstance(frozen, list) and len(tools) == len(frozen) and tools == frozen:
+                request = request | {"tools": frozen}
         if kind == "model" and isinstance(request.get("messages"), list):
             request = request | {"messages": view.fold._messages.retain_array(request["messages"])}
         binding = "model" if kind == "model" else request["name"] if (yield ProviderAvailable(request["name"])) else "function"
@@ -175,7 +176,7 @@ def effective_model(view: PlanningView) -> Generator[PlanningRequest, Any, dict[
         if fork is not None:
             return copy_json(fork["effective_model"])
         assert view.state.active_turn_id is not None
-        task = view.state.turns[view.state.active_turn_id].start._task()
+        task = view.hydrated_definition(view.state.turns[view.state.active_turn_id].start).task
         return {
             "model": task.model,
             "model_settings": task.model_settings.to_dict() if task.model_settings else {},
@@ -193,17 +194,24 @@ def model_plan(view: PlanningView, messages: list[Message]) -> Generator[Plannin
         tid = view.state.active_turn_id
         assert tid is not None
         start = view.state.turns[tid].start
-        task = start.task() if (yield PlanningRead.HAS_HOOKS) else start._task()
-        definition = start._payload["definition"]
+        copy_task = yield PlanningRead.HAS_HOOKS
+        definition = view.hydrated_definition(start)
+        task = deepcopy(definition.task) if copy_task else definition.task
+
+        def prompt_too_long(attempt: Any) -> bool:
+            receipt = attempt.result
+            if receipt is None:
+                return False
+            result = view.hydrate_record_field(receipt, "result", receipt._payload["result"])
+            if type(result) is not dict:
+                raise RecordError("completed result hydration must return an object")
+            return result.get("error_code") == "prompt_too_long"
+
         cycle = 1 + sum(
             op.turn_id == tid
             and op.kind == "model"
             and op.attempts[1].plan._payload["purpose"] == "primary"
-            and not (
-                op.selected_attempt
-                and (receipt := op.attempts[op.selected_attempt].result)
-                and receipt._payload["result"].get("error_code") == "prompt_too_long"
-            )
+            and not (op.selected_attempt and prompt_too_long(op.attempts[op.selected_attempt]))
             for op in view.state.operations.values()
         )
         shared = yield PlanningRead.SHARED_STATE
@@ -215,7 +223,11 @@ def model_plan(view: PlanningView, messages: list[Message]) -> Generator[Plannin
             messages.extend(additions)
         has_hooks = yield PlanningRead.PREPARE_BEFORE_LLM
         messages, schemas = yield BeforeLLM(
-            task, cycle, messages, copy_json(definition["tools"]) if has_hooks else definition["tools"], shared
+            task,
+            cycle,
+            messages,
+            copy_json(list(definition.tools)) if has_hooks else list(definition.tools),
+            shared,
         )
         retained_start(protected_source, messages, protection)
         denied = read_after_cycle_disallowed_tools(shared)
