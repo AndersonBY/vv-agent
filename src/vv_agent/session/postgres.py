@@ -40,6 +40,8 @@ def join_transaction(connection: Connection[Any]) -> SQLSessionTx:
 
 
 class _PostgresContentBackend:
+    lock_clause = " FOR UPDATE"
+
     def __init__(self, connection: Connection[Any]) -> None:
         self.connection = connection
 

@@ -20,6 +20,7 @@ from vv_agent.kernel import _content_store as content_store_contract
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._records import InboxItem, SessionSpec
 from vv_agent.session import content_store
+from vv_agent.session.content_reader import DurableContentReader, record_owner
 from vv_agent.session.postgres import PostgresContentStore, PostgresStore
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 
@@ -117,6 +118,22 @@ def test_sqlite_file_round_trip_survives_reopen_and_rejects_other_owner(tmp_path
             adapter.get("tenant-b", SESSION, ref)
         with pytest.raises(content.ContentUnavailable):
             adapter.get(TENANT, "session-b", ref)
+
+
+def test_sqlite_file_reopen_hydrates_published_content_through_reader(tmp_path: Path) -> None:
+    path = tmp_path / "reader.sqlite"
+    plaintext = b"published content survives a fresh process"
+    with _open_sqlite(path) as store:
+        _create_session(store)
+        with store.atomic() as tx:
+            adapter = SQLiteContentStore(tx, content_store.LocalKeyProvider(MASTER_KEY))
+            ref = adapter.put(TENANT, SESSION, plaintext, content.ContentLabels())
+            adapter.link_record(TENANT, SESSION, 1, ref, "workspace")
+
+    with _open_sqlite(path) as recovered:
+        adapter = SQLiteContentStore(recovered, content_store.LocalKeyProvider(MASTER_KEY))
+        reader = DurableContentReader(adapter, tenant_id=TENANT, session_id=SESSION)
+        assert reader.read(TENANT, SESSION, record_owner(1), "workspace", ref) == plaintext
 
 
 def test_duplicate_put_and_owner_links_are_scoped_and_idempotent(tmp_path: Path) -> None:
@@ -221,6 +238,68 @@ def test_owner_slot_conflict_requires_different_content(tmp_path: Path) -> None:
             adapter.link_record(TENANT, SESSION, 1, first, "body")
             with pytest.raises(content.ContentLinkConflict):
                 adapter.link_record(TENANT, SESSION, 1, second, "body")
+
+
+def test_sqlite_expired_staging_pin_requires_restage_before_link(tmp_path: Path) -> None:
+    path = tmp_path / "expired-pin.sqlite"
+    provider = content_store.LocalKeyProvider(MASTER_KEY)
+    with _open_sqlite(path) as store:
+        _create_session(store)
+        adapter = SQLiteContentStore(store, provider)
+        with store.atomic():
+            ref = adapter.put(TENANT, SESSION, b"restage me", content.ContentLabels())
+        store._rows(
+            "UPDATE sk_content SET pin_until_ms=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (store._now() - 1, TENANT, SESSION, ref.content_id),
+        )
+        with store.atomic(), pytest.raises(content.ContentUnavailable, match="staging pin is expired"):
+            adapter.link_record(TENANT, SESSION, 1, ref, "workspace")
+        assert _count(store, "sk_content_link") == 0
+
+        with store.atomic():
+            assert adapter.put(TENANT, SESSION, b"restage me", content.ContentLabels()) == ref
+            adapter.link_record(TENANT, SESSION, 1, ref, "workspace")
+        assert adapter.get(TENANT, SESSION, ref) == b"restage me"
+
+
+def test_sqlite_gc_preserves_pinned_and_live_content_and_removes_expired_staging(tmp_path: Path) -> None:
+    path = tmp_path / "gc.sqlite"
+    provider = content_store.LocalKeyProvider(MASTER_KEY)
+    with _open_sqlite(path) as store:
+        _create_session(store)
+        with store.atomic() as tx:
+            adapter = SQLiteContentStore(tx, provider)
+            staged = adapter.put(TENANT, SESSION, b"pinned staging", content.ContentLabels())
+            published = adapter.put(TENANT, SESSION, b"published", content.ContentLabels())
+            adapter.link_record(TENANT, SESSION, 1, published, "workspace")
+
+        staged_pin = store._one(
+            "SELECT pin_until_ms FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (TENANT, SESSION, staged.content_id),
+        )[0]
+        published_pin = store._one(
+            "SELECT pin_until_ms FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (TENANT, SESSION, published.content_id),
+        )[0]
+        assert staged_pin is not None and staged_pin > store._now()
+        assert published_pin is None
+
+        with store.atomic():
+            assert adapter.collect_garbage(TENANT, SESSION) == 0
+        assert adapter.get(TENANT, SESSION, staged) == b"pinned staging"
+
+        now = store._now()
+        store._rows(
+            "UPDATE sk_content SET pin_until_ms=%s WHERE tenant_id=%s AND session_id=%s",
+            (now - 1, TENANT, SESSION),
+        )
+        with store.atomic():
+            assert adapter.collect_garbage(TENANT, SESSION) == 1
+        assert adapter.get(TENANT, SESSION, published) == b"published"
+        with pytest.raises(content.ContentUnavailable):
+            adapter.get(TENANT, SESSION, staged)
+        with store.atomic():
+            assert adapter.collect_garbage(TENANT, SESSION) == 0
 
 
 def test_forget_destroys_key_before_deleting_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,10 +470,28 @@ def test_postgres_round_trip_links_and_recovery(disposable_postgres_dsn: str) ->
     with PostgresStore.standalone(disposable_postgres_dsn) as store:
         store.install_schema()
         _create_session(store)
+        with pytest.raises(RuntimeError, match="rollback publication"), store.atomic() as failed:
+            adapter = PostgresContentStore(failed, provider)
+            failed_ref = adapter.put(TENANT, SESSION, b"rolled back publication", content.ContentLabels())
+            adapter.link_record(TENANT, SESSION, 1, failed_ref, "rolled-back")
+            raise RuntimeError("rollback publication")
+        assert _count(store, "sk_content") == 0
+        assert _count(store, "sk_content_link") == 0
+        assert _count(store, "sk_session_key") == 0
+
         with store.atomic() as tx:
             adapter = PostgresContentStore(tx, provider)
             ref = adapter.put(TENANT, SESSION, plaintext, content.ContentLabels())
             adapter.link_record(TENANT, SESSION, 1, ref, "workspace")
+            assert adapter.put(TENANT, SESSION, plaintext, content.ContentLabels()) == ref
+            adapter.link_record(TENANT, SESSION, 1, ref, "workspace")
+
+        store._rows(
+            "UPDATE sk_content SET pin_until_ms=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (store._now() - 1, TENANT, SESSION, ref.content_id),
+        )
+        with store.atomic():
+            assert adapter.collect_garbage(TENANT, SESSION) == 0
 
     with PostgresStore.standalone(disposable_postgres_dsn) as recovered:
         adapter = PostgresContentStore(recovered, content_store.LocalKeyProvider(MASTER_KEY))

@@ -120,6 +120,8 @@ class DurableContentStore(ContentStore, Protocol):
         input_id: str | None = None,
     ) -> ContentRef: ...
 
+    def collect_garbage(self, tenant_id: str, session_id: str) -> int: ...
+
 
 def _text(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:

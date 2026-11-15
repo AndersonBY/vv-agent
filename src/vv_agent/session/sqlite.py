@@ -33,6 +33,8 @@ class SQLiteStore(CoreSQLiteStore, SQLStore):
 
 
 class _SQLiteContentBackend:
+    lock_clause = ""
+
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
 

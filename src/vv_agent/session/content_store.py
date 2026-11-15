@@ -38,6 +38,7 @@ from vv_agent.kernel._content_store import ContentLink, ContentState, SessionKey
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
 _KEY_WRAP_PREFIX = b"vv-agent/S1/key-wrap/v1\0"
+_STAGING_PIN_MS = 5 * 60 * 1000
 
 
 @dataclass(slots=True)
@@ -329,6 +330,8 @@ class InMemoryEncryptedContentStore:
 class _SQLContentBackend(Protocol):
     """Driver-specific execution with one shared, explicit parameter token."""
 
+    lock_clause: str
+
     def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None: ...
 
     def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]: ...
@@ -572,21 +575,15 @@ class SQLContentStore:
         _labels, labels_bytes = _labels_from_storage(canonical_json_bytes(labels.to_dict()))
         existing_row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
-            "WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND mac={p} AND labels={p}",
+            "WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND mac={p} AND labels={p}"
+            f"{self._backend.lock_clause}",
             (tenant_id, session_id, wrapped.key_id, mac, labels_bytes),
         )
         if existing_row is not None:
             existing, existing_state, _nonce, _ciphertext, _locator = _content_from_row(existing_row)
             if existing.mac != mac or existing.labels != labels or existing.size != len(plaintext):
                 raise ContentIntegrityError("deduplicated content metadata is inconsistent")
-            if existing_state is ContentState.GC_PENDING:
-                raise ContentUnavailable("deduplicated content is unavailable")
-            if content_state is ContentState.LIVE and existing_state is ContentState.STAGED:
-                self._backend.run(
-                    "UPDATE sk_content SET state='live' WHERE tenant_id={p} AND session_id={p} AND content_id={p}",
-                    (tenant_id, session_id, existing.content_id),
-                )
-            return existing
+            return self._reuse_content(tenant_id, session_id, existing, existing_state, content_state)
 
         content_id = f"content_{secrets.token_urlsafe(32)}"
         size = len(plaintext)
@@ -597,9 +594,10 @@ class SQLContentStore:
             _content_aad(tenant_id, session_id, content_id, wrapped.key_id, size, labels),
         )
         ref = ContentRef(content_id=content_id, mac=mac, size=size, key_id=wrapped.key_id, labels=labels)
+        now_ms = self._backend.now_ms()
         inserted = self._backend.run(
-            "INSERT INTO sk_content(tenant_id,session_id,content_id,key_id,mac,size,labels,nonce,created_ms,state,ciphertext) "
-            "VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p}) "
+            "INSERT INTO sk_content(tenant_id,session_id,content_id,key_id,mac,size,labels,nonce,created_ms,state,"
+            "pin_until_ms,ciphertext) VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p}) "
             "ON CONFLICT(tenant_id,session_id,key_id,mac,labels) DO NOTHING",
             (
                 tenant_id,
@@ -610,8 +608,9 @@ class SQLContentStore:
                 size,
                 labels_bytes,
                 nonce,
-                self._backend.now_ms(),
+                now_ms,
                 content_state.value,
+                now_ms + _STAGING_PIN_MS if content_state is ContentState.STAGED else None,
                 ciphertext,
             ),
         )
@@ -621,12 +620,38 @@ class SQLContentStore:
         # A concurrent caller may have won the unique identity between selection and insertion.
         row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
-            "WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND mac={p} AND labels={p}",
+            "WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND mac={p} AND labels={p}"
+            f"{self._backend.lock_clause}",
             (tenant_id, session_id, wrapped.key_id, mac, labels_bytes),
         )
         if row is None:
             raise ContentUnavailable("content insertion did not produce a row")
-        existing, _state, _nonce, _ciphertext, _locator = _content_from_row(row)
+        existing, existing_state, _nonce, _ciphertext, _locator = _content_from_row(row)
+        return self._reuse_content(tenant_id, session_id, existing, existing_state, content_state)
+
+    def _reuse_content(
+        self,
+        tenant_id: str,
+        session_id: str,
+        existing: ContentRef,
+        existing_state: ContentState,
+        requested_state: ContentState,
+    ) -> ContentRef:
+        if existing_state is ContentState.GC_PENDING:
+            raise ContentUnavailable("deduplicated content is unavailable")
+        if existing_state is ContentState.STAGED:
+            if requested_state is ContentState.LIVE:
+                self._backend.run(
+                    "UPDATE sk_content SET state='live',pin_until_ms=NULL "
+                    "WHERE tenant_id={p} AND session_id={p} AND content_id={p} AND state='staged'",
+                    (tenant_id, session_id, existing.content_id),
+                )
+            else:
+                self._backend.run(
+                    "UPDATE sk_content SET pin_until_ms={p} "
+                    "WHERE tenant_id={p} AND session_id={p} AND content_id={p} AND state='staged'",
+                    (self._backend.now_ms() + _STAGING_PIN_MS, tenant_id, session_id, existing.content_id),
+                )
         return existing
 
     def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes:
@@ -679,23 +704,34 @@ class SQLContentStore:
         ):
             raise ContentUnavailable("content owner is unavailable")
 
-    def _validated_content(self, tenant_id: str, session_id: str, ref: ContentRef) -> ContentState:
+    def _validated_content(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+        *,
+        for_update: bool = False,
+    ) -> ContentState:
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
         key = self._active_session_key(tenant_id, session_id)
         row = self._backend.fetchone(
-            f"SELECT {_CONTENT_COLUMNS} FROM sk_content WHERE tenant_id={{p}} AND session_id={{p}} AND content_id={{p}}",
+            f"SELECT {_CONTENT_COLUMNS},pin_until_ms FROM sk_content "
+            "WHERE tenant_id={p} AND session_id={p} AND content_id={p}"
+            f"{self._backend.lock_clause if for_update else ''}",
             (tenant_id, session_id, ref.content_id),
         )
         if row is None:
             raise ContentUnavailable("content is unavailable")
-        stored, state, _nonce, _ciphertext, _locator = _content_from_row(row)
+        stored, state, _nonce, _ciphertext, _locator = _content_from_row(row[:-1])
         if stored.key_id != key.key_id or ref.key_id != key.key_id:
             raise ContentBindingMismatch("content key does not belong to the session binding")
         if stored != ref:
             raise ContentIntegrityError("content metadata does not match its reference")
         if state is ContentState.GC_PENDING:
             raise ContentUnavailable("content is unavailable")
+        if state is ContentState.STAGED and (not for_update or row[-1] is None or row[-1] <= self._backend.now_ms()):
+            raise ContentUnavailable("content staging pin is expired")
         return state
 
     def _link(
@@ -709,11 +745,11 @@ class SQLContentStore:
     ) -> None:
         self._require_transaction()
         slot = _link_slot(slot)
-        self._validated_content(tenant_id, session_id, ref)
+        self._validated_content(tenant_id, session_id, ref, for_update=True)
         self._require_owner(tenant_id, session_id, owner_column, owner)
         record_seq = owner if owner_column == "record_seq" else None
         input_id = owner if owner_column == "input_id" else None
-        inserted = self._backend.run(
+        self._backend.run(
             "INSERT INTO sk_content_link(tenant_id,session_id,content_id,record_seq,input_id,slot) "
             "VALUES ({p},{p},{p},{p},{p},{p}) ON CONFLICT DO NOTHING",
             (tenant_id, session_id, ref.content_id, record_seq, input_id, slot),
@@ -725,10 +761,8 @@ class SQLContentStore:
         )
         if existing is None or existing[0] != ref.content_id:
             raise ContentLinkConflict("content owner slot is already linked")
-        if not inserted and existing[0] == ref.content_id:
-            return
         self._backend.run(
-            "UPDATE sk_content SET state='live' WHERE tenant_id={p} AND session_id={p} "
+            "UPDATE sk_content SET state='live',pin_until_ms=NULL WHERE tenant_id={p} AND session_id={p} "
             "AND content_id={p} AND state IN ('staged','live')",
             (tenant_id, session_id, ref.content_id),
         )
@@ -810,6 +844,42 @@ class SQLContentStore:
         if row is None:
             raise ContentUnavailable("content link is unavailable")
         return ref
+
+    def collect_garbage(self, tenant_id: str, session_id: str) -> int:
+        tenant_id = _text(tenant_id, "tenant_id")
+        session_id = _text(session_id, "session_id")
+        self._require_transaction()
+        now_ms = self._backend.now_ms()
+        candidates = self._backend.fetchall(
+            "SELECT c.content_id FROM sk_content c WHERE c.tenant_id={p} AND c.session_id={p} "
+            "AND c.state IN ('staged','gc_pending') "
+            "AND (c.pin_until_ms IS NULL OR c.pin_until_ms<={p}) "
+            "AND NOT EXISTS (SELECT 1 FROM sk_content_link l WHERE l.tenant_id=c.tenant_id "
+            "AND l.session_id=c.session_id AND l.content_id=c.content_id) "
+            f"ORDER BY c.content_id{self._backend.lock_clause}",
+            (tenant_id, session_id, now_ms),
+        )
+        collected = 0
+        for (content_id,) in candidates:
+            marked = self._backend.run(
+                "UPDATE sk_content SET state='gc_pending',pin_until_ms=NULL "
+                "WHERE tenant_id={p} AND session_id={p} AND content_id={p} "
+                "AND state IN ('staged','gc_pending') "
+                "AND (pin_until_ms IS NULL OR pin_until_ms<={p}) "
+                "AND NOT EXISTS (SELECT 1 FROM sk_content_link l WHERE l.tenant_id=sk_content.tenant_id "
+                "AND l.session_id=sk_content.session_id AND l.content_id=sk_content.content_id)",
+                (tenant_id, session_id, content_id, now_ms),
+            )
+            if not marked:
+                continue
+            collected += self._backend.run(
+                "DELETE FROM sk_content WHERE tenant_id={p} AND session_id={p} AND content_id={p} "
+                "AND state='gc_pending' "
+                "AND NOT EXISTS (SELECT 1 FROM sk_content_link l WHERE l.tenant_id=sk_content.tenant_id "
+                "AND l.session_id=sk_content.session_id AND l.content_id=sk_content.content_id)",
+                (tenant_id, session_id, content_id),
+            )
+        return collected
 
     def forget_session(self, tenant_id: str, session_id: str) -> None:
         tenant_id = _text(tenant_id, "tenant_id")
