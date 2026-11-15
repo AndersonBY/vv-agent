@@ -21,6 +21,19 @@ class DriverLeaseScope(Protocol):
     def committing(self) -> AbstractContextManager[Lease]: ...
 
 
+class ActiveUsageContentUnavailable(RuntimeError):
+    """The active usage producer requires the session content store."""
+
+    code = "active_usage_content_unavailable"
+
+    def __init__(self, meter_id: str) -> None:
+        self.meter_id = meter_id
+        super().__init__(
+            f"S1 active usage meter {meter_id!r} requires the session content store; "
+            "the commit was blocked before writing plaintext"
+        )
+
+
 class CoreDriver:
     def __init__(
         self,
@@ -109,23 +122,8 @@ class CoreDriver:
         tid = self.state.active_turn_id
         if tid is not None:
             meter = f"active/{tid}/{self.scope.lease.epoch}"
-            cost = self._observe_cost()
-            records = [
-                self.record(
-                    "usage_observed",
-                    {
-                        "meter_id": meter,
-                        "observation": self.state.usage_observations.get(meter, 0) + 1,
-                        "mode": "cumulative",
-                        "source": "kernel-active-scope",
-                        "usage": {
-                            "elapsed_ms": (self.clock.monotonic_ns() - self.active_since) // 1000000,
-                            "host_cost": cost,
-                        },
-                    },
-                ),
-                *records,
-            ]
+            self._observe_cost()
+            raise ActiveUsageContentUnavailable(meter)
         timings: list[tuple[str, float, str, str | None]] = []
         atomic_start = self.clock.monotonic_ns()
         atomic_error = None
