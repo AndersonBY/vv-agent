@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -11,7 +12,7 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
-from vv_agent.kernel._child_store import input_content_ref, local_content_ref, service_principal
+from vv_agent.kernel._content import ContentRef, KeyProvider
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID
 from vv_agent.memory import MemoryManager
@@ -22,6 +23,21 @@ from vv_agent.run_handle import RunHandle
 from vv_agent.types import AgentTask, Message
 
 from .children import child_handles
+from .content_runtime import (
+    APPROVAL_METADATA,
+    APPROVAL_REASON,
+    APPROVAL_SCOPE,
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    INPUT_SELECTION,
+    SessionContentWriter,
+    bind_content_key_provider,
+    content_key_provider_for,
+    durable_content_reader,
+    read_input_json,
+    read_record_json,
+)
+from .content_store import LocalKeyProvider
 from .context import project_context
 from .kernel import drive
 from .records import InboxItem, SessionSpec
@@ -43,6 +59,7 @@ class SessionDriver:
         store: SessionStore | None = None,
         tenant_id: str | None = None,
         model_resolver=None,
+        content_key_provider: KeyProvider | None = None,
     ) -> None:
         self.model_resolver = model_resolver
         self._owns_store = store is None
@@ -59,6 +76,10 @@ class SessionDriver:
             raise ValueError("tenant_id must be a non-empty string")
         self.tenant_id = tenant_id
         self.store = self._root_store if bound_tenant == self.tenant_id else self._root_store.for_tenant(self.tenant_id)
+        bound_provider = content_key_provider_for(self._root_store)
+        self.uses_development_content_key_provider = content_key_provider is None and bound_provider is None
+        self.content_key_provider = content_key_provider or bound_provider or LocalKeyProvider(secrets.token_bytes(32))
+        bind_content_key_provider(self._root_store, self.content_key_provider)
         self.path = self._root_store.path if isinstance(self._root_store, CoreSQLiteStore) else None
         if (
             isinstance(self._root_store, CoreSQLiteStore)
@@ -74,7 +95,11 @@ class SessionDriver:
         from vv_agent.model import ScriptedModelProvider
 
         provider = ScriptedModelProvider.new("local", "control", [])
-        return self.runtime(Agent("control", "Apply session controls.", model="control"), RunConfig(model_provider=provider))
+        return self.runtime(
+            Agent("control", "Apply session controls.", model="control"),
+            RunConfig(model_provider=provider),
+            session_id=sid,
+        )
 
     def close(self) -> None:
         for handle in self.handles:
@@ -94,42 +119,78 @@ class SessionDriver:
         self._close_callbacks.append(callback)
         _STORE_CLOSERS.setdefault(self._root_store, []).append(callback)
 
-    def _bound_actor(self, actor: dict[str, Any] | None, *, subject_id: str) -> dict[str, Any]:
+    def _bound_actor(
+        self,
+        actor: dict[str, Any] | None,
+        *,
+        subject_id: str,
+        writer: SessionContentWriter,
+    ) -> dict[str, Any]:
         if actor is None:
-            return service_principal(self.tenant_id, subject_id)
+            principal, _ = writer.service_principal(subject_id)
+            return principal
         if not isinstance(actor, dict) or actor.get("tenant_id") != self.tenant_id:
             raise ValueError("input actor must use the session tenant")
+        attributes = actor.get("attributes")
+        if not isinstance(attributes, dict):
+            raise ValueError("input actor attributes require a ContentRef")
+        ContentRef.from_dict(attributes)
         return actor
 
-    def _prepare_item(self, sid: str, item: InboxItem) -> InboxItem:
+    @staticmethod
+    def _input_content_ref(
+        writer: SessionContentWriter,
+        input_id: str,
+        slot: str,
+        value: Any,
+    ) -> tuple[ContentRef, bool]:
+        try:
+            ref = ContentRef.from_dict(value)
+        except (TypeError, ValueError):
+            return writer.put_json(value), False
+        return writer.assert_input(input_id, ref, slot), True
+
+    def _prepare_item(self, sid: str, item: InboxItem, writer: SessionContentWriter) -> InboxItem:
         payload = dict(item.payload)
         if item.kind in {"user", "steer", "follow_up"}:
-            payload["content"] = input_content_ref(
-                payload["content"],
-                slot=f"session/{sid}/input/{item.input_id}",
-                tenant_id=self.tenant_id,
-            )
+            ref, _ = self._input_content_ref(writer, item.input_id, INPUT_CONTENT, payload["content"])
+            payload["content"] = ref.to_dict()
         elif item.kind == "model_selection" and payload["selection"] is not None:
-            payload["selection"] = input_content_ref(
-                payload["selection"],
-                slot=f"session/{sid}/input/{item.input_id}/selection",
-                tenant_id=self.tenant_id,
-            )
+            ref, _ = self._input_content_ref(writer, item.input_id, INPUT_SELECTION, payload["selection"])
+            payload["selection"] = ref.to_dict()
+        elif item.kind == "approval_answer":
+            if payload.get("reason") is not None:
+                ref, _ = self._input_content_ref(writer, item.input_id, APPROVAL_REASON, payload["reason"])
+                payload["reason"] = ref.to_dict()
+            if payload.get("metadata") is not None:
+                ref, _ = self._input_content_ref(writer, item.input_id, APPROVAL_METADATA, payload["metadata"])
+                payload["metadata"] = ref.to_dict()
         return replace(item, payload=payload)
 
     def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
-        principal = self._bound_actor(None, subject_id="local")
-        spec = SessionSpec(
-            sid,
-            principal,
-            local_content_ref(str(workspace), slot=f"session/{sid}/workspace", tenant_id=self.tenant_id),
-            attributes=local_content_ref(attributes or {}, slot=f"session/{sid}/attributes", tenant_id=self.tenant_id),
-        )
         with self.store.atomic() as tx:
-            tx.create(spec, consumers=("events", "app_server", "traces"))
+            writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
+
+            def session_spec(content: SessionContentWriter) -> SessionSpec:
+                principal, _ = content.service_principal("local")
+                return SessionSpec(
+                    sid,
+                    principal,
+                    content.put_json(str(workspace)).to_dict(),
+                    attributes=content.put_json(attributes or {}).to_dict(),
+                )
+
+            writer.create_session(session_spec, consumers=("events", "app_server", "traces"))
         _DRIVERS[(self.tenant_id, sid)] = self
 
-    def runtime(self, agent: Agent, config: RunConfig, task: AgentTask | None = None) -> Runtime:
+    def runtime(
+        self,
+        agent: Agent,
+        config: RunConfig,
+        task: AgentTask | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> Runtime:
 
         llm, resolved = resolve_run_model(agent=agent, run_config=config)
         metadata = dict(agent.metadata) | config.metadata
@@ -163,6 +224,11 @@ class SessionDriver:
             frozen_task=task,
             memory_manager=memory,
             model_resolver=self.model_resolver,
+            content_reader=(
+                durable_content_reader(self._root_store, tenant_id=self.tenant_id, session_id=session_id)
+                if session_id is not None
+                else None
+            ),
         )
         provider = config.model_provider
         if self.model_resolver is None and provider is not None:
@@ -184,6 +250,7 @@ class SessionDriver:
         consumer: str = "events",
         autostart: bool = True,
         actor: dict[str, Any] | None = None,
+        actor_subject_id: str = "local",
     ) -> RunHandle:
         state, _, _ = self.store.read_state(sid)
         if state.turns and config.shared_state is None:
@@ -191,13 +258,17 @@ class SessionDriver:
             config = replace(config, shared_state=prior.raw_result.shared_state)
         if task is not None and config.shared_state is not None:
             task = replace(task, initial_shared_state=dict(config.shared_state))
-        runtime = self.runtime(agent, config, task)
+        runtime = self.runtime(agent, config, task, session_id=sid)
         if state.closed or state.archived:
             raise RuntimeError("session is closed or archived")
         if content is not None:
             identity = input_id or uuid4().hex
-            input_actor = self._bound_actor(actor, subject_id="local")
-            self.push(sid, InboxItem(identity, "user", {"content": content}, actor=input_actor), actor=input_actor)
+            self.push(
+                sid,
+                InboxItem(identity, "user", {"content": content}),
+                actor=actor,
+                actor_subject_id=actor_subject_id,
+            )
             tid = f"{sid}/turn/{identity}"
         else:
             queued = next(
@@ -229,11 +300,87 @@ class SessionDriver:
             handle.start()
         return handle
 
-    def push(self, sid: str, item: InboxItem, *, actor: dict[str, Any] | None = None):
-        item = self._prepare_item(sid, item)
-        item = replace(item, actor=self._bound_actor(actor or item.actor, subject_id="local"))
+    def push(
+        self,
+        sid: str,
+        item: InboxItem,
+        *,
+        actor: dict[str, Any] | None = None,
+        actor_subject_id: str = "local",
+    ):
         with self.store.atomic() as tx:
-            return tx.push(sid, item)
+            return self._push_in_transaction(
+                tx,
+                sid,
+                item,
+                actor=actor,
+                actor_subject_id=actor_subject_id,
+            )
+
+    def _push_in_transaction(
+        self,
+        tx,
+        sid: str,
+        item: InboxItem,
+        *,
+        actor: dict[str, Any] | None = None,
+        actor_subject_id: str = "local",
+    ):
+        writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
+        item = self._prepare_item(sid, item, writer)
+        bound_actor = self._bound_actor(actor or item.actor, subject_id=actor_subject_id, writer=writer)
+        item = replace(item, actor=bound_actor)
+        receipt = tx.push(sid, item)
+        if item.kind in {"user", "steer", "follow_up"}:
+            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["content"]), INPUT_CONTENT)
+        elif item.kind == "model_selection" and item.payload["selection"] is not None:
+            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["selection"]), INPUT_SELECTION)
+        elif item.kind == "approval_answer":
+            writer.link_input(item.input_id, ContentRef.from_dict(item.payload["scope"]), APPROVAL_SCOPE)
+            if item.payload.get("reason") is not None:
+                writer.link_input(item.input_id, ContentRef.from_dict(item.payload["reason"]), APPROVAL_REASON)
+            if item.payload.get("metadata") is not None:
+                writer.link_input(item.input_id, ContentRef.from_dict(item.payload["metadata"]), APPROVAL_METADATA)
+        writer.link_input(
+            item.input_id,
+            ContentRef.from_dict(bound_actor["attributes"]),
+            INPUT_ACTOR_ATTRIBUTES,
+        )
+        return receipt
+
+    def read_input_content(
+        self,
+        sid: str,
+        input_id: str,
+        ref: ContentRef | dict[str, Any],
+        *,
+        slot: str = INPUT_CONTENT,
+    ) -> Any:
+        return read_input_json(
+            self.store,
+            tenant_id=self.tenant_id,
+            session_id=sid,
+            input_id=input_id,
+            ref=ref,
+            slot=slot,
+        )
+
+    def read_record_content(
+        self,
+        sid: str,
+        record_seq: int,
+        ref: ContentRef | dict[str, Any],
+        *,
+        slot: str,
+    ) -> Any:
+        return read_record_json(
+            self.store,
+            tenant_id=self.tenant_id,
+            session_id=sid,
+            record_seq=record_seq,
+            ref=ref,
+            slot=slot,
+        )
 
     def control(
         self,
@@ -246,11 +393,11 @@ class SessionDriver:
     ):
         state, _, _ = self.store.read_state(sid)
         tid = None if action in {"archive", "close"} else state.active_turn_id
-        input_actor = self._bound_actor(actor, subject_id="local-control")
         receipt = self.push(
             sid,
-            InboxItem(input_id, "control", {"action": action}, tid, actor=input_actor),
-            actor=input_actor,
+            InboxItem(input_id, "control", {"action": action}, tid),
+            actor=actor,
+            actor_subject_id="local-control",
         )
         if runtime is None and state.active_turn_id is None:
             runtime = self._control_runtime(sid)
@@ -346,13 +493,16 @@ class SessionDriver:
             {"content": reply_content(target, answer)},
             target.turn_id,
             target.generation,
-            actor=self._bound_actor(actor, subject_id="interaction-reply"),
         )
-        item = self._prepare_item(target.session_id, item)
         if previous:
-            if previous[0] != target.session_id or previous[1].encode() != item.encode():
+            if previous[0] != target.session_id:
                 raise Conflict("input_id reused with different bytes")
-            return self.push(target.session_id, item)
+            return self.push(
+                target.session_id,
+                item,
+                actor=actor,
+                actor_subject_id="interaction-reply",
+            )
         captured = {identity: self.store.read_state(identity) for identity in [sid, *chain]}
         try:
             validate_child_graph(self.store, sid, target.session_id, active=True)
@@ -369,7 +519,12 @@ class SessionDriver:
                 tx.lock_session(identity)
                 if self.store.lease_status(identity)[0] != captured[identity][1][-1].seq:
                     raise InteractionError("stale_interaction")
-            return self.push(target.session_id, item)
+            return self.push(
+                target.session_id,
+                item,
+                actor=actor,
+                actor_subject_id="interaction-reply",
+            )
 
     def approve(
         self,
@@ -394,7 +549,12 @@ class SessionDriver:
                 "reason": decision.reason,
                 "metadata": decision.metadata,
             }
-            return self.push(target, replace(item, payload=payload))
+            return self.push(
+                target,
+                replace(item, payload=payload),
+                actor=actor,
+                actor_subject_id="approval",
+            )
         waits = [w for w in self.waits(sid, runtime) if w[2].get("request_id") == request_id]
         if len(waits) != 1:
             raise KeyError(f"Unknown approval request: {request_id}")
@@ -414,9 +574,9 @@ class SessionDriver:
                 payload,
                 wait["turn_id"],
                 state.turns[wait["turn_id"]].start._payload["generation"],
-                actor=self._bound_actor(actor, subject_id="approval"),
             ),
             actor=actor,
+            actor_subject_id="approval",
         )
 
     def _retained_reply(self, sid: str, input_id: str):

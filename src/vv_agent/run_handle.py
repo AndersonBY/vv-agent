@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
 from vv_agent.events import RunEvent
-from vv_agent.kernel._child_store import input_content_ref, service_principal
 from vv_agent.result import RunResult
 from vv_agent.session.children import cancel_children, child_delivery, child_handles
 from vv_agent.session.events import SessionRunEventStore
@@ -292,15 +291,16 @@ class RunHandle:
             state, _, _ = self.kernel.store.read_state(self.session_id)
             if state.active_turn_id != self.run_id:
                 return False
-            receipt = tx.push(
+            receipt = self.kernel._push_in_transaction(
+                tx,
                 self.session_id,
                 InboxItem(
                     f"cancel/{self.run_id}",
                     "control",
                     {"action": "cancel"},
                     self.run_id,
-                    actor=service_principal(self.kernel.tenant_id, "run-handle"),
                 ),
+                actor_subject_id="run-handle",
             )
             cancel_children(self.kernel.store, tx, state, self.session_id, self.run_id)
         return not receipt.replayed
@@ -324,7 +324,7 @@ class RunHandle:
             request_id,
             decision,
             f"approval/{request_id}/answer",
-            actor=service_principal(self.kernel.tenant_id, "run-handle"),
+            actor=None,
         )
 
     def steer(self, message: str) -> None:
@@ -334,16 +334,10 @@ class RunHandle:
             InboxItem(
                 input_id,
                 "steer",
-                {
-                    "content": input_content_ref(
-                        message,
-                        slot=f"session/{self.session_id}/input/{input_id}",
-                        tenant_id=self.kernel.tenant_id,
-                    )
-                },
+                {"content": message},
                 self.run_id,
-                actor=service_principal(self.kernel.tenant_id, "run-handle"),
             ),
+            actor_subject_id="run-handle",
         )
 
     def follow_up(self, message: str) -> None:
@@ -353,15 +347,9 @@ class RunHandle:
             InboxItem(
                 input_id,
                 "follow_up",
-                {
-                    "content": input_content_ref(
-                        message,
-                        slot=f"session/{self.session_id}/input/{input_id}",
-                        tenant_id=self.kernel.tenant_id,
-                    )
-                },
-                actor=service_principal(self.kernel.tenant_id, "run-handle"),
+                {"content": message},
             ),
+            actor_subject_id="run-handle",
         )
 
     def resume(self, state_or_token=None, payload=None) -> RunResult:

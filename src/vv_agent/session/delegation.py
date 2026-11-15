@@ -18,10 +18,9 @@ from vv_agent.kernel._child_delegation import error as error
 from vv_agent.kernel._child_delegation import success as success
 from vv_agent.kernel._child_store import (
     _store_tenant_id,
-    input_content_ref,
     ordinary_result_for_children,
-    service_principal,
 )
+from vv_agent.kernel._content import ContentRef
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -49,6 +48,15 @@ from vv_agent.workspace import DiscoveryFilteredWorkspaceBackend
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
+from .content_runtime import (
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    SESSION_ATTRIBUTES,
+    SESSION_WORKSPACE,
+    SessionContentWriter,
+    durable_content_reader,
+    read_record_json,
+)
 from .records import CHILD_ADMISSION, InboxItem, Record, copy_json, validate
 from .reducer import ExecutionState
 from .result import project_result
@@ -58,6 +66,21 @@ if TYPE_CHECKING:
     from vv_agent.result import RunResult
 
     from .runtime import Runtime
+
+
+def _record_content(store: SessionStore, sid: str, raw, slot: str):
+    try:
+        ContentRef.from_dict(raw)
+    except (TypeError, ValueError):
+        return raw
+    return read_record_json(
+        store,
+        tenant_id=_store_tenant_id(store),
+        session_id=sid,
+        record_seq=1,
+        ref=raw,
+        slot=slot,
+    )
 
 
 def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:
@@ -211,7 +234,8 @@ def assemble(
 
 def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Record | None = None) -> Runtime:
     created = created if created is not None else store.read(sid, limit=1).records[0].record
-    admission = created.payload["attributes"]["child_admission"]
+    attributes = _record_content(store, sid, created.payload["attributes"], SESSION_ATTRIBUTES)
+    admission = attributes["child_admission"]
     validate(admission, CHILD_ADMISSION)
     if admission["handler_version"] != runtime.handler_version:
         raise Conflict("child admission handler version mismatch")
@@ -220,7 +244,7 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Rec
     # Reapply current host restrictions; the task keeps the frozen restrictions as well.
     context = SimpleNamespace(
         shared_state=runtime.bind_state(task.initial_shared_state, task),
-        workspace=Path(created._payload["workspace"]),
+        workspace=Path(_record_content(store, sid, created._payload["workspace"], SESSION_WORKSPACE)),
         workspace_backend=runtime.config.workspace_backend,
     )
     if context.workspace_backend is None:
@@ -234,6 +258,11 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Rec
         )
     config = replace(config, budget_limits=RunBudgetLimits.from_dict(admission["budget"]))
     child_rt = runtime.for_agent(agent, config)
+    child_rt.content_reader = durable_content_reader(
+        store,
+        tenant_id=_store_tenant_id(store),
+        session_id=sid,
+    )
     child_rt.frozen_task = task
     return child_rt
 
@@ -251,9 +280,12 @@ def outcome(
     turn_id = (
         turn_id
         or state.active_turn_id
-        or next(reversed(state.turns), rows[0].record._payload["attributes"]["child_handle"]["turn_id"])
+        or next(
+            reversed(state.turns),
+            _record_content(store, sid, rows[0].record._payload["attributes"], SESSION_ATTRIBUTES)["child_handle"]["turn_id"],
+        )
     )
-    admission = rows[0].record._payload["attributes"].get("child_admission")
+    admission = _record_content(store, sid, rows[0].record._payload["attributes"], SESSION_ATTRIBUTES).get("child_admission")
     name = admission["definition"]["agent_name"] if admission else runtime.agent.name
     if turn_id not in state.turns:
         return SubTaskOutcome(sid, name, AgentStatus.RUNNING, session_id=sid)
@@ -286,7 +318,12 @@ def result_for_children(
     store: SessionStore, plan: Record, handles: list[dict[str, Any]], runtime: Runtime
 ) -> ToolExecutionResult:
     first = store.read_state(handles[0]["session_id"])
-    admission = first[1][0].record._payload["attributes"].get("child_admission")
+    admission = _record_content(
+        store,
+        handles[0]["session_id"],
+        first[1][0].record._payload["attributes"],
+        SESSION_ATTRIBUTES,
+    ).get("child_admission")
     if admission is None:
         return ordinary_result_for_children(store, plan, handles, first_snapshot=first)
     mode = admission["mode"]
@@ -332,7 +369,13 @@ def result_for_children(
 
 
 def admitted_result(store: SessionStore, plan: Record, handles: list[dict[str, Any]]) -> ToolExecutionResult:
-    admission = store.read(handles[0]["session_id"], limit=1).records[0].record._payload["attributes"].get("child_admission")
+    created = store.read(handles[0]["session_id"], limit=1).records[0].record
+    admission = _record_content(
+        store,
+        handles[0]["session_id"],
+        created._payload["attributes"],
+        SESSION_ATTRIBUTES,
+    ).get("child_admission")
     if not admission:
         if len(handles) > 1:
             return ToolExecutionResult(plan._payload["request"]["id"], json.dumps(handles), metadata={"children": handles})
@@ -408,7 +451,8 @@ class ChildTasks:
             )
         ):
             value = replace(value, status=AgentStatus.RUNNING)
-        task = AgentTask.from_dict(created.payload["attributes"]["child_admission"]["definition"]["task"])
+        attributes = _record_content(self.store, task_id, created.payload["attributes"], SESSION_ATTRIBUTES)
+        task = AgentTask.from_dict(attributes["child_admission"]["definition"]["task"])
         return SimpleNamespace(
             task_id=task_id,
             session_id=task_id,
@@ -440,11 +484,18 @@ class ChildTasks:
         if self.get(task_id) is None:
             raise KeyError(task_id)
         created = self.store.read(task_id, limit=1).records[0].record
-        h = created._payload["attributes"]["child_handle"]
+        attributes = _record_content(self.store, task_id, created._payload["attributes"], SESSION_ATTRIBUTES)
+        h = attributes["child_handle"]
         state, _, _ = self.store.read_state(task_id)
         turn_id = state.active_turn_id or h["turn_id"]
         generation = state.turns[turn_id].start._payload["generation"] if turn_id in state.turns else h["generation"]
         with self.store.atomic() as tx:
+            writer = SessionContentWriter.bind(
+                tx,
+                tenant_id=_store_tenant_id(self.store),
+                session_id=task_id,
+            )
+            actor, actor_attributes = writer.service_principal("child-tasks")
             tx.push(
                 task_id,
                 InboxItem(
@@ -453,9 +504,10 @@ class ChildTasks:
                     payload,
                     turn_id,
                     generation,
-                    actor=service_principal(_store_tenant_id(self.store), "child-tasks"),
+                    actor=actor,
                 ),
             )
+            writer.link_input(input_id, actor_attributes, INPUT_ACTOR_ATTRIBUTES)
 
     def message(self, task_id: str, input_id: str, text: str) -> str:
         if self.get(task_id) is None:
@@ -464,39 +516,33 @@ class ChildTasks:
         applied = state.applied_inputs.get(input_id)
         pending = next((i.item for i in self.store.peek_inbox(task_id) if i.item.input_id == input_id), None)
         previous = InboxItem(**applied._payload["input"]) if applied else pending
-        if previous is not None:
-            content = previous.payload.get("content")
-            expected_content = input_content_ref(
-                text,
-                slot=f"session/{task_id}/input/{input_id}",
-                tenant_id=_store_tenant_id(self.store),
-            )
-            if content != expected_content:
-                raise Conflict("child message id reused with different content")
-            with self.store.atomic() as tx:
-                tx.push(task_id, previous)
-            return "continued" if previous.kind == "follow_up" else "message_queued"
         target = state.active_turn_id
         generation = state.turns[target].start._payload["generation"] if target else None
         action = "message_queued" if target else "continued"
-        content = input_content_ref(
-            text,
-            slot=f"session/{task_id}/input/{input_id}",
-            tenant_id=_store_tenant_id(self.store),
-        )
-        kind, payload = ("steer", {"content": content}) if target else ("follow_up", {"content": content})
+        kind = ("steer", "follow_up")[target is None]
         with self.store.atomic() as tx:
+            writer = SessionContentWriter.bind(
+                tx,
+                tenant_id=_store_tenant_id(self.store),
+                session_id=task_id,
+            )
+            content = writer.put_json(text)
+            actor, actor_attributes = writer.service_principal("child-tasks")
             tx.push(
                 task_id,
                 InboxItem(
                     input_id,
                     kind,
-                    payload,
+                    {"content": content.to_dict()},
                     target,
                     generation,
-                    actor=service_principal(_store_tenant_id(self.store), "child-tasks"),
+                    actor=actor,
                 ),
             )
+            writer.link_input(input_id, content, INPUT_CONTENT)
+            writer.link_input(input_id, actor_attributes, INPUT_ACTOR_ATTRIBUTES)
+        if previous is not None:
+            return "continued" if previous.kind == "follow_up" else "message_queued"
         self.runtime.wake(task_id)
         self.runtime.hook("after_input", None)
         return action

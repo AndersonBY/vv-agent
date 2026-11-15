@@ -17,9 +17,10 @@ from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._child_store import input_content_ref, local_content_ref, service_principal
+from vv_agent.kernel._content import ContentRef
 from vv_agent.types import AgentStatus, Message
 
+from .content_runtime import INPUT_CONTENT, SESSION_ATTRIBUTES, SessionContentWriter
 from .context_view import context_view
 from .projection import project_records
 from .records import InboxItem, SessionSpec, digest
@@ -170,22 +171,22 @@ class _KernelThreadStore:
 
     def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None, context=None):
         attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
-        principal = service_principal(self.kernel.tenant_id, "app-server")
-        workspace = local_content_ref(cwd or ".", slot=f"session/{input_id}/workspace", tenant_id=self.kernel.tenant_id)
-        attributes_ref = local_content_ref(
-            attributes | ({"app_server_context": context} if context is not None else {}),
-            slot=f"session/{input_id}/attributes",
-            tenant_id=self.kernel.tenant_id,
-        )
+        values = attributes | ({"app_server_context": context} if context is not None else {})
         try:
             with self.kernel.store.atomic() as tx:
-                receipt = tx.create(
-                    SessionSpec(
+                writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
+
+                def session_spec(content: SessionContentWriter) -> SessionSpec:
+                    principal, _ = content.service_principal("app-server")
+                    return SessionSpec(
                         input_id,
                         principal,
-                        workspace,
-                        attributes=attributes_ref,
-                    ),
+                        content.put_json(cwd or ".").to_dict(),
+                        attributes=content.put_json(values).to_dict(),
+                    )
+
+                receipt = writer.create_session(
+                    session_spec,
                     consumers=("events", "app_server", "traces"),
                 )
             replayed = receipt.replayed
@@ -193,8 +194,9 @@ class _KernelThreadStore:
             # Retry with the winning node's frozen context; tx.create owns replay.
             creation = self.kernel.store.read(input_id, limit=1).records[0].record._payload
             with self.kernel.store.atomic() as tx:
-                receipt = tx.create(
-                    SessionSpec(
+                writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
+                receipt = writer.create_session(
+                    lambda _content: SessionSpec(
                         input_id,
                         creation["principal"],
                         creation["workspace"],
@@ -214,7 +216,18 @@ class _KernelThreadStore:
         }
 
     def _thread_metadata(self, thread_id, state, records):
-        attributes = records[0].record.payload["attributes"].get("app_server")
+        attributes_ref = records[0].record.payload["attributes"]
+        try:
+            ContentRef.from_dict(attributes_ref)
+        except (TypeError, ValueError):
+            attributes = attributes_ref.get("app_server")
+        else:
+            attributes = self.kernel.read_record_content(
+                thread_id,
+                records[0].seq,
+                attributes_ref,
+                slot=SESSION_ATTRIBUTES,
+            ).get("app_server")
         if attributes is None:
             raise KeyError(thread_id)
         pending = [
@@ -248,12 +261,18 @@ class _KernelThreadStore:
             project_thread_status(state, pending=bool(pending), now_ms=self.clock.now_ms()).value,
             state.active_turn_id or (f"{thread_id}/turn/{pending[-1].input_id}" if pending else None),
             attributes["metadata"]
-            | (
-                {"lineage": records[0].record._payload["attributes"]["app_server_fork"]["lineage"]}
-                if "app_server_fork" in records[0].record._payload["attributes"]
-                else {}
-            ),
+            | ({"lineage": attributes["app_server_fork"]["lineage"]} if "app_server_fork" in attributes else {}),
         )
+
+    def _input_content(self, thread_id: str, item: InboxItem) -> Any:
+        content = item.payload.get("content")
+        if not isinstance(content, dict):
+            return content
+        try:
+            ref = ContentRef.from_dict(content)
+        except (TypeError, ValueError):
+            return content
+        return self.kernel.read_input_content(thread_id, item.input_id, ref, slot=INPUT_CONTENT)
 
     def read_thread(self, thread_id):
         try:
@@ -265,8 +284,8 @@ class _KernelThreadStore:
         runtime = self.runtimes.get(thread_id)
         for tid, turn in state.turns.items():
             start = next(r for r in records if r.record == turn.start)
-            initial = state.applied_inputs[turn.start._payload["input_ids"][0]]._payload["input"]
-            content = initial["payload"]["content"]
+            initial = InboxItem(**state.applied_inputs[turn.start._payload["input_ids"][0]]._payload["input"])
+            content = self._input_content(thread_id, initial)
             wire_input = content.get("app_server", {}).get("input", []) if isinstance(content, dict) else []
             terminal = next((r for r in records if r.record.kind == "turn_ended" and r.record.turn_id == tid), None)
             status = (
@@ -299,9 +318,15 @@ class _KernelThreadStore:
                 pending.append((InboxItem(**r._payload["input"]), records[-1].created_ms))
         for item, received in pending:
             tid = f"{thread_id}/turn/{item.input_id}"
-            content = item.payload["content"]
+            content = self._input_content(thread_id, item)
             turns.append(
-                TurnRecord(tid, thread_id, tid, input=content.get("app_server", {}).get("input", []), started_at=received / 1000)
+                TurnRecord(
+                    tid,
+                    thread_id,
+                    tid,
+                    input=content.get("app_server", {}).get("input", []) if isinstance(content, dict) else [],
+                    started_at=received / 1000,
+                )
             )
         items = []
         for event in project_records(records):
@@ -320,7 +345,19 @@ class _KernelThreadStore:
                 if authorize is not None and not authorize(sid):
                     continue
                 page = self.kernel.store.read(sid, limit=1)
-                if not page.records[0].record._payload["attributes"].get("app_server"):
+                attributes_ref = page.records[0].record._payload["attributes"]
+                try:
+                    ContentRef.from_dict(attributes_ref)
+                except (TypeError, ValueError):
+                    attributes = attributes_ref
+                else:
+                    attributes = self.kernel.read_record_content(
+                        sid,
+                        page.records[0].seq,
+                        attributes_ref,
+                        slot=SESSION_ATTRIBUTES,
+                    )
+                if not attributes.get("app_server"):
                     continue
                 is_archived = any(
                     r.record._payload["disposition"] == "applied" and r.record._payload["input"]["payload"]["action"] == "archive"
@@ -589,7 +626,17 @@ class _KernelRunAdapter(RunAdapter):
                 else (InboxItem(**queued) if queued else pending)
             )
             if item is not None and isinstance(item.payload.get("content"), dict):
-                content = item.payload["content"]
+                try:
+                    content_ref = ContentRef.from_dict(item.payload["content"])
+                except (TypeError, ValueError):
+                    content = item.payload["content"]
+                else:
+                    content = self.kernel.read_input_content(
+                        thread_id,
+                        item.input_id,
+                        content_ref,
+                        slot=INPUT_CONTENT,
+                    )
         metadata = thread.metadata | (content.get("app_server", {}).get("metadata", {}) if content else {})
         agent = self._host.resolve_agent(AgentResolutionRequest(thread_id, thread.agent_key, thread.cwd, metadata))
         config = self._host.build_run_config(RunConfigResolutionRequest(thread_id, thread.agent_key, thread.cwd, metadata))
@@ -607,12 +654,6 @@ class _KernelRunAdapter(RunAdapter):
 
     def submit_input(self, *, connection_id, thread_id, input_id, expected_turn_id, kind, input, metadata=None):
         content = _content(self, input, metadata or {}, kind, expected_turn_id)
-        actor = service_principal(self.kernel.tenant_id, "app-server")
-        content_ref = input_content_ref(
-            content,
-            slot=f"session/{thread_id}/input/{input_id}",
-            tenant_id=self.kernel.tenant_id,
-        )
         try:
             while True:
                 state, records, _ = self.kernel.store.read_state(thread_id)
@@ -621,14 +662,7 @@ class _KernelRunAdapter(RunAdapter):
                     if self.kernel.store.lease_status(thread_id)[0] != records[-1].seq:
                         continue
                     stored = self.kernel.store.read_input(thread_id, input_id)
-                    if stored:
-                        retained = stored.item
-                        if retained.kind != ("user" if kind == "start" else kind):
-                            raise SubmissionConflict("submission_conflict")
-                        if canonical_json_bytes(retained.payload["content"]) != canonical_json_bytes(content_ref):
-                            raise SubmissionConflict("submission_conflict")
-                        item = retained
-                    else:
+                    if not stored:
                         if state.closed or state.archived:
                             raise TurnMismatch("Thread is closed or archived")
                         latest = next(reversed(state.turns), None)
@@ -650,15 +684,19 @@ class _KernelRunAdapter(RunAdapter):
                             raise TurnMismatch("Thread already has an active turn")
                         if kind != "start" and expected_turn_id is None:
                             raise TurnMismatch("turn_mismatch")
-                        item = InboxItem(
-                            input_id,
-                            "user" if kind == "start" else kind,
-                            {"content": content_ref},
-                            expected_turn_id if kind == "steer" else None,
-                            state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
-                            actor=actor,
-                        )
-                    receipt = self.kernel.push(thread_id, item)
+                    item = InboxItem(
+                        input_id,
+                        "user" if kind == "start" else kind,
+                        {"content": content},
+                        expected_turn_id if kind == "steer" else None,
+                        state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
+                    )
+                    receipt = self.kernel._push_in_transaction(
+                        tx,
+                        thread_id,
+                        item,
+                        actor_subject_id="app-server",
+                    )
                     break
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
@@ -733,7 +771,14 @@ class _KernelRunAdapter(RunAdapter):
             # keeps host callbacks and transport writes outside that transaction.
             config = replace(config, stream=None)
             handle = self.kernel.start(
-                thread_id, agent, config, content, input_id=input_id, consumer="app_server", autostart=False
+                thread_id,
+                agent,
+                config,
+                content,
+                input_id=input_id,
+                consumer="app_server",
+                autostart=False,
+                actor_subject_id="app-server",
             )
             handle._wait_for_lease = False
             handle._lease_retry_allowed = lease_retry
@@ -845,23 +890,12 @@ class _KernelRunAdapter(RunAdapter):
         if expected_context_version is not None:
             params["expectedContextVersion"] = expected_context_version
         request_id = "compaction/" + digest([thread_id, action_id])
-        item = InboxItem(
-            request_id,
-            "user",
-            {
-                "content": input_content_ref(
-                    {
-                        "text": "",
-                        "messages": [],
-                        "metadata": {"request_compaction": True},
-                        "app_server_compaction": params,
-                    },
-                    slot=f"session/{thread_id}/input/{request_id}",
-                    tenant_id=self.kernel.tenant_id,
-                )
-            },
-            actor=service_principal(self.kernel.tenant_id, "app-server"),
-        )
+        content = {
+            "text": "",
+            "messages": [],
+            "metadata": {"request_compaction": True},
+            "app_server_compaction": params,
+        }
         try:
             while True:
                 state, records, watermark = self.kernel.store.read_state(thread_id)
@@ -876,15 +910,18 @@ class _KernelRunAdapter(RunAdapter):
                     if (position.head_seq, position.inbox_seq) != (head, watermark):
                         continue
                     previous = self.kernel.store.read_input(thread_id, request_id)
-                    if previous is not None:
-                        if previous.item.encode() != item.encode():
-                            raise SubmissionConflict("submission_conflict")
-                    else:
+                    if previous is None:
                         if state.closed or state.archived:
                             raise TurnResumeError("Thread is closed or archived")
                         if expected_context_version is not None and context_version != expected_context_version:
                             raise ContextVersionMismatch("context_version_mismatch")
-                    receipt = tx.push(thread_id, item)
+                    item = InboxItem(request_id, "user", {"content": content})
+                    receipt = self.kernel._push_in_transaction(
+                        tx,
+                        thread_id,
+                        item,
+                        actor_subject_id="app-server",
+                    )
                     break
         except Conflict as exc:
             if str(exc) == "session or cursor not found":
@@ -911,8 +948,8 @@ class _KernelRunAdapter(RunAdapter):
                     input_id,
                     "model_selection",
                     {"selection": selection},
-                    actor=service_principal(self.kernel.tenant_id, "app-server"),
                 ),
+                actor_subject_id="app-server",
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
@@ -955,8 +992,21 @@ class _KernelRunAdapter(RunAdapter):
         previous = self.kernel._retained_reply(thread_id, input_id)
         if previous:
             retained = previous[1]
+            retained_content = retained.payload.get("content")
+            if isinstance(retained_content, dict):
+                try:
+                    retained_ref = ContentRef.from_dict(retained_content)
+                except (TypeError, ValueError):
+                    retained_content = retained_content
+                else:
+                    retained_content = self.kernel.read_input_content(
+                        previous[0],
+                        retained.input_id,
+                        retained_ref,
+                        slot=INPUT_CONTENT,
+                    )
             original = (
-                {"kind": "respond", **retained.payload["content"]["metadata"]["interaction_response"]}
+                {"kind": "respond", **retained_content["metadata"]["interaction_response"]}
                 if retained.kind == "user"
                 else {"kind": retained.payload["action"]}
                 if retained.kind == "control"
@@ -975,7 +1025,6 @@ class _KernelRunAdapter(RunAdapter):
             _, agent, config = self._binding(thread_id)
             runtime = self.kernel.runtime(agent, config)
         try:
-            actor = service_principal(self.kernel.tenant_id, "app-server")
             if action["kind"] == "respond":
                 receipt = self.kernel.answer(
                     thread_id,
@@ -983,7 +1032,6 @@ class _KernelRunAdapter(RunAdapter):
                     target,
                     InteractionAnswer.from_dict(action["answer"]),
                     input_id,
-                    actor=actor,
                 )
             else:
                 receipt = self.kernel.push(
@@ -994,8 +1042,8 @@ class _KernelRunAdapter(RunAdapter):
                         {"action": action["kind"]},
                         turn_id,
                         state.turns[turn_id].start._payload["generation"],
-                        actor=actor,
                     ),
+                    actor_subject_id="app-server",
                 )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
@@ -1024,7 +1072,7 @@ class _KernelRunAdapter(RunAdapter):
                 request_id,
                 ApprovalDecision(**decision),
                 f"approval/{request_id}/answer",
-                actor=service_principal(self.kernel.tenant_id, "app-server"),
+                actor=None,
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
