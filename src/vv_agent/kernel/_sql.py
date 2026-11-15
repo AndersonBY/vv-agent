@@ -56,6 +56,10 @@ class LedgerIntegrityError(Conflict):
     """Stored ledger bytes, chain positions, commit metadata or checkpoints do not agree."""
 
 
+class UnsupportedFeatureLevel(Conflict):
+    """A producer cannot publish work above the database's write-level ceiling."""
+
+
 class LedgerSigner(Protocol):
     """The minimum signing capability used by transactional input admission."""
 
@@ -74,6 +78,24 @@ def _positive(value: int, name: str) -> None:
 def _natural(value: int, name: str) -> None:
     if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
+
+
+def _level(value: Any, name: str) -> int:
+    _positive(value, name)
+    return value
+
+
+def _record_level(record: Record) -> int:
+    required = _level(record.feature_level, "record feature_level")
+    if record.kind == "turn_started":
+        requirements = record._payload.get("requirements")
+        if isinstance(requirements, dict):
+            required = max(required, _level(requirements.get("level", 1), "turn requirement level"))
+    elif record.kind == "input_applied":
+        input_item = record._payload.get("input")
+        if isinstance(input_item, dict):
+            required = max(required, _level(input_item.get("feature_level", 1), "input feature_level"))
+    return required
 
 
 def _identity(value: str) -> None:
@@ -218,6 +240,7 @@ class SQLStore:
     _previous_prefix: _Prefix | None = None
     _tenant_id = DEFAULT_TENANT_ID
     _root_store: SQLStore | None = None
+    _worker_level = 1
 
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
@@ -225,6 +248,15 @@ class SQLStore:
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
+
+    @property
+    def worker_level(self) -> int:
+        return self._worker_level
+
+    def configure_worker(self, *, level: int = 1) -> None:
+        """Set the maximum feature level this process can execute or project."""
+        root = self._root_store or self
+        root._worker_level = _level(level, "worker level")
 
     def for_tenant(self, tenant_id: str) -> SessionStore:
         """Return a lightweight facade whose public operations are tenant-scoped."""
@@ -311,6 +343,59 @@ class SQLStore:
             bool(root._input_admission_allow_unsigned),
             root._input_admission_signer,
         )
+
+    def _write_ceiling(self) -> int:
+        """Read and lock the database-wide write ceiling inside the caller transaction."""
+        rows = self._rows(f"SELECT storage_major,write_level FROM sk_settings WHERE singleton=1{self.lock_clause}")
+        if len(rows) != 1 or rows[0][0] != "S1":
+            raise LedgerIntegrityError("settings do not identify an S1 store")
+        return _level(rows[0][1], "write_level")
+
+    def _admit_level(self, *, ceiling: int, required: int, current: int = 1) -> int:
+        effective = max(_level(required, "required feature level"), _level(current, "session level"))
+        if effective > ceiling:
+            raise UnsupportedFeatureLevel(f"feature level {effective} exceeds database write level {ceiling}")
+        return effective
+
+    def _input_level(self, item: InboxItem) -> int:
+        required = _level(item.feature_level, "input feature_level")
+        if item.kind == "child_result":
+            child_id = item.payload.get("session_id")
+            if not isinstance(child_id, str):
+                raise Conflict("child_result requires a child session_id")
+            child = self._rows(
+                "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (self.tenant_id, child_id),
+            )
+            if len(child) != 1:
+                raise Conflict("child_result references a missing child session")
+            required = max(required, _level(child[0][0], "child session level"))
+        return required
+
+    def _record_level(self, record: Record) -> int:
+        required = _record_level(record)
+        if record.kind == "input_applied":
+            input_item = record._payload["input"]
+            required = max(required, self._input_level(InboxItem(**input_item)))
+        return required
+
+    def _pending_input_level(self, session_id: str) -> int:
+        required = 1
+        rows = self._rows(
+            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
+            "admission_signature,admission_signed_ms FROM sk_inbox "
+            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NULL ORDER BY input_seq",
+            (self.tenant_id, session_id),
+        )
+        for row in rows:
+            required = max(required, self._input_level(self._stored_input(session_id, row).item))
+        return required
+
+    def _verify_level_cache(self, session_id: str, records: tuple[StoredRecord, ...], cached_level: int) -> None:
+        required = max((self._record_level(stored.record) for stored in records), default=1)
+        required = max(required, self._pending_input_level(session_id))
+        if _level(cached_level, "session level") < required:
+            raise LedgerIntegrityError("session level cache is understated")
 
     def _bind_checkpoint_signer(self) -> Any | None:
         configured, allow_unsigned, signer = self._input_admission_policy()
@@ -545,7 +630,7 @@ class SQLStore:
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
-            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms "
+            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level "
             f"FROM sk_session WHERE tenant_id=%s AND session_id=%s{self.lock_clause}",
             (self.tenant_id, session_id),
         )
@@ -650,6 +735,7 @@ class SQLStore:
 
     def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
         head, epoch = row[0], row[2]
+        cached_level = row[3] if len(row) == 4 else row[6]
         if head == 0:
             raise LedgerIntegrityError("log sequence gap")
         stored_rows, chains = self._verified_records(session_id, head)
@@ -670,6 +756,7 @@ class SQLStore:
                 cached = _Prefix(self.tenant_id, session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
         if cached is not None and through == head:
+            self._verify_level_cache(session_id, cached.records, cached_level)
             self._retain_prefix(cached)
             return cached
         records, bodies = [], []
@@ -703,6 +790,7 @@ class SQLStore:
             reducer,
             (cached.records if cached else ()) + tuple(records),
         )
+        self._verify_level_cache(session_id, prefix.records, cached_level)
         self._retain_prefix(prefix)
         return prefix
 
@@ -716,7 +804,7 @@ class SQLStore:
 
     def _head(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
-            "SELECT head_seq,inbox_seq,lease_epoch FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            "SELECT head_seq,inbox_seq,lease_epoch,level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
         )
 
@@ -751,7 +839,7 @@ class SQLStore:
             snapshot = reducer.snapshot()
             with self._transaction():
                 row = self._lock(session_id)
-                if row[:3] != captured:
+                if row[:3] != captured[:3]:
                     continue
                 self._schedule(session_id, reducer.state)
                 return snapshot
@@ -896,7 +984,7 @@ class SQLStore:
         with self._transaction():
             row = self._lock(session_id)
             now = self._now()  # Must be read after the row lock, not at transaction start.
-            if (row[4] is not None and row[4] > now) or row[5] > now:
+            if row[6] > self._worker_level or (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(
@@ -1029,8 +1117,9 @@ class SQLStore:
                 self._rows(
                     f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
                     "SELECT 1 FROM sk_session s CROSS JOIN clock t "
-                    f"WHERE s.tenant_id=%s AND s.session_id=%s AND {_DRIVE_RUNNABLE_SQL}",
-                    (self.tenant_id, session_id),
+                    f"WHERE s.tenant_id=%s AND s.session_id=%s AND s.schema_version='S1' "
+                    f"AND s.level<=%s AND {_DRIVE_RUNNABLE_SQL}",
+                    (self.tenant_id, session_id, self._worker_level),
                 )
             )
 
@@ -1044,6 +1133,7 @@ class SQLStore:
                 FROM sk_session s CROSS JOIN clock t
                 WHERE s.tenant_id=%s AND s.session_id >= %s
                   AND (s.session_id,'drive','')>(%s,%s,%s)
+                  AND s.schema_version='S1' AND s.level<=%s
                   AND {_DRIVE_RUNNABLE_SQL}
                 ORDER BY s.session_id LIMIT %s
             ), projecting AS (
@@ -1052,6 +1142,7 @@ class SQLStore:
                 CROSS JOIN clock t
                 WHERE c.tenant_id=%s AND c.session_id >= %s
                   AND (c.session_id,'project',c.consumer)>(%s,%s,%s)
+                  AND s.schema_version='S1' AND s.level<=%s
                   AND c.last_seq<s.head_seq AND c.project_retry_at_ms<=t.ms
                 ORDER BY c.session_id,c.consumer LIMIT %s
             ), work AS (
@@ -1063,10 +1154,12 @@ class SQLStore:
                 self.tenant_id,
                 cursor[0],
                 *cursor,
+                self._worker_level,
                 limit,
                 self.tenant_id,
                 cursor[0],
                 *cursor,
+                self._worker_level,
                 limit,
                 limit,
             ),
@@ -1287,11 +1380,16 @@ class SQLSessionTx:
         if tenant_id != s.tenant_id:
             raise Conflict("session principal belongs to another tenant")
         with s._transaction():
-            if spec.parent_session_id is not None and not s._rows(
-                "SELECT 1 FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-                (tenant_id, spec.parent_session_id),
-            ):
-                raise Conflict("parent session not found in tenant")
+            ceiling = s._write_ceiling()
+            parent_level = 1
+            if spec.parent_session_id is not None:
+                parent = s._rows(
+                    "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                    (tenant_id, spec.parent_session_id),
+                )
+                if len(parent) != 1:
+                    raise Conflict("parent session not found in tenant")
+                parent_level = _level(parent[0][0], "parent session level")
             now = s._now()
             inserted = s._rows(
                 "INSERT INTO sk_session(tenant_id,session_id,schema_version,parent_session_id,parent_operation_id,"
@@ -1327,6 +1425,14 @@ class SQLSessionTx:
                 if old[0] != manifest or existing != record.encode():
                     raise Conflict("create identity has different bytes")
                 return CreateReceipt(spec.session_id, 1, old[1], True)
+            required = s._admit_level(
+                ceiling=ceiling,
+                required=max(s._record_level(record), parent_level),
+            )
+            s._rows(
+                "UPDATE sk_session SET level=%s WHERE tenant_id=%s AND session_id=%s",
+                (required, tenant_id, spec.session_id),
+            )
             chain_digest = _extend_chain_digest(_initial_chain_digest(tenant_id, spec.session_id), 1, record.digest)
             commit_digest = sha256(manifest).hexdigest()
             state = s.fold_factory().extend((record,))
@@ -1366,6 +1472,7 @@ class SQLSessionTx:
         if configured and not allow_unsigned and signer is None:
             raise InputAdmissionProofError("signed input admission signer is unavailable")
         with s._transaction():
+            ceiling = s._write_ceiling()
             row = s._lock(session_id)
             old = s._rows(
                 "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
@@ -1378,6 +1485,11 @@ class SQLSessionTx:
                 if old[0][0] != body:
                     raise Conflict("input identity has different bytes")
                 return InputReceipt(item.input_id, stored.input_seq, stored.received_ms, True)
+            required = s._admit_level(
+                ceiling=ceiling,
+                required=s._input_level(item),
+                current=row[6],
+            )
             now, seq = s._now(), row[1] + 1
             key_id = signature = signed_ms = None
             if configured and not allow_unsigned:
@@ -1420,8 +1532,8 @@ class SQLSessionTx:
                 ),
             )
             s._rows(
-                "UPDATE sk_session SET inbox_seq=%s WHERE tenant_id=%s AND session_id=%s",
-                (seq, s.tenant_id, session_id),
+                "UPDATE sk_session SET inbox_seq=%s,level=%s WHERE tenant_id=%s AND session_id=%s",
+                (seq, required, s.tenant_id, session_id),
             )
             return InputReceipt(item.input_id, seq, now)
 
@@ -1482,6 +1594,7 @@ class SQLSessionTx:
         if self._lease_guard is not None:
             lease = self._lease_guard()
         with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
+            ceiling = s._write_ceiling()
             row = s._lock(session_id)
             head_chain_digest = s._chain_anchor(session_id, expected_seq)
             body = _commit_manifest(
@@ -1528,6 +1641,11 @@ class SQLSessionTx:
                 raise SequenceConflict("head or epoch changed during append preparation")
             if prefix.head_digest != head_chain_digest:
                 raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
+            required = s._admit_level(
+                ceiling=ceiling,
+                required=max((s._record_level(record) for record in records), default=1),
+                current=row[6],
+            )
             sequences: list[tuple[str, int]] = []
             new: list[tuple[int, Record, int]] = []
             head = row[0]
@@ -1600,8 +1718,8 @@ class SQLSessionTx:
                     (seq, s.tenant_id, session_id, input_id),
                 )
             s._rows(
-                "UPDATE sk_session SET head_seq=%s WHERE tenant_id=%s AND session_id=%s",
-                (head, s.tenant_id, session_id),
+                "UPDATE sk_session SET head_seq=%s,level=%s WHERE tenant_id=%s AND session_id=%s",
+                (head, required, s.tenant_id, session_id),
             )
             # Consuming unrelated input must not erase an idle provider's SQL deferral.
             s._schedule(
@@ -1623,10 +1741,14 @@ class SQLSessionTx:
         self._active()
         _positive(limit, "limit")
         s = self.store
-        last = s._one(
-            f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s{s.lock_clause}",
+        last, level = s._one(
+            "SELECT c.last_seq,s.level FROM sk_consumer c "
+            "JOIN sk_session s ON s.tenant_id=c.tenant_id AND s.session_id=c.session_id "
+            f"WHERE c.tenant_id=%s AND c.session_id=%s AND c.consumer=%s{s.lock_clause}",
             (s.tenant_id, session_id, consumer),
-        )[0]
+        )
+        if level > s._worker_level:
+            return None
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
         rows = s._rows(
             """
