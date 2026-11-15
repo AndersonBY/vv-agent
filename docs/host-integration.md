@@ -73,6 +73,12 @@ string owned by `src/vv_agent/kernel/_postgres.py` and exported by
 that literal from the installed release. SQLite files carry
 `PRAGMA user_version` 3, and the store refuses to open any other version.
 
+The PostgreSQL DDL is the unisolated base schema. For credential-level tenant
+isolation, call `install_tenant_rls()` after schema installation and use
+`tenant_standalone()` when starting tenant work. Worker and shared-gateway
+logins are separate explicit modes; neither satisfies the tenant credential
+boundary. See [PostgreSQL tenant RLS](postgres-rls.md).
+
 vv-agent has no schema migrator. Finish old sessions with the release that
 created them, then provision the current schema. Any schema change the host
 makes itself is the host's responsibility. See

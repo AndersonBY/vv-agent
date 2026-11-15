@@ -433,8 +433,8 @@ def test_postgres_installs_complete_s1_schema(postgres_database):
         assert foreign_keys
         assert all(definition.startswith("FOREIGN KEY (tenant_id") for definition in foreign_keys)
 
-        assert _postgres.RLS_ISOLATION == "deferred"
-        assert "not installed" in _postgres.RLS_DEFERRED_REASON
+        assert _postgres.RLS_ISOLATION == "explicit-tenant-credentials"
+        assert "install_tenant_rls" in _postgres.RLS_INSTALL_REASON
         assert not any(
             row[0]
             for row in connection.execute(

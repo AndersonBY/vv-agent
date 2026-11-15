@@ -1,8 +1,8 @@
 """Tenant-bound facade integration tests for the S1 SQL stores.
 
 SQLite coverage exercises application-level store scoping on real files. PostgreSQL
-runs the same facade assertions when a disposable server is available; it does not
-claim that the currently deferred PostgreSQL RLS installation is present.
+runs the same facade assertions against the base schema; credential-level RLS has
+separate TCP/password installation and startup coverage in test_s1_postgres_rls.py.
 """
 
 from __future__ import annotations

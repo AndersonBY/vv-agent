@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from hashlib import sha256
 from threading import RLock
-from typing import TYPE_CHECKING, Any, LiteralString, cast
+from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLStore
@@ -16,10 +19,10 @@ if TYPE_CHECKING:
 
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
-RLS_ISOLATION = "deferred"
-RLS_DEFERRED_REASON = (
-    "Tenant LOGIN role allocation and FORCE RLS policies are not installed by this DDL. "
-    "Do not claim PostgreSQL credential isolation until the per-tenant role installation is implemented and tested."
+RLS_ISOLATION = "explicit-tenant-credentials"
+RLS_INSTALL_REASON = "The base DDL is unisolated. Runtime tenant access requires install_tenant_rls() and tenant_standalone()."
+RLS_SHARED_GATEWAY_REASON = (
+    "Shared gateway context prevents accidental query leakage but does not provide tenant credential isolation."
 )
 
 # The owned-table set is also the schema-completeness boundary for initialization.
@@ -38,6 +41,20 @@ SCHEMA_TABLES = frozenset(
         "sk_tombstone",
     }
 )
+SESSION_TABLES = frozenset(SCHEMA_TABLES - {"sk_settings"})
+
+_RLS_ROLE_MARKER_PREFIX = "vv-agent-rls-v1"
+
+
+@dataclass(frozen=True)
+class RLSInstallation:
+    """Installed PostgreSQL role boundary and its exact isolation claim."""
+
+    mode: Literal["tenant", "worker", "shared-gateway"]
+    role: str
+    tenant_id: str | None
+    credential_isolation: bool
+
 
 # Tenant RLS is deliberately absent here: safe installation requires generated per-tenant LOGIN
 # roles and grants, rather than a shared role or a GUC-only policy that can forge tenant context.
@@ -188,6 +205,32 @@ def _connection_conninfo(connection: Connection[Any]) -> str:
     return make_conninfo(info.dsn, password=info.password) if info.password else info.dsn
 
 
+def _role_marker(mode: str, tenant_id: str | None = None) -> str:
+    suffix = ""
+    if tenant_id is not None:
+        suffix = ":" + base64.urlsafe_b64encode(tenant_id.encode("utf-8")).decode("ascii")
+    return f"{_RLS_ROLE_MARKER_PREFIX}:{mode}{suffix}"
+
+
+def _policy_name(role: str) -> str:
+    return "vv_rls_" + sha256(role.encode("utf-8")).hexdigest()[:24]
+
+
+def _validate_name(value: str, label: str, *, allow_empty: bool = False) -> None:
+    if not isinstance(value, str) or (not allow_empty and not value) or "\x00" in value:
+        raise ValueError(f"{label} must be nonempty text without NUL")
+
+
+def _query_rows(
+    connection: Connection[Any], query: str, params: tuple[Any, ...] = (), *, binary: bool = False
+) -> list[tuple[Any, ...]]:
+    from psycopg.rows import tuple_row
+
+    with connection.cursor(row_factory=tuple_row) as cursor:
+        cursor.execute(cast(LiteralString, query), params, binary=binary)
+        return cursor.fetchall() if cursor.description is not None else []
+
+
 class PostgresStore(SQLStore):
     """A serialized connection; atomic() nests as a savepoint in host transactions."""
 
@@ -247,11 +290,12 @@ class PostgresStore(SQLStore):
             yield cls(connection, fold_factory=fold_factory)
 
     def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        from psycopg.rows import tuple_row
+        with self._connection_lock:
+            return _query_rows(self.connection, query, params, binary=query.lstrip().startswith("SELECT"))
 
-        with self._connection_lock, self.connection.cursor(row_factory=tuple_row) as cursor:
-            cursor.execute(cast(LiteralString, query), params, binary=query.lstrip().startswith("SELECT"))
-            return cursor.fetchall() if cursor.description is not None else []
+    def _execute(self, query: Any) -> None:
+        with self._connection_lock, self.connection.cursor() as cursor:
+            cursor.execute(query)
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -270,17 +314,216 @@ class PostgresStore(SQLStore):
             raise RuntimeError("SessionTx requires an open transaction")
         return self._one("SELECT pg_current_xact_id()::text")[0]
 
+    def _schema_tables(self) -> set[str]:
+        return {
+            row[0]
+            for row in self._rows(
+                "SELECT c.relname FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+                "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'"
+            )
+        }
+
+    def _install_runtime_role(
+        self,
+        *,
+        role: str,
+        password: str,
+        mode: Literal["tenant", "worker", "shared-gateway"],
+        tenant_id: str | None,
+    ) -> RLSInstallation:
+        from psycopg import sql
+
+        _validate_name(role, "runtime role")
+        _validate_name(password, "runtime role password")
+        if tenant_id is not None:
+            _validate_name(tenant_id, "tenant_id")
+        marker = _role_marker(mode, tenant_id)
+        policy = _policy_name(role)
+
+        with self._transaction():
+            if self._schema_tables() != SCHEMA_TABLES:
+                raise ValueError("PostgreSQL session schema must be installed before RLS")
+            schema = self._one("SELECT current_schema()")[0]
+            if not isinstance(schema, str):
+                raise ValueError("PostgreSQL current schema is unavailable")
+
+            existing = self._rows("SELECT shobj_description(oid,'pg_authid') FROM pg_roles WHERE rolname=%s", (role,))
+            if existing:
+                if existing[0][0] != marker:
+                    raise ValueError("runtime role already exists without the matching vv-agent RLS marker")
+            else:
+                self._execute(
+                    sql.SQL(
+                        "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT"
+                    ).format(sql.Identifier(role), sql.Literal(password))
+                )
+                self._execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(role), sql.Literal(marker)))
+
+            role_state = self._rows(
+                "SELECT r.rolcanlogin,r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,"
+                "r.rolreplication,r.rolinherit,"
+                "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid),"
+                "EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid AND c.relname=ANY(%s)),"
+                "EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspowner=r.oid AND n.nspname=current_schema()),"
+                "EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND d.datdba=r.oid),"
+                "has_schema_privilege(r.oid,current_schema(),'CREATE') "
+                "FROM pg_roles r WHERE r.rolname=%s",
+                (sorted(SCHEMA_TABLES), role),
+            )
+            if len(role_state) != 1:
+                raise ValueError("runtime role is unavailable")
+            row = role_state[0]
+            if not row[0] or any(row[1:7]) or row[7] or row[8] or row[9] or row[10] or row[11]:
+                raise ValueError("runtime role must be a dedicated login without elevated memberships or DDL rights")
+
+            tenant_predicate = None
+            if mode == "tenant":
+                assert tenant_id is not None
+                tenant_predicate = sql.SQL(
+                    "session_user = {} AND tenant_id = {} AND current_setting('vv.tenant_id', true) = {}"
+                ).format(sql.Literal(role), sql.Literal(tenant_id), sql.Literal(tenant_id))
+            elif mode == "worker":
+                tenant_predicate = sql.SQL("session_user = {}").format(sql.Literal(role))
+            else:
+                tenant_predicate = sql.SQL(
+                    "session_user = {} AND current_setting('vv.tenant_id', true) IS NOT NULL "
+                    "AND tenant_id = current_setting('vv.tenant_id', true)"
+                ).format(sql.Literal(role))
+
+            for table in sorted(SESSION_TABLES):
+                self._execute(
+                    sql.SQL("ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(schema), sql.Identifier(table))
+                )
+                self._execute(
+                    sql.SQL("ALTER TABLE {}.{} FORCE ROW LEVEL SECURITY").format(sql.Identifier(schema), sql.Identifier(table))
+                )
+                self._execute(
+                    sql.SQL("DROP POLICY IF EXISTS {} ON {}.{}").format(
+                        sql.Identifier(policy), sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+                self._execute(
+                    sql.SQL("CREATE POLICY {} ON {}.{} FOR ALL TO {} USING ({}) WITH CHECK ({})").format(
+                        sql.Identifier(policy),
+                        sql.Identifier(schema),
+                        sql.Identifier(table),
+                        sql.Identifier(role),
+                        tenant_predicate,
+                        tenant_predicate,
+                    )
+                )
+                self._execute(
+                    sql.SQL("REVOKE ALL ON TABLE {}.{} FROM PUBLIC").format(sql.Identifier(schema), sql.Identifier(table))
+                )
+                self._execute(
+                    sql.SQL("GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE {}.{} TO {}").format(
+                        sql.Identifier(schema), sql.Identifier(table), sql.Identifier(role)
+                    )
+                )
+
+            self._execute(
+                sql.SQL("GRANT SELECT ON TABLE {}.sk_settings TO {}").format(sql.Identifier(schema), sql.Identifier(role))
+            )
+            self._execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(role)))
+            database = self._one("SELECT current_database()")[0]
+            self._execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), sql.Identifier(role)))
+
+        return RLSInstallation(
+            mode=mode,
+            role=role,
+            tenant_id=tenant_id,
+            credential_isolation=mode == "tenant",
+        )
+
+    def install_tenant_rls(self, tenant_id: str, role: str, password: str) -> RLSInstallation:
+        """Install a credential-isolated tenant login and FORCE RLS policies."""
+
+        return self._install_runtime_role(role=role, password=password, mode="tenant", tenant_id=tenant_id)
+
+    def install_worker_rls(self, role: str, password: str) -> RLSInstallation:
+        """Install a distinct cross-tenant worker login; it is not a tenant path."""
+
+        return self._install_runtime_role(role=role, password=password, mode="worker", tenant_id=None)
+
+    def install_shared_gateway_rls(self, role: str, password: str) -> RLSInstallation:
+        """Install explicit context-only isolation; shared credentials can impersonate tenants."""
+
+        return self._install_runtime_role(role=role, password=password, mode="shared-gateway", tenant_id=None)
+
+    @classmethod
+    def verify_tenant_connection(cls, connection: Connection[Any], tenant_id: str) -> None:
+        """Reject any runtime login that cannot be trusted for the requested tenant."""
+
+        _validate_name(tenant_id, "tenant_id")
+        identity = _query_rows(connection, "SELECT session_user,current_user")
+        if len(identity) != 1 or identity[0][0] != identity[0][1]:
+            raise ValueError("tenant runtime requires session_user and current_user to match")
+        role = identity[0][0]
+        state = _query_rows(
+            connection,
+            "SELECT r.rolcanlogin,r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,"
+            "r.rolreplication,r.rolinherit,shobj_description(r.oid,'pg_authid'),"
+            "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid),"
+            "EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid AND c.relname=ANY(%s)),"
+            "EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspowner=r.oid AND n.nspname=current_schema()),"
+            "EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND d.datdba=r.oid),"
+            "has_schema_privilege(r.oid,current_schema(),'CREATE') "
+            "FROM pg_roles r WHERE r.rolname=%s",
+            (sorted(SCHEMA_TABLES), role),
+        )
+        if len(state) != 1:
+            raise ValueError("tenant runtime role is unavailable")
+        row = state[0]
+        if (
+            not row[0]
+            or any(row[1:7])
+            or row[7] != _role_marker("tenant", tenant_id)
+            or row[8]
+            or row[9]
+            or row[10]
+            or row[11]
+            or row[12]
+        ):
+            raise ValueError("tenant runtime role is not a safe credential-bound login for this tenant")
+        policy = _policy_name(role)
+        policies = _query_rows(
+            connection,
+            "SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) AND p.polname=%s "
+            "AND (SELECT oid FROM pg_roles WHERE rolname=session_user)=ANY(p.polroles)",
+            (sorted(SESSION_TABLES), policy),
+        )
+        guarded = _query_rows(
+            connection,
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) "
+            "AND c.relrowsecurity AND c.relforcerowsecurity",
+            (sorted(SESSION_TABLES),),
+        )
+        if policies != [(len(SESSION_TABLES),)] or guarded != [(len(SESSION_TABLES),)]:
+            raise ValueError("tenant runtime policies are not completely forced")
+
+    @classmethod
+    @contextmanager
+    def tenant_standalone(
+        cls,
+        conninfo: str,
+        *,
+        tenant_id: str,
+        fold_factory: Callable[[], Fold],
+    ) -> Iterator[PostgresStore]:
+        """Open and verify a dedicated tenant LOGIN; callers still set transaction-local context."""
+
+        with cls._connect(conninfo) as connection:
+            cls.verify_tenant_connection(connection, tenant_id)
+            yield cls(connection, fold_factory=fold_factory)
+
     def install_schema(self) -> None:
         with self._transaction():
-            existing = {
-                row[0]
-                for row in self._rows(
-                    "SELECT c.relname FROM pg_catalog.pg_class c "
-                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
-                    "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'"
-                )
-            }
+            existing = self._schema_tables()
             if existing:
                 if existing == SCHEMA_TABLES:
                     settings = self._rows("SELECT singleton,storage_major,write_level FROM sk_settings")

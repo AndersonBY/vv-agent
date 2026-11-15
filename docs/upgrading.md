@@ -24,11 +24,12 @@ to use the session tenant. The tenant-bound store facade scopes its SQL
 operations by `tenant_id`. The low-level codec validates each shape; it does
 not itself authenticate a tenant or repair a mismatched actor.
 
-That facade is an application routing boundary, not completed database
-isolation. PostgreSQL role allocation and `FORCE ROW LEVEL SECURITY` policies
-are deferred and are not installed by the S1 DDL. Do not treat access through a
-shared database role as credential isolation or as proof that one tenant cannot
-read another tenant's rows.
+That facade is an application routing boundary. The base S1 DDL intentionally
+does not install tenant roles or enable RLS. A deployment that claims database
+credential isolation must call the explicit tenant installer after schema
+creation and open runtime sessions through tenant startup validation. See
+[PostgreSQL tenant RLS](postgres-rls.md). A shared gateway remains an explicitly
+weaker trust mode and does not provide tenant credential isolation.
 
 The S1 logical skeleton stores content positions as `ContentRef` values instead
 of host, user or model plaintext. The producer/codec phase validates reference
@@ -118,12 +119,13 @@ and makes the principal, actor and content-reference shapes closed. Pre-S1
 stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
 migration or import tool is provided.
 
-This branch implements the S1 skeleton schema, tenant-bound store routing and
-producer/codec boundary, but it does not complete P2. Content hydration and the
-key/content lifecycle are not integrated; admission, input and checkpoint
-signatures are not yet authenticated end to end; and PostgreSQL RLS is
-deferred. Hosts must not claim encrypted content, signed history or database
-credential isolation from these interfaces alone.
+This branch implements the S1 skeleton schema, tenant-bound store routing,
+producer/codec boundary and explicit PostgreSQL tenant RLS installation. It
+does not complete P2. Content hydration and the key/content lifecycle are not
+integrated, and admission, input and checkpoint signatures are not yet
+authenticated end to end. Hosts must not claim encrypted content or signed
+history from these interfaces alone, and must not claim database credential
+isolation without the explicit tenant role installation and startup checks.
 
 Contract 39 narrows failed closed-session diagnostics to
 `invalid session schema`. This is a public diagnostic change, but accepted and

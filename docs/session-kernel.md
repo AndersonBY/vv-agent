@@ -799,6 +799,11 @@ also creates a temporary login role (CREATEROLE) and connects through
 `127.0.0.1`. Without psycopg or a server, PostgreSQL cases skip with a reason;
 CI supplies a DSN so they run there.
 
+`tests/test_s1_postgres_rls.py` starts a disposable TCP/password cluster with
+`initdb` and `pg_ctl`, then tests separate migration, tenant, worker and gateway
+logins. It skips when those server programs, psycopg or a non-root environment
+are unavailable. See [PostgreSQL tenant RLS](postgres-rls.md).
+
 ```bash
 uv run pytest tests/session -q
 python3 scripts/contract_snapshot.py check

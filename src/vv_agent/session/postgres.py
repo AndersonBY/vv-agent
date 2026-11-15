@@ -30,6 +30,13 @@ class PostgresStore(CorePostgresStore, SQLStore):
         with cls._connect(conninfo) as connection:
             yield cls(connection)
 
+    @classmethod
+    @contextmanager
+    def tenant_standalone(cls, conninfo: str, *, tenant_id: str) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            cls.verify_tenant_connection(connection, tenant_id)
+            yield cls(connection)
+
     def _heartbeat_connection(self, conninfo: str):
         return PostgresStore.standalone(conninfo)
 
