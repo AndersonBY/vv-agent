@@ -13,6 +13,7 @@ def test_real_sqlite_storage_imports_and_runs_without_sdk(tmp_path, flags):
 import importlib.abc
 import sqlite3
 import sys
+from hashlib import sha256
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 class CoreOnly(importlib.abc.MetaPathFinder):
@@ -27,6 +28,32 @@ from vv_agent.kernel._records import SessionSpec, InboxItem, make_record
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._sql import SQLSessionTx
 assert not any(n.split('.')[0] in {'psycopg','django'} for n in sys.modules)
+
+def content_ref(label):
+    payload = label.encode()
+    return {
+        'content_id': 'content/test/' + label,
+        'mac': sha256(payload).hexdigest(),
+        'size': len(payload),
+        'key_id': 'key/test',
+        'labels': {'source': [], 'classification': 'internal'},
+    }
+def principal(subject_id='p'):
+    return {
+        'tenant_id': 'default',
+        'subject_id': subject_id,
+        'subject_kind': 'user',
+        'attributes': content_ref('principal/' + subject_id),
+    }
+def session_spec(session_id):
+    return SessionSpec(
+        session_id,
+        principal(session_id),
+        content_ref(session_id + '/workspace'),
+        attributes=content_ref(session_id + '/attributes'),
+    )
+def inbox_item():
+    return InboxItem('i', 'user', {'content': content_ref('go')}, actor=principal())
 
 class Clock:
     ms = 1000
@@ -48,22 +75,22 @@ with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as store:
     assert store.connection.execute('PRAGMA synchronous').fetchone()[0] == 2
     with store.atomic() as tx:
         assert type(tx) is SQLSessionTx
-        tx.create(SessionSpec('s','test','workspace'), consumers=())
-        first = tx.push('s', InboxItem('i','user',{'content':'go'}))
-        assert tx.push('s', InboxItem('i','user',{'content':'go'})).replayed
+        tx.create(session_spec('s'), consumers=())
+        first = tx.push('s', inbox_item())
+        assert tx.push('s', inbox_item()).replayed
     lease = store.acquire('s', owner='first', ttl_ms=1000)
     r = make_record('usage_observed', session_id='s', payload={
-        'meter_id':'m','observation':1,'mode':'cumulative','usage':{},'source':'host'})
+        'meter_id':'m','observation':1,'mode':'cumulative','usage':content_ref('usage'),'source':content_ref('host')})
     with store.atomic() as tx:
         receipt = tx.append('s',lease=lease,expected_seq=1,commit_id='usage',records=(r,))
     with store.atomic() as tx:
         replay = tx.append('s',lease=lease,expected_seq=1,commit_id='usage',records=(r,))
         assert replay.replayed and replay.head_seq == receipt.head_seq == 2
     with store.atomic() as tx:
-        tx.create(SessionSpec('outer','test','workspace'), consumers=())
+        tx.create(session_spec('outer'), consumers=())
         try:
             with store.atomic() as nested:
-                nested.create(SessionSpec('rolled-back','test','workspace'), consumers=())
+                nested.create(session_spec('rolled-back'), consumers=())
                 raise Crash()
         except Crash: pass
     assert store.list_sessions() == ('outer','s')
