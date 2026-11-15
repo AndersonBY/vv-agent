@@ -15,60 +15,168 @@ if TYPE_CHECKING:
     from psycopg import Connection
 
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
+STORAGE_MAJOR = "S1"
+RLS_ISOLATION = "deferred"
+RLS_DEFERRED_REASON = (
+    "Tenant LOGIN role allocation and FORCE RLS policies are not installed by this DDL. "
+    "Do not claim PostgreSQL credential isolation until the per-tenant role installation is implemented and tested."
+)
+
+# The owned-table set is also the schema-completeness boundary for initialization.
+SCHEMA_TABLES = frozenset(
+    {
+        "sk_settings",
+        "sk_session",
+        "sk_record",
+        "sk_inbox",
+        "sk_consumer",
+        "sk_commit",
+        "sk_checkpoint",
+        "sk_session_key",
+        "sk_content",
+        "sk_content_link",
+        "sk_tombstone",
+    }
+)
+
+# Tenant RLS is deliberately absent here: safe installation requires generated per-tenant LOGIN
+# roles and grants, rather than a shared role or a GUC-only policy that can forge tenant context.
 DDL = """
+CREATE TABLE sk_settings (
+    singleton integer PRIMARY KEY CHECK (singleton = 1),
+    storage_major text NOT NULL CHECK (storage_major = 'S1'),
+    write_level integer NOT NULL CHECK (write_level >= 1)
+);
 CREATE TABLE sk_session (
-    session_id text PRIMARY KEY,
-    schema_version smallint NOT NULL CHECK (schema_version = 1),
-    parent_session_id text REFERENCES sk_session(session_id), parent_operation_id text,
+    tenant_id text NOT NULL, session_id text NOT NULL,
+    schema_version text NOT NULL CHECK (schema_version = 'S1'),
+    parent_session_id text, parent_operation_id text,
     head_seq bigint NOT NULL DEFAULT 0 CHECK (head_seq >= 0),
     inbox_seq bigint NOT NULL DEFAULT 0 CHECK (inbox_seq >= 0),
     lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
-    lease_owner text, lease_until_ms bigint,
+    lease_owner text, lease_until_ms bigint CHECK (lease_until_ms IS NULL OR lease_until_ms >= 0),
     phase text NOT NULL CHECK (phase IN ('idle','active','parked','suspended','closed')),
-    active_turn_id text, next_drive_ms bigint,
-    drive_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0), terminal_seq bigint NOT NULL DEFAULT 0,
+    active_turn_id text, next_drive_ms bigint CHECK (next_drive_ms IS NULL OR next_drive_ms >= 0),
+    drive_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0),
+    terminal_seq bigint NOT NULL DEFAULT 0 CHECK (terminal_seq >= 0 AND terminal_seq <= head_seq),
+    level integer NOT NULL CHECK (level >= 1), handler_version text,
+    required_capabilities bytea NOT NULL DEFAULT decode('5b5d','hex'),
+    deletion_state text NOT NULL CHECK (deletion_state IN ('live','forgetting','forgotten','purging')),
+    created_ms bigint NOT NULL CHECK (created_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id),
     CHECK ((lease_owner IS NULL) = (lease_until_ms IS NULL)),
-    CHECK (terminal_seq BETWEEN 0 AND head_seq)
+    CHECK ((parent_session_id IS NULL) = (parent_operation_id IS NULL)),
+    FOREIGN KEY (tenant_id,parent_session_id) REFERENCES sk_session(tenant_id,session_id)
 );
-CREATE INDEX sk_session_due ON sk_session(next_drive_ms,session_id) WHERE next_drive_ms IS NOT NULL;
-CREATE INDEX sk_session_parent ON sk_session(parent_session_id);
+CREATE INDEX sk_session_due ON sk_session(level,next_drive_ms,tenant_id,session_id)
+    WHERE next_drive_ms IS NOT NULL AND deletion_state = 'live';
+CREATE INDEX sk_session_parent ON sk_session(tenant_id,parent_session_id) WHERE parent_session_id IS NOT NULL;
+CREATE INDEX sk_session_deletion ON sk_session(tenant_id,deletion_state,session_id);
 CREATE TABLE sk_record (
-    session_id text NOT NULL REFERENCES sk_session(session_id), seq bigint NOT NULL CHECK (seq > 0),
-    record_id text NOT NULL, schema_version smallint NOT NULL CHECK (schema_version = 1),
+    tenant_id text NOT NULL, session_id text NOT NULL, seq bigint NOT NULL CHECK (seq > 0),
+    record_id text NOT NULL, schema_version text NOT NULL CHECK (schema_version = 'S1'),
     kind text NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
         'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
     turn_id text, operation_id text, attempt integer CHECK (attempt > 0), body bytea NOT NULL,
-    digest text NOT NULL CHECK (length(digest)=64), commit_id text NOT NULL,
-    commit_digest text NOT NULL CHECK (length(commit_digest)=64),
-    commit_position integer NOT NULL CHECK (commit_position >= 0), writer_epoch bigint NOT NULL, created_ms bigint NOT NULL,
-    PRIMARY KEY(session_id,seq), UNIQUE(session_id,record_id), UNIQUE(session_id,commit_id,commit_position)
+    digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+    chain_digest text NOT NULL CHECK (chain_digest ~ '^[0-9a-f]{64}$'), commit_id text NOT NULL,
+    commit_digest text NOT NULL CHECK (commit_digest ~ '^[0-9a-f]{64}$'),
+    commit_position integer NOT NULL CHECK (commit_position >= 0), writer_epoch bigint NOT NULL CHECK (writer_epoch >= 0),
+    created_ms bigint NOT NULL CHECK (created_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id,seq), UNIQUE (tenant_id,session_id,record_id),
+    UNIQUE (tenant_id,session_id,commit_id,commit_position),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id)
 );
-CREATE INDEX sk_record_operation ON sk_record(session_id,operation_id,attempt,seq) WHERE operation_id IS NOT NULL;
-CREATE INDEX sk_record_turn ON sk_record(session_id,turn_id,seq);
+CREATE INDEX sk_record_operation ON sk_record(tenant_id,session_id,operation_id,attempt,seq) WHERE operation_id IS NOT NULL;
+CREATE INDEX sk_record_turn ON sk_record(tenant_id,session_id,turn_id,seq);
 CREATE TABLE sk_inbox (
-    session_id text NOT NULL REFERENCES sk_session(session_id), input_id text NOT NULL,
+    tenant_id text NOT NULL, session_id text NOT NULL, input_id text NOT NULL,
     input_seq bigint NOT NULL CHECK (input_seq > 0),
     kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
         'control','provider_evidence','model_selection')),
-    body bytea NOT NULL, digest text NOT NULL CHECK (length(digest)=64),
-    available_ms bigint NOT NULL, received_ms bigint NOT NULL, consumed_seq bigint,
-    PRIMARY KEY(session_id,input_id), UNIQUE(session_id,input_seq),
-    FOREIGN KEY(session_id,consumed_seq) REFERENCES sk_record(session_id,seq)
+    body bytea NOT NULL, digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+    admission_key_id text, admission_signature bytea,
+    admission_signed_ms bigint CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
+    available_ms bigint NOT NULL CHECK (available_ms >= 0), received_ms bigint NOT NULL CHECK (received_ms >= 0),
+    consumed_seq bigint CHECK (consumed_seq IS NULL OR consumed_seq > 0),
+    PRIMARY KEY (tenant_id,session_id,input_id), UNIQUE (tenant_id,session_id,input_seq),
+    CHECK ((admission_key_id IS NULL) = (admission_signature IS NULL)
+        AND (admission_key_id IS NULL) = (admission_signed_ms IS NULL)),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
+    FOREIGN KEY (tenant_id,session_id,consumed_seq) REFERENCES sk_record(tenant_id,session_id,seq)
 );
-CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
+CREATE INDEX sk_inbox_ready ON sk_inbox(tenant_id,session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
 CREATE TABLE sk_consumer (
-    session_id text NOT NULL REFERENCES sk_session(session_id), consumer text NOT NULL,
+    tenant_id text NOT NULL, session_id text NOT NULL, consumer text NOT NULL,
     last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
-    project_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0), PRIMARY KEY(session_id,consumer)
+    project_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id,consumer),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id)
 );
+CREATE INDEX sk_consumer_retry ON sk_consumer(tenant_id,project_retry_at_ms,last_seq,session_id,consumer);
 -- Commit metadata is necessary for empty/fully overlapping commits and their original head_seq.
 -- It owns no execution state; record bodies remain solely in sk_record.
 CREATE TABLE sk_commit (
-    session_id text NOT NULL REFERENCES sk_session(session_id), commit_id text NOT NULL,
-    body bytea NOT NULL, digest text NOT NULL CHECK(length(digest)=64),
-    record_sequences bytea NOT NULL, head_seq bigint NOT NULL CHECK(head_seq >= 0), created_ms bigint NOT NULL,
-    PRIMARY KEY(session_id,commit_id)
+    tenant_id text NOT NULL, session_id text NOT NULL, commit_id text NOT NULL,
+    body bytea NOT NULL, digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+    record_sequences bytea NOT NULL, head_seq bigint NOT NULL CHECK (head_seq >= 0),
+    created_ms bigint NOT NULL CHECK (created_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id,commit_id),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id)
 );
+CREATE TABLE sk_checkpoint (
+    tenant_id text NOT NULL, session_id text NOT NULL, seq bigint NOT NULL CHECK (seq > 0),
+    chain_digest text NOT NULL CHECK (chain_digest ~ '^[0-9a-f]{64}$'),
+    key_id text NOT NULL, signature bytea NOT NULL, signed_ms bigint NOT NULL CHECK (signed_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id,seq),
+    FOREIGN KEY (tenant_id,session_id,seq) REFERENCES sk_record(tenant_id,session_id,seq)
+);
+CREATE TABLE sk_session_key (
+    tenant_id text NOT NULL, session_id text NOT NULL, key_id text NOT NULL,
+    provider_id text NOT NULL, wrapped_key bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('active','destroying')), created_ms bigint NOT NULL CHECK (created_ms >= 0),
+    PRIMARY KEY (tenant_id,session_id), UNIQUE (tenant_id,key_id),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id)
+);
+CREATE TABLE sk_content (
+    tenant_id text NOT NULL, session_id text NOT NULL, content_id text NOT NULL,
+    key_id text NOT NULL, mac text NOT NULL CHECK (mac ~ '^[0-9a-f]{64}$'),
+    size bigint NOT NULL CHECK (size >= 0), labels bytea NOT NULL, nonce bytea NOT NULL CHECK (octet_length(nonce) = 12),
+    created_ms bigint NOT NULL CHECK (created_ms >= 0),
+    state text NOT NULL CHECK (state IN ('staged','live','gc_pending')),
+    pin_until_ms bigint CHECK (pin_until_ms IS NULL OR pin_until_ms >= 0),
+    ciphertext bytea, object_locator bytea,
+    PRIMARY KEY (tenant_id,session_id,content_id),
+    UNIQUE (tenant_id,session_id,key_id,mac,labels),
+    CHECK ((ciphertext IS NOT NULL) <> (object_locator IS NOT NULL))
+);
+CREATE INDEX sk_content_gc ON sk_content(state,pin_until_ms,created_ms,tenant_id,session_id,content_id)
+    WHERE state IN ('staged','gc_pending');
+CREATE TABLE sk_content_link (
+    tenant_id text NOT NULL, session_id text NOT NULL, content_id text NOT NULL,
+    record_seq bigint, input_id text, slot text NOT NULL,
+    CHECK ((record_seq IS NOT NULL)::int + (input_id IS NOT NULL)::int = 1),
+    FOREIGN KEY (tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
+    FOREIGN KEY (tenant_id,session_id,record_seq) REFERENCES sk_record(tenant_id,session_id,seq),
+    FOREIGN KEY (tenant_id,session_id,input_id) REFERENCES sk_inbox(tenant_id,session_id,input_id),
+    FOREIGN KEY (tenant_id,session_id,content_id) REFERENCES sk_content(tenant_id,session_id,content_id)
+);
+CREATE UNIQUE INDEX sk_content_link_record_slot
+    ON sk_content_link(tenant_id,session_id,record_seq,slot) WHERE record_seq IS NOT NULL;
+CREATE UNIQUE INDEX sk_content_link_input_slot
+    ON sk_content_link(tenant_id,session_id,input_id,slot) WHERE input_id IS NOT NULL;
+CREATE INDEX sk_content_link_content ON sk_content_link(tenant_id,session_id,content_id);
+CREATE TABLE sk_tombstone (
+    tenant_id text NOT NULL, session_id text NOT NULL,
+    final_seq bigint NOT NULL CHECK (final_seq >= 0),
+    chain_digest text NOT NULL CHECK (chain_digest ~ '^[0-9a-f]{64}$'),
+    deleted_ms bigint NOT NULL CHECK (deleted_ms >= 0), actor bytea NOT NULL,
+    key_id text NOT NULL, signature bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('pending','complete')),
+    scope_root_session_id text NOT NULL,
+    PRIMARY KEY (tenant_id,session_id)
+);
+CREATE INDEX sk_tombstone_state ON sk_tombstone(state,tenant_id,session_id);
 """
 
 
@@ -164,4 +272,23 @@ class PostgresStore(SQLStore):
 
     def install_schema(self) -> None:
         with self._transaction():
+            existing = {
+                row[0]
+                for row in self._rows(
+                    "SELECT c.relname FROM pg_catalog.pg_class c "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+                    "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'"
+                )
+            }
+            if existing:
+                if existing == SCHEMA_TABLES:
+                    settings = self._rows("SELECT singleton,storage_major,write_level FROM sk_settings")
+                    if settings == [(1, STORAGE_MAJOR, 1)]:
+                        return
+                raise ValueError("unsupported PostgreSQL session schema version")
             self._rows(DDL)
+            self._rows(
+                "INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,%s,1)",
+                (STORAGE_MAJOR,),
+            )
