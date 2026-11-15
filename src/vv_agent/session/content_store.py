@@ -444,6 +444,16 @@ class SQLContentStore:
     def _require_transaction(self) -> None:
         self._backend.require_transaction()
 
+    def _require_live(self, tenant_id: str, session_id: str) -> None:
+        row = self._backend.fetchone(
+            "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}",
+            (tenant_id, session_id),
+        )
+        if row is None:
+            raise ContentUnavailable("content session is unavailable")
+        if row[0] != "live":
+            raise ContentUnavailable("content session is fenced for deletion")
+
     def _key_row(self, tenant_id: str, session_id: str) -> tuple[Any, ...] | None:
         return self._backend.fetchone(
             "SELECT key_id,provider_id,wrapped_key,state FROM sk_session_key WHERE tenant_id={p} AND session_id={p}",
@@ -485,6 +495,7 @@ class SQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         self._require_transaction()
+        self._require_live(tenant_id, session_id)
         existing = self._session_key(tenant_id, session_id) if self._key_row(tenant_id, session_id) is not None else None
         if existing is not None:
             if existing.provider_id != self._provider_id or existing.state is not SessionKeyState.ACTIVE:
@@ -511,6 +522,7 @@ class SQLContentStore:
 
     def put_session_key(self, key: SessionKeyRecord) -> None:
         self._require_transaction()
+        self._require_live(key.tenant_id, key.session_id)
         if key.provider_id != self._provider_id:
             raise KeyUnavailable("session data key provider does not match")
         inserted = self._backend.run(
@@ -567,6 +579,7 @@ class SQLContentStore:
         if content_state not in {ContentState.STAGED, ContentState.LIVE}:
             raise ValueError("put state must be staged or live")
         self._require_transaction()
+        self._require_live(tenant_id, session_id)
 
         wrapped = self.create_session_key(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
@@ -659,6 +672,7 @@ class SQLContentStore:
         session_id = _text(session_id, "session_id")
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
+        self._require_live(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
         row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS} FROM sk_content WHERE tenant_id={{p}} AND session_id={{p}} AND content_id={{p}}",
@@ -714,6 +728,7 @@ class SQLContentStore:
     ) -> ContentState:
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
+        self._require_live(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
         row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS},pin_until_ms FROM sk_content "
@@ -792,6 +807,7 @@ class SQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         owner_column, owner = _owner_identity(record_seq=record_seq, input_id=input_id)
+        self._require_live(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
         rows = self._backend.fetchall(
             f"SELECT l.record_seq,l.input_id,l.slot,{_content_columns_prefixed('c')} "
@@ -835,6 +851,7 @@ class SQLContentStore:
         session_id = _text(session_id, "session_id")
         slot = _link_slot(slot)
         owner_column, owner = _owner_identity(record_seq=record_seq, input_id=input_id)
+        self._require_live(tenant_id, session_id)
         self._validated_content(tenant_id, session_id, ref)
         row = self._backend.fetchone(
             f"SELECT 1 FROM sk_content_link WHERE tenant_id={{p}} AND session_id={{p}} "
@@ -849,6 +866,7 @@ class SQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         self._require_transaction()
+        self._require_live(tenant_id, session_id)
         now_ms = self._backend.now_ms()
         candidates = self._backend.fetchall(
             "SELECT c.content_id FROM sk_content c WHERE c.tenant_id={p} AND c.session_id={p} "

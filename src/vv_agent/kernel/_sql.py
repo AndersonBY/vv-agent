@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -12,6 +13,7 @@ from hashlib import sha256
 from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import ContentBindingMismatch, ForgetTombstone, Principal, TombstoneState, _tombstone_message
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec, _MessageCache
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._state import ExecutionState
@@ -58,6 +60,10 @@ class LedgerIntegrityError(Conflict):
 
 class UnsupportedFeatureLevel(Conflict):
     """A producer cannot publish work above the database's write-level ceiling."""
+
+
+class SessionNotLive(Conflict):
+    """Normal execution is closed while a session is being forgotten or purged."""
 
 
 class LedgerSigner(Protocol):
@@ -228,6 +234,17 @@ class _Prefix:
     records: tuple[StoredRecord, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DeletionScopeEntry:
+    tenant_id: str
+    session_id: str
+    parent_session_id: str | None
+    head_seq: int
+    inbox_seq: int
+    deletion_state: str
+    depth: int
+
+
 class SQLStore:
     """One connection per thread. atomic() nests as a savepoint in host transactions."""
 
@@ -364,11 +381,13 @@ class SQLStore:
             if not isinstance(child_id, str):
                 raise Conflict("child_result requires a child session_id")
             child = self._rows(
-                "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                "SELECT level,deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, child_id),
             )
             if len(child) != 1:
                 raise Conflict("child_result references a missing child session")
+            if child[0][1] != "live":
+                raise SessionNotLive("child result session is fenced for deletion")
             required = max(required, _level(child[0][0], "child session level"))
         return required
 
@@ -618,7 +637,8 @@ class SQLStore:
         return tuple(
             row[0]
             for row in self._rows(
-                "SELECT session_id FROM sk_session WHERE tenant_id=%s AND (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
+                "SELECT session_id FROM sk_session WHERE tenant_id=%s AND deletion_state='live' "
+                "AND (%s OR session_id > %s) ORDER BY session_id LIMIT %s",
                 (self.tenant_id, after is None, after or "", limit),
             )
         )
@@ -630,12 +650,28 @@ class SQLStore:
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
-            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level "
+            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,deletion_state "
             f"FROM sk_session WHERE tenant_id=%s AND session_id=%s{self.lock_clause}",
             (self.tenant_id, session_id),
         )
 
+    @staticmethod
+    def _require_live_row(row: tuple[Any, ...]) -> None:
+        if len(row) < 8 or row[7] != "live":
+            raise SessionNotLive("session is fenced for deletion")
+
+    def _require_live(self, session_id: str, *, for_update: bool = False) -> tuple[Any, ...]:
+        row = self._one(
+            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,deletion_state "
+            f"FROM sk_session WHERE tenant_id=%s AND session_id=%s"
+            f"{self.lock_clause if for_update else ''}",
+            (self.tenant_id, session_id),
+        )
+        self._require_live_row(row)
+        return row
+
     def _check_lease(self, session_id: str, lease: Lease, row: tuple[Any, ...], now: int) -> None:
+        self._require_live_row(row)
         if (
             lease.tenant_id != self.tenant_id
             or lease.session_id != session_id
@@ -646,6 +682,30 @@ class SQLStore:
             or lease.expires_at_ms <= now
         ):
             raise LeaseLost("lease expired or fenced")
+
+    def _deletion_scope(self, root_session_id: str) -> tuple[DeletionScopeEntry, ...]:
+        """Lock the current root/descendant inventory in deterministic depth order."""
+        rows = self._rows(
+            """
+            WITH RECURSIVE deletion_scope(session_id,depth) AS (
+                SELECT session_id,0 FROM sk_session WHERE tenant_id=%s AND session_id=%s
+                UNION ALL
+                SELECT child.session_id,deletion_scope.depth+1
+                FROM sk_session child
+                JOIN deletion_scope ON child.tenant_id=%s
+                    AND child.parent_session_id=deletion_scope.session_id
+            )
+            SELECT s.tenant_id,s.session_id,s.parent_session_id,s.head_seq,s.inbox_seq,s.deletion_state,
+                   deletion_scope.depth
+            FROM sk_session s
+            JOIN deletion_scope ON deletion_scope.session_id=s.session_id
+            WHERE s.tenant_id=%s
+            ORDER BY deletion_scope.depth DESC,s.session_id
+            """
+            + self.lock_clause,
+            (self.tenant_id, root_session_id, self.tenant_id, self.tenant_id),
+        )
+        return tuple(DeletionScopeEntry(*row) for row in rows)
 
     def _stored(self, session_id: str, row: tuple[Any, ...], messages: _MessageCache | None = None) -> StoredRecord:
         body, seq, commit, epoch, created, checksum = row
@@ -832,6 +892,7 @@ class SQLStore:
         )
 
     def rebuild_schedule(self, session_id: str) -> ExecutionState:
+        self._require_live(session_id)
         while True:
             captured = self._head(session_id)
             self._fold_cache = None
@@ -839,6 +900,7 @@ class SQLStore:
             snapshot = reducer.snapshot()
             with self._transaction():
                 row = self._lock(session_id)
+                self._require_live_row(row)
                 if row[:3] != captured[:3]:
                     continue
                 self._schedule(session_id, reducer.state)
@@ -849,6 +911,7 @@ class SQLStore:
         _natural(after_seq, "after_seq")
         if through_seq is not None:
             _natural(through_seq, "through_seq")
+        self._require_live(session_id)
         # Records are immutable: cap by the captured head without locking writers.
         head, inbox = self._one(
             "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
@@ -860,6 +923,7 @@ class SQLStore:
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
 
     def lease_status(self, session_id: str) -> tuple[int, int, int]:
+        self._require_live(session_id)
         head, epoch, until, now = self._one(
             f"SELECT head_seq,lease_epoch,lease_until_ms,{self.clock_sql} FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
@@ -867,6 +931,7 @@ class SQLStore:
         return head, epoch, max(0, (until or now) - now)
 
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
+        self._require_live(session_id)
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
             "FROM sk_inbox "
@@ -880,6 +945,7 @@ class SQLStore:
     def control_records(self, session_id: str, *, through_seq: int) -> tuple[StoredRecord, ...]:
         """Read consumed control facts for catalog filtering without folding turns."""
         _natural(through_seq, "through_seq")
+        self._require_live(session_id)
         rows = self._rows(
             "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
             "FROM sk_inbox i JOIN sk_record r ON r.tenant_id=i.tenant_id "
@@ -892,6 +958,7 @@ class SQLStore:
 
     def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]:
         """Indexed dependencies for a bounded event page, without folding session history."""
+        self._require_live(session_id)
         found = {r.seq: r for r in records}
         through = max(found, default=0)
         turns = {r.record.turn_id for r in records if r.record.turn_id}
@@ -968,6 +1035,7 @@ class SQLStore:
         _positive(limit, "limit")
         if through_input_seq is not None:
             _natural(through_input_seq, "through_input_seq")
+        self._require_live(session_id)
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
@@ -983,6 +1051,7 @@ class SQLStore:
         _positive(ttl_ms, "ttl_ms")
         with self._transaction():
             row = self._lock(session_id)
+            self._require_live_row(row)
             now = self._now()  # Must be read after the row lock, not at transaction start.
             if row[6] > self._worker_level or (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
@@ -1033,6 +1102,7 @@ class SQLStore:
         """Read the SQL schedule using database time; provider queries require the held lease."""
         with self._transaction():
             row = self._lock(session_id)
+            self._require_live_row(row)
             now = self._now()
             if lease is not None:
                 self._check_lease(session_id, lease, row, now)
@@ -1049,6 +1119,7 @@ class SQLStore:
     def _defer_idle_drive(self, lease: Lease, *, poll_ms: int, lease_guard: Callable[[], Lease] | None = None) -> bool:
         _positive(poll_ms, "poll_ms")
         sid = lease.session_id
+        self._require_live(sid)
         captured = self._head(sid)
         state = self._prefix(sid, captured).reducer.state
         with self._transaction():
@@ -1098,6 +1169,7 @@ class SQLStore:
         """Back off one consumer without claiming or delaying execution."""
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
+            self._require_live(session_id)
             self._one(
                 f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s{self.lock_clause}",
                 (self.tenant_id, session_id, consumer),
@@ -1118,7 +1190,7 @@ class SQLStore:
                     f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
                     "SELECT 1 FROM sk_session s CROSS JOIN clock t "
                     f"WHERE s.tenant_id=%s AND s.session_id=%s AND s.schema_version='S1' "
-                    f"AND s.level<=%s AND {_DRIVE_RUNNABLE_SQL}",
+                    f"AND s.deletion_state='live' AND s.level<=%s AND {_DRIVE_RUNNABLE_SQL}",
                     (self.tenant_id, session_id, self._worker_level),
                 )
             )
@@ -1133,7 +1205,7 @@ class SQLStore:
                 FROM sk_session s CROSS JOIN clock t
                 WHERE s.tenant_id=%s AND s.session_id >= %s
                   AND (s.session_id,'drive','')>(%s,%s,%s)
-                  AND s.schema_version='S1' AND s.level<=%s
+                  AND s.schema_version='S1' AND s.deletion_state='live' AND s.level<=%s
                   AND {_DRIVE_RUNNABLE_SQL}
                 ORDER BY s.session_id LIMIT %s
             ), projecting AS (
@@ -1142,7 +1214,7 @@ class SQLStore:
                 CROSS JOIN clock t
                 WHERE c.tenant_id=%s AND c.session_id >= %s
                   AND (c.session_id,'project',c.consumer)>(%s,%s,%s)
-                  AND s.schema_version='S1' AND s.level<=%s
+                  AND s.schema_version='S1' AND s.deletion_state='live' AND s.level<=%s
                   AND c.last_seq<s.head_seq AND c.project_retry_at_ms<=t.ms
                 ORDER BY c.session_id,c.consumer LIMIT %s
             ), work AS (
@@ -1165,6 +1237,292 @@ class SQLStore:
             ),
         )
         return tuple(WorkItem(*row) for row in rows)
+
+    @staticmethod
+    def _verify_tombstone_object(tombstone: ForgetTombstone, verifier: Any | None, *, allow_unsigned: bool) -> None:
+        message = _tombstone_message(tombstone)
+        signature = base64.b64decode(tombstone.signature, validate=True)
+        if allow_unsigned:
+            expected = sha256(message).digest()
+            if tombstone.key_id != "hash-only/sha256" or not hmac.compare_digest(signature, expected):
+                raise LedgerIntegrityError("hash-only tombstone does not match its canonical message")
+            return
+        if verifier is None or not callable(getattr(verifier, "verify", None)):
+            raise SessionNotLive("a ledger signer is required to verify the deletion tombstone")
+        if not verifier.verify(tombstone.key_id, message, signature):
+            raise LedgerIntegrityError("deletion tombstone signature is invalid")
+
+    def _tombstone(self, session_id: str, *, for_update: bool = False) -> ForgetTombstone | None:
+        row = self._rows(
+            "SELECT final_seq,chain_digest,deleted_ms,actor,key_id,signature,state,scope_root_session_id "
+            "FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s" + (self.lock_clause if for_update else ""),
+            (self.tenant_id, session_id),
+        )
+        if not row:
+            return None
+        final_seq, chain_digest, deleted_ms, actor_body, key_id, signature, state, scope_root = row[0]
+        try:
+            actor_value = json.loads(actor_body)
+            if canonical_json_bytes(actor_value, "tombstone actor") != actor_body:
+                raise ValueError("actor is not canonical JCS")
+            return ForgetTombstone.from_dict(
+                {
+                    "tenant_id": self.tenant_id,
+                    "session_id": session_id,
+                    "final_seq": final_seq,
+                    "chain_digest": chain_digest,
+                    "deleted_ms": deleted_ms,
+                    "actor": actor_value,
+                    "key_id": key_id,
+                    "signature": base64.b64encode(bytes(signature)).decode("ascii"),
+                    "state": state,
+                    "scope_root_session_id": scope_root,
+                }
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LedgerIntegrityError("stored deletion tombstone is invalid") from exc
+
+    def _write_pending_tombstone(
+        self,
+        entry: DeletionScopeEntry,
+        actor: Principal,
+        *,
+        scope_root_session_id: str,
+        bound_signer: Any | None,
+        verifier: Any | None,
+        allow_unsigned: bool,
+        now: int,
+    ) -> ForgetTombstone:
+        existing = self._tombstone(entry.session_id, for_update=True)
+        chain_digest = self._chain_anchor(entry.session_id, entry.head_seq)
+        if entry.head_seq < 1:
+            raise LedgerIntegrityError("deletion tombstone requires a retained record head")
+        if existing is not None:
+            if (
+                existing.final_seq,
+                existing.chain_digest,
+                existing.actor,
+                existing.state,
+                existing.scope_root_session_id,
+            ) != (entry.head_seq, chain_digest, actor, TombstoneState.PENDING, scope_root_session_id):
+                raise LedgerIntegrityError("existing deletion tombstone does not match the fenced scope")
+            self._verify_tombstone_object(existing, verifier, allow_unsigned=allow_unsigned)
+            return existing
+
+        if allow_unsigned:
+            key_id = "hash-only/sha256"
+        else:
+            if bound_signer is None:
+                raise SessionNotLive("a bound ledger signer is required before deletion fencing")
+            key_id = getattr(bound_signer, "key_id", None)
+            if not isinstance(key_id, str) or not key_id or not callable(getattr(bound_signer, "sign", None)):
+                raise LedgerIntegrityError("ledger signer returned an invalid tombstone binding")
+        unsigned = ForgetTombstone(
+            tenant_id=self.tenant_id,
+            session_id=entry.session_id,
+            final_seq=entry.head_seq,
+            chain_digest=chain_digest,
+            deleted_ms=now,
+            actor=actor,
+            key_id=key_id,
+            signature="AA==",
+            state=TombstoneState.PENDING,
+            scope_root_session_id=scope_root_session_id,
+        )
+        message = _tombstone_message(unsigned)
+        signature = sha256(message).digest() if allow_unsigned else bound_signer.sign(message)
+        if not isinstance(signature, bytes) or not signature:
+            raise LedgerIntegrityError("ledger signer returned an invalid tombstone signature")
+        tombstone = replace(
+            unsigned,
+            signature=base64.b64encode(signature).decode("ascii"),
+        )
+        self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+        self._rows(
+            "INSERT INTO sk_tombstone(tenant_id,session_id,final_seq,chain_digest,deleted_ms,actor,key_id,signature,"
+            "state,scope_root_session_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
+            (
+                self.tenant_id,
+                entry.session_id,
+                entry.head_seq,
+                chain_digest,
+                now,
+                canonical_json_bytes(actor.to_dict(), "tombstone actor"),
+                tombstone.key_id,
+                signature,
+                scope_root_session_id,
+            ),
+        )
+        return tombstone
+
+    def begin_forget(
+        self,
+        session_id: str,
+        actor: Principal,
+        *,
+        bound_signer: Any | None,
+        verifier: Any | None,
+        allow_unsigned: bool,
+    ) -> tuple[str, ...]:
+        """Fence a forget scope and durably bind its pending tombstone."""
+        if actor.tenant_id != self.tenant_id:
+            raise ContentBindingMismatch("deletion actor belongs to another tenant")
+        with self._transaction():
+            scope = self._deletion_scope(session_id)
+            if not scope:
+                raise Conflict("session not found in tenant")
+            root = next(entry for entry in scope if entry.session_id == session_id)
+            if root.deletion_state == "purging":
+                raise SessionNotLive("session purge is already in progress")
+            if root.deletion_state == "forgotten":
+                tombstone = self._tombstone(session_id, for_update=True)
+                if tombstone is None or tombstone.state is not TombstoneState.COMPLETE:
+                    raise LedgerIntegrityError("forgotten session is missing its complete tombstone")
+                self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+                return (session_id,)
+            now = self._now()
+            if root.deletion_state == "live":
+                updated = self._rows(
+                    "UPDATE sk_session SET deletion_state='forgetting',lease_epoch=lease_epoch+1,lease_owner=NULL,"
+                    "lease_until_ms=NULL,next_drive_ms=NULL,drive_retry_at_ms=0 "
+                    "WHERE tenant_id=%s AND session_id=%s AND deletion_state='live' RETURNING session_id",
+                    (self.tenant_id, session_id),
+                )
+                if len(updated) != 1:
+                    raise Conflict("session deletion fence changed concurrently")
+            self._write_pending_tombstone(
+                root,
+                actor,
+                scope_root_session_id=session_id,
+                bound_signer=bound_signer,
+                verifier=verifier,
+                allow_unsigned=allow_unsigned,
+                now=now,
+            )
+            return (session_id,)
+
+    def complete_forget(self, session_id: str) -> None:
+        """Publish the complete tombstone after content/key erasure succeeds."""
+        with self._transaction():
+            scope = self._deletion_scope(session_id)
+            if not scope:
+                raise Conflict("session not found in tenant")
+            root = next(entry for entry in scope if entry.session_id == session_id)
+            if root.deletion_state == "forgotten":
+                return
+            if root.deletion_state != "forgetting":
+                raise SessionNotLive("session is not in the forgetting state")
+            tombstone = self._tombstone(session_id, for_update=True)
+            if tombstone is None or tombstone.state is not TombstoneState.PENDING:
+                raise LedgerIntegrityError("pending forget tombstone is missing")
+            self._rows(
+                "UPDATE sk_tombstone SET state='complete' WHERE tenant_id=%s AND session_id=%s AND state='pending'",
+                (self.tenant_id, session_id),
+            )
+            self._rows(
+                "UPDATE sk_session SET deletion_state='forgotten',lease_owner=NULL,lease_until_ms=NULL,next_drive_ms=NULL "
+                "WHERE tenant_id=%s AND session_id=%s AND deletion_state='forgetting'",
+                (self.tenant_id, session_id),
+            )
+
+    def begin_purge(
+        self,
+        session_id: str,
+        actor: Principal,
+        *,
+        bound_signer: Any | None,
+        verifier: Any | None,
+        allow_unsigned: bool,
+    ) -> tuple[str, ...]:
+        """Freeze root/descendants, persist pending tombstones, and start purge."""
+        if actor.tenant_id != self.tenant_id:
+            raise ContentBindingMismatch("deletion actor belongs to another tenant")
+        with self._transaction():
+            scope = self._deletion_scope(session_id)
+            now = self._now()
+            if not scope:
+                tombstones = self._rows(
+                    "SELECT session_id FROM sk_tombstone WHERE tenant_id=%s AND scope_root_session_id=%s ORDER BY session_id",
+                    (self.tenant_id, session_id),
+                )
+                if not tombstones:
+                    raise Conflict("session not found in tenant")
+                for (member,) in tombstones:
+                    tombstone = self._tombstone(member, for_update=True)
+                    if tombstone is None or tombstone.state is not TombstoneState.COMPLETE:
+                        raise LedgerIntegrityError("incomplete purge tombstone outlives its session")
+                    self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+                return tuple(sorted(row[0] for row in tombstones))
+            for entry in scope:
+                self._rows(
+                    "UPDATE sk_session SET deletion_state='purging',lease_epoch=lease_epoch+1,lease_owner=NULL,"
+                    "lease_until_ms=NULL,next_drive_ms=NULL,drive_retry_at_ms=0 "
+                    "WHERE tenant_id=%s AND session_id=%s AND deletion_state!='purging'",
+                    (self.tenant_id, entry.session_id),
+                )
+                existing = self._tombstone(entry.session_id, for_update=True)
+                if existing is not None and existing.state is TombstoneState.COMPLETE:
+                    if (
+                        existing.final_seq != entry.head_seq
+                        or existing.scope_root_session_id != session_id
+                        or existing.actor != actor
+                    ):
+                        raise LedgerIntegrityError("completed tombstone does not match the purge scope")
+                    self._verify_tombstone_object(existing, verifier, allow_unsigned=allow_unsigned)
+                    continue
+                self._write_pending_tombstone(
+                    entry,
+                    actor,
+                    scope_root_session_id=session_id,
+                    bound_signer=bound_signer,
+                    verifier=verifier,
+                    allow_unsigned=allow_unsigned,
+                    now=now,
+                )
+            return tuple(entry.session_id for entry in scope)
+
+    def complete_purge(self, session_id: str) -> tuple[str, ...]:
+        """Delete a fenced scope child-first and retain only complete tombstones."""
+        with self._transaction():
+            scope = self._deletion_scope(session_id)
+            if not scope:
+                rows = self._rows(
+                    "SELECT session_id FROM sk_tombstone WHERE tenant_id=%s AND scope_root_session_id=%s "
+                    "AND state='complete' ORDER BY session_id",
+                    (self.tenant_id, session_id),
+                )
+                if not rows:
+                    raise Conflict("purge scope has no retained complete tombstones")
+                return tuple(row[0] for row in rows)
+            if any(entry.deletion_state != "purging" for entry in scope):
+                raise SessionNotLive("purge scope is not fully fenced")
+            for entry in scope:
+                tombstone = self._tombstone(entry.session_id, for_update=True)
+                if tombstone is None or tombstone.state not in {TombstoneState.PENDING, TombstoneState.COMPLETE}:
+                    raise LedgerIntegrityError("purge tombstone is missing or incomplete")
+            tables = (
+                "sk_content_link",
+                "sk_content",
+                "sk_inbox",
+                "sk_checkpoint",
+                "sk_consumer",
+                "sk_commit",
+                "sk_record",
+                "sk_session_key",
+                "sk_session",
+            )
+            for entry in scope:
+                for table in tables:
+                    self._rows(
+                        f"DELETE FROM {table} WHERE tenant_id=%s AND session_id=%s",
+                        (self.tenant_id, entry.session_id),
+                    )
+            for entry in scope:
+                self._rows(
+                    "UPDATE sk_tombstone SET state='complete' WHERE tenant_id=%s AND session_id=%s AND state='pending'",
+                    (self.tenant_id, entry.session_id),
+                )
+            return tuple(entry.session_id for entry in scope)
 
 
 class _TenantSQLStore:
@@ -1362,7 +1720,7 @@ class SQLSessionTx:
 
     def lock_session(self, session_id: str) -> None:
         self._active()
-        self.store._lock(session_id)
+        self.store._require_live_row(self.store._lock(session_id))
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         self._active()
@@ -1384,12 +1742,25 @@ class SQLSessionTx:
             parent_level = 1
             if spec.parent_session_id is not None:
                 parent = s._rows(
-                    "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                    f"SELECT level,deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s{s.lock_clause}",
                     (tenant_id, spec.parent_session_id),
                 )
                 if len(parent) != 1:
                     raise Conflict("parent session not found in tenant")
+                if parent[0][1] != "live":
+                    raise SessionNotLive("parent session is fenced for deletion")
                 parent_level = _level(parent[0][0], "parent session level")
+            if s._rows(
+                "SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s",
+                (tenant_id, spec.session_id),
+            ):
+                raise SessionNotLive("a deleted session identity cannot be reused")
+            existing_session = s._rows(
+                "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (tenant_id, spec.session_id),
+            )
+            if existing_session and existing_session[0][0] != "live":
+                raise SessionNotLive("a deleted session identity cannot be reused")
             now = s._now()
             inserted = s._rows(
                 "INSERT INTO sk_session(tenant_id,session_id,schema_version,parent_session_id,parent_operation_id,"
@@ -1474,6 +1845,7 @@ class SQLSessionTx:
         with s._transaction():
             ceiling = s._write_ceiling()
             row = s._lock(session_id)
+            s._require_live_row(row)
             old = s._rows(
                 "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
                 "FROM sk_inbox "
@@ -1580,6 +1952,7 @@ class SQLSessionTx:
         if len({r.record_id for r in records}) != len(records):
             raise Conflict("duplicate record_id in batch")
         s = self.store
+        s._require_live(session_id)
         captured = s._head(session_id)
         prefix = None
         reducer = None
@@ -1741,12 +2114,14 @@ class SQLSessionTx:
         self._active()
         _positive(limit, "limit")
         s = self.store
-        last, level = s._one(
-            "SELECT c.last_seq,s.level FROM sk_consumer c "
+        last, level, deletion_state = s._one(
+            "SELECT c.last_seq,s.level,s.deletion_state FROM sk_consumer c "
             "JOIN sk_session s ON s.tenant_id=c.tenant_id AND s.session_id=c.session_id "
             f"WHERE c.tenant_id=%s AND c.session_id=%s AND c.consumer=%s{s.lock_clause}",
             (s.tenant_id, session_id, consumer),
         )
+        if deletion_state != "live":
+            raise SessionNotLive("session is fenced for deletion")
         if level > s._worker_level:
             return None
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
@@ -1777,6 +2152,7 @@ class SQLSessionTx:
 
     def ack(self, batch: ConsumerBatch) -> None:
         self._active()
+        self.store._require_live(batch.session_id)
         key = (batch.session_id, batch.consumer)
         if self.batches.get(key) is not batch:
             raise Conflict("ack requires the batch issued by this transaction")
