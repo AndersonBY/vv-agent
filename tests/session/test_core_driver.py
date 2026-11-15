@@ -13,7 +13,7 @@ from vv_agent.session.reducer import Fold
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost, SequenceConflict
 
-from .helpers import record
+from .helpers import content_ref, item, principal, runtime_turn_record
 from .test_recovery_matrix import runtime
 
 
@@ -47,7 +47,10 @@ def run_case(driver_type, path, case, monkeypatch):
     with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "p", "w"), consumers=())
+            tx.create(
+                SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=(),
+            )
         rt = runtime(path, [])
         rt.clock = clock
         observed = []
@@ -99,34 +102,32 @@ def run_case(driver_type, path, case, monkeypatch):
             driver = driver_type(store, "s", rt, scope)
         assert driver.store is store and driver.scope is scope
         if case in {"active", "cost_error", "cost_baseexception"}:
-            # These are original record inputs; all construction, append and folding are real.
-            task = rt.compile("go", "t")
-            definition = rt.definition(task)
-            driver.commit([record("turn_started", definition=definition, definition_digest=rt.definition_digest(task))])
+            driver.commit([runtime_turn_record("t")])
         incoming = driver.record(
             "usage_observed",
             {
                 "meter_id": "host",
                 "observation": 1,
                 "mode": "cumulative",
-                "usage": {},
-                "source": "host",
+                "usage": content_ref("usage"),
+                "source": content_ref("host"),
             },
         )
         pending = [incoming]
 
         def prepare(tx):
             events.append(("prepare",))
-            tx.create(SessionSpec("business", "p", "w"), consumers=())
+            tx.create(
+                SessionSpec("business", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=(),
+            )
             if case == "prepare":
                 raise cut
             return []
 
         if case == "guard":
-            from vv_agent.session.records import InboxItem
-
             with store.atomic() as tx:
-                tx.push("s", InboxItem("late", "user", {"content": "late"}))
+                tx.push("s", item("late", actor=principal()))
         if case == "lease":
             scope.lease = replace(scope.lease, epoch=scope.lease.epoch + 1)
         before = len(driver.records)
@@ -204,7 +205,10 @@ def test_sdk_uses_core_ledger_methods_and_refreshes_live_bindings(tmp_path):
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "p", "w"), consumers=())
+            tx.create(
+                SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=(),
+            )
         rt = runtime(path, [])
         lease = store.acquire("s", owner="refresh", ttl_ms=15000)
         assert lease is not None
@@ -233,16 +237,17 @@ def test_core_boundary_and_pending_state_follow_actual_retained_records(tmp_path
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
         with store.atomic() as tx:
-            tx.create(SessionSpec("s", "p", "w"), consumers=())
+            tx.create(
+                SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=(),
+            )
         rt = runtime(path, [])
         lease = store.acquire("s", owner="state", ttl_ms=15000)
         assert lease is not None
         scope = kernel._Scope(lease, rt, now_ms=store._now())
         driver = kernel._Driver(store, "s", rt, scope)
-        task = rt.compile("go", "t")
-        definition = rt.definition(task)
-        driver.commit([record("turn_started", definition=definition, definition_digest=rt.definition_digest(task))])
-        assert driver.durable_shared_state() == task.initial_shared_state and not driver.pending_batch()
+        driver.commit([runtime_turn_record("t")])
+        assert driver.durable_shared_state() == {} and not driver.pending_batch()
         messages = [m.to_dict() for m in driver.transcript()]
         boundary = driver.boundary_record(
             "before_memory", "b", {"messages": messages, "shared_state": {"items": [1]}}, source_digest=digest(messages)

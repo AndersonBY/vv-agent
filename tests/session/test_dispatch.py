@@ -13,14 +13,14 @@ from vv_agent.events import RunStateChangedEvent
 from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.session.kernel import _Driver, drive, read_state
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import SessionSpec
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import record
+from .helpers import content_ref, item, principal, record
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime
 from .transport import PollingProvider, Transport, WorkerKilled
@@ -28,9 +28,19 @@ from .transport import PollingProvider, Transport, WorkerKilled
 pytestmark = pytest.mark.persistent_store
 
 
+class SessionTransport(Transport):
+    def create(self, sid="s", steps=(), tools=(), consumers=("host",)):
+        with self.store.atomic() as tx:
+            tx.create(
+                SessionSpec(sid, principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
+                consumers=consumers,
+            )
+        self.runtimes[sid] = runtime(self.database, steps, tools, wake=self.wake)
+
+
 @pytest.fixture
 def transport(store, database):
-    return Transport(store, database)
+    return SessionTransport(store, database)
 
 
 @pytest.fixture
@@ -52,7 +62,7 @@ def records(store, sid="s", kind=None):
 
 
 def prompt(input_id="initial", **kw):
-    return InboxItem(input_id, "user", {"content": "go"}, **kw)
+    return replace(item(input_id, actor=principal("test")), payload={"content": content_ref("go")}, **kw)
 
 
 def test_idle_and_completed_turn_quiesce(transport):
@@ -252,10 +262,9 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
     transport.deliver()
     before = list(transport.wakes)
     if wait_kind == "approval":
-        answer = InboxItem(
-            "reply",
-            "approval_answer",
-            {
+        answer = replace(
+            item("reply", "approval_answer", actor=principal("test")),
+            payload={
                 "operation_id": park.operation_id,
                 "attempt": park.attempt,
                 "request_id": handle["request_id"],
@@ -263,15 +272,14 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
                 "scope": handle["scope"],
                 "decision": "approve",
             },
-            park.turn_id,
+            target_turn_id=park.turn_id,
         )
     else:
-        answer = InboxItem(
-            "reply",
-            "user",
-            {"content": {"operation_id": park.operation_id, "interaction_id": handle["interaction_id"], "text": "blue"}},
-            park.turn_id,
-            0,
+        answer = replace(
+            item("reply", actor=principal("test")),
+            payload={"content": content_ref("blue-answer")},
+            target_turn_id=park.turn_id,
+            generation=0,
         )
     transport.push("s", answer)
     assert transport.wakes == [*before, "s"] and transport.queue == ["s"]
@@ -333,7 +341,10 @@ def test_cancel_from_other_worker_is_observed_at_next_boundary(transport):
         try:
             assert entered.wait(10)
             with open_store(transport.database) as canceller, canceller.atomic() as tx:
-                tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, "s/turn/initial"))
+                tx.push(
+                    "s",
+                    item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+                )
             transport.wake("s")
             transport.queue.pop()
             with open_store(transport.database) as duplicate:
@@ -482,7 +493,7 @@ def test_input_during_deferred_provider_wait_is_immediate(transport, clock, prov
     transport.tick()
     assert scheduled(transport.store) == 1_002_000
     clock(1)
-    transport.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/initial"))
+    transport.push("s", item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"))
     assert transport.store.is_runnable("s")
     transport.drain()
     assert records(transport.store, kind="turn_ended")[0].payload["status"] == "cancelled"
@@ -515,12 +526,12 @@ def test_unrelated_input_preserves_provider_deferral(transport, clock, provider_
     transport.tick()
     due = scheduled(transport.store)
     clock(1)
-    item = (
-        InboxItem("unrelated", "control", {"action": "cancel"}, target_turn_id="stale")
+    incoming = (
+        item("unrelated", "control", actor=principal("test"), action="cancel", target_turn_id="stale")
         if kind == "stale"
-        else InboxItem("unrelated", kind, {"content": "next"})
+        else item("unrelated", kind, actor=principal("test"))
     )
-    transport.push("s", item)
+    transport.push("s", incoming)
     transport.drain()
     assert read_state(transport.store, "s")[0].applied_inputs["unrelated"].payload["disposition"] == (
         "queued" if kind == "follow_up" else "rejected"
@@ -642,7 +653,7 @@ def test_queued_turn_has_no_poll_delay(transport, clock, surface):
 
     def first(_request):
         starts.append(transport.store._now())
-        transport.push("s", InboxItem("next", "follow_up", {"content": "next"}))
+        transport.push("s", item("next", "follow_up", actor=principal("test")))
         return LLMResponse("first")
 
     def second(_request):
@@ -711,7 +722,10 @@ def test_any_idle_drive_defers_a_stale_due_without_records(transport, clock, mon
 def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_source):
     store = transport.store
     with store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": False}}), consumers=("host",))
+        tx.create(
+            SessionSpec("s", principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
+            consumers=("host",),
+        )
     lease = store.acquire("s", owner="holder", ttl_ms=1000)
     assert lease is not None
     future = 1_000_250
@@ -741,7 +755,10 @@ def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_sourc
 def test_idle_deferral_does_not_overwrite_new_commit_schedule(transport, clock, monkeypatch):
     store = transport.store
     with store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": False}}), consumers=("host",))
+        tx.create(
+            SessionSpec("s", principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
+            consumers=("host",),
+        )
     lease = store.acquire("s", owner="holder", ttl_ms=1000)
     assert lease is not None
     with store.atomic():

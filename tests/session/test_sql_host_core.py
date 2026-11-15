@@ -16,6 +16,7 @@ from vv_agent.session.store import LeaseLost, SequenceConflict
 from vv_agent.session.supervisor import tick
 
 from .conftest import open_store
+from .helpers import content_ref, principal
 from .test_batch_children import rows
 from .test_children import parent_runtime
 from .test_recovery_matrix import start
@@ -105,7 +106,19 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
         assert host.connection is store.connection
         for i in range(2):
             host._rows("INSERT INTO business_child VALUES (%s,%s)", (i, 2 if fault == "commit" else 1))
-        specs = [ChildSession(SessionSpec(f"business-{i}", "test", "/tmp"), "go", yield_on_steer=True) for i in range(2)]
+        specs = [
+            ChildSession(
+                SessionSpec(
+                    f"business-{i}",
+                    principal("test"),
+                    content_ref("workspace"),
+                    attributes=content_ref("attributes"),
+                ),
+                "go",
+                yield_on_steer=True,
+            )
+            for i in range(2)
+        ]
         return [*specs, object()] if fault == "invalid" else specs
 
     rt.children["child_task"] = ChildTool(admit)

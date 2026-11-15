@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ from vv_agent.kernel._lease_scope import LeaseOwnership
 from vv_agent.kernel._records import SessionSpec, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._store import StoredRecord
+
+from .helpers import content_ref, principal
 
 
 class FixedClock:
@@ -136,7 +139,13 @@ class SqlAppendPhase:
         record = make_record(
             "usage_observed",
             session_id=self.session_id,
-            payload={"meter_id": "drive-core", "observation": 1, "mode": "cumulative", "usage": {}, "source": "host"},
+            payload={
+                "meter_id": "drive-core",
+                "observation": 1,
+                "mode": "cumulative",
+                "usage": content_ref("usage"),
+                "source": content_ref("host"),
+            },
         )
         with self.store.atomic() as tx, self.scope.committing() as lease:
             tx.append(
@@ -202,7 +211,10 @@ def binding(store, session_id: str, events: list[str], clock: FixedClock, *, fac
 
 def create_session(store, session_id: str = "s") -> None:
     with store.atomic() as tx:
-        tx.create(SessionSpec(session_id, "p", "w"), consumers=())
+        tx.create(
+            SessionSpec(session_id, principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+            consumers=(),
+        )
 
 
 @pytest.mark.persistent_store
@@ -346,6 +358,7 @@ def test_option_validation_precedes_binding_and_store_effects(tmp_path):
 def test_drive_core_is_sdk_free_and_runs_factory_transfer_on_real_sqlite(tmp_path, flags):
     script = r"""
 import importlib.abc
+import json
 import sys
 from threading import Event, Lock, get_ident, local
 sys.path.insert(0, sys.argv[1])
@@ -392,7 +405,7 @@ class Phase:
         self.calls += 1
         if self.calls > 1: return False
         rec=make_record('usage_observed', session_id='s', payload={'meter_id':'core','observation':1,
-            'mode':'cumulative','usage':{},'source':'host'})
+            'mode':'cumulative','usage':json.loads(sys.argv[6]),'source':json.loads(sys.argv[7])})
         with self.store.atomic() as tx:
             with self.scope.committing() as lease:
                 tx.append('s', lease=lease, expected_seq=1, commit_id='core-step', records=(rec,))
@@ -403,7 +416,9 @@ def factory(): return Fold(normalize_memory_settings=unused, count_messages=unus
 clock=Clock()
 with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as store:
     store.install_schema()
-    with store.atomic() as tx: tx.create(SessionSpec('s','p','w'), consumers=())
+    with store.atomic() as tx:
+        tx.create(SessionSpec('s', json.loads(sys.argv[3]), json.loads(sys.argv[4]),
+            attributes=json.loads(sys.argv[5])), consumers=())
     runtime=None
     def make_runtime():
         global runtime
@@ -425,7 +440,21 @@ assert all(n in {'vv_agent','vv_agent.kernel'} or n.startswith('vv_agent.kernel.
            for n in sys.modules if n.startswith('vv_agent'))
 """
     result = subprocess.run(
-        [sys.executable, "-I", *flags, "-B", "-c", script, str(Path(__file__).parents[2] / "src"), str(tmp_path / "core.sqlite")],
+        [
+            sys.executable,
+            "-I",
+            *flags,
+            "-B",
+            "-c",
+            script,
+            str(Path(__file__).parents[2] / "src"),
+            str(tmp_path / "core.sqlite"),
+            json.dumps(principal()),
+            json.dumps(content_ref("workspace")),
+            json.dumps(content_ref("attributes")),
+            json.dumps(content_ref("usage")),
+            json.dumps(content_ref("host")),
+        ],
         capture_output=True,
         text=True,
         timeout=20,

@@ -9,13 +9,13 @@ from time import monotonic
 import pytest
 
 from vv_agent.session.kernel import _Driver, drive, read_state
-from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import RuntimeNotReady
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.supervisor import tick
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
+from .helpers import item, principal
 from .test_recovery_matrix import runtime, start
 
 CONTRACT = json.loads((Path(__file__).parents[1] / "fixtures/parity/session_supervision.json").read_text())
@@ -300,7 +300,7 @@ def test_backoff_fences_expired_and_superseded_lease_preserves_schedule(store, c
     assert not store.is_runnable("s")
     assert all(w.kind != "drive" for w in store.list_runnable())
     with store.atomic() as tx:
-        tx.push("s", InboxItem("during-backoff", "steer", {"content": "wait"}))
+        tx.push("s", item("during-backoff", "steer", actor=principal("test")))
     assert store.acquire("s", owner="duplicate", ttl_ms=1000) is None
     clock(499)
     assert not store.is_runnable("s")

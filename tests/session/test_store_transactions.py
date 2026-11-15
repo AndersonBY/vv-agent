@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 from threading import Barrier
 from time import sleep
 
@@ -11,12 +12,18 @@ from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.store import Conflict, LeaseLost, SequenceConflict
 
 from .conftest import open_store
-from .helpers import item, record
+from .helpers import content_ref, principal, record
+from .helpers import item as helper_item
+
+item = partial(helper_item, actor=principal())
 
 
 def create(store, sid="s", consumers=()):
     with store.atomic() as tx:
-        return tx.create(SessionSpec(sid, "p", "w", attributes={"seed": {"unseen_input_protection": False}}), consumers=consumers)
+        return tx.create(
+            SessionSpec(sid, principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+            consumers=consumers,
+        )
 
 
 def lease_for(store, sid="s"):
@@ -56,7 +63,7 @@ def test_create_idempotency(store):
     assert replace(create(store, consumers=("host",)), replayed=False) == first
     before = counts(store)
     with pytest.raises(Conflict), store.atomic() as tx:
-        tx.create(SessionSpec("s", "different", "w"), consumers=("host",))
+        tx.create(SessionSpec("s", principal("different"), content_ref("workspace")), consumers=("host",))
     with pytest.raises(Conflict):
         create(store, consumers=("other",))
     assert counts(store) == before == (1, 0, 1, 1)
@@ -120,10 +127,10 @@ def test_push_consume_atomic_and_inbox_cas(store):
         replay = tx.push("s", incoming)
         assert replay.replayed and replace(replay, replayed=False) == first
         with pytest.raises(Conflict):
-            tx.push("s", replace(incoming, payload={"content": "other"}))
+            tx.push("s", replace(incoming, payload={"content": content_ref("other")}))
     assert first.input_seq == 1
     lease = lease_for(store)
-    applied = record("input_applied")
+    applied = record("input_applied", input=incoming.to_dict(), input_digest=incoming.digest)
     before = counts(store)
     with pytest.raises(SequenceConflict):
         append(store, lease, [applied, record("turn_started", input_ids=["i"])], consume_input_ids=("i",), expected_inbox_seq=0)
@@ -202,7 +209,10 @@ def test_runnable_empty_inbox_future_user_wait_and_pagination(store):
             record("turn_started", sid="d"),
             record("op_planned", sid="d", op_kind="interaction", purpose=None),
             record(
-                "op_parked", sid="d", phase="before_dispatch", handle={"kind": "user", "interaction_id": "q", "question": "?"}
+                "op_parked",
+                sid="d",
+                phase="before_dispatch",
+                handle={"kind": "user", "interaction_id": "q", "question": content_ref("question")},
             ),
         ],
     )
@@ -421,10 +431,11 @@ def test_commit_metadata_retains_references_without_another_record_copy(store):
 
     create(store)
     lease = lease_for(store)
+    definition = content_ref("large-frozen-definition")
     rec = record(
         "turn_started",
-        definition={"large_frozen_request": "kept once"},
-        definition_digest=digest({"large_frozen_request": "kept once"}),
+        definition=definition,
+        definition_digest=digest(definition),
     )
     append(store, lease, [rec])
     body = store.connection.execute("SELECT body FROM sk_commit WHERE commit_id='c'").fetchone()[0]
@@ -455,8 +466,6 @@ import vv_agent.session.postgres
 
 
 def test_late_callback_after_generation_replaced_is_consumed_as_audit(store):
-    from vv_agent.session.records import InboxItem
-
     create(store)
     lease = lease_for(store)
     append(
@@ -470,17 +479,16 @@ def test_late_callback_after_generation_replaced_is_consumed_as_audit(store):
             record("turn_started", tid="t2", generation=2),
         ],
     )
-    callback = InboxItem(
-        "callback",
-        "provider_result",
-        {
+    callback = replace(
+        item("callback", "provider_result"),
+        payload={
             "operation_id": "o",
             "attempt": 1,
             "request_digest": record("op_planned").payload["request_digest"],
             "provider_binding": "provider",
-            "result": {"ok": True},
-            "usage": {},
-            "evidence": ["accepted"],
+            "result": content_ref("result"),
+            "usage": content_ref("usage"),
+            "evidence": content_ref("evidence"),
         },
         target_turn_id="t",
         generation=1,
@@ -524,7 +532,7 @@ def test_native_consumer_cursor_and_host_write_share_transaction(store):
 
 
 @pytest.mark.sqlite_file
-@pytest.mark.parametrize("version", [0, 1, 2, 4])
+@pytest.mark.parametrize("version", [0, 1, 2, 3])
 def test_sqlite_rejects_missing_or_unknown_database_version(store, database, version):
     store.connection.execute(f"PRAGMA user_version={version}")
     with pytest.raises(ValueError, match="schema version"), open_store(database):
