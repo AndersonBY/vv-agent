@@ -6,7 +6,10 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Any, Protocol
 
+from vv_agent.kernel._execution_values import AgentTask
+from vv_agent.kernel._hydration import ContentReader, MissingContentLink, SessionHydrator
 from vv_agent.kernel._lease_scope import Clock
+from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx
@@ -46,10 +49,12 @@ class CoreDriver:
         observe_cost: Callable[[], dict[str, Any] | None],
         hook: Callable[[str, Record | None], None],
         emit_phase: Callable[[float, dict[str, Any]], None],
+        content_reader: ContentReader | None = None,
     ) -> None:
         self.store, self.sid, self.scope = store, sid, scope
         self._fold_factory, self._clock = fold_factory, clock
         self._observe_cost, self._hook, self._emit_phase = observe_cost, hook, emit_phase
+        self.content_reader = content_reader
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
         self.active_since = self.clock.monotonic_ns()
@@ -110,6 +115,44 @@ class CoreDriver:
             attempt=plan.attempt if plan else None,
             payload=payload,
         )
+
+    def hydrator_for(self, record_owner: int | str) -> SessionHydrator:
+        """Create the one owner-scoped hydrator over this driver's session reader."""
+
+        reader = self.content_reader
+        if reader is None:
+            raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
+        if self.store is None:
+            raise RecordError("S1 content hydration requires a session store")
+
+        binding = getattr(reader, "binding", None)
+        store_tenant = getattr(self.store, "tenant_id", None)
+        if binding is None:
+            if not isinstance(store_tenant, str) or not store_tenant:
+                raise RecordError("S1 content reader must have an explicit tenant and session binding")
+            tenant_id = store_tenant
+        else:
+            if not isinstance(binding, tuple) or len(binding) != 2 or not all(isinstance(item, str) and item for item in binding):
+                raise MissingContentLink("content reader binding is invalid")
+            tenant_id, bound_session_id = binding
+            if bound_session_id != self.sid or (store_tenant is not None and store_tenant != tenant_id):
+                raise MissingContentLink("content reader does not match the driver store and session")
+
+        if type(record_owner) is int:
+            if record_owner < 1:
+                raise ValueError("record_owner must be a positive record sequence or input id")
+            owner = f"record:{record_owner}"
+        elif isinstance(record_owner, str) and record_owner:
+            if record_owner == self.sid:
+                raise ValueError("session_id cannot be used as a content owner")
+            owner = record_owner if record_owner.startswith(("record:", "input:")) else f"input:{record_owner}"
+        else:
+            raise ValueError("record_owner must be a positive record sequence or input id")
+        return SessionHydrator(reader, tenant_id=tenant_id, session_id=self.sid, owner=owner)
+
+    def _task(self) -> AgentTask:
+        assert self.state.active_turn_id is not None
+        return self.state.turns[self.state.active_turn_id].start._task()
 
     def commit(
         self,
@@ -235,7 +278,7 @@ class CoreDriver:
                 if snapshot is not None:
                     return copy_json(snapshot)
         assert self.state.active_turn_id is not None
-        return copy_json(self.state.turns[self.state.active_turn_id].start._task().initial_shared_state)
+        return copy_json(self._task().initial_shared_state)
 
     def pending_batch(self) -> bool:
         return any(

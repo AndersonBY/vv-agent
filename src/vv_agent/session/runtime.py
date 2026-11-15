@@ -23,6 +23,7 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
+from vv_agent.kernel._hydration import ContentReader
 from vv_agent.kernel._retained_budget import retained_budget_inputs
 from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
@@ -94,6 +95,7 @@ class Runtime:
     tool_timeout: float = 300
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None
     wake: Callable[[str], None] = lambda _sid: None
+    content_reader: ContentReader | None = None
     memory_manager: MemoryManager = field(default_factory=MemoryManager)
     clock: Clock = field(default_factory=SystemClock)
     lease_keeper: LeaseKeeper = field(default_factory=ThreadLeaseKeeper)
@@ -113,6 +115,8 @@ class Runtime:
             raise ValueError("lease retry delays must be finite, positive, and base <= cap")
         if not 0 < self.heartbeat_seconds <= 1 or self.ttl_ms <= self.heartbeat_seconds * 2000:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
+        if self.content_reader is not None and not isinstance(self.content_reader, ContentReader):
+            raise TypeError("content_reader must implement ContentReader")
 
         self.config = effective_run_config(self.agent, self.config)
         self.providers = {**self.config.tool_providers, **self.providers}

@@ -5,14 +5,18 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Generator
 from contextlib import suppress
+from copy import deepcopy
 from typing import Any
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
+from vv_agent.kernel._hydration import DefinitionContent, TypedSchemaFailure
+from vv_agent.kernel._record_codec import RecordError
 from vv_agent.types import AgentTask, Message
 
 from . import _drive_phase, _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
@@ -70,6 +74,7 @@ class _Driver(CoreDriver):
             observe_cost=observe_cost,
             hook=lambda point, record: runtime.hook(point, record),
             emit_phase=emit_phase,
+            content_reader=runtime.content_reader,
         )
 
     def live_budget(self) -> BudgetEvaluator | None:
@@ -96,11 +101,32 @@ class _Driver(CoreDriver):
 
     def task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
-        return self.state.turns[self.state.active_turn_id].start.task()
+        start = self.state.turns[self.state.active_turn_id].start
+        if self.content_reader is None:
+            return start.task()
+        return deepcopy(self._hydrated_definition().task)
 
     def _task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
-        return self.state.turns[self.state.active_turn_id].start._task()
+        start = self.state.turns[self.state.active_turn_id].start
+        if self.content_reader is None:
+            return start._task()
+        return self._hydrated_definition().task
+
+    def _hydrated_definition(self) -> DefinitionContent:
+        assert self.state.active_turn_id is not None
+        start = self.state.turns[self.state.active_turn_id].start
+        try:
+            ref = ContentRef.from_dict(start._payload["definition"])
+        except (TypeError, ValueError) as exc:
+            raise TypedSchemaFailure("turn_started.definition must be a ContentRef") from exc
+        stored = next(
+            (row for row in self.records if row.record is start or row.record.record_id == start.record_id),
+            None,
+        )
+        if stored is None:
+            raise RecordError("turn_started record is outside the retained ledger")
+        return self.hydrator_for(stored.seq).definition(ref)
 
     def effective_model(self) -> dict[str, Any]:
         return _driver_planning.effective_model(self)
@@ -253,7 +279,7 @@ class _Driver(CoreDriver):
 
     def shared_state(self) -> dict[str, Any]:
         assert self.state.active_turn_id is not None
-        return self.runtime.bind_state(self.durable_shared_state(), self.state.turns[self.state.active_turn_id].start._task())
+        return self.runtime.bind_state(self.durable_shared_state(), self._task())
 
     def model_plan(self) -> Record | None:
         return _driver_planning.model_plan(self)
