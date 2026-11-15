@@ -6,6 +6,7 @@ from collections.abc import Generator
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from ._boundary_hydration import active_task, hydrate_boundary_data
 from ._cycle_values import (
     AfterCycleAction,
     AfterCycleDecision,
@@ -16,6 +17,7 @@ from ._cycle_values import (
     persist_after_cycle_disallowed_tools,
     read_after_cycle_disallowed_tools,
 )
+from ._driver import CoreDriver
 from ._driver_requests import CommitRecords
 from ._execution_values import CompletionReason
 from ._records import Record
@@ -73,7 +75,13 @@ AfterCycleRequest = (
 )
 
 
-def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCycleRequest, Any, bool]:
+def after_cycle(source: ExecutionState | CoreDriver, *, has_hooks: bool) -> Generator[AfterCycleRequest, Any, bool]:
+    if isinstance(source, CoreDriver):
+        driver = source
+        state = source.state
+    else:
+        driver = None
+        state = source
     if not has_hooks:
         return False
     tid = state.active_turn_id
@@ -89,11 +97,12 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
     if op.selected_attempt is None:
         return False
     receipt = op.attempts[op.selected_attempt].result
-    if receipt is None or receipt._payload["result"].get("error_code"):
+    receipt_result = _completed_result(driver, receipt) if receipt is not None else None
+    if receipt_result is None or receipt_result.get("error_code"):
         return False
     recorded = state.boundaries.get((tid, "after_cycle", oid))
     if recorded is not None:
-        error = recorded._payload["data"]["error"]
+        error = _boundary_data(driver, recorded).get("error")
         if error:
             yield CloseAfterCycle(error)
             return True
@@ -109,7 +118,7 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
             for op in children
             if op.selected_attempt is not None
             and (receipt_value := op.attempts[op.selected_attempt].result) is not None
-            and receipt_value._payload["result"].get("directive") == ToolDirective.FINISH.value
+            and _completed_result(driver, receipt_value).get("directive") == ToolDirective.FINISH.value
         ),
         None,
     )
@@ -119,7 +128,7 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
             a = child.attempts[max(child.attempts)]
             if a.state == "planned":
                 value = build_skipped_result(
-                    ToolCall.from_dict(a.execution_plan.payload["request"]),
+                    ToolCall.from_dict(_plan(driver, a.execution_plan).payload["request"]),
                     error_code="skipped_due_to_finish",
                     message="Tool skipped because a previous tool finished the task.",
                 )
@@ -135,20 +144,19 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
     ]
     if any(op.state != "completed" and not any(a.wait in waits for a in op.attempts.values()) for op in children):
         return False
-    task = state.turns[tid].start.task()
-    index = (
-        op.attempts[1].plan._payload["request"]["metadata"].get("vv_session", {}).get("cycle_index", int(oid.rsplit("/", 1)[1]))
-    )
+    task = active_task(driver) if driver is not None else state.turns[tid].start.task()
+    primary_plan = _plan(driver, op.attempts[1].plan)
+    index = primary_plan._payload["request"]["metadata"].get("vv_session", {}).get("cycle_index", int(oid.rsplit("/", 1)[1]))
     if waits:
         native = NativeCycleOutcome(NativeCycleOutcomeKind.WAIT_USER, CompletionReason.WAIT_USER, "ask_user", steer_allowed=False)
     elif finish:
         native = NativeCycleOutcome(
             NativeCycleOutcomeKind.COMPLETED,
             CompletionReason.TOOL_FINISH,
-            finish.attempts[1].plan._payload["request"]["name"],
+            _plan(driver, finish.attempts[1].plan)._payload["request"]["name"],
             index < task.max_cycles,
         )
-    elif not receipt._payload["result"].get("tool_calls") and task.no_tool_policy != "continue":
+    elif not receipt_result.get("tool_calls") and task.no_tool_policy != "continue":
         waiting = task.no_tool_policy == "wait_user"
         native = NativeCycleOutcome(
             NativeCycleOutcomeKind.WAIT_USER if waiting else NativeCycleOutcomeKind.COMPLETED,
@@ -173,7 +181,14 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
             messages=(yield ReadTranscript()),
             shared_state=shared,
             cumulative_token_usage=usage,
-            available_tool_names=[s["function"]["name"] for s in state.turns[tid].start._payload["definition"]["tools"]],
+            available_tool_names=[
+                s["function"]["name"]
+                for s in (
+                    driver.hydrated_definition(state.turns[tid].start).tools
+                    if driver is not None
+                    else state.turns[tid].start._payload["definition"]["tools"]
+                )
+            ],
             disallowed_tool_names=list(
                 dict.fromkeys([*task.metadata.get("_vv_agent_disallowed_tools", []), *read_after_cycle_disallowed_tools(shared)])
             ),
@@ -199,3 +214,27 @@ def after_cycle(state: ExecutionState, *, has_hooks: bool) -> Generator[AfterCyc
         },
     )
     return True
+
+
+def _plan(driver: CoreDriver | None, record: Record) -> Record:
+    return driver.hydrate_plan(record) if driver is not None else record
+
+
+def _completed_result(driver: CoreDriver | None, record: Record) -> dict[str, Any]:
+    value = (
+        driver.hydrate_record_field(record, "result", record._payload["result"])
+        if driver is not None
+        else record._payload["result"]
+    )
+    if type(value) is not dict:
+        raise ValueError("completed result hydration must return an object")
+    return value
+
+
+def _boundary_data(driver: CoreDriver | None, record: Record) -> dict[str, Any]:
+    if driver is not None:
+        return hydrate_boundary_data(driver, record)
+    data = record._payload.get("data")
+    if type(data) is not dict:
+        raise ValueError("boundary data must be an object")
+    return data

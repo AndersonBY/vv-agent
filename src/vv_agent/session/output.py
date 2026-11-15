@@ -28,5 +28,5 @@ def prepare_output(driver: _Driver, value: Any) -> tuple[str, str | None, Any] |
 
     assert driver.state.active_turn_id is not None
     agent = driver.runtime.agent
-    steps = phase.prepare_output(driver.state, value)
+    steps = phase.prepare_output(driver, value)
     return run(driver, steps, output_agent=agent)

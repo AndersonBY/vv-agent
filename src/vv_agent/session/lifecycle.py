@@ -15,5 +15,5 @@ def after_cycle(driver: _Driver) -> bool:
     from ._recovery_phase import run
 
     manager = AfterCycleHookManager(driver.runtime.config.after_cycle_hooks)
-    steps = phase.after_cycle(driver.state, has_hooks=manager.has_hooks())
+    steps = phase.after_cycle(driver, has_hooks=manager.has_hooks())
     return run(driver, steps, after_cycle=manager)

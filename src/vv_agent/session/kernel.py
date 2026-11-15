@@ -10,6 +10,7 @@ from typing import Any
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
+from vv_agent.kernel._boundary_hydration import hydrate_stored_records
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._content import ContentRef
@@ -275,7 +276,8 @@ class _Driver(CoreDriver):
         return _driver_inputs.start_turn(self)
 
     def transcript(self) -> list[Message]:
-        return project_context(self.records, self.state, _fold_factory=_fold_factory_for(self.store))
+        records = hydrate_stored_records(self, self.records) if self.content_reader is not None else self.records
+        return project_context(records, self.state, _fold_factory=_fold_factory_for(self.store))
 
     def shared_state(self) -> dict[str, Any]:
         assert self.state.active_turn_id is not None

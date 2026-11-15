@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vv_agent.kernel import _compaction_phase as phase
+from vv_agent.kernel._boundary_hydration import definition_payload, hydrate_record
 from vv_agent.kernel._compaction_phase import memory_settings as memory_settings
 from vv_agent.llm.errors import MAX_PTL_RETRIES
 from vv_agent.memory.manager import MemoryManager, SummaryPlan
@@ -22,11 +23,15 @@ if TYPE_CHECKING:
 def manager_for(driver: _Driver) -> MemoryManager:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
-    task = start._task()
-    definition = start._payload["definition"]
-    fork = driver.records[0].record._payload["attributes"].get("app_server_fork")
-    baseline = driver.records[0].record._payload["attributes"].get("app_server_context") if fork else None
-    settings = memory_settings(baseline or definition, driver.state.model_selection)
+    definition = definition_payload(driver, start)
+    task = driver.hydrated_definition(start).task
+    attributes = driver.session_attributes()
+    fork = attributes.get("app_server_fork")
+    baseline = attributes.get("app_server_context") if fork else None
+    selection = driver.state.model_selection
+    if selection is not None:
+        selection = hydrate_record(driver, selection)
+    settings = memory_settings(baseline or definition, selection)
     settings["artifact_scope"] = _session_artifact_scope(driver.sid, task.task_id)
     return MemoryManager(
         **settings,

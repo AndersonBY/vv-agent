@@ -177,12 +177,12 @@ def _compact(driver, *, requested_by=None):
 
 def _after_cycle(driver):
     configured = yield Read.START_AFTER_CYCLE
-    return (yield from _compose(driver, cycle.after_cycle(driver.state, has_hooks=configured)))
+    return (yield from _compose(driver, cycle.after_cycle(driver, has_hooks=configured)))
 
 
 def _output(driver, value):
     yield Read.START_OUTPUT
-    return (yield from _compose(driver, output.prepare_output(driver.state, value)))
+    return (yield from _compose(driver, output.prepare_output(driver, value)))
 
 
 def _dispatch(driver, attempt):

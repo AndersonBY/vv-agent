@@ -9,6 +9,7 @@ from typing import Any
 
 from . import _driver_outcomes as outcomes
 from . import _summary_compaction as summary
+from ._boundary_hydration import active_task, hydrate_stored_records
 from ._context import project_context
 from ._driver import CoreDriver
 from ._driver_planning import plan as plan_steps
@@ -48,10 +49,15 @@ class CountPrefix:
 
 def source_at(driver: CoreDriver, version: str) -> Generator[CountPrefix, int, list[Message]]:
     prefix = tuple(row for row in driver.records if row.seq <= int(version))
-    logical = [row.record for row in prefix]
+    hydrated = hydrate_stored_records(driver, prefix)
+    logical = [row.record for row in hydrated]
     inputs = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
     folded = driver._fold_factory()
-    steps = folded.extend_steps(logical, consumed_inputs=inputs)
+    steps = folded.extend_steps(
+        logical,
+        consumed_inputs=inputs,
+        bodies=(row.record.encode() for row in prefix),
+    )
     count = None
     try:
         while True:
@@ -65,7 +71,7 @@ def source_at(driver: CoreDriver, version: str) -> Generator[CountPrefix, int, l
         raise _StopIterationTransport(error) from error
     finally:
         steps.close()
-    return project_context(prefix, state)
+    return project_context(hydrated, state)
 
 
 def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tuple[bool, str | None]]:
@@ -86,7 +92,8 @@ def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tu
             ):
                 model_id = yield SummaryRead.MODEL_ROUTE
                 assert driver.state.active_turn_id is not None
-                task = driver.state.turns[driver.state.active_turn_id].start.task()
+                task = active_task(driver)
+                parent_plan = driver.hydrate_plan(driver.state.operations[plan._payload["dependencies"][0]].attempts[1].plan)
                 request = {
                     "model": model_id,
                     "messages": [Message("user", summary_plan.prompt).to_dict()],
@@ -97,11 +104,7 @@ def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tu
                         "source_digest": digest([m.to_dict() for m in source]),
                         "source_context_version": version,
                         "child_operation_id": plan.operation_id,
-                        "vv_session": {
-                            "cycle_index": driver.state.operations[plan._payload["dependencies"][0]]
-                            .attempts[1]
-                            .plan._payload["request"]["metadata"]["vv_session"]["cycle_index"]
-                        },
+                        "vv_session": {"cycle_index": parent_plan._payload["request"]["metadata"]["vv_session"]["cycle_index"]},
                     },
                     "prompt_bundle": None,
                     "model_settings": task.model_settings.to_dict() if task.model_settings else None,
@@ -110,20 +113,21 @@ def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tu
                 return False, None
         elif op.selected_attempt is not None:
             attempt = op.attempts[op.selected_attempt]
-            meta = attempt.plan._payload["request"]["metadata"]
+            plan_record = driver.hydrate_plan(attempt.plan)
+            meta = plan_record._payload["request"]["metadata"]
             source = yield from source_at(driver, meta["source_context_version"])
             if digest([m.to_dict() for m in source]) != meta["source_digest"]:
                 raise ValueError("child summary source mismatch")
             summary_plan = summary.plan_full_summary(source, **(yield SummaryRead.PLAN_SETTINGS))
-            if (
-                summary_plan is not None
-                and attempt.result is not None
-                and not attempt.result._payload["result"].get("error_code")
-                and attempt.context == "normal"
-            ):
+            result = (
+                driver.hydrate_record_field(attempt.result, "result", attempt.result._payload["result"])
+                if attempt.result is not None
+                else None
+            )
+            if summary_plan is not None and result is not None and not result.get("error_code") and attempt.context == "normal":
                 accepted = yield from summary.accept_summary(
                     summary_plan,
-                    attempt.result._payload["result"]["content"],
+                    result["content"],
                     **(yield SummaryRead.ACCEPT_SETTINGS),
                     require_reduction=False,
                 )
@@ -131,8 +135,9 @@ def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tu
                     return True, next(m.content for m in accepted.messages if m.name == "memory_summary")
         elif summary_pending(driver, plan.operation_id or ""):
             return False, None
+        plan_record = driver.hydrate_plan(plan)
         result = ToolExecutionResult(
-            plan._payload["request"]["id"],
+            plan_record._payload["request"]["id"],
             "A fresh parent summary is unavailable; no child was admitted.",
             status_code=ToolResultStatus.ERROR,
             error_code="child_summary_unavailable",

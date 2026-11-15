@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from vv_agent.events import MemoryCompactCompleted, MemoryCompactMode, MemoryCompactStarted, MemoryCompactTrigger
+from vv_agent.kernel._boundary_hydration import hydrate_boundary_data
 from vv_agent.memory.provider import call_after_memory_providers, call_before_memory_providers
 from vv_agent.memory.session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryState
 
@@ -41,7 +42,7 @@ def restore_memory(driver: _Driver) -> SessionMemory:
     memory = session_memory(driver.task())
     for (tid, stage, _), r in driver.state.boundaries.items():
         if tid == driver.state.active_turn_id and stage == "session_memory_saved":
-            memory.state = SessionMemoryState.from_dict(copy_json(r._payload["data"]["state"]))
+            memory.state = SessionMemoryState.from_dict(copy_json(hydrate_boundary_data(driver, r)["state"]))
     return memory
 
 
@@ -51,11 +52,11 @@ def save_projection(driver: _Driver) -> None:
     for (tid, stage, _), r in driver.state.boundaries.items():
         if stage != "session_memory_saved":
             continue
-        task = driver.state.turns[tid].start._task()
+        task = driver.hydrated_definition(driver.state.turns[tid].start).task
         memory = session_memory(task, Path(driver.runtime.config.workspace or ".") if task.use_workspace else None)
         path = memory.storage_path()
         if path is not None:
-            latest[path] = r._payload["data"]["state"]
+            latest[path] = hydrate_boundary_data(driver, r)["state"]
     for path, state in latest.items():
         data = json.dumps(state, ensure_ascii=False, indent=2)
         if path.exists() and path.read_text(encoding="utf-8") == data:

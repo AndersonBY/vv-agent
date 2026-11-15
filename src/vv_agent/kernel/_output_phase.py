@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from typing import Any, Protocol
 
+from vv_agent.kernel._boundary_hydration import active_task, hydrate_boundary_data
+from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._state import ExecutionState
 
@@ -87,12 +89,18 @@ def serializable_output(value: Any) -> Any:
     return value
 
 
-def prepare_output(state: ExecutionState, value: Any) -> Generator[OutputRequest, Any, OutputOutcome | None]:
+def prepare_output(source: ExecutionState | CoreDriver, value: Any) -> Generator[OutputRequest, Any, OutputOutcome | None]:
+    if isinstance(source, CoreDriver):
+        driver = source
+        state = source.state
+    else:
+        driver = None
+        state = source
     tid = state.active_turn_id
     assert tid is not None
     final = state.boundaries.get((tid, "output_checked", "final"))
     if final:
-        data = final._payload["data"]
+        data = _boundary_data(driver, final)
         return data["status"], data["reason"], data["value"]
     if (
         not (yield OutputSetting.HAS_GUARDRAILS)
@@ -125,16 +133,22 @@ def prepare_output(state: ExecutionState, value: Any) -> Generator[OutputRequest
         raise ValueError("output repair boundary has no logged operation")
     if repair is not None:
         receipt = repair.attempts[repair.selected_attempt or max(repair.attempts)].result
+        receipt_result = (
+            driver.hydrate_record_field(receipt, "result", receipt._payload["result"])
+            if driver is not None and receipt is not None
+            else None
+        )
         if receipt is None:
             outcome = ("failed", "output_validation_failed", "output_validation_failed: repair_provider_error")
-        elif receipt._payload["result"].get("error_code"):
+        elif receipt_result is None or receipt_result.get("error_code"):
+            repair_error = receipt_result.get("content") if receipt_result is not None else None
             outcome = (
                 "failed",
                 "output_validation_failed",
-                f"output_validation_failed: repair_provider_error: {receipt._payload['result']['content']}",
+                f"output_validation_failed: repair_provider_error: {repair_error}",
             )
         else:
-            value = receipt.payload["result"]["content"]
+            value = receipt_result["content"]
             outcome = None
         if outcome:
             record = yield CreateBoundary(
@@ -144,7 +158,7 @@ def prepare_output(state: ExecutionState, value: Any) -> Generator[OutputRequest
                     "status": outcome[0],
                     "reason": outcome[1],
                     "value": outcome[2],
-                    "partial_output": initial._payload["data"]["value"] if initial else value,
+                    "partial_output": _boundary_data(driver, initial)["value"] if initial else value,
                 },
             )
             yield CommitRecords([record])
@@ -159,7 +173,7 @@ def prepare_output(state: ExecutionState, value: Any) -> Generator[OutputRequest
         and (yield OutputSetting.HAS_REPAIR)
         and (yield OutputSetting.MAX_REPAIRS) == 1
     ):
-        task = state.turns[tid].start.task()
+        task = active_task(driver) if driver is not None else state.turns[tid].start.task()
         request = {
             "model": (yield OutputSetting.REPAIR_MODEL) or task.model,
             "messages": [],
@@ -197,3 +211,12 @@ def prepare_output(state: ExecutionState, value: Any) -> Generator[OutputRequest
     )
     yield CommitRecords([record])
     return outcome
+
+
+def _boundary_data(driver: CoreDriver | None, record: Any) -> dict[str, Any]:
+    if driver is not None:
+        return hydrate_boundary_data(driver, record)
+    data = record._payload.get("data")
+    if type(data) is not dict:
+        raise ValueError("output boundary data must be an object")
+    return data

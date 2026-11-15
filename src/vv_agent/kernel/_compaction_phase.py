@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vv_agent.kernel import _summary_compaction
+from vv_agent.kernel._boundary_hydration import active_task, hydrate_record
 from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
 from vv_agent.kernel._context import message_ids
 from vv_agent.kernel._context_messages import UnseenInputCapacityError, retained_start
+from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._microcompaction import MicrocompactPlan, estimate_tool_artifact_path, plan_memory_microcompact
@@ -213,7 +215,8 @@ def finish_summary(driver: CompactionView) -> Generator[object, Any, bool]:
             or (a.context != "normal")
         ):
             continue
-        meta = a.plan._payload["request"]["metadata"]
+        plan_record = _hydrated_plan(driver, a.plan)
+        meta = plan_record._payload["request"]["metadata"]
         if meta.get("mode") == "child_summary":
             continue
         source = yield CompactionRequest.TRANSCRIPT
@@ -232,7 +235,7 @@ def finish_summary(driver: CompactionView) -> Generator[object, Any, bool]:
             continue
         accepted_result = yield from _summary_compaction.accept_summary(
             plan,
-            a.result._payload["result"]["content"],
+            _hydrated_completed_result(driver, a.result).get("content", ""),
             protected_start=manager.protected_start,
             recovery_tool_available=manager.recovery_tool_available,
             effective_context_window=manager.effective_context_window,
@@ -270,14 +273,14 @@ def compact_context(
     failures = 0
     for op in reversed(primary):
         result = op.attempts[op.selected_attempt].result if op.selected_attempt else None
-        if result is None or result._payload["result"].get("error_code") != "prompt_too_long":
+        if result is None or _hydrated_completed_result(driver, result).get("error_code") != "prompt_too_long":
             break
         failures += 1
     cycle = 1 + sum(
         not (
             op.selected_attempt
             and (receipt := op.attempts[op.selected_attempt].result)
-            and (receipt._payload["result"].get("error_code") == "prompt_too_long")
+            and (_hydrated_completed_result(driver, receipt).get("error_code") == "prompt_too_long")
         )
         for op in primary
     )
@@ -289,6 +292,8 @@ def compact_context(
         ),
         None,
     )
+    if last_compaction is not None:
+        last_compaction = _hydrated_record(driver, last_compaction)
     if (
         last_compaction
         and last_compaction._payload["replacement"] == [m.to_dict() for m in source]
@@ -388,8 +393,8 @@ def compact_context(
     if not failures and any(
         op.turn_id == driver.state.active_turn_id
         and op.attempts[1].plan._payload["purpose"] == "compaction"
-        and (op.attempts[1].plan._payload["request"]["metadata"]["source_digest"] == source_digest)
-        and (op.attempts[1].plan._payload["request"]["metadata"]["mode"] == mode)
+        and (_hydrated_plan(driver, op.attempts[1].plan)._payload["request"]["metadata"]["source_digest"] == source_digest)
+        and (_hydrated_plan(driver, op.attempts[1].plan)._payload["request"]["metadata"]["mode"] == mode)
         for op in driver.state.operations.values()
     ):
         return (yield from finish_compact(driver, manager, source, mode="none", changed=False))
@@ -410,7 +415,7 @@ def compact_context(
     if oid in driver.state.operations:
         return (yield from finish_compact(driver, manager, source, mode="none", changed=False))
     assert driver.state.active_turn_id is not None
-    task = driver.state.turns[driver.state.active_turn_id].start._task()
+    task = _task(driver)
     model_id = yield ModelRoute("compaction")
     request = {
         "model": model_id,
@@ -443,10 +448,9 @@ def extract_memory(
     driver: CompactionView, source: list[Message], current_tokens: int, cycle: int
 ) -> Generator[object, Any, bool]:
     assert driver.state.active_turn_id is not None
-    task = driver.state.turns[driver.state.active_turn_id].start._task()
+    task = _task(driver)
     if not task.metadata.get("session_memory_enabled"):
         return False
-    task = driver.state.turns[driver.state.active_turn_id].start.task()
     yield CompactionRequest.RESTORE_SESSION_MEMORY
     oid = f"{task.task_id}/model/session_memory/{digest([m.to_dict() for m in source])}"
     saved = _boundary(driver, "session_memory_saved", oid)
@@ -486,7 +490,7 @@ def pending_memory(driver: CompactionView):
     tid = driver.state.active_turn_id
     for (turn, stage, key), r in reversed(list(driver.state.boundaries.items())):
         if turn == tid and stage == "memory_started" and _boundary(driver, "memory_completed", key) is None:
-            return key, r._payload["data"]["event"]
+            return key, _hydrated_record(driver, r)._payload["data"]["event"]
     return None
 
 
@@ -568,4 +572,28 @@ def finish_compact(
 
 def _task(driver: CompactionView):
     assert driver.state.active_turn_id is not None
+    if hasattr(driver, "hydrated_definition") and hasattr(driver, "stored_record"):
+        return active_task(cast(CoreDriver, driver))
     return driver.state.turns[driver.state.active_turn_id].start._task()
+
+
+def _hydrated_record(driver: CompactionView, record: Record) -> Record:
+    if hasattr(driver, "stored_record") and hasattr(driver, "hydrator_for"):
+        return hydrate_record(cast(CoreDriver, driver), record)
+    return record
+
+
+def _hydrated_plan(driver: CompactionView, record: Record) -> Record:
+    if hasattr(driver, "hydrate_plan"):
+        return cast(Any, driver).hydrate_plan(record)
+    return record
+
+
+def _hydrated_completed_result(driver: CompactionView, record: Record) -> dict[str, Any]:
+    if hasattr(driver, "hydrate_record_field"):
+        result = cast(Any, driver).hydrate_record_field(record, "result", record._payload["result"])
+    else:
+        result = record._payload["result"]
+    if type(result) is not dict:
+        raise ValueError("completed result hydration must return an object")
+    return result
