@@ -1,8 +1,8 @@
 """Standard-library contracts for S1 encrypted content storage.
 
-Concrete key providers, encryption, process locks and SQL adapters live in the
-session layer. The kernel owns only backend-neutral protocol and persisted
-state shapes.
+The kernel owns backend-neutral content protocols, the narrow cipher injection
+point, and persisted state shapes. Concrete key providers, encryption and
+process locks live in the session layer.
 """
 
 from __future__ import annotations
@@ -29,6 +29,16 @@ class ContentStore(Protocol):
     def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes: ...
 
     def forget_session(self, tenant_id: str, session_id: str) -> None: ...
+
+
+class ContentCipher(Protocol):
+    """The sole cipher and randomness port used by S1 content storage."""
+
+    def encrypt(self, key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes: ...
+
+    def decrypt(self, key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes: ...
+
+    def random_bytes(self, n: int) -> bytes: ...
 
 
 class ContentState(StrEnum):
@@ -130,6 +140,7 @@ def _text(value: object, field_name: str) -> str:
 
 
 __all__ = [
+    "ContentCipher",
     "ContentLink",
     "ContentState",
     "ContentStore",
