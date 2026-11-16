@@ -259,15 +259,28 @@ def _git(repo: Path, *args: str) -> bytes:
     ).stdout
 
 
+_SOURCE_PATHS = ("src/vv_agent", "scripts/record_codec_fixtures.py", "scripts/s1_fixture_values.py")
+
+
 def _source_tree_digest(repo: Path) -> str:
-    paths = ("src/vv_agent", "scripts/record_codec_fixtures.py", "scripts/s1_fixture_values.py")
-    digest_input = bytearray(_git(repo, "diff", "--binary", "HEAD", "--", *paths))
-    untracked = _git(repo, "ls-files", "--others", "--exclude-standard", "--", *paths).decode().splitlines()
-    for relative in sorted(untracked):
+    listed = _git(repo, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", *_SOURCE_PATHS)
+    relative_paths = sorted({path.decode("utf-8", "surrogateescape") for path in listed.split(b"\0") if path})
+    digest_input = sha256()
+    for relative in relative_paths:
         path = repo / relative
-        if path.is_file():
-            digest_input.extend(relative.encode() + b"\0" + path.read_bytes() + b"\0")
-    return sha256(digest_input).hexdigest()
+        if not path.is_file():
+            continue
+        relative_bytes = relative.encode("utf-8", "surrogateescape")
+        body = path.read_bytes()
+        digest_input.update(len(relative_bytes).to_bytes(8, "big"))
+        digest_input.update(relative_bytes)
+        digest_input.update(len(body).to_bytes(8, "big"))
+        digest_input.update(body)
+    return digest_input.hexdigest()
+
+
+def _source_worktree_dirty(repo: Path) -> bool:
+    return bool(_git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--", *_SOURCE_PATHS).strip())
 
 
 def _content_ref_paths(value: Any, path: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -308,7 +321,7 @@ def _trusted_storage_capture_impl() -> dict[str, Any]:
 
     repo = Path(__file__).resolve().parents[1]
     revision = _git(repo, "rev-parse", "HEAD").decode().strip()
-    dirty = bool(_git(repo, "status", "--porcelain=v1", "--untracked-files=normal"))
+    dirty = _source_worktree_dirty(repo)
 
     with SQLiteStore.standalone(":memory:") as raw_store:
         raw_store.install_schema()
