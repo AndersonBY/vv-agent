@@ -1,14 +1,15 @@
 {
   "app_server_error": {
     "code": -32603,
-    "message": "stored record chain digest mismatch"
+    "message": "invalid session schema"
   },
   "canonical": {
-    "inbox_sha256": "68c8b955fb49d2aa359d594f27ac1e80eb6af9ad21f88d9d54388c7c66a78705",
-    "inbox_utf8": "{\"actor\":{\"attributes\":{\"content_id\":\"content/test/principal/fixture/user\",\"key_id\":\"key/test\",\"labels\":{\"classification\":\"internal\",\"source\":[]},\"mac\":\"c9afa4e97b48788fb4bd3c2eab128616ffce29f4811f2689a4f92ba27b2597e1\",\"size\":22},\"subject_id\":\"fixture/user\",\"subject_kind\":\"user\",\"tenant_id\":\"default\"},\"admission_proof\":null,\"available_ms\":0,\"feature_level\":1,\"generation\":null,\"input_id\":\"i\",\"kind\":\"user\",\"payload\":{\"content\":{\"content_id\":\"content/test/go\",\"key_id\":\"key/test\",\"labels\":{\"classification\":\"internal\",\"source\":[]},\"mac\":\"4cd0e21a9a0795a14ec9aa5f0e7d1abff0492565770e43eafdf1e3e8afed1f33\",\"size\":2}},\"schema_version\":\"S1\",\"target_turn_id\":null}",
-    "record_sha256": "6fce183a3296e2ff652dfa55d74c420e5b7c97f15c7a24251a8a5d07042ae9e8",
-    "record_utf8": "{\"attempt\":null,\"feature_level\":1,\"kind\":\"session_created\",\"operation_id\":null,\"payload\":{\"attributes\":{\"content_id\":\"content/test/attributes\",\"key_id\":\"key/test\",\"labels\":{\"classification\":\"internal\",\"source\":[]},\"mac\":\"f1b4db36f908e557e2321176b6d345f5a700d4fba979381605327fdc1c8adbf7\",\"size\":10},\"parent_operation_id\":null,\"parent_session_id\":null,\"principal\":{\"attributes\":{\"content_id\":\"content/test/principal/p\",\"key_id\":\"key/test\",\"labels\":{\"classification\":\"internal\",\"source\":[]},\"mac\":\"64e6c8aee35cacbb5666a27e02459378901c2744100ffdb804af3275e9a04e76\",\"size\":11},\"subject_id\":\"p\",\"subject_kind\":\"user\",\"tenant_id\":\"default\"},\"workspace\":{\"content_id\":\"content/test/workspace\",\"key_id\":\"key/test\",\"labels\":{\"classification\":\"internal\",\"source\":[]},\"mac\":\"21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08\",\"size\":9}},\"record_id\":\"session/s/created\",\"schema_version\":\"S1\",\"session_id\":\"s\",\"turn_id\":null}"
+    "inbox_sha256": "af39690df1121774e037efa464fb09302ee16d282f474cd16012e6ddcccc0490",
+    "inbox_utf8": "{\"available_ms\":0,\"generation\":null,\"input_id\":\"i\",\"kind\":\"user\",\"payload\":{\"content\":\"go\"},\"schema_version\":3,\"target_turn_id\":null}",
+    "record_sha256": "ab2ed968bd89994659da4819eb42667b703bcdbe6435f19352142378365d97a7",
+    "record_utf8": "{\"attempt\":null,\"kind\":\"session_created\",\"operation_id\":null,\"payload\":{\"attributes\":{\"seed\":{\"response_rejection\":true,\"unseen_input_protection\":true}},\"parent_operation_id\":null,\"parent_session_id\":null,\"principal\":\"p\",\"workspace\":\"/fixture\"},\"record_id\":\"session/s/created\",\"schema_version\":1,\"session_id\":\"s\",\"turn_id\":null}"
   },
+  "historical_capture": true,
   "model_selection_reason": "model_selection_unresolvable",
   "preserved_diagnostics": [
     {
@@ -21,7 +22,7 @@
     {
       "case": "embedded_digest",
       "error": {
-        "message": "invalid session schema",
+        "message": "input digest mismatch",
         "type": "RecordError"
       }
     },
@@ -49,11 +50,12 @@
     {
       "case": "model_settings",
       "error": {
-        "message": "S1 actor requires a closed Principal",
+        "message": "named tool_choice requires a non-empty function name",
         "type": "RecordError"
       }
     }
   ],
+  "producer_contract_version": "39.0.0",
   "provider_reason": "provider_result_invalid",
   "schema_diagnostics": [
     {
@@ -80,10 +82,11 @@
     {
       "case": "reserved_metadata",
       "error": {
-        "message": "attributes requires a ContentRef produced by the content store",
+        "message": "invalid session schema",
         "type": "RecordError"
       }
     }
   ],
+  "schema_version": 1,
   "version": 1
 }
