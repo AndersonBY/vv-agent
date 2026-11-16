@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract_version": "40.0.0",
-  "contract_revision": "6c24282a3ddf2dc5c2715a6eb5ee42cdc3b9bf68",
+  "contract_revision": "6c242824644f639a028abe65de2bc5c224a41c55",
   "source_repository": "https://github.com/AndersonBY/vv-agent-contract",
   "artifact_url": "https://github.com/AndersonBY/vv-agent-contract/releases/download/v40.0.0/vv-agent-contract-40.0.0.zip",
   "artifact_sha256": "1e722f02cde3ebcbba2e630d2c8a1fbf437bd024c93a644e0e847872f7c3aef7",
