@@ -1336,9 +1336,9 @@
     "note": "Captured from the current Python S1 constructors, content publication writer and canonical encoder. Signed proof fields are deterministic valid wire values; this capture does not claim a cryptographic signer was executed.",
     "producer_capture": true,
     "producer_repository": "https://github.com/AndersonBY/vv-agent",
-    "source_revision": "3f4d87374ce27d2abf3fc23421f20f766aee16a5",
-    "source_tree_sha256": "8127023fa691ba1c6a8416d80d4aba0b1bf9253d27593bed0c161607f058bc14",
-    "source_worktree_dirty": true
+    "source_revision": "6bbca7f7bdaf79e814d59c9ef6508bcfeb53d4dd",
+    "source_tree_sha256": "73f2a3b57d4df0aa983cca9acbd752f59d04e36562765160bcdf583374a75953",
+    "source_worktree_dirty": false
   },
   "record_schema_version": "S1",
   "rejected_cases": [
@@ -1746,7 +1746,7 @@
       "reason": "boundary event is a ContentRef"
     }
   ],
-  "revision": "3f4d87374ce27d2abf3fc23421f20f766aee16a5",
+  "revision": "6bbca7f7bdaf79e814d59c9ef6508bcfeb53d4dd",
   "schema_version": "vv-agent.trusted-storage-s1.v1",
   "status": "producer-captured",
   "storage_major": "S1"
