@@ -101,17 +101,41 @@ class LocalKeyProvider:
         self._master_key = master_key
         self._state_path = Path(state_path).expanduser() if state_path is not None else _default_local_key_state_path(master_key)
         self._lock = RLock()
-        self._initialize_state()
+        self._connection: sqlite3.Connection | None = None
+        try:
+            self._state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._connection = self._connect()
+            self._initialize_state()
+        except BaseException:
+            self.close()
+            raise
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._state_path, timeout=30)
-        connection.execute("PRAGMA busy_timeout=30000")
+        connection = sqlite3.connect(self._state_path, timeout=30, check_same_thread=False)
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
+    def _state_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("LocalKeyProvider is closed")
+        return self._connection
+
+    def close(self) -> None:
+        """Close the provider-owned state connection."""
+        with self._lock:
+            connection = self._connection
+            if connection is None:
+                return
+            connection.close()
+            self._connection = None
+
     def _initialize_state(self) -> None:
-        self._state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         master_fingerprint = hashlib.sha256(self._master_key).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._state_connection() as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS local_content_key_state ("
                 "singleton INTEGER PRIMARY KEY CHECK (singleton=1),"
@@ -140,7 +164,8 @@ class LocalKeyProvider:
             self._state_path.chmod(0o600)
 
     def _key_state(self, key_id: str) -> tuple[str, str, bool, str | None] | None:
-        with self._connect() as connection:
+        with self._lock:
+            connection = self._state_connection()
             row = connection.execute(
                 "SELECT tenant_id,session_id,destroyed,evidence_id FROM local_content_keys WHERE key_id=?",
                 (key_id,),
@@ -150,7 +175,7 @@ class LocalKeyProvider:
         return row[0], row[1], bool(row[2]), row[3]
 
     def _persist_new_key(self, tenant_id: str, session_id: str, key_id: str) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._state_connection() as connection:
             try:
                 connection.execute(
                     "INSERT INTO local_content_keys(tenant_id,session_id,key_id,destroyed,evidence_id) VALUES (?,?,?,0,NULL)",
@@ -201,9 +226,9 @@ class LocalKeyProvider:
             raise KeyUnavailable("wrapped data key is unavailable")
         if wrapped_key.tenant_id != tenant_id or wrapped_key.session_id != session_id:
             raise KeyUnavailable("wrapped data key does not belong to the session binding")
-        self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
-
-        return self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
+        with self._lock:
+            self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
+            return self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
 
     def restore_data_key(self, wrapped_key: WrappedDataKey) -> None:
         """Validate persistent lifecycle state for a durable wrapped envelope."""
@@ -211,13 +236,14 @@ class LocalKeyProvider:
             raise KeyUnavailable("wrapped data key is unavailable")
         tenant_id = _text(wrapped_key.tenant_id, "tenant_id")
         session_id = _text(wrapped_key.session_id, "session_id")
-        self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
-        self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
+        with self._lock:
+            self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
+            self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
 
     def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
         tenant_id = _text(tenant_id, "tenant_id")
         key_id = _text(key_id, "key_id")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._state_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT tenant_id,session_id,destroyed,evidence_id FROM local_content_keys WHERE key_id=?",
