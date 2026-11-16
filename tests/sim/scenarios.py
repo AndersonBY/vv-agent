@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._child_store import ChildSession, child_delivery
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import CHILD_RESULT, INPUT_ACTOR_ATTRIBUTES, ContentRef
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, Unknown
 from vv_agent.kernel._records import InboxItem
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolExecutionResult
-from vv_agent.session.content_runtime import CHILD_RESULT, INPUT_ACTOR_ATTRIBUTES, SessionContentWriter
-from vv_agent.session.projection import hydrate_records, hydration_for_session_store
 
-from .world import FaultyStore, SimClock, SimWorld, WorkerDeath, require
+if TYPE_CHECKING:
+    from .world import SimWorld
 
 SCENARIOS = (
     "tools",
@@ -40,6 +40,13 @@ SCENARIOS = (
     "cancel_descendants",
     "context_compacted",
 )
+
+
+def require(condition, invariant, detail):
+    if not condition:
+        from .world import InvariantViolation
+
+        raise InvariantViolation(invariant, detail)
 
 
 class Provider:
@@ -132,6 +139,8 @@ TOOL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_d
 
 
 def _hydrated_records_by_id(w, sid, rows):
+    from vv_agent.session.projection import hydrate_records, hydration_for_session_store
+
     hydration = hydration_for_session_store(w.connection("observer"), sid)
     return {row.record.record_id: row.record for row in hydrate_records(rows, hydration)}
 
@@ -228,6 +237,8 @@ def lease_takeover(w, provider):
             original_hook(point, record)
 
         rt.hook = hook
+        from .world import FaultyStore
+
         w.workers[participant] = FaultyStore(w.connection(participant), w, participant)
         w.runtimes[("s", participant)] = rt
         w.enqueue(f"worker/{participant}", lambda participant=participant: entry(participant))
@@ -394,6 +405,8 @@ def future_input(w, provider):
     w.events.append({"future_input_held": "future", "available_ms": due, "observed_ms": now})
     # SQLite advances injected time; PostgreSQL sleeps against unchanged SQL time.
     deadline = w.clock.monotonic() + 10
+    from .world import SimClock
+
     if isinstance(w.clock, SimClock):
         w.clock.sleep(max(0, due - observer._now()) / 1000)
     else:
@@ -428,6 +441,8 @@ def future_input(w, provider):
 
 def _audit_executor_stops(w):
     """Record the stop that ``SimWorld.drive`` would otherwise reduce to a participant name."""
+    from .world import WorkerDeath
+
     actual_drive_runtime = w._drive_runtime
 
     def observed_drive_runtime(store, sid, *, runtime, factory):
@@ -635,6 +650,8 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         rt.registry.register_schema("effect", schema)
         rt.verify_frozen_definition = True
         if "worker-1" not in w.workers:
+            from .world import FaultyStore
+
             w.workers["worker-1"] = FaultyStore(w.connection("worker-1"), w, "worker-1")
         w.runtimes[("s", "worker-1")] = rt
     if w.scenario == "metered_tool":
@@ -665,6 +682,8 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         ):
             item = replace(template, input_id=input_id, payload=payload)
             with delivery.atomic() as tx:
+                from vv_agent.session.content_runtime import SessionContentWriter
+
                 writer = SessionContentWriter.bind(tx, tenant_id=delivery.tenant_id, session_id="s")
                 tx.push("s", item)
                 assert item.actor is not None
@@ -694,10 +713,10 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
     require(state.active_turn_id is None, "I4", "fair SQL scan did not finish this bounded scenario")
     if w.scenario == "definition_mismatch":
         terminal = next(r for r in rows if r.record.kind == "turn_ended")
-        logical_terminal = hydrate_records((terminal,), hydration_for_session_store(w.connection("observer"), "s"))[0]
+        logical_terminal = _hydrated_records_by_id(w, "s", (terminal,))[terminal.record.record_id]
         require(
-            logical_terminal.record.payload["status"] == "failed"
-            and logical_terminal.record.payload["reason"] == "handler_schema_or_capability_mismatch",
+            logical_terminal.payload["status"] == "failed"
+            and logical_terminal.payload["reason"] == "handler_schema_or_capability_mismatch",
             "definition",
             "changed runtime did not fail its frozen definition check",
         )

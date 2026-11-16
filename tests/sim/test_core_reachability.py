@@ -4,8 +4,10 @@ The fixed execution registry below is the small set of cross-module functions th
 existing SimWorld participants actually invoke.  It is not a scan of private
 helpers.  ``sys.setprofile`` observes exact ``__code__`` identities while seven
 fixed SQLite scenarios and one real projection failure/retry participant run in a
-fresh SDK-free process.  New projection evidence is required because SimWorld did
-not previously have a projection participant.
+fresh process. The scenarios module is imported first under the strict core-only
+W9 guard; the SDK-capable SimWorld host is loaded only after that boundary check.
+New projection evidence is required because SimWorld did not previously have a
+projection participant.
 
 The central public API manifest is checked separately in an SDK-enabled process.
 Only explicit core-origin callables are counted: value methods are owned by real
@@ -136,7 +138,7 @@ source, purelib, root, entrypoints_raw, contract_profiles_raw, scenarios_raw = s
 entrypoints = json.loads(entrypoints_raw)
 contract_profiles = json.loads(contract_profiles_raw)
 scenarios = json.loads(scenarios_raw)
-sys.path[:0] = [source, root, purelib]
+sys.path[:0] = [source, root, str(Path(root) / "tests"), purelib]
 
 allowed = {
     "vv_agent",
@@ -152,7 +154,8 @@ class CoreOnly(importlib.abc.MetaPathFinder):
             if fullname not in allowed and not fullname.startswith("vv_agent.kernel."):
                 raise AssertionError(f"forbidden SDK import: {fullname}")
 
-sys.meta_path.insert(0, CoreOnly())
+core_only = CoreOnly()
+sys.meta_path.insert(0, core_only)
 
 
 def resolve(module_name, qualname):
@@ -163,8 +166,16 @@ def resolve(module_name, qualname):
 
 
 from tests.sim.scenarios import run_scenario
+from vv_agent.kernel._records import InboxItem
+
+boundary_modules = sorted(name for name in sys.modules if name.startswith("vv_agent"))
+assert all(name in allowed or name.startswith("vv_agent.kernel.") for name in boundary_modules)
+sys.meta_path.remove(core_only)
+
+# S1 content storage adapters live in the session layer, so actual SimWorld
+# execution is an SDK-capable host path after the core-only import gate.
 from tests.sim.world import SimWorld
-from vv_agent.kernel._records import InboxItem, SessionSpec
+from session.helpers import create_fixture_session, push_fixture_input
 
 functions = {}
 for module_name, qualname in (*entrypoints, *contract_profiles):
@@ -193,10 +204,8 @@ class ExpectedProjectionSinkError(Exception):
 
 def projection_failure_then_ack(world):
     store = world.connection("projection-host")
-    with store.atomic() as tx:
-        tx.create(SessionSpec("projection", "sim", "/tmp"), consumers=("events", "other"))
-    with store.atomic() as tx:
-        tx.push("projection", InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(store, "projection", consumers=("events", "other"))
+    push_fixture_input(store, "projection", InboxItem("initial", "user", {"content": "go"}))
 
     observer = world.connection("projection-observer")
     initial = work(observer)
@@ -264,7 +273,6 @@ finally:
     sys.setprofile(None)
 
 loaded = {name for name in sys.modules if name.startswith("vv_agent")}
-assert loaded <= allowed | {name for name in loaded if name.startswith("vv_agent.kernel.")}
 leaves = sorted(
     name
     for name in loaded
@@ -279,6 +287,7 @@ assert set(leaves) == {
 print(
     json.dumps(
         {
+            "boundary_modules": len(boundary_modules),
             "leaves": leaves,
             "kernel_modules": len([name for name in loaded if name.startswith("vv_agent.kernel.")]),
             "scenarios": summaries,
@@ -388,7 +397,7 @@ def _run_probe(script, *args, tmp_path, no_site):
     return json.loads(result.stdout)
 
 
-def test_core_execution_entries_are_naturally_reached_in_fresh_sdk_free_simulation(tmp_path):
+def test_core_execution_entries_are_naturally_reached_after_core_only_import_gate(tmp_path):
     evidence = _run_probe(
         textwrap.dedent(CORE_PROBE),
         SOURCE,
@@ -402,6 +411,7 @@ def test_core_execution_entries_are_naturally_reached_in_fresh_sdk_free_simulati
     )
 
     assert tuple(evidence["scenarios"]) == FIXED_SCENARIOS
+    assert evidence["boundary_modules"] > 0
     assert evidence["kernel_modules"] > 0
     _require_exact(
         "simulation import leaves",

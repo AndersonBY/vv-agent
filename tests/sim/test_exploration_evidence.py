@@ -8,10 +8,11 @@ import pytest
 from vv_agent.kernel import _child_store, _driver_outcomes
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._definition import DefinitionCache
-from vv_agent.kernel._records import Record
+from vv_agent.kernel._records import digest
 from vv_agent.kernel._reducer import TransitionError
 from vv_agent.kernel._usage import project_model_usage
 
+from .exploration_support import read_logical_state, retained_definition
 from .scenarios import Provider, run_scenario
 from .world import InvariantViolation, SimWorld
 
@@ -38,7 +39,7 @@ def test_disabling_scanner_fails_i4_with_ready_active_work(sim_database, monkeyp
         monkeypatch.setattr(world.connection("scanner"), "list_runnable", lambda **_kwargs: ())
         with pytest.raises(InvariantViolation, match="I4: fair SQL scan"):
             run_scenario(world, scenario)
-        state, _, _ = world.connection("observer").read_state("s")
+        state, _, _ = read_logical_state(world)
         assert state.active_turn_id is not None
         assert world.connection("observer").is_runnable("s")
         assert not world.queue
@@ -59,7 +60,7 @@ def test_competing_workers_renew_expire_and_take_over_at_driver_checkpoints(sim_
 def test_frozen_definition_mismatch_fails_without_more_external_sends(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "definition_mismatch")
-        rows = world.connection("observer").read("s").records
+        _, rows, _ = read_logical_state(world)
         terminal = next(row.record for row in rows if row.record.kind == "turn_ended")
         assert terminal.payload["reason"] == "handler_schema_or_capability_mismatch"
         assert sum(call[3] == "model" for call in world.calls) == 1
@@ -67,13 +68,23 @@ def test_frozen_definition_mismatch_fails_without_more_external_sends(sim_databa
 
 
 def test_definition_evidence_detects_bypassed_runtime_digest_check(sim_database, monkeypatch):
-    actual = DefinitionCache.definition_digest
+    retained = None
+
+    def frozen_definition():
+        nonlocal retained
+        if retained is None:
+            retained = retained_definition(world)
+        return retained
+
+    def trust_retained_definition(self, task, bindings, catalog):
+        return frozen_definition()
 
     def trust_retained_digest(self, task, bindings, catalog):
-        return task.payload["definition_digest"] if isinstance(task, Record) else actual(self, task, bindings, catalog)
+        return digest(frozen_definition())
 
-    monkeypatch.setattr(DefinitionCache, "definition_digest", trust_retained_digest)
     with SimWorld(sim_database, seed=17) as world:
+        monkeypatch.setattr(DefinitionCache, "definition", trust_retained_definition)
+        monkeypatch.setattr(DefinitionCache, "definition_digest", trust_retained_digest)
         with pytest.raises(InvariantViolation, match="definition:"):
             run_scenario(world, "definition_mismatch")
         assert sum(call[3] == "model" for call in world.calls) == 2
@@ -82,8 +93,7 @@ def test_definition_evidence_detects_bypassed_runtime_digest_check(sim_database,
 def test_precommit_model_result_recovers_as_meter_missing_then_one_retry(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "model_result_precommit")
-        store = world.connection("observer")
-        state, rows, _ = store.read_state("s")
+        state, rows, _ = read_logical_state(world)
         model = next(operation for operation in state.operations.values() if operation.kind == "model")
         oid = model.attempts[1].plan.operation_id
         usage, _ledger = project_model_usage(state, model.turn_id)
@@ -103,7 +113,7 @@ def test_precommit_model_result_recovers_as_meter_missing_then_one_retry(sim_dat
 def test_metered_tool_authenticates_usage_and_retains_original_accounting(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "metered_tool")
-        state, rows, _ = world.connection("observer").read_state("s")
+        state, rows, _ = read_logical_state(world)
         completion = next(
             row.record for row in rows if row.record.kind == "op_completed" and "/tool/" in (row.record.operation_id or "")
         )
@@ -144,7 +154,7 @@ def test_seeded_takeover_replays_the_same_interleaving(tmp_path):
 def test_approval_binds_request_digest_scope_and_generation(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "approval_reply")
-        state, rows, _ = world.connection("observer").read_state("s")
+        state, rows, _ = read_logical_state(world)
         for suffix in ("request", "digest", "scope", "turn", "generation"):
             assert state.applied_inputs[f"approval-{suffix}"].payload["disposition"] == "rejected"
         assert state.applied_inputs["approval-valid"].payload["disposition"] == "applied"
@@ -197,7 +207,7 @@ def _assert_i7_cancel_tree(world, result):
         ("grandchild", 1),
     ]
     for sid in active:
-        state, rows, _ = world.connection("observer").read_state(sid)
+        state, rows, _ = read_logical_state(world, sid)
         assert state.active_turn_id is None
         assert [row.record.payload["status"] for row in rows if row.record.kind == "turn_ended"] == ["cancelled"]
     assert world.connection("provider")._one("SELECT count(*) FROM sim_effect")[0] == 0
@@ -314,8 +324,8 @@ def test_descendant_oracle_detects_missing_second_generation_cancel(sim_database
     with SimWorld(sim_database, seed=17) as world:
         with pytest.raises(InvariantViolation, match="I7: cancellation did not propagate to grandchild"):
             run_scenario(world, "cancel_descendants")
-        assert world.connection("observer").read_state("child")[0].active_turn_id is None
-        assert world.connection("observer").read_state("grandchild")[0].active_turn_id == "grandchild/turn/start"
+        assert read_logical_state(world, "child")[0].active_turn_id is None
+        assert read_logical_state(world, "grandchild")[0].active_turn_id == "grandchild/turn/start"
 
 
 @pytest.mark.parametrize("scenario", ["approval_reply", "future_input", "cancel_descendants"])
@@ -343,7 +353,7 @@ def test_descendant_settlement_requires_real_terminal_receipt(sim_database, monk
         with pytest.raises(TransitionError, match="child completion needs terminal input"):
             run_scenario(world, "cancel_descendants")
         observer = world.connection("observer")
-        _, rows, _ = observer.read_state("child")
+        _, rows, _ = read_logical_state(world, "child")
         assert not any(row.record.kind == "op_completed" and "/tool/" in row.record.operation_id for row in rows)
         assert any(item.item.kind == "child_result" and item.consumed_seq is None for item in observer.peek_inbox("child"))
         world.check()

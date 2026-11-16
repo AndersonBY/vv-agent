@@ -295,12 +295,9 @@ class SimWorld:
             else:
                 context = SimPostgresStore.standalone(self.database)
             raw_store = self.stack.enter_context(context)
-            if isinstance(raw_store, SQLiteStore):
-                raw_store._rows("PRAGMA busy_timeout=10")
-                raw_store._rows("PRAGMA synchronous=OFF")
-            elif self.postgres_runtime_ready:
+            if not isinstance(raw_store, SQLiteStore) and self.postgres_runtime_ready:
                 self._set_postgres_runtime_timeouts(raw_store)
-            else:
+            elif not isinstance(raw_store, SQLiteStore):
                 raw_store._rows("SELECT set_config('lock_timeout','0',false),set_config('statement_timeout','0',false)")
             store = wrap_fixture_store(raw_store, self.content_provider)
             self.connections[participant] = store

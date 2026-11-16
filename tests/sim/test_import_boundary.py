@@ -1,4 +1,4 @@
-"""Default simulation starts with only the core and three accepted host leaves."""
+"""Default Sim scenarios import with only the core and three accepted host leaves."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path[:0] = [sys.argv[1], sys.argv[2], sys.argv[3]]
+source, root, purelib = sys.argv[1:]
+sys.path[:0] = [source, root, str(Path(root) / "tests"), purelib]
 allowed = {
     "vv_agent",
     "vv_agent.kernel",
@@ -38,7 +39,8 @@ class CoreOnly(importlib.abc.MetaPathFinder):
                 blocked.append(fullname)
                 raise ForbiddenSDKImport(f"forbidden SDK import: {fullname}")
 
-sys.meta_path.insert(0, CoreOnly())
+core_only = CoreOnly()
+sys.meta_path.insert(0, core_only)
 try:
     importlib.import_module("vv_agent.session.runtime")
 except ForbiddenSDKImport as error:
@@ -49,6 +51,15 @@ assert blocked == ["vv_agent.session"]
 
 from vv_agent import _jsonschema, _memory_settings, _token_counting
 from tests.sim.scenarios import SCENARIOS, run_scenario
+
+assert callable(run_scenario)
+assert len(SCENARIOS) == 21
+
+boundary_modules = sorted(name for name in sys.modules if name.startswith("vv_agent"))
+assert all(name in allowed or name.startswith("vv_agent.kernel.") for name in boundary_modules)
+sys.meta_path.remove(core_only)
+
+# S1 content adapters are an SDK-capable host dependency after the import gate.
 from tests.sim.world import SimWorld
 
 with tempfile.TemporaryDirectory() as directory:
@@ -58,18 +69,17 @@ with tempfile.TemporaryDirectory() as directory:
         assert summary["backend"] == "sqlite"
         assert summary["calls"]
 
-loaded = {name for name in sys.modules if name.startswith("vv_agent")}
-assert loaded <= allowed | {name for name in loaded if name.startswith("vv_agent.kernel.")}
-assert not any(name.startswith(("vv_agent.session", "vv_agent.agent", "vv_agent.runtime", "vv_agent.tools")) for name in loaded)
 print(json.dumps({
     "blocked_imports": blocked,
-    "leaves": sorted(name for name in loaded if name in allowed),
-    "kernel_modules": len([name for name in loaded if name.startswith("vv_agent.kernel.")]),
+    "boundary_modules": len(boundary_modules),
+    "leaves": sorted(name for name in boundary_modules if name in allowed),
+    "kernel_modules": len([name for name in boundary_modules if name.startswith("vv_agent.kernel.")]),
+    "scenarios": len(SCENARIOS),
 }))
 """
 
 
-def test_default_simulation_blocks_non_core_sdk_from_fresh_process(tmp_path):
+def test_default_simulation_scenarios_import_without_non_core_sdk(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
@@ -85,11 +95,13 @@ def test_default_simulation_blocks_non_core_sdk_from_fresh_process(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout)
     assert evidence["blocked_imports"] == ["vv_agent.session"]
+    assert evidence["boundary_modules"] > 0
     assert {"vv_agent._jsonschema", "vv_agent._memory_settings", "vv_agent._token_counting"} <= set(evidence["leaves"])
     assert evidence["kernel_modules"] > 0
+    assert evidence["scenarios"] == 21
