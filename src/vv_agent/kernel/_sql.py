@@ -48,6 +48,7 @@ _DRIVE_RUNNABLE_SQL = """
 _INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
 _CHAIN_DOMAIN = b"vv-agent/S1"
 _CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
+_RECORD_READ_PAGE_SIZE = 256
 
 
 class InputAdmissionProofError(Conflict):
@@ -723,72 +724,78 @@ class SQLStore:
         return StoredRecord(record, seq, commit, epoch, created)
 
     def _verified_records(self, session_id: str, through: int) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        rows = self._rows(
-            "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
-            "schema_version,kind,turn_id,operation_id,attempt,commit_position "
-            "FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
-            (self.tenant_id, session_id, through),
-        )
-        if len(rows) != through:
-            raise LedgerIntegrityError("log sequence gap")
         previous = _initial_chain_digest(self.tenant_id, session_id)
         chains: list[str] = []
         stored_rows: list[tuple[Any, ...]] = []
-        for expected_seq, row in enumerate(rows, 1):
-            (
-                body,
-                seq,
-                commit_id,
-                epoch,
-                created_ms,
-                checksum,
-                stored_chain,
-                record_id,
-                schema_version,
-                kind,
-                turn_id,
-                operation_id,
-                attempt,
-                commit_position,
-            ) = row
-            if seq != expected_seq:
-                raise LedgerIntegrityError("log sequence gap or reorder")
-            actual_digest = sha256(body).hexdigest()
-            if actual_digest != checksum:
-                raise LedgerIntegrityError("stored record digest mismatch")
-            try:
-                value = json.loads(body)
-                if canonical_json_bytes(value, "stored record body") != body:
-                    raise LedgerIntegrityError("stored record body is not canonical JCS")
-            except (TypeError, ValueError) as exc:
-                raise LedgerIntegrityError("stored record body is not canonical JCS") from exc
-            if not isinstance(value, dict) or (
-                value.get("record_id"),
-                value.get("session_id"),
-                value.get("schema_version"),
-                value.get("kind"),
-                value.get("turn_id"),
-                value.get("operation_id"),
-                value.get("attempt"),
-            ) != (
-                record_id,
-                session_id,
-                schema_version,
-                kind,
-                turn_id,
-                operation_id,
-                attempt,
-            ):
-                raise LedgerIntegrityError("stored record SQL identity does not match its body")
-            _natural(epoch, "record writer_epoch")
-            _natural(created_ms, "record created_ms")
-            _natural(commit_position, "record commit_position")
-            actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
-            if stored_chain != actual_chain:
-                raise LedgerIntegrityError("stored record chain digest mismatch")
-            previous = actual_chain
-            chains.append(actual_chain)
-            stored_rows.append((body, seq, commit_id, epoch, created_ms, checksum))
+        cursor = 0
+        while cursor < through:
+            rows = self._rows(
+                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
+                "schema_version,kind,turn_id,operation_id,attempt,commit_position "
+                "FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s "
+                "ORDER BY seq LIMIT %s",
+                (self.tenant_id, session_id, cursor, through, _RECORD_READ_PAGE_SIZE),
+            )
+            if not rows:
+                raise LedgerIntegrityError("log sequence gap")
+            for expected_seq, row in enumerate(rows, cursor + 1):
+                (
+                    body,
+                    seq,
+                    commit_id,
+                    epoch,
+                    created_ms,
+                    checksum,
+                    stored_chain,
+                    record_id,
+                    schema_version,
+                    kind,
+                    turn_id,
+                    operation_id,
+                    attempt,
+                    commit_position,
+                ) = row
+                if seq != expected_seq:
+                    raise LedgerIntegrityError("log sequence gap or reorder")
+                actual_digest = sha256(body).hexdigest()
+                if actual_digest != checksum:
+                    raise LedgerIntegrityError("stored record digest mismatch")
+                try:
+                    value = json.loads(body)
+                    if canonical_json_bytes(value, "stored record body") != body:
+                        raise LedgerIntegrityError("stored record body is not canonical JCS")
+                except (TypeError, ValueError) as exc:
+                    raise LedgerIntegrityError("stored record body is not canonical JCS") from exc
+                if not isinstance(value, dict) or (
+                    value.get("record_id"),
+                    value.get("session_id"),
+                    value.get("schema_version"),
+                    value.get("kind"),
+                    value.get("turn_id"),
+                    value.get("operation_id"),
+                    value.get("attempt"),
+                ) != (
+                    record_id,
+                    session_id,
+                    schema_version,
+                    kind,
+                    turn_id,
+                    operation_id,
+                    attempt,
+                ):
+                    raise LedgerIntegrityError("stored record SQL identity does not match its body")
+                _natural(epoch, "record writer_epoch")
+                _natural(created_ms, "record created_ms")
+                _natural(commit_position, "record commit_position")
+                actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
+                if stored_chain != actual_chain:
+                    raise LedgerIntegrityError("stored record chain digest mismatch")
+                previous = actual_chain
+                chains.append(actual_chain)
+                stored_rows.append((body, seq, commit_id, epoch, created_ms, checksum))
+            cursor = expected_seq
+        if cursor != through:
+            raise LedgerIntegrityError("log sequence gap")
         self._verify_checkpoints(session_id, tuple(chains))
         self._verify_commits(session_id, tuple(chains))
         return stored_rows, tuple(chains)
@@ -1371,35 +1378,48 @@ class SQLStore:
             scope = self._deletion_scope(session_id)
             if not scope:
                 raise Conflict("session not found in tenant")
-            root = next(entry for entry in scope if entry.session_id == session_id)
-            if root.deletion_state == "purging":
+            if any(entry.deletion_state == "purging" for entry in scope):
                 raise SessionNotLive("session purge is already in progress")
-            if root.deletion_state == "forgotten":
-                tombstone = self._tombstone(session_id, for_update=True)
-                if tombstone is None or tombstone.state is not TombstoneState.COMPLETE:
-                    raise LedgerIntegrityError("forgotten session is missing its complete tombstone")
-                self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
-                return (session_id,)
+            if any(entry.deletion_state not in {"live", "forgetting", "forgotten"} for entry in scope):
+                raise SessionNotLive("session deletion state is not forgettable")
             now = self._now()
-            if root.deletion_state == "live":
+            for entry in scope:
+                if entry.deletion_state != "live":
+                    continue
                 updated = self._rows(
                     "UPDATE sk_session SET deletion_state='forgetting',lease_epoch=lease_epoch+1,lease_owner=NULL,"
                     "lease_until_ms=NULL,next_drive_ms=NULL,drive_retry_at_ms=0 "
                     "WHERE tenant_id=%s AND session_id=%s AND deletion_state='live' RETURNING session_id",
-                    (self.tenant_id, session_id),
+                    (self.tenant_id, entry.session_id),
                 )
                 if len(updated) != 1:
                     raise Conflict("session deletion fence changed concurrently")
-            self._write_pending_tombstone(
-                root,
-                actor,
-                scope_root_session_id=session_id,
-                bound_signer=bound_signer,
-                verifier=verifier,
-                allow_unsigned=allow_unsigned,
-                now=now,
-            )
-            return (session_id,)
+            for entry in scope:
+                tombstone = self._tombstone(entry.session_id, for_update=True)
+                if tombstone is not None and tombstone.state is TombstoneState.COMPLETE:
+                    chain_digest = self._chain_anchor(entry.session_id, entry.head_seq)
+                    if (
+                        entry.deletion_state != "forgotten"
+                        or tombstone.final_seq != entry.head_seq
+                        or tombstone.chain_digest != chain_digest
+                        or tombstone.actor != actor
+                        or tombstone.scope_root_session_id != session_id
+                    ):
+                        raise LedgerIntegrityError("completed tombstone does not match the forget scope")
+                    self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+                    continue
+                if entry.deletion_state == "forgotten":
+                    raise LedgerIntegrityError("forgotten session is missing its complete tombstone")
+                self._write_pending_tombstone(
+                    entry,
+                    actor,
+                    scope_root_session_id=session_id,
+                    bound_signer=bound_signer,
+                    verifier=verifier,
+                    allow_unsigned=allow_unsigned,
+                    now=now,
+                )
+            return tuple(entry.session_id for entry in scope)
 
     def complete_forget(self, session_id: str) -> None:
         """Publish the complete tombstone after content/key erasure succeeds."""
@@ -1407,23 +1427,29 @@ class SQLStore:
             scope = self._deletion_scope(session_id)
             if not scope:
                 raise Conflict("session not found in tenant")
-            root = next(entry for entry in scope if entry.session_id == session_id)
-            if root.deletion_state == "forgotten":
-                return
-            if root.deletion_state != "forgetting":
-                raise SessionNotLive("session is not in the forgetting state")
-            tombstone = self._tombstone(session_id, for_update=True)
-            if tombstone is None or tombstone.state is not TombstoneState.PENDING:
-                raise LedgerIntegrityError("pending forget tombstone is missing")
-            self._rows(
-                "UPDATE sk_tombstone SET state='complete' WHERE tenant_id=%s AND session_id=%s AND state='pending'",
-                (self.tenant_id, session_id),
-            )
-            self._rows(
-                "UPDATE sk_session SET deletion_state='forgotten',lease_owner=NULL,lease_until_ms=NULL,next_drive_ms=NULL "
-                "WHERE tenant_id=%s AND session_id=%s AND deletion_state='forgetting'",
-                (self.tenant_id, session_id),
-            )
+            if any(entry.deletion_state not in {"forgetting", "forgotten"} for entry in scope):
+                raise SessionNotLive("forget scope is not fully fenced")
+            for entry in scope:
+                tombstone = self._tombstone(entry.session_id, for_update=True)
+                if tombstone is None:
+                    raise LedgerIntegrityError("forget tombstone is missing")
+                if tombstone.final_seq != entry.head_seq or tombstone.scope_root_session_id != session_id:
+                    raise LedgerIntegrityError("forget tombstone does not match the locked scope")
+                if entry.deletion_state == "forgotten":
+                    if tombstone.state is not TombstoneState.COMPLETE:
+                        raise LedgerIntegrityError("forgotten session is missing its complete tombstone")
+                    continue
+                if tombstone.state is not TombstoneState.PENDING:
+                    raise LedgerIntegrityError("pending forget tombstone is missing")
+                self._rows(
+                    "UPDATE sk_tombstone SET state='complete' WHERE tenant_id=%s AND session_id=%s AND state='pending'",
+                    (self.tenant_id, entry.session_id),
+                )
+                self._rows(
+                    "UPDATE sk_session SET deletion_state='forgotten',lease_owner=NULL,lease_until_ms=NULL,"
+                    "next_drive_ms=NULL WHERE tenant_id=%s AND session_id=%s AND deletion_state='forgetting'",
+                    (self.tenant_id, entry.session_id),
+                )
 
     def begin_purge(
         self,

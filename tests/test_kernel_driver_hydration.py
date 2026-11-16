@@ -11,7 +11,7 @@ import pytest
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, ContentSessionWriter, SourceKind
-from vv_agent.kernel._content_publication import publish_record_content
+from vv_agent.kernel._content_publication import make_retained_record_before_publication, publish_record_content
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import IntegrityFailure, MissingContentLink, ReferenceDigestMismatch, reference_digest
@@ -249,12 +249,16 @@ def test_definition_and_session_attribute_nested_messages_hydrate_explicitly() -
 
 
 class _PutWriter:
-    def __init__(self) -> None:
+    def __init__(self, read_values: dict[str, Any] | None = None) -> None:
         self.puts: list[Any] = []
+        self.read_values = read_values or {}
 
     def put_json(self, value: Any, *, labels: Any = ...) -> ContentRef:
         self.puts.append(value)
         return _ref(f"put-{len(self.puts)}", value)
+
+    def get_json(self, ref: ContentRef) -> Any:
+        return self.read_values[ref.content_id]
 
 
 def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
@@ -314,6 +318,14 @@ def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
     attempt = SimpleNamespace(plan=plan.record, prepared=prepared.record)
     state = SimpleNamespace(operations={"o": SimpleNamespace(attempts={1: attempt})})
     driver, reader = _driver((plan, prepared), state)
+    session_driver = object.__new__(_Driver)
+    session_driver.sid = driver.sid
+    session_driver.store = driver.store
+    session_driver.content_reader = driver.content_reader
+    session_driver._hydrators = driver._hydrators
+    session_driver.records = driver.records
+    session_driver._stored_by_id = driver._stored_by_id
+    session_driver.state = driver.state
     for owner, slot, ref, value in (
         ("record:11", "request", prepared_request, {"id": "call", "name": "tool", "source": "prepared"}),
         ("record:11", "tool", prepared_tool, {"idempotency": "supported", "source": "prepared"}),
@@ -322,7 +334,7 @@ def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
     ):
         reader.add(owner, slot, ref, value)
 
-    hydrated = driver.hydrate_plan(synthetic)
+    hydrated = session_driver.hydrate_plan(plan.record)
 
     assert hydrated._payload["request"] == {"id": "call", "name": "tool", "source": "prepared"}
     assert hydrated._payload["tool"] == {"idempotency": "supported", "source": "prepared"}
@@ -332,6 +344,79 @@ def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
     }
     assert {owner for owner, _slot, _content_id in reader.calls} == {"record:11"}
     assert {slot for _owner, slot, _content_id in reader.calls} == {"request", "tool", "hook_result", "shared_state"}
+    assert session_driver.hydrate_record_field(synthetic, "request", prepared_request.to_dict()) == {
+        "id": "call",
+        "name": "tool",
+        "source": "prepared",
+    }
+    assert session_driver.hydrate_record_field(synthetic, "hook_result", hook_result.to_dict()) == {"content": "short"}
+    assert session_driver.hydrate_record_field(synthetic, "shared_state", shared_state.to_dict()) == {"step": 2}
+
+
+def test_prepared_overlay_rejects_canonical_plan_owner_for_logical_ref() -> None:
+    planned_request = _ref("planned-only", {"id": "call", "name": "tool", "source": "planned"})
+    prepared_request = _ref("prepared-only", {"id": "call", "name": "tool", "source": "prepared"})
+    plan = _stored(
+        12,
+        "op_planned",
+        {
+            "op_kind": "tool",
+            "purpose": None,
+            "request": planned_request.to_dict(),
+            "request_digest": "0" * 64,
+            "context_version": "1",
+            "dependencies": [],
+            "tool": None,
+            "idempotency_key": None,
+            "budget_admission": _ref("planned-budget", {}).to_dict(),
+            "not_before_ms": None,
+            "provider_binding": "function",
+            "consumed_unknowns": [],
+            "policy_decision": None,
+        },
+    )
+    prepared = _stored(
+        13,
+        "op_prepared",
+        {
+            "request": prepared_request.to_dict(),
+            "request_digest": "1" * 64,
+            "tool": None,
+            "op_kind": "tool",
+            "provider_binding": "function",
+            "idempotency_key": None,
+            "hook_result": None,
+            "shared_state": _ref("prepared-shared", {"step": 1}).to_dict(),
+            "policy_decision": None,
+        },
+    )
+    attempt = SimpleNamespace(plan=plan.record, prepared=prepared.record)
+    state = SimpleNamespace(operations={"o": SimpleNamespace(attempts={1: attempt})})
+    driver, reader = _driver((plan, prepared), state)
+    session_driver = object.__new__(_Driver)
+    session_driver.sid = driver.sid
+    session_driver.store = driver.store
+    session_driver.content_reader = driver.content_reader
+    session_driver._hydrators = driver._hydrators
+    session_driver.records = driver.records
+    session_driver._stored_by_id = driver._stored_by_id
+    session_driver.state = driver.state
+    logical = replace(
+        plan.record,
+        payload=plan.record._payload
+        | {
+            "request": prepared_request.to_dict(),
+            "budget_admission": {
+                "hook_result": None,
+                "shared_state": prepared.record._payload["shared_state"],
+            },
+        },
+    )
+    reader.add("record:12", "request", planned_request, {"id": "call", "name": "tool", "source": "planned"})
+    reader.add("record:12", "request", prepared_request, {"id": "call", "name": "tool", "source": "prepared"})
+
+    with pytest.raises(MissingContentLink):
+        session_driver.hydrate_record_field(logical, "request", prepared_request.to_dict())
 
 
 def test_canonical_plan_hydrates_prepared_hook_nested_children_overlay() -> None:
@@ -552,6 +637,20 @@ def test_completed_unknown_and_terminal_fields_hydrate_with_nullable_none() -> N
     assert driver.hydrate_record_field(null_completed.record, "shared_state", None) is None
 
 
+def test_input_applied_reason_hydrates_from_owner_and_rejects_wrong_owner() -> None:
+    reason = _ref("input-reason", "background child notification")
+    applied = _stored(16, "input_applied", {"input": {"input_id": "input-1"}, "reason": reason.to_dict()})
+    driver, reader = _driver((applied,))
+    reader.add("record:16", "input_reason", reason, "background child notification")
+
+    assert driver.hydrate_record_field(applied.record, "input_reason", reason.to_dict()) == ("background child notification")
+
+    reader.links.pop(("record:16", "input_reason", reason.content_id))
+    reader.add("record:999", "input_reason", reason, "background child notification")
+    with pytest.raises(MissingContentLink):
+        driver.hydrate_record_field(applied.record, "input_reason", reason.to_dict())
+
+
 def test_parked_provider_user_approval_and_delegation_fields_use_declared_slots() -> None:
     job = _ref("job", {"id": "job/1"})
     evidence = _ref("parked-evidence", ["receipt/1"])
@@ -642,8 +741,15 @@ def test_retry_publication_reuses_original_plan_refs_without_put() -> None:
             "policy_decision": None,
         },
     )
-    retry = replace(plan.record, attempt=2, payload=plan.record._payload | {"not_before_ms": 10})
-    writer = _PutWriter()
+    retry = make_retained_record_before_publication(
+        "op_planned",
+        session_id="s",
+        turn_id="t",
+        operation_id="o",
+        attempt=2,
+        payload=plan.record._payload | {"not_before_ms": 10},
+    )
+    writer = _PutWriter({request.content_id: {"id": "call", "name": "effect"}})
 
     published = publish_record_content(cast(ContentSessionWriter, writer), (retry,))
 

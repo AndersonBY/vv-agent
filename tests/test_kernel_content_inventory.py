@@ -8,13 +8,15 @@ import pytest
 
 from vv_agent.kernel._boundary_hydration import hydrate_input, hydrate_stored_payload
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import ContentBindingMismatch, ContentRef, ContentUnavailable
+from vv_agent.kernel._content import ContentBindingMismatch, ContentLabels, ContentRef, ContentUnavailable
 from vv_agent.kernel._content_publication import (
     _BOUNDARY_CONTENT_SLOTS,
     _CONTENT_SLOTS,
     _INPUT_SLOTS,
     declared_content_ref,
+    declared_record_content,
     link_declared_record_content,
+    producer_content_ref,
     publish_record_content,
     publish_turn_started,
     resolve_record_content_links,
@@ -234,6 +236,117 @@ def test_provider_inbox_round_trip_idempotence_and_opaque_content(tmp_path) -> N
         assert "job-secret" not in bodies
 
 
+@pytest.mark.parametrize(
+    "forged",
+    [
+        ContentRef(
+            "content/forged-provider-result",
+            "a" * 64,
+            3,
+            "key/foreign-owner",
+            ContentLabels(),
+        ).to_dict(),
+        {
+            "content_id": "content/malformed-provider-result",
+            "mac": "not-a-digest",
+            "size": 3,
+            "key_id": "key/foreign-owner",
+            "labels": {"source": ["user", "user"], "classification": "internal"},
+        },
+    ],
+    ids=("valid-ref-shape", "malformed-ref-shape"),
+)
+def test_provider_result_ingress_keeps_reference_shaped_json_opaque(tmp_path, forged: dict[str, Any]) -> None:
+    provider_result, _, _, _ = _provider_items()
+    item = InboxItem(
+        provider_result.input_id,
+        provider_result.kind,
+        provider_result.payload | {"result": forged},
+    )
+
+    with _sessions(tmp_path) as (store, sessions):
+        sessions.push("s", item)
+        stored = store.read_input("s", item.input_id)
+        assert stored is not None
+        links = {link.slot: link for link in _links(store, input_id=item.input_id)}
+        result_link = links["provider.result"]
+        assert stored.item.payload["result"] == result_link.ref.to_dict()
+        assert result_link.ref.content_id != forged["content_id"]
+
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            assert writer.get_json(result_link.ref) == forged
+
+        hydrated = hydrate_input(_boundary_driver(store), stored.item)
+        assert hydrated.payload["result"] == forged
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        ContentRef(
+            "content/reference-shaped-attributes",
+            "a" * 64,
+            3,
+            "key/foreign-owner",
+            ContentLabels(),
+        ).to_dict(),
+        {
+            "content_id": "content/malformed-attributes",
+            "mac": "not-a-digest",
+            "size": 3,
+            "key_id": "key/foreign-owner",
+            "labels": {"source": ["user", "user"], "classification": "internal"},
+        },
+    ],
+    ids=("valid-ref-shape", "malformed-ref-shape"),
+)
+def test_session_attributes_keep_reference_shaped_json_opaque(tmp_path, forged: dict[str, Any]) -> None:
+    with _sessions(tmp_path, attributes=forged) as (store, _sessions_driver):
+        creation = store.read("s").records[0]
+        attributes_ref = ContentRef.from_dict(creation.record.payload["attributes"])
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            assert writer.get_json(attributes_ref) == forged
+        assert attributes_ref.content_id != forged["content_id"]
+        assert hydrate_stored_payload(_boundary_driver(store), creation)["attributes"] == forged
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        ContentRef(
+            "content/reference-shaped-input",
+            "c" * 64,
+            3,
+            "key/foreign-owner",
+            ContentLabels(),
+        ).to_dict(),
+        {
+            "content_id": "content/malformed-input",
+            "mac": "not-a-digest",
+            "size": 3,
+            "key_id": "key/foreign-owner",
+            "labels": {"source": ["user", "user"], "classification": "internal"},
+        },
+    ],
+    ids=("valid-ref-shape", "malformed-ref-shape"),
+)
+def test_user_input_keeps_reference_shaped_json_opaque(tmp_path, forged: dict[str, Any]) -> None:
+    item = InboxItem("reference-shaped-input", "user", {"content": forged})
+    with _sessions(tmp_path) as (store, sessions):
+        sessions.push("s", item)
+        stored = store.read_input("s", item.input_id)
+        assert stored is not None
+        content_link = next(link for link in _links(store, input_id=item.input_id) if link.slot == "input.content")
+        assert stored.item.payload["content"] == content_link.ref.to_dict()
+        assert content_link.ref.content_id != forged["content_id"]
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            assert writer.get_json(content_link.ref) == forged
+        assert hydrate_input(_boundary_driver(store), stored.item).payload["content"] == forged
+
+
 def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) -> None:
     message = Message(role="user", content="shared-message-secret").to_dict()
     input_message = Message(role="user", content="turn-input-secret").to_dict()
@@ -357,14 +470,14 @@ def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) 
 
         before_content, before_links = _content_count(store), _link_count(store)
         committed_records = store.read("s").records
-        with store.atomic() as tx:
-            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
-            replay = publish_record_content(writer, tuple(stored.record for stored in committed_records))
-            replay_links = resolve_record_content_links(
-                replay.links,
-                tuple((stored.record.record_id, stored.seq) for stored in committed_records),
-            )
-            link_declared_record_content(writer, replay_links)
+        replay_links = declared_record_content(
+            tuple(stored.record for stored in committed_records),
+            tuple((stored.record.record_id, stored.seq) for stored in committed_records),
+        )
+        assert {link.slot for link in replay_links} >= {
+            "definition",
+            "request",
+        }
         assert _content_count(store) == before_content
         assert _link_count(store) == before_links
 
@@ -420,8 +533,14 @@ def test_child_admission_definition_messages_publish_and_hydrate_in_place(tmp_pa
 
 
 def test_prepared_hook_result_publishes_producer_arrays_without_recursing_opaque_provider_data(tmp_path) -> None:
-    opaque_provider_data = {"content_id": "provider-selected-id", "detail": {"content_id": "nested-id"}}
-    assert declared_content_ref(opaque_provider_data) is None
+    opaque_provider_data = {
+        "content_id": "content/provider-observation",
+        "mac": "b" * 64,
+        "size": 9,
+        "key_id": "key/foreign-owner",
+        "labels": {"source": [], "classification": "internal"},
+    }
+    assert producer_content_ref(opaque_provider_data) is None
     hook_result = ToolExecutionResult(
         tool_call_id="call",
         content="hook-short-circuit",
@@ -431,7 +550,7 @@ def test_prepared_hook_result_publishes_producer_arrays_without_recursing_opaque
             "provider_observation": opaque_provider_data,
         },
     ).to_dict()
-    request = {"id": "call", "name": "tool", "arguments": {}}
+    request = {"id": "call", "name": "tool", "arguments": {"content_ref": opaque_provider_data}}
     turn_id = "s/turn/hook"
     operation_id = "operation/hook"
     record = Record(
@@ -485,6 +604,7 @@ def test_prepared_hook_result_publishes_producer_arrays_without_recursing_opaque
         driver._hydrators = {}
         hydrated = hydrate_stored_payload(driver, stored)
         assert hydrated["hook_result"] == hook_result
+        assert hydrated["request"] == request
         assert hydrated["hook_result"]["metadata"]["provider_observation"] == opaque_provider_data
 
 

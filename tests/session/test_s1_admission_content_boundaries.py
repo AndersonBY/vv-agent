@@ -12,14 +12,23 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from vv_agent._memory_settings import MemoryManagerSettings
-from vv_agent.kernel._content import ContentLabels, ContentRef, ContentUnavailable, Principal
+from vv_agent.kernel._child_store import ChildSession, create_child
+from vv_agent.kernel._content import (
+    ContentLabels,
+    ContentRef,
+    ContentUnavailable,
+    ExportLineKind,
+    Principal,
+    SessionHead,
+)
 from vv_agent.kernel._driver_inputs import CommitInput
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._records import InboxItem
-from vv_agent.kernel._sql import InputAdmissionProofError
-from vv_agent.session.content_runtime import SessionContentWriter
+from vv_agent.kernel._sql import InputAdmissionProofError, UnsupportedFeatureLevel
+from vv_agent.session.content_runtime import SESSION_ATTRIBUTES, SessionContentWriter
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
+from vv_agent.session.export import export_session
 from vv_agent.session.fork import fork_thread
 from vv_agent.session.records import SessionSpec
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
@@ -217,6 +226,7 @@ def driver_record(item: InboxItem, *, input_seq: int, received_ms: int):
     driver.sid = "session"
     driver.watermark = input_seq
     driver.state = ExecutionState()
+    driver.content_reader = None
     stored = SimpleNamespace(item=item, input_seq=input_seq, received_ms=received_ms)
     driver.store = SimpleNamespace(peek_inbox=lambda *_args, **_kwargs: [stored])
     pending = apply_input(driver, one_turn=True)
@@ -225,6 +235,90 @@ def driver_record(item: InboxItem, *, input_seq: int, received_ms: int):
     with suppress(StopIteration):
         next(pending)
     return request.records[0]
+
+
+def test_signed_content_child_uses_sql_admission_level_checkpoint_and_nested_links(tmp_path):
+    stack, store, _driver, signer = _start_signed(tmp_path, "signed-child")
+    try:
+        parent = store.read("session", limit=1).records[0].record
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        store._rows("UPDATE sk_session SET level=2 WHERE tenant_id='default' AND session_id='session'")
+        admission = {
+            "mode": "configured",
+            "definition": {
+                "task": {
+                    "initial_messages": [{"role": "system", "content": "child initial"}],
+                    "metadata": {"vv_session": {"input_messages": [{"role": "user", "content": "child input"}]}},
+                }
+            },
+        }
+        child = ChildSession(
+            SessionSpec(
+                "signed-child",
+                parent.payload["principal"],
+                parent.payload["workspace"],
+                attributes={"child_admission": admission},
+            ),
+            "signed child task",
+        )
+        plan = SimpleNamespace(
+            session_id="session",
+            turn_id="session/turn/start",
+            operation_id="operation/signed-child",
+            attempt=1,
+        )
+
+        with _driver.store.atomic() as tx:
+            create_child(tx, child, plan, generation=1)
+
+        assert store._one(
+            "SELECT parent_session_id,parent_operation_id,level FROM sk_session WHERE session_id='signed-child'"
+        ) == ("session", "operation/signed-child", 2)
+        checkpoint = store._rows(
+            "SELECT seq,key_id,signature FROM sk_checkpoint WHERE tenant_id='default' AND session_id='signed-child' ORDER BY seq"
+        )
+        assert checkpoint[0][:2] == (1, signer.key_id)
+        assert checkpoint[0][2]
+
+        created = store.read("signed-child", limit=1).records[0].record
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="signed-child")
+            attributes = writer.get_json(created.payload["attributes"])
+            links = {link.slot for link in writer.durable.read_links("default", "signed-child", record_seq=1)}
+            assert writer.assert_record(1, created.payload["attributes"], SESSION_ATTRIBUTES) == ContentRef.from_dict(
+                created.payload["attributes"]
+            )
+        task = attributes["child_admission"]["definition"]["task"]
+        assert task["initial_messages"][0]["content_id"]
+        assert task["metadata"]["vv_session"]["input_messages"][0]["content_id"]
+        assert {
+            "session.attributes.child_admission.definition.task.initial_messages[0]",
+            "session.attributes.child_admission.definition.task.metadata.vv_session.input_messages[0]",
+        } <= links
+        document = export_session(store.for_tenant("default"), "signed-child")
+        head = SessionHead(
+            tenant_id=document.header.tenant_id,
+            session_id=document.header.session_id,
+            final_seq=document.header.head_seq,
+            chain_digest=document.header.chain_digest,
+            key_id=signer.key_id,
+        )
+        document.verify(head, signer, expected_head=(head.final_seq, head.chain_digest))
+        assert any(line.kind is ExportLineKind.CHECKPOINT and line.value["seq"] == 1 for line in document.lines)
+
+        store._rows("UPDATE sk_settings SET write_level=1 WHERE singleton=1")
+        rejected = replace(child, spec=replace(child.spec, session_id="rejected-child"))
+        rejected_plan = SimpleNamespace(
+            session_id="session",
+            turn_id="session/turn/start",
+            operation_id="operation/rejected",
+            attempt=1,
+        )
+        with pytest.raises(UnsupportedFeatureLevel), _driver.store.atomic() as tx:
+            create_child(tx, rejected, rejected_plan, generation=1)
+        assert not store._rows("SELECT 1 FROM sk_session WHERE session_id='rejected-child'")
+    finally:
+        stack.__exit__(None, None, None)
 
 
 def _fork_attributes() -> dict:
@@ -284,6 +378,18 @@ def test_fork_reencrypts_session_identity_and_survives_one_side_forget(tmp_path,
         source_principal = source_created["principal"]["attributes"]
         assert destination_principal["key_id"] != source_principal["key_id"]
         assert destination_principal["content_id"] != source_principal["content_id"]
+        with driver.store.atomic() as tx:
+            destination_writer = SessionContentWriter.bind(tx, tenant_id="default", session_id=destination_id)
+            destination_attributes = destination_writer.get_json(destination_created["attributes"])
+            destination_links = {
+                link.slot for link in destination_writer.durable.read_links("default", destination_id, record_seq=1)
+            }
+            seed_message = destination_writer.get_json(destination_attributes["seed"]["messages"][0])
+        assert seed_message["content"]
+        assert destination_attributes["seed"]["shared_state"] == {}
+        assert destination_attributes["seed"]["unseen_input_protection"] is False
+        assert "session.attributes.seed.messages[0]" in destination_links
+        assert destination_attributes["app_server_fork"]["lineage"]["sourceThreadId"] == "source"
 
         survivor = destination_id if forgotten == "source" else "source"
         with store.atomic() as tx:
@@ -295,7 +401,7 @@ def test_fork_reencrypts_session_identity_and_survives_one_side_forget(tmp_path,
             attributes = survivor_writer.get_json(survivor_created.record.payload["attributes"])
             workspace = survivor_writer.get_json(survivor_created.record.payload["workspace"])
             principal_attributes = survivor_writer.get_json(survivor_created.record.payload["principal"]["attributes"])
-        assert attributes["seed"] == {"messages": [], "shared_state": {}}
+        assert attributes["seed"]["shared_state"] == {}
         assert workspace == "/workspace"
         assert principal_attributes == {"role": "source"}
 

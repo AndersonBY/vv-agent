@@ -7,6 +7,7 @@ import textwrap
 import threading
 
 import pytest
+from session.helpers import content_ref
 
 from vv_agent.kernel import _driver_outcomes, _driver_recovery
 from vv_agent.kernel._lease_scope import LeaseOwnership
@@ -42,26 +43,65 @@ def drop_input_identity_constraint(world):
     column_type = "TEXT" if backend == "sqlite" else "text"
     integer_type = "INTEGER" if backend == "sqlite" else "bigint"
     blob_type = "BLOB" if backend == "sqlite" else "bytea"
+    record_xor_input = (
+        "((record_seq IS NOT NULL) + (input_id IS NOT NULL) = 1)"
+        if backend == "sqlite"
+        else "((record_seq IS NOT NULL)::int + (input_id IS NOT NULL)::int = 1)"
+    )
     strict = " STRICT" if backend == "sqlite" else ""
     store = world.connection("mutation/schema")
     with store.atomic():
         store._rows("DROP INDEX IF EXISTS sk_inbox_ready")
+        # Foreign-key targets must stay unique, so rebuild only the link table
+        # without its input_id reference to the intentionally non-unique inbox.
+        store._rows("DROP TABLE sk_content_link")
         store._rows("DROP TABLE sk_inbox")
         store._rows(
             f"""
             CREATE TABLE sk_inbox (
-                session_id {column_type} NOT NULL REFERENCES sk_session(session_id), input_id {column_type} NOT NULL,
+                tenant_id {column_type} NOT NULL, session_id {column_type} NOT NULL, input_id {column_type} NOT NULL,
                 input_seq {integer_type} NOT NULL CHECK (input_seq > 0),
                 kind {column_type} NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer',
                     'child_result','control','provider_evidence','model_selection')),
                 body {blob_type} NOT NULL, digest {column_type} NOT NULL CHECK (length(digest)=64),
-                available_ms {integer_type} NOT NULL, received_ms {integer_type} NOT NULL, consumed_seq {integer_type},
-                UNIQUE(session_id,input_seq),
-                FOREIGN KEY(session_id,consumed_seq) REFERENCES sk_record(session_id,seq)
+                admission_key_id {column_type}, admission_signature {blob_type},
+                admission_signed_ms {integer_type} CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
+                available_ms {integer_type} NOT NULL CHECK (available_ms >= 0),
+                received_ms {integer_type} NOT NULL CHECK (received_ms >= 0),
+                consumed_seq {integer_type} CHECK (consumed_seq IS NULL OR consumed_seq > 0),
+                UNIQUE(tenant_id,session_id,input_seq),
+                CHECK ((admission_key_id IS NULL) = (admission_signature IS NULL)
+                    AND (admission_key_id IS NULL) = (admission_signed_ms IS NULL)),
+                FOREIGN KEY(tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
+                FOREIGN KEY(tenant_id,session_id,consumed_seq) REFERENCES sk_record(tenant_id,session_id,seq)
             ){strict}
             """
         )
-        store._rows("CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL")
+        store._rows(
+            "CREATE INDEX sk_inbox_ready ON sk_inbox(tenant_id,session_id,available_ms,input_seq) WHERE consumed_seq IS NULL"
+        )
+        store._rows(
+            f"""
+            CREATE TABLE sk_content_link (
+                tenant_id {column_type} NOT NULL, session_id {column_type} NOT NULL,
+                content_id {column_type} NOT NULL, record_seq {integer_type}, input_id {column_type},
+                slot {column_type} NOT NULL,
+                CHECK {record_xor_input},
+                FOREIGN KEY(tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
+                FOREIGN KEY(tenant_id,session_id,record_seq) REFERENCES sk_record(tenant_id,session_id,seq),
+                FOREIGN KEY(tenant_id,session_id,content_id) REFERENCES sk_content(tenant_id,session_id,content_id)
+            ){strict}
+            """
+        )
+        store._rows(
+            "CREATE UNIQUE INDEX sk_content_link_record_slot "
+            "ON sk_content_link(tenant_id,session_id,record_seq,slot) WHERE record_seq IS NOT NULL"
+        )
+        store._rows(
+            "CREATE UNIQUE INDEX sk_content_link_input_slot "
+            "ON sk_content_link(tenant_id,session_id,input_id,slot) WHERE input_id IS NOT NULL"
+        )
+        store._rows("CREATE INDEX sk_content_link_content ON sk_content_link(tenant_id,session_id,content_id)")
 
 
 @pytest.mark.parametrize(
@@ -180,8 +220,8 @@ def lock_order_probe(world):
                     "meter_id": "lock-probe",
                     "observation": 1,
                     "mode": "cumulative",
-                    "usage": {},
-                    "source": "host",
+                    "usage": content_ref("lock-probe/usage"),
+                    "source": content_ref("lock-probe/source"),
                 },
             )
             with driving.atomic() as tx:

@@ -1,28 +1,46 @@
-from hashlib import sha256
 from typing import Any
 
+try:
+    from support.s1_fixture_values import (
+        content_ref,
+        create_fixture_session,
+        fixture_child_spec,
+        fixture_content_reader,
+        fixture_key_provider,
+        principal,
+        push_fixture_input,
+        read_fixture_state,
+        wrap_fixture_store,
+    )
+except ModuleNotFoundError:
+    from scripts.s1_fixture_values import (
+        content_ref,
+        create_fixture_session,
+        fixture_child_spec,
+        fixture_content_reader,
+        fixture_key_provider,
+        principal,
+        push_fixture_input,
+        read_fixture_state,
+        wrap_fixture_store,
+    )
 from vv_agent.session.records import InboxItem, Record, digest, make_record
 
-
-def content_ref(label: str = "content") -> dict[str, Any]:
-    """Deterministic ContentRef double; no plaintext is stored in the skeleton."""
-    payload = label.encode("utf-8")
-    return {
-        "content_id": f"content/test/{label}",
-        "mac": sha256(payload).hexdigest(),
-        "size": len(payload),
-        "key_id": "key/test",
-        "labels": {"source": [], "classification": "internal"},
-    }
-
-
-def principal(subject_id: str = "p", subject_kind: str = "user") -> dict[str, Any]:
-    return {
-        "tenant_id": "default",
-        "subject_id": subject_id,
-        "subject_kind": subject_kind,
-        "attributes": content_ref(f"principal/{subject_id}"),
-    }
+__all__ = [
+    "base",
+    "content_ref",
+    "create_fixture_session",
+    "fixture_child_spec",
+    "fixture_content_reader",
+    "fixture_key_provider",
+    "item",
+    "principal",
+    "push_fixture_input",
+    "read_fixture_state",
+    "record",
+    "runtime_turn_record",
+    "wrap_fixture_store",
+]
 
 
 def item(input_id: str = "i", kind: str = "user", **kw: Any) -> InboxItem:

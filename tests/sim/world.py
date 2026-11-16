@@ -15,6 +15,9 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from session.helpers import content_ref, create_fixture_session, fixture_key_provider, push_fixture_input, wrap_fixture_store
 
 from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._postgres import PostgresStore
@@ -22,8 +25,84 @@ from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolCall
+from vv_agent.session.content_runtime import durable_content_reader
+from vv_agent.session.postgres import PostgresStore as SessionPostgresStore
+from vv_agent.session.projection import SessionHydration
+from vv_agent.session.sqlite import SQLiteStore as SessionSQLiteStore
 
-from .assembly import CoreRuntimeAssembly, SimRuntimeNotReady, fold_factory
+from .assembly import CoreRuntimeAssembly, SimContentReader, SimRuntimeNotReady, extend_hydrated_fold, fold_factory
+
+
+def sqlite_root(store):
+    current, seen = store, set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, SQLiteStore):
+            return current
+        for name in ("_root", "_root_store", "_store", "store"):
+            parent = getattr(current, name, None)
+            if parent is not None and parent is not current:
+                current = parent
+                break
+        else:
+            return None
+    return None
+
+
+def sqlite_state_version(store, sid):
+    root = sqlite_root(store)
+    if root is None:
+        return None
+    head = root._one(
+        "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+        (store.tenant_id, sid),
+    )
+    data_version = root.connection.execute("PRAGMA data_version").fetchone()[0]
+    return data_version, root.connection.total_changes, *head
+
+
+class SimSQLiteStore(SessionSQLiteStore):
+    def __init__(self, path, *, clock=None):
+        SQLiteStore.__init__(self, path, fold_factory=fold_factory, clock=clock)
+        self._sim_verified_ledger_cache = None
+
+    def _verified_records(self, session_id, through):
+        params = (self.tenant_id, session_id, through)
+        record_rows = tuple(
+            self._rows(
+                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
+                "schema_version,kind,turn_id,operation_id,attempt,commit_position FROM sk_record "
+                "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
+                params,
+            )
+        )
+        checkpoint_rows = tuple(
+            self._rows(
+                "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
+                "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
+                params,
+            )
+        )
+        commit_rows = tuple(
+            self._rows(
+                "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
+                "WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
+                (self.tenant_id, session_id),
+            )
+        )
+        signature = (through, record_rows, checkpoint_rows, commit_rows)
+        cached = self._sim_verified_ledger_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1], cached[2]
+        stored_rows, chains = super()._verified_records(session_id, through)
+        self._sim_verified_ledger_cache = (signature, stored_rows, chains)
+        return stored_rows, chains
+
+
+class SimPostgresStore(SessionPostgresStore):
+    def __init__(self, connection):
+        PostgresStore.__init__(self, connection, fold_factory=fold_factory)
+
 
 PENDING = {
     "I9": "W2c: chain_digest and chain verifier do not exist at the P1 baseline",
@@ -40,6 +119,15 @@ class InvariantViolation(AssertionError):
 def require(condition, invariant, detail):
     if not condition:
         raise InvariantViolation(invariant, detail)
+
+
+@dataclass(frozen=True)
+class CachedHydratedState:
+    signature: tuple[Any, ...]
+    fold: Any
+    records: tuple[Any, ...]
+    inbox_seq: int
+    version: tuple[Any, ...] | None
 
 
 class WorkerDeath(BaseException):
@@ -172,12 +260,16 @@ class SimWorld:
         self.model_receipts = {}
         self.tasks, self.running = {}, set()
         self.folds, self.prefixes, self.runtimes, self.snapshots = {}, {}, {}, {}
+        self.verified_folds, self.verified_prefixes = {}, {}
+        self._signature_cache = {}
+        self._content_signatures, self._content_bodies = {}, {}
         self.queue = []
         self.after_external = None
         self.scenario = None
         self.covered = set()
         self.memory_settings = {}
         self.postgres_runtime_ready = False
+        self.content_provider = fixture_key_provider()
 
     def __enter__(self):
         host = self.connection("host")
@@ -199,18 +291,107 @@ class SimWorld:
     def connection(self, participant):
         if participant not in self.connections:
             if isinstance(self.database, Path):
-                context = SQLiteStore.standalone(str(self.database), clock=self.clock, fold_factory=fold_factory)
+                context = SimSQLiteStore.standalone(str(self.database), clock=self.clock)
             else:
-                context = PostgresStore.standalone(self.database, fold_factory=fold_factory)
-            store = self.stack.enter_context(context)
-            if isinstance(store, SQLiteStore):
-                store._rows("PRAGMA busy_timeout=10")
+                context = SimPostgresStore.standalone(self.database)
+            raw_store = self.stack.enter_context(context)
+            if isinstance(raw_store, SQLiteStore):
+                raw_store._rows("PRAGMA busy_timeout=10")
+                raw_store._rows("PRAGMA synchronous=OFF")
             elif self.postgres_runtime_ready:
-                self._set_postgres_runtime_timeouts(store)
+                self._set_postgres_runtime_timeouts(raw_store)
             else:
-                store._rows("SELECT set_config('lock_timeout','0',false),set_config('statement_timeout','0',false)")
+                raw_store._rows("SELECT set_config('lock_timeout','0',false),set_config('statement_timeout','0',false)")
+            store = wrap_fixture_store(raw_store, self.content_provider)
             self.connections[participant] = store
         return self.connections[participant]
+
+    def read_state(self, sid):
+        store = self.connection("observer")
+        cached = self.snapshots.get(sid)
+        version = sqlite_state_version(store, sid)
+        if cached is not None and version is not None and cached.version == version:
+            return cached.fold.state, cached.records, cached.inbox_seq
+        head = store._head(sid)
+        verified, _chains = store._verified_records(sid, head[0])
+        records = tuple(store._stored(sid, row) for row in verified)
+        inbox_seq = head[1]
+        signature = self.cached_state_signature(store, sid)
+        self._content_signatures[sid] = signature
+        hydration = SessionHydration(
+            SimContentReader(
+                durable_content_reader(store, tenant_id=store.tenant_id, session_id=sid),
+                self,
+            ),
+            tenant_id=store.tenant_id,
+            session_id=sid,
+        )
+        prefix = cached.records if cached is not None else ()
+        if cached is not None and cached.signature[0] == signature[0][: len(prefix)]:
+            fold, _hydrated = extend_hydrated_fold(cached.fold, records[len(prefix) :], hydration, raw_applied_inputs=False)
+        else:
+            fold, _hydrated = extend_hydrated_fold(None, records, hydration, raw_applied_inputs=False)
+        version = sqlite_state_version(store, sid)
+        self.snapshots[sid] = CachedHydratedState(signature, fold, records, inbox_seq, version)
+        return fold.state, records, inbox_seq
+
+    def cached_state_signature(self, store, sid, records=None):
+        version = sqlite_state_version(store, sid)
+        if version is None:
+            return self.state_signature(store, sid, records)
+        root = sqlite_root(store)
+        key = (id(root), store.tenant_id, sid, records is not None)
+        cached = self._signature_cache.get(key)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        signature = self.state_signature(store, sid, records)
+        self._signature_cache[key] = (version, signature)
+        return signature
+
+    @staticmethod
+    def state_signature(store, sid, records=None):
+        params = (store.tenant_id, sid)
+        return (
+            tuple((row.seq, row.record.encode()) for row in records)
+            if records is not None
+            else tuple(
+                store._rows(
+                    "SELECT seq,body,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,schema_version,"
+                    "kind,turn_id,operation_id,attempt,commit_position FROM sk_record "
+                    "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                    params,
+                )
+            ),
+            tuple(
+                store._rows(
+                    "SELECT input_id,input_seq,kind,body,digest,admission_key_id,admission_signature,"
+                    "admission_signed_ms,available_ms,received_ms,consumed_seq FROM sk_inbox "
+                    "WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
+                    params,
+                )
+            ),
+            tuple(
+                store._rows(
+                    "SELECT key_id,provider_id,wrapped_key,state,created_ms FROM sk_session_key "
+                    "WHERE tenant_id=%s AND session_id=%s",
+                    params,
+                )
+            ),
+            tuple(
+                store._rows(
+                    "SELECT content_id,key_id,mac,size,labels,nonce,created_ms,state,pin_until_ms,ciphertext,"
+                    "object_locator FROM sk_content WHERE tenant_id=%s AND session_id=%s ORDER BY content_id",
+                    params,
+                )
+            ),
+            tuple(
+                store._rows(
+                    "SELECT record_seq,input_id,content_id,slot FROM sk_content_link "
+                    "WHERE tenant_id=%s AND session_id=%s ORDER BY record_seq,input_id,content_id,slot",
+                    params,
+                )
+            ),
+        )
 
     @staticmethod
     def _set_postgres_runtime_timeouts(store):
@@ -233,16 +414,27 @@ class SimWorld:
         self.stack.enter_context(patch.object(SQLSessionTx, "_write", write))
 
     def create(self, sid="s"):
-        with self.connection("host").atomic() as tx:
-            tx.create(SessionSpec(sid, "sim", "/tmp"), consumers=())
+        create_fixture_session(self.connection("host"), sid, consumers=())
         self.push(sid, InboxItem("initial", "user", {"content": "go"}))
+
+    def child_spec(self, parent_session_id, session_id):
+        created = self.connection("observer").read(session_id=parent_session_id, limit=1).records[0].record._payload
+        return SessionSpec(
+            session_id,
+            created["principal"],
+            created["workspace"],
+            attributes={},
+        )
 
     def push(self, sid, item):
         store = self.connection("host")
         before = store.read_input(sid, item.input_id)
         try:
-            with store.atomic() as tx:
-                receipt = tx.push(sid, item)
+            if before is not None and item == before.item:
+                with store.atomic() as tx:
+                    receipt = tx.push(sid, item)
+            else:
+                receipt = push_fixture_input(store, sid, item)
         except Exception as exc:
             if before is not None:
                 raise InvariantViolation("I3", "duplicate input rejected instead of replayed") from exc
@@ -445,28 +637,14 @@ class SimWorld:
     def check(self, *, quiescent=False, every_prefix=False):
         store = self.connection("observer")
         for sid in store.list_sessions():
-            version = store._head(sid)[:2]
-            cached = self.snapshots.get(sid)
-            if cached is None or cached[0] != version or every_prefix:
-                cached = self.snapshots[sid] = (version, store.read_state(sid))
-            state, rows, _ = cached[1]
+            state, rows, _ = self.read_state(sid)
+            checked_inputs = self._check_inputs(sid, rows)
+            _inputs, applications = checked_inputs
             records = [r.record for r in rows]
             identities = {(sid, r.record.record_id) for r in rows}
             for session, rid, epoch, actual, until, now in self.admissions:
                 if (session, rid) in identities and epoch:
                     require(epoch == actual and until is not None and until > now, "I2", f"unfenced write {rid}")
-            inputs = store._rows("SELECT input_id,consumed_seq FROM sk_inbox WHERE session_id=%s", (sid,))
-            applications = Counter(r._payload["input"]["input_id"] for r in records if r.kind == "input_applied")
-            for row in rows:
-                if row.record.kind == "input_applied":
-                    require(
-                        row.created_ms >= row.record._payload["input"]["available_ms"],
-                        "I3",
-                        "input consumed before its durable availability time",
-                    )
-            for input_id, consumed in inputs:
-                require(applications[input_id] == int(consumed is not None), "I3", f"input {sid}/{input_id} consumption differs")
-            require(set(applications) <= {key for key, _ in inputs}, "I3", "application has no inbox input")
             current = self.folds.setdefault(sid, fold_factory())
             old = self.prefixes.get(sid, 0)
             for end in range(old + 1, len(records) + 1):
@@ -474,17 +652,31 @@ class SimWorld:
                 consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
                 current.extend([r], consumed_inputs=consumed)
             self.prefixes[sid] = len(records)
-            # An unchanged prefix has already passed cold replay. Still compare
-            # the actual store cache and external counters on every step below.
+            # Two independent append-only branches catch reducer drift without
+            # replaying the full history for every head. The raw signature
+            # forces a rebuild if same-head SQL record bytes change.
             if len(records) != old:
-                self.compare_prefix(records, current.state)
+                raw_prefix = self.snapshots[sid].signature[0]
+                verified = self.verified_folds.setdefault(sid, fold_factory())
+                verified_old = len(self.verified_prefixes.get(sid, ()))
+                if raw_prefix[:verified_old] == self.verified_prefixes.get(sid, ()):
+                    for end in range(verified_old + 1, len(records) + 1):
+                        r = records[end - 1]
+                        consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
+                        verified.extend([r], consumed_inputs=consumed)
+                else:
+                    verified = self.verified_folds[sid] = fold_factory()
+                    for r in records:
+                        consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
+                        verified.extend([r], consumed_inputs=consumed)
+                self.verified_prefixes[sid] = raw_prefix
+                require(current.state == verified.state, "I8", "append-only fold branches diverged")
             if every_prefix:
                 replay = fold_factory()
                 for end, r in enumerate(records, 1):
                     consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
                     replay.extend([r], consumed_inputs=consumed)
                     self.compare_prefix(records[:end], replay.state)
-            require(state == current.state, "I8", "store cache differs from incremental replay")
             for oid, op in state.operations.items():
                 first_key = op.attempts[1].plan._payload["idempotency_key"]
                 for number, attempt in op.attempts.items():
@@ -537,6 +729,22 @@ class SimWorld:
             if applications:
                 self.covered.add("I3")
 
+    def _check_inputs(self, sid, rows):
+        signature = self.snapshots[sid].signature
+        inputs = tuple((row[0], row[10]) for row in signature[1])
+        applications = Counter(r.record._payload["input"]["input_id"] for r in rows if r.record.kind == "input_applied")
+        for row in rows:
+            if row.record.kind == "input_applied":
+                require(
+                    row.created_ms >= row.record._payload["input"]["available_ms"],
+                    "I3",
+                    "input consumed before its durable availability time",
+                )
+        for input_id, consumed in inputs:
+            require(applications[input_id] == int(consumed is not None), "I3", f"input {sid}/{input_id} consumption differs")
+        require(set(applications) <= {key for key, _ in inputs}, "I3", "application has no inbox input")
+        return inputs, applications
+
     @staticmethod
     def compare_prefix(records, state):
         consumed = [InboxItem(**r.payload["input"]) for r in records if r.kind == "input_applied"]
@@ -557,8 +765,8 @@ class SimWorld:
                 "meter_id": "stale-probe",
                 "observation": 1,
                 "mode": "cumulative",
-                "usage": {},
-                "source": "host",
+                "usage": content_ref("stale-probe/usage"),
+                "source": content_ref("stale-probe/source"),
             },
         )
         try:
@@ -579,7 +787,7 @@ class SimWorld:
         store = self.connection("observer")
         exercised = False
         for sid in store.list_sessions():
-            snapshot = store.read_state(sid)
+            snapshot = self.read_state(sid)
             state, rows, _ = snapshot
             meters = {}
             for stored in rows:

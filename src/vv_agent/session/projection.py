@@ -339,9 +339,6 @@ def hydrate_record_payload(
                 record_payload=source,
             ),
         )
-    if record.kind == "input_applied" and include_input:
-        item = InboxItem(**payload["input"])
-        payload["input"] = hydrate_input(item, hydration).to_dict()
     return payload
 
 
@@ -378,22 +375,60 @@ def fold_hydrated_records(
 ) -> Any:
     """Fold hydrated values while retaining the committed record encoding for dedupe."""
 
-    input_rows = tuple(row for row in source_records if row.record.kind == "input_applied")
+    source_by_identity = {(row.record.record_id, row.seq): row for row in source_records}
+    hydrated_by_identity = {}
+    for row in records:
+        identity = (row.record.record_id, row.seq)
+        source = source_by_identity.get(identity)
+        if source is None:
+            raise MissingContentLink("hydrated record identity does not match source")
+        if identity in hydrated_by_identity:
+            raise MissingContentLink("hydrated record identity is duplicated")
+        hydrated_by_identity[identity] = row
+
+    fold_records = []
+    input_rows = []
+    for source in source_records:
+        identity = (source.record.record_id, source.seq)
+        row = hydrated_by_identity.get(identity)
+        if row is None:
+            row = hydrate_stored_record(source, hydration)
+        elif row.record.encode() != source.record.encode():
+            raise MissingContentLink("hydrated record body does not match source")
+        if source.record.kind == "input_applied":
+            logical_payload = copy_json(row.record._payload)
+            input_rows.append((source, row))
+            fold_payload = copy_json(logical_payload)
+            fold_payload["input"] = copy_json(source.record._payload["input"])
+            fold_record = replace(row.record, payload=fold_payload)
+            object.__setattr__(fold_record, "_body", source.record.encode())
+            object.__setattr__(fold_record, "_business_payload", logical_payload)
+            row = replace(row, record=fold_record)
+        fold_records.append(row)
+
     logical_items = {}
-    for row in input_rows:
-        committed = InboxItem(**row.record._payload["input"])
-        logical_items[row.record.record_id] = _RetainedInboxItem(hydrate_input(committed, hydration), committed.encode())
-    fold_records = hydrate_records(source_records, hydration, include_input=False)
+    hydrated_inputs = {}
+    for source, row in input_rows:
+        committed = InboxItem(**source.record._payload["input"])
+        logical = InboxItem(**row.record._payload["input"])
+        logical_items[row.record.record_id] = _RetainedInboxItem(logical, committed.encode())
+        hydrated_inputs[row.record.record_id] = row
     with logical_inputs(logical_items):
         state = fold_factory().extend(
             (row.record for row in fold_records),
             consumed_inputs=logical_items.values(),
             bodies=(row.record.encode() for row in source_records),
         )
-    hydrated_by_id = {row.record.record_id: row.record for row in records if row.record.kind == "input_applied"}
     state.applied_inputs = {
-        input_id: hydrated_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()
+        input_id: hydrated_inputs[record.record_id].record if record.record_id in hydrated_inputs else record
+        for input_id, record in state.applied_inputs.items()
     }
+    for operation in state.operations.values():
+        for attempt in operation.attempts.values():
+            if attempt.approval_answer is not None:
+                hydrated = hydrated_inputs.get(attempt.approval_answer.record_id)
+                if hydrated is not None:
+                    attempt.approval_answer = hydrated.record
     return state
 
 

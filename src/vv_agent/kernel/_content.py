@@ -8,7 +8,7 @@ persist atomically. Identifier fields are opaque, non-empty strings.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -506,6 +506,7 @@ def _tombstone_message(tombstone: ForgetTombstone) -> bytes:
             "domain": _PURGE_DOMAIN,
             "tenant_id": tombstone.tenant_id,
             "session_id": tombstone.session_id,
+            "scope_root_session_id": tombstone.scope_root_session_id,
             "final_seq": tombstone.final_seq,
             "chain_digest": tombstone.chain_digest,
             "deleted_ms": tombstone.deleted_ms,
@@ -543,22 +544,26 @@ class ForgetTombstone:
             raise InvalidTombstone("tombstone state is not recognized") from exc
         _text(self.scope_root_session_id, "tombstone scope_root_session_id", InvalidTombstone)
 
-    def verify(self, head: SessionHead, signer: Any | None = None) -> None:
+    def verify(
+        self,
+        head: SessionHead,
+        signer: Any | None = None,
+        *,
+        scope_root_session_id: str | None = None,
+    ) -> None:
         """Verify tombstone binding and, when supplied, its Ed25519 signature.
 
         Without ``signer`` this is an explicit hash-only mode: bindings are checked,
-        but a canonical-base64 signature is not evidence of authenticity.
+        but a canonical-base64 signature is not evidence of authenticity. Record,
+        content, and tombstone key identifiers are independent domains; callers may
+        assert a known deletion scope root when verifying a descendant tombstone.
         """
         _require_ledger_verifier(signer, InvalidTombstone, "tombstone")
-        if (
-            self.tenant_id != head.tenant_id
-            or self.session_id != head.session_id
-            or self.key_id != head.key_id
-            or self.actor.tenant_id != self.tenant_id
-            or self.actor.attributes.key_id != self.key_id
-        ):
-            raise ContentBindingMismatch("tombstone tenant, session, actor, or key binding does not match")
-        if self.scope_root_session_id != self.session_id:
+        if scope_root_session_id is not None:
+            _text(scope_root_session_id, "expected tombstone scope root", InvalidTombstone)
+        if self.tenant_id != head.tenant_id or self.session_id != head.session_id or self.actor.tenant_id != self.tenant_id:
+            raise ContentBindingMismatch("tombstone tenant, session, or actor binding does not match")
+        if scope_root_session_id is not None and self.scope_root_session_id != scope_root_session_id:
             raise ForgottenSessionReuse("A forgotten session identity cannot be reused.")
         if self.state is not TombstoneState.COMPLETE:
             raise InvalidTombstone("forget verification requires a complete tombstone")
@@ -771,22 +776,37 @@ def _validate_export_line(kind: ExportLineKind, value: dict[str, Any]) -> None:
         _hash(value["chain_digest"], "manifest chain_digest", InvalidExport)
 
 
-def _walk(value: Any):
-    yield value
-    if type(value) is dict:
-        for item in value.values():
-            yield from _walk(item)
-    elif type(value) is list:
-        for item in value:
-            yield from _walk(item)
+def _content_refs(slots: Iterable[tuple[str, Any]]) -> list[ContentRef]:
+    from ._content_publication import _MISSING
 
-
-def _content_refs(value: Any) -> list[ContentRef]:
     refs: list[ContentRef] = []
-    for node in _walk(value):
-        if type(node) is dict and set(node) == {"content_id", "mac", "size", "key_id", "labels"}:
-            refs.append(ContentRef.from_dict(node))
+    for slot, value in slots:
+        if value is _MISSING or value is None:
+            continue
+        try:
+            refs.append(value if isinstance(value, ContentRef) else ContentRef.from_dict(value))
+        except (TypeError, ValueError) as exc:
+            raise InvalidExport(f"{slot} content slot does not contain a ContentRef") from exc
     return refs
+
+
+def _record_content_refs(record: Record) -> list[ContentRef]:
+    from ._content_publication import _payload_slots
+
+    return _content_refs((slot, value) for _path, slot, value in _payload_slots(record.kind, record._payload))
+
+
+def _input_content_refs(item: InboxItem) -> list[ContentRef]:
+    from ._content_publication import _expand_slot, input_content_slots
+
+    slots = [
+        (slot, value)
+        for content_slot in input_content_slots(item.kind)
+        for _path, slot, value in _expand_slot(item.payload, content_slot.path, content_slot.slot)
+    ]
+    if item.actor is not None:
+        slots.append((INPUT_ACTOR_ATTRIBUTES, item.actor["attributes"]))
+    return _content_refs(slots)
 
 
 def _length_prefixed(value: str) -> bytes:
@@ -906,10 +926,22 @@ def _verify_record_input_proof(
             raise InvalidExport("record input admission signature is invalid")
 
 
-def _verify_export_tenants(value: Any, tenant_id: str, label: str) -> None:
-    for node in _walk(value):
-        if type(node) is dict and "tenant_id" in node and node["tenant_id"] != tenant_id:
-            raise ContentBindingMismatch(f"{label} tenant does not match the export")
+def _verify_principal_tenant(principal: dict[str, Any], tenant_id: str, label: str) -> None:
+    if principal["tenant_id"] != tenant_id:
+        raise ContentBindingMismatch(f"{label} tenant does not match the export")
+
+
+def _verify_record_tenant(record: Record, tenant_id: str) -> None:
+    if record.kind == "session_created":
+        _verify_principal_tenant(record._payload["principal"], tenant_id, "record")
+    elif record.kind == "input_applied":
+        _verify_principal_tenant(record._payload["input"]["actor"], tenant_id, "record")
+
+
+def _verify_input_tenant(item: InboxItem, tenant_id: str) -> None:
+    if item.actor is None:
+        raise InvalidExport("inbox input requires an actor")
+    _verify_principal_tenant(item.actor, tenant_id, "inbox input")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1026,7 +1058,7 @@ class ExportDocument:
             if record.record_id in record_ids:
                 raise InvalidExport("export contains duplicate record identities")
             record_ids.add(record.record_id)
-            _verify_export_tenants(record.to_dict(), self.header.tenant_id, "record")
+            _verify_record_tenant(record, self.header.tenant_id)
             previous_chain = _extend_chain_digest(previous_chain, expected_seq, record.digest)
             if envelope["chain_digest"] != previous_chain:
                 raise InvalidExport("record chain digest does not match C0/Cn")
@@ -1065,7 +1097,7 @@ class ExportDocument:
             item = InboxItem.parse(canonical_json_bytes(value["input"]))
             if item.input_id in inboxes_by_id or value["input_seq"] in inboxes_by_seq:
                 raise InvalidExport("export contains duplicate inbox identities")
-            _verify_export_tenants(item.to_dict(), self.header.tenant_id, "inbox input")
+            _verify_input_tenant(item, self.header.tenant_id)
             _verify_input_admission(
                 item,
                 input_seq=value["input_seq"],
@@ -1135,9 +1167,11 @@ class ExportDocument:
         available_refs: dict[str, ContentRef] = {}
         for line in self.lines:
             if line.kind is ExportLineKind.RECORD:
-                refs = _content_refs(line.value["record"])
+                record = records_by_seq[line.value["storage_envelope"]["seq"]]
+                refs = _record_content_refs(record)
             elif line.kind is ExportLineKind.INBOX:
-                refs = _content_refs(line.value["input"])
+                item = inboxes_by_seq[line.value["input_seq"]][0]
+                refs = _input_content_refs(item)
             else:
                 continue
             for ref in refs:

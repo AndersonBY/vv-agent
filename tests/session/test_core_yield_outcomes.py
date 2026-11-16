@@ -29,13 +29,14 @@ def yield_fixture(world):
 def test_provider_yield_validation_and_fallback_use_actual_completed_owner(tmp_path, monkeypatch, mode):
     with SDKWorld(tmp_path / "yield.sqlite", seed=17) as world:
         worker, attempt, provider, item = yield_fixture(world)
-        handle = dict(attempt.wait["handle"])
+        raw_handle = dict(attempt.wait["handle"])
+        handle = worker.hydrate_parked_wait(attempt.plan.operation_id, attempt.plan.attempt, attempt.wait)["handle"]
         calls, completions = [], []
         original = core.completed_steps
 
-        def completed(owner, plan, outcome):
+        def completed(owner, plan, outcome, **kwargs):
             completions.append((owner, plan, outcome))
-            return (yield from original(owner, plan, outcome))
+            return (yield from original(owner, plan, outcome, **kwargs))
 
         monkeypatch.setattr(core, "completed_steps", completed)
 
@@ -68,7 +69,7 @@ def test_provider_yield_validation_and_fallback_use_actual_completed_owner(tmp_p
         result = receipt.payload["result"]
         assert receipt.payload["yielded_by"] == item.input_id
         assert receipt.payload["evidence"] == [f"steer/{item.input_id}", handle["evidence"]]
-        assert attempt.wait["handle"] == handle
+        assert attempt.wait["handle"] == raw_handle
         assert len(calls) == (mode != "none")
         if mode == "valid":
             assert result["content"] == "custom interruption"

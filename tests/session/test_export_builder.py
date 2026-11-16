@@ -14,7 +14,9 @@ from vv_agent.kernel._content import (
     ExportContentMode,
     ExportLineKind,
     ExportModeMismatch,
+    ForgottenSessionReuse,
     InvalidExport,
+    InvalidTombstone,
     Principal,
     SessionHead,
 )
@@ -34,9 +36,9 @@ MASTER_KEY = b"e" * 32
 
 
 class Signer:
-    def __init__(self) -> None:
+    def __init__(self, key_id: str = "export-builder-ledger-key") -> None:
         self.key = Ed25519PrivateKey.generate()
-        self.key_id = "export-builder-ledger-key"
+        self.key_id = key_id
 
     def bind_key(self):
         signer = self
@@ -60,10 +62,26 @@ class Signer:
         return True
 
 
-def _create(store: SQLiteStore) -> None:
+class Verifier:
+    def __init__(self, *signers: Signer) -> None:
+        self._signers = {signer.key_id: signer for signer in signers}
+
+    def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
+        signer = self._signers.get(key_id)
+        return signer is not None and signer.verify(key_id, message, signature)
+
+
+def _create(store: SQLiteStore, session_id: str = SESSION, *, parent: str | None = None) -> None:
     with store.atomic() as tx:
         tx.create(
-            SessionSpec(SESSION, principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+            SessionSpec(
+                session_id,
+                principal(),
+                content_ref("workspace" if session_id == SESSION else f"workspace-{session_id}"),
+                parent_session_id=parent,
+                parent_operation_id=f"operation/{session_id}" if parent is not None else None,
+                attributes=content_ref("attributes" if session_id == SESSION else f"attributes-{session_id}"),
+            ),
             consumers=(),
         )
 
@@ -107,12 +125,12 @@ def _consume_input(store: SQLiteStore, input_id: str) -> None:
         )
 
 
-def _deletion_principal(key_id: str) -> Principal:
+def _deletion_principal(attributes: ContentRef) -> Principal:
     return Principal(
         TENANT,
         "export-deleter",
         "service",
-        ContentRef("content/export-deleter", "0" * 64, 0, key_id, ContentLabels()),
+        attributes,
     )
 
 
@@ -127,7 +145,7 @@ def _head(document, key_id: str) -> SessionHead:
 
 
 def test_export_session_builds_complete_verified_skeleton(tmp_path) -> None:
-    signer = Signer()
+    signer = Signer("export-builder-checkpoint-key")
     with SQLiteStore.standalone(str(tmp_path / "signed.sqlite")) as store:
         store.install_schema()
         store.configure_input_admission(signer)
@@ -189,6 +207,8 @@ def test_export_session_builds_complete_verified_skeleton(tmp_path) -> None:
         assert applied_record["payload"]["input_proof"] is not None
 
         exported_checkpoints = [line.value for line in document.lines if line.kind is ExportLineKind.CHECKPOINT]
+        assert {line["key_id"] for line in exported_checkpoints} == {signer.key_id}
+        assert signer.key_id != content_ref("hello")["key_id"]
         assert [(line["seq"], line["chain_digest"]) for line in exported_checkpoints] == [
             (envelope["seq"], envelope["chain_digest"]) for envelope in exported_records
         ]
@@ -265,33 +285,127 @@ def test_reopened_signed_store_without_verifier_cannot_make_unsigned_export(tmp_
 
 
 def test_forgotten_signed_session_exports_retained_skeleton(tmp_path) -> None:
-    signer = Signer()
+    checkpoint_signer = Signer("export-builder-checkpoint-key")
+    tombstone_signer = Signer("export-builder-tombstone-key")
+    verifier = Verifier(checkpoint_signer, tombstone_signer)
     with SQLiteStore.standalone(str(tmp_path / "forgotten-export.sqlite")) as store:
         store.install_schema()
-        store.configure_input_admission(signer)
+        store.configure_input_admission(checkpoint_signer)
         _create(store)
         with store.atomic() as tx:
             tx.push(SESSION, item("input"))
         _append_turn(store)
         _consume_input(store, "input")
         content = SQLiteContentStore(store, LocalKeyProvider(MASTER_KEY))
-        deletion = SessionDeletionStore(store, content, signer=signer)
+        with store.for_tenant(TENANT).atomic():
+            actor_ref = content.put(TENANT, SESSION, b"provider actor", ContentLabels())
+        deletion = SessionDeletionStore(store, content, signer=tombstone_signer)
 
-        deletion.forget_session(TENANT, SESSION, actor=_deletion_principal(signer.key_id))
+        deletion.forget_session(TENANT, SESSION, actor=_deletion_principal(actor_ref))
 
-        document = export_session(store.for_tenant(TENANT), SESSION, signer=signer)
-        head = _head(document, signer.key_id)
-        document.verify(head, signer, expected_head=(head.final_seq, head.chain_digest))
+        document = export_session(store.for_tenant(TENANT), SESSION, signer=verifier)
+        head = _head(document, checkpoint_signer.key_id)
+        document.verify(head, verifier, expected_head=(head.final_seq, head.chain_digest))
         assert document.header.content_mode is ExportContentMode.SKELETON
         assert not any(line.kind is ExportLineKind.CONTENT for line in document.lines)
         inbox = next(line.value for line in document.lines if line.kind is ExportLineKind.INBOX)
         assert inbox["consumed_seq"] == 3
         assert inbox["input"]["admission_proof"] is not None
-        assert sum(line.kind is ExportLineKind.CHECKPOINT for line in document.lines) == 3
+        checkpoints = [line.value for line in document.lines if line.kind is ExportLineKind.CHECKPOINT]
+        assert len(checkpoints) == 3
+        assert {checkpoint["key_id"] for checkpoint in checkpoints} == {checkpoint_signer.key_id}
+        tombstone = store._tombstone(SESSION)
+        assert tombstone is not None
+        assert tombstone.key_id == tombstone_signer.key_id
+        assert tombstone.key_id != checkpoint_signer.key_id
+        assert tombstone.actor.attributes.key_id == actor_ref.key_id
+        assert actor_ref.key_id not in {checkpoint_signer.key_id, tombstone_signer.key_id}
         assert store._one(
             "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (TENANT, SESSION),
         ) == ("forgotten",)
+
+        with pytest.raises(InvalidTombstone, match="tombstone signature is invalid"):
+            export_session(store.for_tenant(TENANT), SESSION, signer=checkpoint_signer)
+        with pytest.raises(InvalidExport, match="checkpoint signature is invalid"):
+            export_session(store.for_tenant(TENANT), SESSION, signer=tombstone_signer)
+
+
+def test_forget_cascade_exports_descendant_tombstones_with_independent_signers(tmp_path) -> None:
+    child = "export-builder-child"
+    checkpoint_signer = Signer("export-builder-checkpoint-key")
+    tombstone_signer = Signer("export-builder-tombstone-key")
+    verifier = Verifier(checkpoint_signer, tombstone_signer)
+    with SQLiteStore.standalone(str(tmp_path / "forgotten-cascade.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(checkpoint_signer)
+        _create(store, SESSION)
+        _create(store, child, parent=SESSION)
+        content = SQLiteContentStore(store, LocalKeyProvider(MASTER_KEY))
+        with store.for_tenant(TENANT).atomic():
+            actor_ref = content.put(TENANT, SESSION, b"provider actor", ContentLabels())
+        deletion = SessionDeletionStore(store, content, signer=tombstone_signer)
+
+        receipt = deletion.forget_session(TENANT, SESSION, actor=_deletion_principal(actor_ref))
+
+        assert set(receipt.session_ids) == {SESSION, child}
+        exported_tombstones = {}
+        for session_id in (SESSION, child):
+            document = export_session(store.for_tenant(TENANT), session_id, signer=verifier)
+            head = _head(document, checkpoint_signer.key_id)
+            document.verify(head, verifier, expected_head=(head.final_seq, head.chain_digest))
+            tombstone = store._tombstone(session_id)
+            assert tombstone is not None
+            assert tombstone.session_id == session_id
+            assert tombstone.scope_root_session_id == SESSION
+            assert tombstone.key_id == tombstone_signer.key_id
+            assert tombstone.actor.attributes.key_id == actor_ref.key_id
+            assert len({tombstone.key_id, head.key_id, actor_ref.key_id}) == 3
+            exported_tombstones[session_id] = (document, head, tombstone)
+        child_document, child_head, child_tombstone = exported_tombstones[child]
+        child_tombstone.verify(
+            child_head,
+            verifier,
+            scope_root_session_id=SESSION,
+        )
+        with pytest.raises(ForgottenSessionReuse):
+            child_tombstone.verify(
+                child_head,
+                verifier,
+                scope_root_session_id=child_document.header.session_id,
+            )
+        with pytest.raises(Conflict):
+            deletion.verify_tombstones(TENANT, "other")
+
+
+def test_forgotten_hash_only_session_exports_unsigned_tombstone(tmp_path) -> None:
+    child = "export-builder-hash-child"
+    with SQLiteStore.standalone(str(tmp_path / "forgotten-hash-only.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
+        _create(store)
+        _create(store, child, parent=SESSION)
+        content = SQLiteContentStore(store, LocalKeyProvider(MASTER_KEY))
+        with store.for_tenant(TENANT).atomic():
+            actor_ref = content.put(TENANT, SESSION, b"provider actor", ContentLabels())
+        deletion = SessionDeletionStore(store, content, allow_unsigned=True)
+
+        receipt = deletion.forget_session(TENANT, SESSION, actor=_deletion_principal(actor_ref))
+
+        assert set(receipt.session_ids) == {SESSION, child}
+        for session_id in (SESSION, child):
+            document = export_session(store.for_tenant(TENANT), session_id)
+            head = _head(document, "hash-only")
+            document.verify(head, expected_head=(head.final_seq, head.chain_digest))
+            assert not any(line.kind is ExportLineKind.CONTENT for line in document.lines)
+            assert not any(line.kind is ExportLineKind.CHECKPOINT for line in document.lines)
+            tombstone = store._tombstone(session_id)
+            assert tombstone is not None
+            assert tombstone.key_id == "hash-only/sha256"
+            assert tombstone.key_id != head.key_id
+            assert tombstone.scope_root_session_id == SESSION
+            assert tombstone.actor.attributes.key_id == actor_ref.key_id
+            assert actor_ref.key_id != tombstone.key_id
 
 
 def test_export_rejects_unstable_or_incomplete_forget_state(tmp_path) -> None:

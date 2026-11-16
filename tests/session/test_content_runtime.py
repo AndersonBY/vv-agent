@@ -12,6 +12,7 @@ from vv_agent.session.content_runtime import (
     SESSION_WORKSPACE,
     ContentRuntimeUnavailable,
     SessionContentWriter,
+    _DeferredContentBackend,
 )
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.records import InboxItem, Record, SessionSpec
@@ -36,6 +37,16 @@ def _counts(store: SQLiteStore) -> tuple[int, int, int, int]:
         store._rows(f"SELECT COUNT(*) FROM {table}")[0][0]
         for table in ("sk_session", "sk_session_key", "sk_content", "sk_content_link")
     )
+
+
+def test_deferred_content_backend_rejects_unrecognized_admission_sql() -> None:
+    backend = SimpleNamespace(lock_clause="")
+    deferred = _DeferredContentBackend(backend, tenant_id="default", session_id="session-a")
+
+    with pytest.raises(RuntimeError, match="unexpected content SQL before session admission"):
+        deferred.fetchone("SELECT 1 FROM sk_content WHERE tenant_id={p}", ("default",))
+    with pytest.raises(RuntimeError, match="unexpected content SQL before session admission"):
+        deferred.run("DELETE FROM sk_content WHERE tenant_id={p}", ("default",))
 
 
 def test_sqlite_ingress_persists_key_content_links_and_reopens(tmp_path: Path) -> None:

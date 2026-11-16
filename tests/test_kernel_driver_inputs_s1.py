@@ -51,6 +51,7 @@ def _driver(item: InboxItem, state: ExecutionState | None = None, *, capture: bo
     driver.watermark = 1
     driver.state = state or ExecutionState()
     driver.store = SimpleNamespace(peek_inbox=lambda *args, **kwargs: [SimpleNamespace(item=item)])
+    driver.content_reader = None
     if capture:
 
         def record(kind, payload, plan=None, *, tid=None):

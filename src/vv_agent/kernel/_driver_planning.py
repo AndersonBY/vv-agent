@@ -9,12 +9,12 @@ from enum import Enum, auto
 from typing import Any, Protocol
 
 from ._compaction_text import is_microcompacted_tool_content
-from ._content_publication import make_record_before_publication
+from ._content_publication import declared_content_ref, make_record_before_publication
 from ._context import protected_start
 from ._context_messages import retained_start
 from ._cycle_values import read_after_cycle_disallowed_tools
 from ._execution_values import AgentTask
-from ._hydration import DefinitionContent
+from ._hydration import DefinitionContent, KeyUnavailable
 from ._message_values import Message
 from ._model_settings import ModelSettings, RetrySettings
 from ._record_codec import RecordError
@@ -35,6 +35,7 @@ class PlanningView(Protocol):
     def sid(self) -> str: ...
     def hydrated_definition(self, record: Record) -> DefinitionContent: ...
     def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any: ...
+    def session_attributes(self) -> dict[str, Any]: ...
 
 
 class PlanningRead(Enum):
@@ -172,9 +173,22 @@ def effective_model(view: PlanningView) -> Generator[PlanningRequest, Any, dict[
     try:
         selected = view.state.model_selection
         if selected is not None:
-            selection = selected._payload["input"]["payload"]["selection"]
-            return selection | {"binding": selected._payload["model_binding"]}
-        fork = view.records[0].record._payload["attributes"].get("app_server_fork")
+            payload = selected._payload
+            input_id = payload["input"]["input_id"]
+            applied = view.state.applied_inputs.get(input_id)
+            if applied is not None:
+                payload = applied._payload
+            selection = payload["input"]["payload"]["selection"]
+            binding = payload["model_binding"]
+            try:
+                if declared_content_ref(selection) is not None or declared_content_ref(binding) is not None:
+                    raise KeyUnavailable("model selection requires hydrated logical state")
+            except ValueError as exc:
+                raise RecordError("model selection contains a malformed ContentRef") from exc
+            if type(selection) is not dict or type(binding) is not dict:
+                raise RecordError("model selection and binding must hydrate to objects")
+            return selection | {"binding": binding}
+        fork = view.session_attributes().get("app_server_fork")
         if fork is not None:
             return copy_json(fork["effective_model"])
         assert view.state.active_turn_id is not None

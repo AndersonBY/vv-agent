@@ -22,6 +22,20 @@ if TYPE_CHECKING:
     from vv_agent.kernel._state import ExecutionState
 
 
+def _business_payload(record) -> dict:
+    """Return hydrated fields without changing the retained value used for validation."""
+
+    payload = getattr(record, "_business_payload", None)
+    return payload if type(payload) is dict else record._payload
+
+
+def _record_task(record) -> AgentTask:
+    if getattr(record, "_business_payload", None) is None:
+        return record._task()
+    payload = _business_payload(record)
+    return AgentTask.from_dict(copy_json(payload["definition"]["task"]))
+
+
 def project_context(
     records: Sequence[StoredRecord],
     state: ExecutionState,
@@ -49,7 +63,7 @@ def project_context(
             if r.kind == "context_compacted" or (r.kind == "boundary_recorded" and r._payload["stage"] == "before_memory"):
                 start = index
                 assert r.turn_id is not None
-                task = state.turns[r.turn_id].start._task()
+                task = _record_task(state.turns[r.turn_id].start)
                 break
     seed = (
         records[0].record._payload["attributes"].get("seed", {})
@@ -68,7 +82,7 @@ def project_context(
         r = records[index].record
         if r.kind not in {"context_compacted", "boundary_recorded", "turn_started", "input_applied", "op_completed"}:
             continue
-        p = r._payload
+        p = _business_payload(r)
         if r.kind == "boundary_recorded":
             if p["stage"] == "before_memory" and compacted:
                 messages = filter_empty_assistant_messages([decode(m) for m in p["data"]["messages"]])
@@ -77,7 +91,7 @@ def project_context(
         elif r.kind == "context_compacted" and compacted:
             messages = filter_empty_assistant_messages([decode(m) for m in p["replacement"]])
         elif r.kind == "turn_started":
-            task = r._task()
+            task = _record_task(r)
             if task.metadata.get("_vv_agent_app_server_compaction_only") and seen_turn:
                 continue
             seen_turn = True
@@ -254,7 +268,7 @@ class InputProtection:
     def advance(self, row: StoredRecord, state: ExecutionState, cache: _MessageCache) -> None:
         r, seq = row.record, row.seq
         self.prefix_seq = seq
-        p, kind = r._payload, r.kind
+        p, kind = _business_payload(r), r.kind
         if kind == "session_created":
             self.messages = filter_empty_assistant_messages(
                 [cache.parse(m) for m in p["attributes"].get("seed", {}).get("messages", [])]
@@ -344,7 +358,7 @@ class InputProtection:
             (row,), state, _initial=self.messages, _task=self.task, _seen_turn=self.seen_turn, _message_cache=cache
         )
         if kind == "turn_started":
-            task = r._task()
+            task = _record_task(r)
             self.replace(after)
             if not task.metadata.get("_vv_agent_app_server_compaction_only"):
                 initial = task.metadata.get("vv_session", {}).get("input_messages")

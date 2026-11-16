@@ -232,7 +232,8 @@ def check_kernel_boundaries(root: Path) -> list[str]:
 
     Syntax boundary: imports, Name/Attribute calls, import aliases and simple
     name-to-name/attribute assignments. Effectful stdlib API families are
-    conservatively rejected, including pure helpers within those families.
+    conservatively rejected, except explicitly named pure query composition
+    constructors.
     No scope/control-flow inference, reflection, re-export tracing, unlisted
     API effect inference or arbitrary execution proof. This is a maintenance
     gate, not a sandbox. Only the two concrete storage adapters may open
@@ -285,6 +286,11 @@ def check_kernel_boundaries(root: Path) -> list[str]:
         "exec",
         "builtins.eval",
         "builtins.exec",
+    }
+    query_composition_calls = {
+        "psycopg.sql.Identifier",
+        "psycopg.sql.Literal",
+        "psycopg.sql.SQL",
     }
     storage_calls = {
         "src/vv_agent/kernel/_sqlite.py": {"sqlite3.connect", "threading.RLock"},
@@ -394,9 +400,13 @@ def check_kernel_boundaries(root: Path) -> list[str]:
                 if path not in storage_owners and target.endswith(".cursor"):
                     errors.append(f"{path}:{node.lineno}: forbidden kernel storage API: {target}")
                 if (
-                    target in effect_calls
-                    or any(target == family or target.startswith(family + ".") for family in effect_families)
-                ) and not (target in storage_calls.get(path, set()) and in_function(node)):
+                    (
+                        target in effect_calls
+                        or any(target == family or target.startswith(family + ".") for family in effect_families)
+                    )
+                    and target not in query_composition_calls
+                    and not (target in storage_calls.get(path, set()) and in_function(node))
+                ):
                     errors.append(f"{path}:{node.lineno}: forbidden kernel effect call: {target}")
     return sorted(set(errors))
 

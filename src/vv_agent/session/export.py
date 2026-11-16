@@ -196,19 +196,14 @@ def export_session(
         (*record_lines, *inbox_lines, *checkpoint_lines, manifest),
     )
 
-    key_id = (
-        checkpoints[-1][2]
-        if checkpoints
-        else tombstone.key_id
-        if tombstone is not None
-        else getattr(verifier, "key_id", "hash-only")
-    )
-    if not isinstance(key_id, str) or not key_id:
-        key_id = "hash-only"
-    head = SessionHead(tenant_id, session_id, head_seq, chain_digest, key_id)
-    document.verify(head, verifier, expected_head=expected_head)
+    record_key_id = checkpoints[-1][2] if checkpoints else getattr(verifier, "key_id", "hash-only")
+    if not isinstance(record_key_id, str) or not record_key_id:
+        record_key_id = "hash-only"
+    record_head = SessionHead(tenant_id, session_id, head_seq, chain_digest, record_key_id)
+    document.verify(record_head, verifier, expected_head=expected_head)
     if tombstone is not None:
-        tombstone.verify(head, verifier)
+        tombstone_head = SessionHead(tenant_id, session_id, head_seq, chain_digest, tombstone.key_id)
+        tombstone.verify(tombstone_head, verifier)
         store._verify_tombstone_object(tombstone, verifier, allow_unsigned=not signed)
     return document
 

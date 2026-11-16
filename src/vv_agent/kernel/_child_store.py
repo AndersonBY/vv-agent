@@ -143,10 +143,7 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
         "generation": child.generation,
         "background": child.background,
     }
-    attributes = child.spec.attributes
-    if is_content_ref(attributes):
-        raise ValueError("child admission attributes require content hydration before adding child_handle")
-    attributes = dict(attributes or {}) | {"child_handle": handle}
+    attributes = dict(child.spec.attributes or {}) | {"child_handle": handle}
     principal = Principal.from_dict(child.spec.principal)
     tenant_id = principal.tenant_id
     tx_store = getattr(tx, "store", None)
@@ -167,14 +164,13 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
             workspace_ref = writer.copy_json_from(parent_writer, child.spec.workspace)
         else:
             workspace_ref = writer.put_json(child.spec.workspace)
-        attributes_ref = writer.put_json(attributes)
         return replace(
             child.spec,
             principal=child_principal,
             workspace=workspace_ref.to_dict(),
             parent_session_id=plan.session_id,
             parent_operation_id=plan.operation_id,
-            attributes=attributes_ref.to_dict(),
+            attributes=attributes,
         )
 
     child_writer.create_session(child_spec, consumers=(*child.consumers, "child_delivery"))
@@ -257,10 +253,11 @@ def child_delivery(
             result = terminal.record.payload["result"]
             if result is None:
                 result_ref = None
-            elif is_content_ref(result):
-                result_ref = parent_writer.copy_json_from(child_writer, result)
             else:
-                result_ref = parent_writer.put_json(result)
+                if not is_content_ref(result):
+                    raise ValueError("child terminal result requires a ContentRef")
+                child_writer.assert_record(terminal.seq, result, "turn_ended_result")
+                result_ref = parent_writer.copy_json_from(child_writer, result)
             item = completion_input(handle, terminal, actor=actor, result_ref=result_ref)
             tx.push(parent_id, item)
             if result_ref is not None:
@@ -334,8 +331,10 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
             parent_writer.assert_input(item.input_id, result_ref, CHILD_RESULT)
             delivered_result = parent_writer.get_json(result_ref)
             terminal_result = r.payload["result"]
-            if is_content_ref(terminal_result):
-                terminal_result = child_writer.get_json(terminal_result)
+            if not is_content_ref(terminal_result):
+                return None
+            child_writer.assert_record(terminal.seq, terminal_result, "turn_ended_result")
+            terminal_result = child_writer.get_json(terminal_result)
             if canonical_json_bytes(delivered_result) != canonical_json_bytes(terminal_result):
                 return None
     return terminal

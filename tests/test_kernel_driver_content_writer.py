@@ -14,6 +14,7 @@ def _driver(*, tenant_id: str = "tenant-a") -> CoreDriver:
     driver = object.__new__(CoreDriver)
     driver.store = SimpleNamespace(tenant_id=tenant_id)
     driver.sid = "session-a"
+    driver.content_reader = None
     return driver
 
 

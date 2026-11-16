@@ -14,8 +14,10 @@ from vv_agent._memory_settings import normalize_memory_settings
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation
 from vv_agent.kernel._budget_values import BudgetUnavailableReason, HostCost
 from vv_agent.kernel._compaction_phase import CompactionMemory
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._driver_outcomes import OutcomeRead
 from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 
 
 def capture_factory_heartbeats(monkeypatch):
@@ -218,13 +220,15 @@ def test_context_compaction_event_uses_core_effective_threshold(tmp_path):
     }
     with SimWorld(tmp_path / "compaction-threshold.sqlite", seed=17) as world:
         summary = run_scenario(world, "context_compacted", memory_settings=configured)
-        _state, rows, _ = world.connection("observer").read_state("s")
-        started = next(
-            row.record
-            for row in rows
-            if row.record.kind == "boundary_recorded" and row.record.payload["stage"] == "memory_started"
+        store = world.connection("observer")
+        _state, rows, _ = store.read_state("s")
+        started_row = next(
+            row for row in rows if row.record.kind == "boundary_recorded" and row.record.payload["stage"] == "memory_started"
         )
-        event = started.payload["data"]["event"]
+        started = started_row.record
+        raw_event = started.payload["data"]["event"]
+        assert ContentRef.from_dict(raw_event).content_id
+        event = hydrate_record_payload(started_row, hydration_for_session_store(store, "s"))["data"]["event"]
         manager = CompactionMemory(normalize_memory_settings(world.memory_settings, None), None, False)
 
     assert summary["scenario"] == "context_compacted"

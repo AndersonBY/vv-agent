@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
-from hashlib import sha256
+from types import MappingProxyType
 from typing import Any, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
@@ -31,7 +31,9 @@ from vv_agent.kernel._content import (
     SourceKind,
 )
 from vv_agent.kernel._content_publication import (
+    _BOUNDARY_CONTENT_SLOTS,
     _CONTENT_SLOTS,
+    _INPUT_SLOTS,
     PROVIDER_EVIDENCE,
     PROVIDER_HANDLE_CANCEL_REF,
     PROVIDER_HANDLE_EVIDENCE,
@@ -39,14 +41,14 @@ from vv_agent.kernel._content_publication import (
     PROVIDER_HANDLE_QUERY_REF,
     PROVIDER_RESULT,
     PROVIDER_USAGE,
+    ContentSlot,
     publish_session_created_content,
 )
 from vv_agent.kernel._content_store import DurableContentStore
-from vv_agent.kernel._records import Record, SessionSpec
+from vv_agent.kernel._records import SessionSpec
 from vv_agent.kernel._sql import SQLSessionTx
 from vv_agent.kernel._store import (
     CommitReceipt,
-    Conflict,
     ConsumerBatch,
     ContentSessionTx,
     CreateReceipt,
@@ -60,35 +62,11 @@ from .content_store import SQLContentStore
 from .postgres import PostgresContentStore, PostgresStore
 from .sqlite import SQLiteContentStore, SQLiteStore
 
-_SLOTS = frozenset(
-    {
-        SESSION_PRINCIPAL_ATTRIBUTES,
-        SESSION_WORKSPACE,
-        SESSION_ATTRIBUTES,
-        INPUT_CONTENT,
-        INPUT_SELECTION,
-        INPUT_ACTOR_ATTRIBUTES,
-        APPROVAL_SCOPE,
-        APPROVAL_REASON,
-        APPROVAL_METADATA,
-        CHILD_RESULT,
-        PROVIDER_EVIDENCE,
-        PROVIDER_HANDLE_CANCEL_REF,
-        PROVIDER_HANDLE_EVIDENCE,
-        PROVIDER_HANDLE_JOB_ID,
-        PROVIDER_HANDLE_QUERY_REF,
-        PROVIDER_RESULT,
-        PROVIDER_USAGE,
-    }
-)
 _PROVIDER_ATTRIBUTE = "_vv_agent_content_key_provider"
-_DECLARED_NESTED_SLOT_BASES = frozenset(
-    f"{content_slot.slot}.{nested_slot.slot}"
-    for content_slots in _CONTENT_SLOTS.values()
-    for content_slot in content_slots
-    for nested_slot in content_slot.nested
-)
-_NESTED_SLOT = re.compile(r"^(?P<base>.+)\[(?P<index>0|[1-9][0-9]*)\]$")
+_INDEXED_SLOT = re.compile(r"^(?P<base>[^\[\]]+)(?P<indices>(?:\[(?:0|[1-9][0-9]*)\])*)$")
+_SLOT_INDEX = re.compile(r"\[(?:0|[1-9][0-9]*)\]")
+_DEFERRED_SESSION_LIVE_SQL = "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}"
+_DEFERRED_ADMISSION_TABLES = frozenset({"sk_session", "sk_session_key", "sk_content", "sk_content_link", "sk_record", "sk_inbox"})
 
 INTERNAL_LABELS = ContentLabels(source=(SourceKind.INTERNAL,), classification=Classification.INTERNAL)
 HOST_LABELS = ContentLabels(source=(SourceKind.USER,), classification=Classification.INTERNAL)
@@ -96,6 +74,205 @@ HOST_LABELS = ContentLabels(source=(SourceKind.USER,), classification=Classifica
 
 class ContentRuntimeUnavailable(RuntimeError):
     """The trusted ingress has no durable store or bound key provider."""
+
+
+class _DeferredContentBackend:
+    """Let SQLContentStore allocate target content before the session row exists.
+
+    SQLSessionTx.create remains the admission authority. This backend only
+    captures the existing content store's own SQL statements and replays them
+    after the create transaction has admitted the session. SQLContentStore has
+    no public pre-admission staging API today, so this adapter recognizes the
+    small set of backend operations it emits and rejects any other operation on
+    an admission table instead of delegating it to a session that does not yet
+    exist.
+    """
+
+    def __init__(self, backend: Any, *, tenant_id: str, session_id: str) -> None:
+        self._backend = backend
+        self._tenant_id = tenant_id
+        self._session_id = session_id
+        self._key_values: dict[str, Any] | None = None
+        self._content: dict[str, dict[str, Any]] = {}
+        self._mutations: list[tuple[str, tuple[Any, ...]]] = []
+        self.lock_clause = backend.lock_clause
+
+    @staticmethod
+    def _storage_error() -> RuntimeError:
+        return RuntimeError("unexpected content SQL before session admission")
+
+    @staticmethod
+    def _select_columns(query: str) -> tuple[str, ...]:
+        selected, separator, _rest = query.partition(" FROM ")
+        if not separator or not selected.startswith("SELECT "):
+            raise _DeferredContentBackend._storage_error()
+        return tuple(column.strip() for column in selected.removeprefix("SELECT ").split(","))
+
+    @classmethod
+    def _insert_values(cls, query: str, params: tuple[Any, ...]) -> dict[str, Any]:
+        _prefix, separator, suffix = query.partition("(")
+        columns, separator_after_columns, _rest = suffix.partition(")")
+        if not separator or not separator_after_columns:
+            raise cls._storage_error()
+        return dict(zip((column.strip() for column in columns.split(",")), params, strict=True))
+
+    @classmethod
+    def _select_row(cls, query: str, values: Mapping[str, Any] | None) -> tuple[Any, ...] | None:
+        if values is None:
+            return None
+        columns = cls._select_columns(query)
+        try:
+            return tuple(values[column] for column in columns)
+        except KeyError as exc:
+            raise cls._storage_error() from exc
+
+    def _reads_admission_table(self, query: str) -> bool:
+        padded = f" {query} "
+        return any(f" {table} " in padded for table in _DEFERRED_ADMISSION_TABLES)
+
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+        query = " ".join(query.split())
+        if query == _DEFERRED_SESSION_LIVE_SQL and params == (self._tenant_id, self._session_id):
+            return ("live",)
+        if " FROM sk_session_key " in f" {query} ":
+            if params != (self._tenant_id, self._session_id):
+                raise self._storage_error()
+            return self._select_row(query, self._key_values)
+        if " FROM sk_content WHERE " in f" {query} ":
+            return self._fetch_content(query, params)
+        if self._reads_admission_table(query):
+            raise self._storage_error()
+        return self._backend.fetchone(query, params)
+
+    def _fetch_content(self, query: str, params: tuple[Any, ...]) -> tuple[Any, ...] | None:
+        if params[:2] != (self._tenant_id, self._session_id):
+            raise self._storage_error()
+        if len(params) == 3:
+            values = self._content.get(cast(str, params[2]))
+        elif len(params) == 5:
+            key_id, mac, labels = params[2:]
+            values = next(
+                (
+                    candidate
+                    for candidate in self._content.values()
+                    if (candidate["key_id"], candidate["mac"], candidate["labels"]) == (key_id, mac, labels)
+                ),
+                None,
+            )
+        else:
+            raise self._storage_error()
+        return self._select_row(query, values)
+
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        if self._reads_admission_table(" ".join(query.split())):
+            raise self._storage_error()
+        return self._backend.fetchall(query, params)
+
+    def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        query = " ".join(query.split())
+        if query.startswith("INSERT INTO sk_session_key("):
+            self._key_values = self._insert_values(query, params)
+            self._mutations.append((query, params))
+            return 1
+        if query.startswith("INSERT INTO sk_content("):
+            values = self._insert_values(query, params)
+            values["object_locator"] = None
+            self._content[cast(str, values["content_id"])] = values
+            self._mutations.append((query, params))
+            return 1
+        if query.startswith("UPDATE sk_content SET state='live'"):
+            _tenant, _session, content_id = params
+            values = self._content[cast(str, content_id)]
+            values["state"] = "live"
+            values["object_locator"] = None
+            values["pin_until_ms"] = None
+            self._mutations.append((query, params))
+            return 1
+        if query.startswith("UPDATE sk_content SET pin_until_ms"):
+            pin_until_ms, _tenant, _session, content_id = params
+            self._content[cast(str, content_id)]["pin_until_ms"] = pin_until_ms
+            self._mutations.append((query, params))
+            return 1
+        if query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            raise self._storage_error()
+        return self._backend.run(query, params)
+
+    def require_transaction(self) -> None:
+        self._backend.require_transaction()
+
+    def now_ms(self) -> int:
+        return self._backend.now_ms()
+
+    def replay(self) -> None:
+        for query, params in self._mutations:
+            self._backend.run(query, params)
+
+
+def _deferred_content_writer(writer: SessionContentWriter) -> tuple[SessionContentWriter, _DeferredContentBackend]:
+    backend = _DeferredContentBackend(
+        writer._durable._backend,
+        tenant_id=writer.tenant_id,
+        session_id=writer.session_id,
+    )
+    durable = SQLContentStore(backend, writer._key_provider, provider_id=writer._durable._provider_id)
+    deferred = SessionContentWriter(
+        tx=writer.tx,
+        tenant_id=writer.tenant_id,
+        session_id=writer.session_id,
+        key_provider=writer._key_provider,
+        _published_refs=writer._published_refs,
+    )
+    deferred._durable = durable
+    deferred.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
+    return deferred, backend
+
+
+def _add_slot_spec(specs: dict[str, int], slot: str, index_count: int) -> None:
+    previous = specs.setdefault(slot, index_count)
+    if previous != index_count:
+        raise RuntimeError(f"conflicting content inventory slot: {slot}")
+
+
+def _content_slot_specs(content_slots: Iterable[ContentSlot]) -> dict[str, int]:
+    specs: dict[str, int] = {}
+    for content_slot in content_slots:
+        _add_slot_spec(specs, content_slot.slot, content_slot.path.count("*"))
+        for nested_slot in content_slot.nested:
+            _add_slot_spec(
+                specs,
+                f"{content_slot.slot}.{nested_slot.slot}",
+                nested_slot.path.count("*"),
+            )
+    return specs
+
+
+_record_slot_specs = _content_slot_specs(
+    content_slot
+    for content_slots in (*_CONTENT_SLOTS.values(), *_BOUNDARY_CONTENT_SLOTS.values())
+    for content_slot in content_slots
+)
+for _provider_record_slot in (
+    PROVIDER_EVIDENCE,
+    PROVIDER_HANDLE_CANCEL_REF,
+    PROVIDER_HANDLE_EVIDENCE,
+    PROVIDER_HANDLE_JOB_ID,
+    PROVIDER_HANDLE_QUERY_REF,
+    PROVIDER_RESULT,
+    PROVIDER_USAGE,
+):
+    _add_slot_spec(_record_slot_specs, _provider_record_slot, 0)
+for _input_slots in _INPUT_SLOTS.values():
+    for _input_slot in _input_slots:
+        _add_slot_spec(
+            _record_slot_specs,
+            f"input.payload.{'.'.join(_input_slot.path)}",
+            _input_slot.path.count("*"),
+        )
+_RECORD_SLOT_SPECS: Mapping[str, int] = MappingProxyType(_record_slot_specs)
+
+_input_slot_specs = _content_slot_specs(content_slot for content_slots in _INPUT_SLOTS.values() for content_slot in content_slots)
+_add_slot_spec(_input_slot_specs, INPUT_ACTOR_ATTRIBUTES, 0)
+_INPUT_SLOT_SPECS: Mapping[str, int] = MappingProxyType(_input_slot_specs)
 
 
 def bind_content_key_provider(store: SessionStore, key_provider: KeyProvider) -> None:
@@ -127,10 +304,12 @@ def durable_content_store(
     if provider is None:
         raise ContentRuntimeUnavailable("a content key provider must be explicitly bound to the session store")
     if isinstance(root, SQLiteStore):
-        return SQLiteContentStore(root, provider)
-    if isinstance(root, PostgresStore):
-        return PostgresContentStore(root, provider)
-    raise ContentRuntimeUnavailable("content reads require a durable SQLite or PostgreSQL store")
+        durable: DurableContentStore = SQLiteContentStore(root, provider)
+    elif isinstance(root, PostgresStore):
+        durable = PostgresContentStore(root, provider)
+    else:
+        raise ContentRuntimeUnavailable("content reads require a durable SQLite or PostgreSQL store")
+    return cast(DurableContentStore, _ValidatedDurableContentStore(durable))
 
 
 def durable_content_reader(store: SessionStore, *, tenant_id: str, session_id: str):
@@ -185,13 +364,65 @@ def _root_store(store: object) -> object:
     return current
 
 
-def _slot(value: str) -> str:
-    if value in _SLOTS:
-        return value
-    match = _NESTED_SLOT.fullmatch(value)
-    if match is None or match.group("base") not in _DECLARED_NESTED_SLOT_BASES:
+def _slot(value: str, specs: Mapping[str, int]) -> str:
+    match = _INDEXED_SLOT.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError("content links require a stable declared slot")
+    base = match.group("base")
+    declared_indexes = specs.get(base)
+    if declared_indexes is None or declared_indexes != len(_SLOT_INDEX.findall(match.group("indices"))):
         raise ValueError("content links require a stable declared slot")
     return value
+
+
+class _ValidatedDurableContentStore:
+    """Keep direct durable link calls on the writer's owner/slot inventory."""
+
+    def __init__(self, durable: DurableContentStore) -> None:
+        self._durable = durable
+
+    def link_record(
+        self,
+        tenant_id: str,
+        session_id: str,
+        record_seq: int,
+        ref: ContentRef,
+        slot: str,
+    ) -> None:
+        self._durable.link_record(tenant_id, session_id, record_seq, ref, _slot(slot, _RECORD_SLOT_SPECS))
+
+    def link_input(
+        self,
+        tenant_id: str,
+        session_id: str,
+        input_id: str,
+        ref: ContentRef,
+        slot: str,
+    ) -> None:
+        self._durable.link_input(tenant_id, session_id, input_id, ref, _slot(slot, _INPUT_SLOT_SPECS))
+
+    def assert_link(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+        slot: str,
+        *,
+        record_seq: int | None = None,
+        input_id: str | None = None,
+    ) -> ContentRef:
+        specs = _INPUT_SLOT_SPECS if record_seq is None and input_id is not None else _RECORD_SLOT_SPECS
+        return self._durable.assert_link(
+            tenant_id,
+            session_id,
+            ref,
+            _slot(slot, specs),
+            record_seq=record_seq,
+            input_id=input_id,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._durable, name)
 
 
 class SessionContentWriter:
@@ -204,6 +435,7 @@ class SessionContentWriter:
         tenant_id: str,
         session_id: str,
         key_provider: KeyProvider,
+        _published_refs: set[ContentRef] | None = None,
     ) -> None:
         if not isinstance(tenant_id, str) or not tenant_id:
             raise ValueError("tenant_id must be a non-empty string")
@@ -231,7 +463,9 @@ class SessionContentWriter:
         self.tenant_id = tenant_id
         self.session_id = session_id
         self._key_provider = key_provider
-        self.durable = durable
+        self._durable = durable
+        self.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
+        self._published_refs = _published_refs if _published_refs is not None else set()
 
     @classmethod
     def bind(
@@ -254,16 +488,18 @@ class SessionContentWriter:
         return cls(tx=tx, tenant_id=tenant_id, session_id=session_id, key_provider=provider)
 
     def create_session_key(self):
-        return self.durable.create_session_key(self.tenant_id, self.session_id)
+        return self._durable.create_session_key(self.tenant_id, self.session_id)
 
     def put_bytes(self, value: bytes, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
-        return self.durable.put(self.tenant_id, self.session_id, value, labels)
+        ref = self._durable.put(self.tenant_id, self.session_id, value, labels)
+        self._published_refs.add(ref)
+        return ref
 
     def put_json(self, value: Any, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
         return self.put_bytes(canonical_json_bytes(value), labels=labels)
 
     def get_bytes(self, ref: ContentRef | Mapping[str, Any]) -> bytes:
-        return self.durable.get(self.tenant_id, self.session_id, _content_ref(ref))
+        return self._durable.get(self.tenant_id, self.session_id, _content_ref(ref))
 
     def get_json(self, ref: ContentRef | Mapping[str, Any]) -> Any:
         try:
@@ -294,7 +530,13 @@ class SessionContentWriter:
         return principal, ref
 
     def link_input(self, input_id: str, ref: ContentRef, slot: str) -> None:
-        self.durable.link_input(self.tenant_id, self.session_id, input_id, ref, _slot(slot))
+        self._durable.link_input(
+            self.tenant_id,
+            self.session_id,
+            input_id,
+            ref,
+            _slot(slot, _INPUT_SLOT_SPECS),
+        )
 
     def link_input_actor(self, input_id: str, ref: ContentRef) -> None:
         self.link_input(input_id, ref, INPUT_ACTOR_ATTRIBUTES)
@@ -306,23 +548,29 @@ class SessionContentWriter:
         self.link_input(input_id, ref, CHILD_RESULT)
 
     def link_record(self, record_seq: int, ref: ContentRef, slot: str) -> None:
-        self.durable.link_record(self.tenant_id, self.session_id, record_seq, ref, _slot(slot))
+        self._durable.link_record(
+            self.tenant_id,
+            self.session_id,
+            record_seq,
+            ref,
+            _slot(slot, _RECORD_SLOT_SPECS),
+        )
 
     def assert_input(self, input_id: str, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef:
-        return self.durable.assert_link(
+        return self._durable.assert_link(
             self.tenant_id,
             self.session_id,
             _content_ref(ref),
-            _slot(slot),
+            _slot(slot, _INPUT_SLOT_SPECS),
             input_id=input_id,
         )
 
     def assert_record(self, record_seq: int, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef:
-        return self.durable.assert_link(
+        return self._durable.assert_link(
             self.tenant_id,
             self.session_id,
             _content_ref(ref),
-            _slot(slot),
+            _slot(slot, _RECORD_SLOT_SPECS),
             record_seq=record_seq,
         )
 
@@ -334,136 +582,67 @@ class SessionContentWriter:
     ) -> CreateReceipt:
         """Create session/key/content/record/links inside the current outer transaction."""
         self.tx._active()
-        if any(not isinstance(consumer, str) or not consumer for consumer in consumers):
-            raise ValueError("consumers must be non-empty strings")
-        if len(consumers) != len(set(consumers)):
-            raise Conflict("duplicate consumer")
-
         store = self.tx.store
-        tenant_id = self.tenant_id
-        session_id = self.session_id
-        with store._transaction():
-            if not store._rows(
+        existing = bool(
+            store._rows(
                 "SELECT 1 FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-                (tenant_id, session_id),
-            ):
-                inserted = bool(
-                    store._rows(
-                        "INSERT INTO sk_session(tenant_id,session_id,schema_version,phase,level,deletion_state,created_ms) "
-                        "VALUES (%s,%s,'S1','idle',1,'live',%s) RETURNING session_id",
-                        (tenant_id, session_id, store._now()),
-                    )
-                )
-            else:
-                inserted = False
-            store._lock(session_id)
-
-            spec = spec_factory(self)
-            if spec.session_id != session_id:
-                raise ValueError("session spec does not match the content writer binding")
-            principal = Principal.from_dict(spec.principal)
-            if principal.tenant_id != tenant_id:
-                raise Conflict("session principal belongs to another tenant")
-
-            if inserted:
-                store._rows(
-                    "UPDATE sk_session SET parent_session_id=%s,parent_operation_id=%s WHERE tenant_id=%s AND session_id=%s",
-                    (spec.parent_session_id, spec.parent_operation_id, tenant_id, session_id),
-                )
-            else:
-                parent = store._rows(
-                    "SELECT parent_session_id,parent_operation_id FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-                    (tenant_id, session_id),
-                )
-                if not parent or tuple(parent[0]) != (spec.parent_session_id, spec.parent_operation_id):
-                    raise Conflict("session parent identity has different bytes")
-
-            existing_body = None
-            if not inserted:
-                rows = store._rows(
-                    "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=1",
-                    (tenant_id, session_id),
-                )
-                if not rows:
-                    raise Conflict("session create row is incomplete")
-                existing_body = rows[0][0]
-
-            if spec.parent_session_id is not None and not store._rows(
-                "SELECT 1 FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-                (tenant_id, spec.parent_session_id),
-            ):
-                raise Conflict("parent session not found in tenant")
-
-            existing_record = Record.parse(existing_body) if existing_body is not None else None
-            if spec.attributes is None and existing_record is not None:
-                attributes = existing_record._payload["attributes"]
-            else:
-                attributes = spec.attributes
-            if attributes is None:
-                raise ValueError("session attributes require a ContentRef")
-            created_content = publish_session_created_content(
-                self,
-                principal=spec.principal,
-                workspace=spec.workspace,
-                attributes=attributes,
+                (self.tenant_id, self.session_id),
             )
-            spec = replace(
-                spec,
-                principal=created_content.principal,
-                workspace=created_content.workspace.to_dict(),
-                attributes=created_content.attributes.to_dict(),
-            )
-            record = spec.record(_existing=existing_record) if existing_record is not None else spec.record()
-            body = canonical_json_bytes({"create": record.to_dict(), "consumers": sorted(consumers)})
-            manifest = canonical_json_bytes({"create": record.record_id, "consumers": sorted(consumers)})
-            if existing_body is not None:
-                old = store._rows(
-                    "SELECT body,created_ms FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
-                    (tenant_id, session_id, "session/create"),
-                )
-                if not old or old[0][0] != manifest or existing_body != record.encode():
-                    raise Conflict("create identity has different bytes")
-                receipt = CreateReceipt(session_id, 1, old[0][1], True)
-            else:
-                now = store._now()
-                state = store.fold_factory().extend((record,))
-                self.tx._write(
-                    record,
-                    seq=1,
-                    commit_id="session/create",
-                    commit_digest=sha256(body).hexdigest(),
-                    position=0,
-                    epoch=0,
-                    now=now,
-                )
-                self.tx._commit(
-                    session_id,
-                    "session/create",
-                    body,
-                    manifest,
-                    ((record.record_id, 1),),
-                    1,
-                    now,
-                )
-                for consumer in consumers:
-                    store._rows(
-                        "INSERT INTO sk_consumer(tenant_id,session_id,consumer) VALUES (%s,%s,%s)",
-                        (tenant_id, session_id, consumer),
-                    )
-                store._rows(
-                    "UPDATE sk_session SET head_seq=1 WHERE tenant_id=%s AND session_id=%s",
-                    (tenant_id, session_id),
-                )
-                store._schedule(session_id, state)
-                receipt = CreateReceipt(session_id, 1, now)
+        )
+        deferred_backend: _DeferredContentBackend | None = None
+        factory_writer = self
+        if not existing:
+            factory_writer, deferred_backend = _deferred_content_writer(self)
 
-            self.link_record(1, principal.attributes, SESSION_PRINCIPAL_ATTRIBUTES)
-            self.link_record(1, _content_ref(spec.workspace), SESSION_WORKSPACE)
-            assert spec.attributes is not None
-            self.link_record(1, _content_ref(spec.attributes), SESSION_ATTRIBUTES)
-            for nested in created_content.nested:
-                self.link_record(1, nested.ref, nested.slot)
-            return receipt
+        spec = spec_factory(factory_writer)
+        if spec.session_id != self.session_id:
+            raise ValueError("session spec does not match the content writer binding")
+        principal = Principal.from_dict(spec.principal)
+        if principal.tenant_id != self.tenant_id:
+            raise ValueError("session principal must use the content writer tenant")
+        if spec.attributes is None:
+            if deferred_backend is not None:
+                raise ValueError("new session attributes require content publication")
+            return self.tx.create(spec, consumers=consumers)
+
+        if existing:
+            # Replay receives a committed reference-form spec. Validate its
+            # declared roots without treating mappings as new producer values.
+            _content_ref(spec.workspace)
+            _content_ref(spec.attributes)
+            return self.tx.create(spec, consumers=consumers)
+
+        workspace_ref = _creation_ref(factory_writer, spec.workspace)
+        attributes = _creation_ref(factory_writer, spec.attributes)
+        principal_attributes = _creation_ref(factory_writer, spec.principal["attributes"])
+        principal_payload = (
+            spec.principal | {"attributes": principal_attributes} if principal_attributes is not None else spec.principal
+        )
+
+        created_content = publish_session_created_content(
+            factory_writer,
+            principal=principal_payload,
+            workspace=workspace_ref if workspace_ref is not None else spec.workspace,
+            attributes=attributes if attributes is not None else spec.attributes,
+        )
+        published = replace(
+            spec,
+            principal=created_content.principal,
+            workspace=created_content.workspace.to_dict(),
+            attributes=created_content.attributes.to_dict(),
+        )
+        receipt = self.tx.create(published, consumers=consumers)
+        if deferred_backend is not None:
+            if receipt.replayed:
+                raise RuntimeError("a new deferred session cannot replay an existing create")
+            deferred_backend.replay()
+
+        self.link_record(1, _content_ref(created_content.principal["attributes"]), SESSION_PRINCIPAL_ATTRIBUTES)
+        self.link_record(1, created_content.workspace, SESSION_WORKSPACE)
+        self.link_record(1, created_content.attributes, SESSION_ATTRIBUTES)
+        for nested in created_content.nested:
+            self.link_record(1, nested.ref, nested.slot)
+        return receipt
 
 
 class _ContentSessionTxAdapter:
@@ -474,6 +653,7 @@ class _ContentSessionTxAdapter:
             raise ContentRuntimeUnavailable("content capability requires a caller-owned SQL transaction")
         self._tx = tx
         self._key_provider = key_provider
+        self._published_refs: set[ContentRef] = set()
 
     def content_writer(self, *, tenant_id: str, session_id: str):
         return SessionContentWriter(
@@ -481,6 +661,7 @@ class _ContentSessionTxAdapter:
             tenant_id=tenant_id,
             session_id=session_id,
             key_provider=self._key_provider,
+            _published_refs=self._published_refs,
         )
 
     def lock_session(self, session_id: str) -> None:
@@ -557,6 +738,18 @@ def wrap_session_content_store(store: SessionStore, key_provider: KeyProvider) -
 
 def _content_ref(value: ContentRef | Mapping[str, Any]) -> ContentRef:
     return value if isinstance(value, ContentRef) else ContentRef.from_dict(value)
+
+
+def _creation_ref(writer: SessionContentWriter, value: Any) -> ContentRef | None:
+    """Recognize only refs explicitly returned by this factory's writer."""
+
+    if isinstance(value, ContentRef):
+        return value
+    try:
+        ref = ContentRef.from_dict(value)
+    except (TypeError, ValueError):
+        return None
+    return ref if ref in writer._published_refs else None
 
 
 __all__ = [

@@ -87,7 +87,7 @@ def test_long_result_head_tail_utf8_integrity_and_source(text, named):
     }
     assert namespace["source_complete"] is True
     assert namespace["capture_incomplete_reason"] is None
-    assert receipt._payload["result_digest"] == hashlib.sha256(canonical_json_bytes(raw)).hexdigest()
+    assert receipt._retained_payload["result_digest"] == digest(receipt._retained_payload["result"])
     assert max(backend.chunk_lengths) <= 65536
     assert backend.writes == 1
 

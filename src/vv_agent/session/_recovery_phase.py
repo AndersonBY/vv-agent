@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 from vv_agent.approval import ApprovalDecision, ApprovalRequest
@@ -29,7 +30,6 @@ from . import compaction, memory
 from . import output as output_host
 from ._driver_scope import _invoke
 from .delegation import result_for_children
-from .projection import project_records
 from .tool_results import prepare_tool_resources, project_tool_content
 
 if TYPE_CHECKING:
@@ -177,7 +177,8 @@ class _Host:
 
             return driver.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, inputs.CommitInput):
-            return driver.commit(request.records, (request.input_id,), guarded=True)
+            with _raw_approval_commit(driver, request.records):
+                return driver.commit(request.records, (request.input_id,), guarded=True)
         if isinstance(request, inputs.CompileTurn):
             return driver.runtime.compile(request.content, request.turn_id, seed=request.seed, control=request.control)
         if isinstance(request, inputs.ResolveModelSelection):
@@ -282,12 +283,21 @@ class _Host:
         if isinstance(request, cycle.ReadTranscript) or request is compaction_core.CompactionRequest.TRANSCRIPT:
             return driver.transcript()
         if isinstance(request, cycle.ReadCycleProjection):
-            state, records, _ = driver.store.read_state(driver.sid)
+            state = driver._logical_state()
+            records = driver.records
             _, records = turn_result_prefix(records, request.turn_id)
-            usage, _ = project_model_usage(state, request.turn_id)
-            cycles = project_cycles(state, records, request.turn_id, usage)
-            project_records(records)
-            return cycles, usage
+            plans = []
+            try:
+                for operation in state.operations.values():
+                    for attempt in operation.attempts.values():
+                        plans.append((attempt, attempt.plan))
+                        attempt.plan = driver.hydrate_plan(attempt.plan)
+                usage, _ = project_model_usage(state, request.turn_id)
+                cycles = project_cycles(state, records, request.turn_id, usage)
+                return cycles, usage
+            finally:
+                for attempt, plan in plans:
+                    attempt.plan = plan
         if isinstance(request, cycle.ApplyAfterCycleHooks):
             assert self.after_cycle is not None
             return self.after_cycle.apply(request.snapshot)
@@ -475,6 +485,21 @@ class _Host:
         if isinstance(request, output_core.SerializeOutput):
             return output_host.serializable_output(request.value)
         return self.dispatch()._handle(request)
+
+
+@contextmanager
+def _raw_approval_commit(driver: _Driver, records: list[Any]):
+    """Let the reducer compare raw approval refs after typed input validation."""
+
+    if not any(record.kind == "input_applied" and record._payload["input"]["kind"] == "approval_answer" for record in records):
+        yield
+        return
+    reader = driver.content_reader
+    driver.content_reader = None
+    try:
+        yield
+    finally:
+        driver.content_reader = reader
 
 
 def run[T](

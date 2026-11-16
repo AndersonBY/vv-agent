@@ -310,6 +310,48 @@ def test_unknown_effect_is_fenced_but_retained_for_skeleton(tmp_path) -> None:
         ]
 
 
+def test_forget_cascades_tombstones_and_content_over_the_entire_scope(tmp_path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(tmp_path / "forget-scope.sqlite") as (store, signer):
+        assert signer is not None
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        adapter, child_ref = _publish_content(store, provider, "child")
+        with store.for_tenant(TENANT).atomic():
+            actor_ref = adapter.put(TENANT, "root", b"provider actor", ContentLabels())
+        actor = Principal(TENANT, "user/deleter", "user", actor_ref)
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+
+        receipt = deletion.forget_session(TENANT, "root", actor=actor)
+
+        assert set(receipt.session_ids) == {"root", "child"}
+        states = dict(
+            store._rows(
+                "SELECT session_id,deletion_state FROM sk_session WHERE tenant_id=%s ORDER BY session_id",
+                (TENANT,),
+            )
+        )
+        assert states == {"child": "forgotten", "root": "forgotten"}
+        tombstones = deletion.verify_tombstones(TENANT, "root")
+        assert {item.session_id for item in tombstones} == {"root", "child"}
+        assert {item.scope_root_session_id for item in tombstones} == {"root"}
+        assert {item.actor.attributes.key_id for item in tombstones} == {actor_ref.key_id}
+        assert actor_ref.key_id != signer.key_id
+        assert _count(store, "sk_content", "child") == 0
+        assert _count(store, "sk_session_key", "child") == 0
+        assert _count(store, "sk_record", "root") == 1
+        assert _count(store, "sk_record", "child") == 1
+        with pytest.raises(ContentUnavailable):
+            adapter.get(TENANT, "child", child_ref)
+
+        store._rows(
+            "UPDATE sk_tombstone SET scope_root_session_id='other' WHERE tenant_id=%s AND session_id='child'",
+            (TENANT,),
+        )
+        with pytest.raises(LedgerIntegrityError, match="signature"):
+            deletion.verify_tombstones(TENANT, "other")
+
+
 def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(tmp_path) -> None:
     path = tmp_path / "purge.sqlite"
     provider = LocalKeyProvider(MASTER_KEY)
@@ -375,6 +417,13 @@ def test_missing_signer_fails_before_fence_and_unsigned_mode_is_explicitly_weak(
         assert receipt.authenticity is DeletionAuthenticity.HASH_ONLY
         tombstone = deletion.verify_tombstones(TENANT, "session")[0]
         assert tombstone.key_id == "hash-only/sha256"
+        signature = store._one("SELECT signature FROM sk_tombstone WHERE session_id='session'")[0]
+        store._rows(
+            "UPDATE sk_tombstone SET signature=%s WHERE tenant_id=%s AND session_id='session'",
+            (bytes([signature[0] ^ 1]) + signature[1:], TENANT),
+        )
+        with pytest.raises(LedgerIntegrityError, match="hash-only tombstone"):
+            deletion.verify_tombstones(TENANT, "session")
 
 
 def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path) -> None:

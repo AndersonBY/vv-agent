@@ -5,6 +5,7 @@ import pytest
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._record_schema import INPUT_PAYLOADS, PAYLOADS
+from vv_agent.kernel._reducer import _operation
 from vv_agent.kernel._schema import _compile_check
 from vv_agent.session.records import InboxItem, Record, RecordError, digest
 from vv_agent.session.reducer import TransitionError, fold
@@ -141,10 +142,17 @@ def test_mismatched_result_rejected(kw):
         fold([*base(), record("op_completed", **kw)])
 
 
-def test_parked_provider_evidence_and_duplicate_result():
+def test_parked_provider_evidence_defers_binding_and_duplicate_result():
     log = [*base(), record("op_parked")]
+    raw = fold([*log, record("op_completed", evidence=content_ref("other-evidence"))])
+    assert raw.operations["o"].attempts[1].state == "completed"
+
+    logical = fold(log)
+    logical.operations["o"].attempts[1].wait["handle"]["evidence"] = ["parked-evidence"]
+    completed = record("op_completed")
+    completed = replace(completed, payload=completed._payload | {"evidence": ["result-evidence"]})
     with pytest.raises(TransitionError):
-        fold([*log, record("op_completed", evidence=content_ref("other-evidence"))])
+        _operation(logical, completed)
     done = record("op_completed")
     assert fold([*log, done, done]).operations["o"].selected_attempt == 1
     different_result = content_ref("different-result")

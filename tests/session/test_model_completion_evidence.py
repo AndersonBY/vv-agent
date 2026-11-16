@@ -11,12 +11,30 @@ from unittest.mock import patch
 
 import pytest
 
+from vv_agent.kernel._content import ContentRef
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.context import project_context, protected_start
 from vv_agent.session.kernel import drive
+from vv_agent.session.projection import (
+    fold_hydrated_records,
+    hydrate_record_payload,
+    hydrate_records,
+    hydration_for_session_store,
+    project_records,
+)
 from vv_agent.session.records import InboxItem, SessionSpec, make_record
+from vv_agent.session.reducer import _fold_factory_for
+from vv_agent.session.result import project_result
 
-from .test_recovery_matrix import records_of, runtime
+from .helpers import (
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    push_fixture_input,
+    wrap_fixture_store,
+)
+from .test_recovery_matrix import runtime
 
 CASES = (
     "filter_stream",
@@ -150,28 +168,29 @@ def local_completion(case):
 
 
 def run_completion_case(store, database, case, declared, *, create=True):
+    content_reader = None
+    hydrated_attributes = None
     if create:
+        store = wrap_fixture_store(store)
         # Unseen protection is independent: test both response policies with the same protected input.
         attributes = {"seed": {"unseen_input_protection": True}}
         if declared is not None:
             attributes["seed"]["response_rejection"] = declared
-        historical = make_record(
-            "session_created",
-            session_id="s",
-            payload={
-                "principal": "test",
-                "workspace": "/tmp",
-                "parent_session_id": None,
-                "parent_operation_id": None,
-                "attributes": attributes,
-            },
-        )
-        with patch.object(SessionSpec, "record", return_value=historical), store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", "/tmp"), consumers=("events",))
-            tx.push("s", InboxItem("initial", "user", {"content": "go"}))
+        create_fixture_session(store, "s", attributes=attributes)
+        push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
+        creation = store.read("s").records[0]
+        ContentRef.from_dict(creation.record._payload["attributes"])
+        hydration = hydration_for_session_store(store, "s")
+        hydrated_attributes = hydrate_record_payload(creation, hydration)["attributes"]
+        assert hydrated_attributes["seed"]["unseen_input_protection"] is True
+        if declared is None:
+            assert "response_rejection" not in hydrated_attributes["seed"]
+        else:
+            assert hydrated_attributes["seed"]["response_rejection"] is declared
+        content_reader = fixture_content_reader(store, "s")
     deltas = []
     with local_completion(case) as (server, calls):
-        rt = runtime(database, [])
+        rt = runtime(database, [], content_reader=content_reader)
         rt.config = replace(rt.config, stream=deltas.append)
         rt.llm = VvLlmClient(
             [EndpointTarget(name, "synthetic-unused", f"http://127.0.0.1:{server.server_port}/{name}") for name in ("a", "b")],
@@ -181,27 +200,39 @@ def run_completion_case(store, database, case, declared, *, create=True):
         with patch.object(VvLlmClient, "_should_use_stream", return_value=not case.endswith("nonstream")):
             drive(store, "s", runtime=rt)
     state, rows, _ = store.read_state("s")
-    results = [r.payload["result"] for r in records_of(store, "op_completed")]
-    unknowns = records_of(store, "op_unknown")
-    terminal = records_of(store, "turn_ended")[-1].payload
+    retained_bodies = tuple(row.record.encode() for row in rows)
+    hydration = hydration_for_session_store(store, "s") if create else None
+    logical_state = state
+    if hydration is not None:
+        hydrated_rows = hydrate_records(rows, hydration)
+        logical_state = fold_hydrated_records(hydrated_rows, rows, _fold_factory_for(store), hydration)
+    completed = [row for row in rows if row.record.kind == "op_completed"]
+    results = [hydrate_record_payload(row, hydration).get("result") for row in completed]
+    unknown_rows = [row for row in rows if row.record.kind == "op_unknown"]
+    unknown_reasons = [hydrate_record_payload(row, hydration).get("reason") for row in unknown_rows]
+    terminal = hydrate_record_payload(next(row for row in reversed(rows) if row.record.kind == "turn_ended"), hydration)
+    projection = project_result(store, "s", "s/turn/initial") if create else None
+    projected_context = projection.raw_result.messages if projection is not None else project_context(rows, state)
     from vv_agent.events import event_from_dict
-    from vv_agent.session.projection import project_records
 
     events = [
-        event.to_dict() for event in project_records(rows) if event.to_dict()["type"] in {"model_call_failed", "run_failed"}
+        event.to_dict()
+        for event in project_records(rows, hydration=hydration)
+        if event.to_dict()["type"] in {"model_call_failed", "run_failed"}
     ]
     for event in events:
         assert event_from_dict(event).to_dict() == event
     is_rejection = declared is True and (case.startswith("filter") or case.startswith("anthropic"))
     if case == "eof":
-        assert len(unknowns) == 2 and not results
+        assert len(unknown_rows) == 2 and not results
         assert terminal["reason"] == "model_outcome_unknown"
-        assert all("ModelStreamInterrupted" in r.payload["reason"] for r in unknowns)
+        assert all("ModelStreamInterrupted" in reason for reason in unknown_reasons)
         assert len(calls) == 2
-        if state._protection is not None:
-            assert protected_start(rows, state) == 1
+        if logical_state._protection is not None:
+            assert protected_start(rows, logical_state) == 1
     elif is_rejection:
-        assert len(results) == 1 and not unknowns and len(calls) == 1
+        assert len(results) == 1 and not unknown_rows and len(calls) == 1
+        assert hydrated_attributes is not None and hydrated_attributes["seed"]["response_rejection"] is True
         assert terminal["reason"] == "model_request_rejected"
         failure = next(event for event in events if event["type"] == "model_call_failed")
         assert failure["outcome"] == "definitive" and failure["metadata"]["model_rejection"]["status_code"] == 200
@@ -214,20 +245,31 @@ def run_completion_case(store, database, case, declared, *, create=True):
             "message": "Model provider response was rejected.",
             "retryable": False,
         }
+        assert projection is not None and projection.error_code == "model_request_rejected"
         assert PARTIAL not in json.dumps([row.record.to_dict() for row in rows])
-        assert not any(m.role == "assistant" and m.content == PARTIAL for m in project_context(rows, state))
-        if state._protection is not None:
-            assert protected_start(rows, state) == 1
+        assert not any(m.role == "assistant" and m.content == PARTIAL for m in projected_context)
+        if logical_state._protection is not None:
+            assert protected_start(rows, logical_state) == 1
         if case == "filter_stream":
             assert any(getattr(d, "delta", None) == PARTIAL for d in deltas)
+        retained_rows = store.read_state("s")[1]
+        assert tuple(row.record.encode() for row in retained_rows) == retained_bodies
+        replayed_events = [
+            event.to_dict()
+            for event in project_records(retained_rows, hydration=hydration_for_session_store(store, "s"))
+            if event.to_dict()["type"] in {"model_call_failed", "run_failed"}
+        ]
+        assert replayed_events == events
+        replayed_projection = project_result(store, "s", "s/turn/initial")
+        assert replayed_projection.error_code == projection.error_code
     else:
-        assert len(results) == 1 and not unknowns and len(calls) == 1
+        assert len(results) == 1 and not unknown_rows and len(calls) == 1
         assert terminal["reason"] != "model_request_rejected"
         result = results[0]
         evidence = result["raw"]["completion_metadata"]
         if case.startswith("refusal"):
             assert result["content"] == REFUSAL and evidence["refusal"] == REFUSAL
-            assert any(m.role == "assistant" and m.content == REFUSAL for m in project_context(rows, state))
+            assert any(m.role == "assistant" and m.content == REFUSAL for m in projected_context)
         if case == "degraded":
             assert evidence["stream_terminated"] is None
             assert evidence["attributes"]["openai_done_observer"] == "unsupported_decoder"
@@ -235,16 +277,16 @@ def run_completion_case(store, database, case, declared, *, create=True):
             assert evidence["stream_terminated"] is None and evidence["stream_exhausted"] is None
         else:
             assert evidence["stream_terminated"] is True and evidence["stream_exhausted"] is True
-        assert protected_start(rows, state) is None
+        assert protected_start(rows, logical_state) is None
     return {
         "case": case,
         "declared": declared,
         "results": results,
-        "unknown_reasons": [r.payload["reason"] for r in unknowns],
+        "unknown_reasons": unknown_reasons,
         "terminal_reason": terminal["reason"],
         "failure_events": events,
-        "protected_start": protected_start(rows, state),
-        "context": [m.to_dict() for m in project_context(rows, state)],
+        "protected_start": protected_start(rows, logical_state),
+        "context": [m.to_dict() for m in projected_context],
         "http_calls": calls,
     }
 
@@ -269,33 +311,45 @@ def test_completion_fixture():
 def test_seed_policy_creation_replay(store, policy, value):
     from vv_agent.session.store import Conflict
 
+    store = wrap_fixture_store(store)
     attributes = {"seed": {"messages": [], "shared_state": {}}}
     if value is not None:
         attributes["seed"][policy] = value
-    creation = make_record(
-        "session_created",
-        session_id="policy",
-        payload={
-            "principal": "test",
-            "workspace": "/tmp",
-            "parent_session_id": None,
-            "parent_operation_id": None,
-            "attributes": attributes,
-        },
-    )
-    with patch.object(SessionSpec, "record", return_value=creation), store.atomic() as tx:
-        tx.create(SessionSpec("policy", "test", "/tmp"), consumers=("events",))
-    before = store.read("policy").records[0].record.encode()
+    receipt = create_fixture_session(store, "policy", attributes=attributes)
+    assert receipt.replayed is False
+    created = store.read("policy").records[0]
+    ContentRef.from_dict(created.record._payload["attributes"])
+    hydrated = hydrate_record_payload(created, hydration_for_session_store(store, "policy"))["attributes"]["seed"]
+    if value is None:
+        assert policy not in hydrated
+    else:
+        assert hydrated[policy] is value
+    before = created.record.encode()
     with store.atomic() as tx:
-        assert tx.create(
-            SessionSpec("policy", "test", "/tmp", attributes={"seed": {"messages": [], "shared_state": {}}}),
+        creation = created.record._payload
+        writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id="policy")
+        replayed = writer.create_session(
+            lambda _content: SessionSpec(
+                "policy",
+                creation["principal"],
+                creation["workspace"],
+                attributes=creation["attributes"],
+            ),
             consumers=("events",),
-        ).replayed
+        )
+        assert replayed.replayed is True
     assert store.read("policy").records[0].record.encode() == before
     with pytest.raises(Conflict), store.atomic() as tx:
-        tx.create(
-            SessionSpec(
-                "policy", "test", "/tmp", attributes={"seed": {"messages": [], "shared_state": {}, policy: not bool(value)}}
+        changed_attributes = {"seed": {"messages": [], "shared_state": {}, policy: not bool(value)}}
+        writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id="policy")
+        changed_ref = writer.put_json(changed_attributes)
+        creation = created.record._payload
+        writer.create_session(
+            lambda _content: SessionSpec(
+                "policy",
+                creation["principal"],
+                creation["workspace"],
+                attributes=changed_ref.to_dict(),
             ),
             consumers=("events",),
         )
@@ -428,24 +482,17 @@ def test_children_from_undeclared_source_freeze_false(store, database):
 
     from .test_children import parent_runtime
 
-    creation = make_record(
-        "session_created",
-        session_id="s",
-        payload={
-            "principal": "test",
-            "workspace": "/tmp",
-            "parent_session_id": None,
-            "parent_operation_id": None,
-            "attributes": {},
-        },
-    )
-    with patch.object(SessionSpec, "record", return_value=creation), store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp"), consumers=("events",))
-        tx.push("s", InboxItem("initial", "user", {"content": "go"}))
-    rt = parent_runtime(database)
-    rt.children["child_task"] = lambda _: ChildSession(SessionSpec("child", "test", "/tmp"), "work")
+    store = wrap_fixture_store(store)
+    create_fixture_session(store, "s", attributes={})
+    push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
+    rt = parent_runtime(store, database)
+    rt.content_reader = fixture_content_reader(store, "s")
+    rt.children["child_task"] = lambda plan: ChildSession(fixture_child_spec(store, plan.session_id, "child"), "work")
     drive(store, "s", runtime=rt)
-    assert store.read("child").records[0].record.payload["attributes"]["seed"] == {
+    creation = store.read("child").records[0]
+    ContentRef.from_dict(creation.record._payload["attributes"])
+    seed = hydrate_record_payload(creation, hydration_for_session_store(store, "child"))["attributes"]["seed"]
+    assert seed == {
         "unseen_input_protection": False,
         "response_rejection": False,
     }
@@ -458,25 +505,25 @@ def test_fork_from_undeclared_source_freezes_false(store):
 
     from .test_app_server_fork import run_turn, send, server_for
 
+    store = wrap_fixture_store(store)
     host = DefaultAppServerHost(
         agent=Agent("test", "test", model="test"),
         run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "test", [LLMResponse("done")])),
     )
     server = server_for(store, host)
-    original = SessionSpec.record
-
-    def undeclared(spec, **kwargs):
-        record = original(spec, **kwargs)
-        payload = record.payload
-        payload["attributes"].pop("seed", None)
-        return make_record("session_created", session_id=spec.session_id, payload=payload)
 
     try:
-        with patch.object(SessionSpec, "record", undeclared):
-            server.kernel.create("source", "/tmp", {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}})
+        create_fixture_session(
+            store,
+            "source",
+            attributes={"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}},
+            consumers=("events", "app_server", "traces"),
+        )
         turn = run_turn(server, "source", "go")
         result = send(server, "fork", "thread/fork", {"threadId": "source", "forkId": "copy", "throughTurnId": turn})
-        seed = store.read(result["threadId"]).records[0].record.payload["attributes"]["seed"]
+        creation = store.read(result["threadId"]).records[0]
+        ContentRef.from_dict(creation.record._payload["attributes"])
+        seed = hydrate_record_payload(creation, hydration_for_session_store(store, result["threadId"]))["attributes"]["seed"]
         assert seed["response_rejection"] is False and seed["unseen_input_protection"] is False
     finally:
         server.kernel.close()
@@ -488,10 +535,14 @@ def test_response_rejection_in_output_repair_preserves_repair_failure(store, dat
     from vv_agent.output_validation import OutputValidationResult
     from vv_agent.types import LLMResponse, Message
 
-    with store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp", attributes={"seed": {"response_rejection": declared}}), consumers=("events",))
-        tx.push("s", InboxItem("initial", "user", {"content": "go"}))
-    rt = runtime(database, [LLMResponse("invalid")])
+    store = wrap_fixture_store(store)
+    create_fixture_session(store, "s", attributes={"seed": {"response_rejection": declared}})
+    push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
+    creation = store.read("s").records[0]
+    ContentRef.from_dict(creation.record._payload["attributes"])
+    hydrated_seed = hydrate_record_payload(creation, hydration_for_session_store(store, "s"))["attributes"]["seed"]
+    assert hydrated_seed["response_rejection"] is declared
+    rt = runtime(database, [LLMResponse("invalid")], content_reader=fixture_content_reader(store, "s"))
     rt.agent.output_validation_enabled = True
     rt.agent.output_validator = lambda value, _: (
         OutputValidationResult.accept() if value == PARTIAL else OutputValidationResult.reject("invalid")
@@ -504,11 +555,15 @@ def test_response_rejection_in_output_repair_preserves_repair_failure(store, dat
             LlmRequest(model="test", messages=[Message("user", "repair")], tools=[])
         )
         drive(store, "s", runtime=rt)
-    result = records_of(store, "op_completed")[-1].payload["result"]
+    _, rows, _ = store.read_state("s")
+    hydration = hydration_for_session_store(store, "s")
+    result = hydrate_record_payload(next(row for row in reversed(rows) if row.record.kind == "op_completed"), hydration)["result"]
     if declared:
         assert result["error_code"] == "repair_provider_error"
+        assert result["content"] == "HTTP 200: Model provider response was rejected."
         assert PARTIAL not in json.dumps(result)
-        assert records_of(store, "turn_ended")[-1].payload["reason"] == "output_validation_failed"
+        terminal = hydrate_record_payload(next(row for row in reversed(rows) if row.record.kind == "turn_ended"), hydration)
+        assert terminal["reason"] == "output_validation_failed"
     else:
         assert result["content"] == PARTIAL
 

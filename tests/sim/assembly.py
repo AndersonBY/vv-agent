@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Generator
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
+from unittest.mock import patch
 
 from vv_agent._jsonschema import schema_issues
 from vv_agent._memory_settings import normalize_memory_settings
 from vv_agent._token_counting import count_messages_tokens
 from vv_agent.kernel import _after_cycle as cycle
-from vv_agent.kernel import _child_store, _driver_dispatch, _driver_recovery
+from vv_agent.kernel import _child_store, _driver_dispatch, _driver_recovery, _reducer
 from vv_agent.kernel import _child_summary as child_summary
 from vv_agent.kernel import _compaction_phase as compaction
 from vv_agent.kernel import _driver_inputs as inputs
@@ -30,24 +32,40 @@ from vv_agent.kernel._budget_values import BudgetUnavailableReason, RunBudgetLim
 from vv_agent.kernel._call_context import approved_tool_call
 from vv_agent.kernel._cancellation import Cancellation, CancelledError
 from vv_agent.kernel._child_store import ordinary_result_for_children
+from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content_publication import (
+    declared_content_ref,
+    make_record_before_publication,
+    publish_turn_started,
+)
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._drive import DriveBinding, drive_core
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._execution_values import AgentTask, LLMResponse
+from vv_agent.kernel._hydration import DefinitionContent, _parse_definition
 from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership, apply_controls, cancel_if_lost
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._model_settings import ModelSettings
 from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._provider_outcomes import Definitive, Unknown
-from vv_agent.kernel._records import Record, copy_json
-from vv_agent.kernel._reducer import Fold
+from vv_agent.kernel._record_codec import RecordError
+from vv_agent.kernel._records import InboxItem, Record, copy_json, digest
+from vv_agent.kernel._reducer import Fold, logical_inputs, logical_operation_payloads, logical_turn_wait_results
 from vv_agent.kernel._sql import SQLStore
-from vv_agent.kernel._store import LeaseLost, SessionStore
+from vv_agent.kernel._store import Conflict, LeaseLost, SessionStore, StoredRecord
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._tool_metadata import ToolIdempotency, ToolMetadata
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
+from vv_agent.session.content_reader import DurableContentReader, owner_scope
+from vv_agent.session.content_runtime import durable_content_reader
+from vv_agent.session.projection import (
+    SessionHydration,
+    _RetainedInboxItem,
+    hydrate_input,
+    hydrate_records,
+)
 
 
 class SimRuntimeNotReady(Exception):
@@ -231,6 +249,83 @@ def fold_factory() -> Fold:
     return Fold(normalize_memory_settings=normalize_memory_settings, count_messages=count_messages_tokens)
 
 
+@dataclass(frozen=True)
+class LogicalSnapshot:
+    signature: tuple[Any, ...]
+    fold: Fold
+    hydrated_records: tuple[StoredRecord, ...]
+    hydrated_by_id: dict[str, StoredRecord]
+    definitions_by_id: dict[str, DefinitionContent]
+
+
+class SimContentReader:
+    def __init__(self, reader: DurableContentReader, runtime: CoreRuntimeAssembly) -> None:
+        self._reader = reader
+        self._runtime = runtime
+
+    @property
+    def binding(self):
+        return self._reader.binding
+
+    def read(self, tenant_id, session_id, owner, slot, ref):
+        signature = self._runtime._content_signatures.get(session_id)
+        if signature is None:
+            return self._reader.read(tenant_id, session_id, owner, slot, ref)
+        key = (signature[2:], tenant_id, session_id, ref)
+        body = self._runtime._content_bodies.get(key)
+        if body is not None:
+            owner_kind, owner_value = owner_scope(owner)
+            column = 0 if owner_kind == "record_seq" else 1
+            if any(link[column] == owner_value and link[2] == ref.content_id and link[3] == slot for link in signature[4]):
+                return body
+        body = self._reader.read(tenant_id, session_id, owner, slot, ref)
+        self._runtime._content_bodies[key] = body
+        return body
+
+
+def extend_hydrated_fold(
+    fold: Fold | None,
+    records: tuple[StoredRecord, ...],
+    hydration: Any,
+    *,
+    raw_applied_inputs: bool,
+) -> tuple[Fold, tuple[StoredRecord, ...]]:
+    hydrated = hydrate_records(records, hydration)
+    hydrated_by_id = {row.record.record_id: row.record for row in hydrated}
+    logical_items = {}
+    fold_records = []
+    for stored, logical in zip(records, hydrated, strict=True):
+        record = logical.record
+        if stored.record.kind == "input_applied":
+            committed = InboxItem(**stored.record._payload["input"])
+            item = InboxItem(**logical.record._payload["input"])
+            logical_items[stored.record.record_id] = _RetainedInboxItem(item, committed.encode())
+            record = replace(record, payload=record.payload | {"input": stored.record._payload["input"]})
+        fold_records.append(record)
+
+    current = fold.fork() if fold is not None else fold_factory()
+    with logical_inputs(logical_items):
+        state = current.extend(
+            fold_records,
+            consumed_inputs=logical_items.values(),
+            bodies=(row.record.encode() for row in records),
+        )
+    if raw_applied_inputs:
+        raw_by_id = {row.record.record_id: row.record for row in records if row.record.kind == "input_applied"}
+        state.applied_inputs = {
+            input_id: raw_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()
+        }
+        if state.child_completions is not None:
+            state.child_completions = {
+                key: hydrated_by_id.get(record.record_id, record) for key, record in state.child_completions.items()
+            }
+    else:
+        state.applied_inputs = {
+            input_id: hydrated_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()
+        }
+    return current, hydrated
+
+
 def _count(request: TokenCount) -> int:
     messages = [request.messages] if isinstance(request.messages, Message) else request.messages
     return count_messages_tokens([message.to_openai_message() for message in messages], model=request.model)
@@ -296,6 +391,9 @@ class CoreRuntimeAssembly:
         )
         self._definitions = DefinitionCache()
         self._active_driver: SimDriver | None = None
+        self._logical_snapshots: dict[str, LogicalSnapshot] = {}
+        self._hydrated_inputs: dict[tuple[Any, ...], InboxItem] = {}
+        self.verify_frozen_definition = False
         self.approval_handle = None
         self._last_model_usage = {}
 
@@ -423,6 +521,10 @@ class SimDriver(CoreDriver):
             observe_cost=self._observe_cost,
             hook=lambda point, record: assembly.hook(point, record),
             emit_phase=lambda _duration, _fields: None,
+            content_reader=SimContentReader(
+                durable_content_reader(store, tenant_id=store.tenant_id, session_id=sid),
+                assembly.world,
+            ),
         )
 
     def _observe_cost(self):
@@ -432,13 +534,261 @@ class SimDriver(CoreDriver):
         value = meter.read()
         return value.to_dict() if value is not None else None
 
+    @staticmethod
+    def _published_record(stored):
+        record = Record.parse(stored.record.encode())
+        return stored if record == stored.record else replace(stored, record=record)
+
+    def load_state(self) -> None:
+        super().load_state()
+        self.records = tuple(self._published_record(stored) for stored in self.records)
+        self._stored_by_id = {stored.record.record_id: stored for stored in self.records}
+        self.fold.history = list(self.records)
+        self.fold.seen = {stored.record.record_id: stored.record.encode() for stored in self.records}
+
+    def extend(self, records) -> None:
+        super().extend(tuple(self._published_record(stored) for stored in records))
+
+    def commit(
+        self,
+        records: list[Record],
+        consumed: tuple[str, ...] = (),
+        *,
+        guarded: bool = False,
+        prepare: Callable[[Any], list[Record]] | None = None,
+    ) -> None:
+        logical_state = self.state if self.content_reader is not None and self.state is not self.fold.state else None
+        record_count = len(self.records)
+        if logical_state is not None:
+            self.state = self.fold.state
+        parked = [record for record in records if record.kind == "turn_parked"]
+        applied = [record for record in records if record.kind == "input_applied"]
+
+        def prepare_records(tx):
+            return list(prepare(tx)) if prepare is not None else []
+
+        try:
+            if (parked or applied) and self.content_reader is not None:
+                logical_input_items = {
+                    record.record_id: self._hydrated_input(InboxItem(**record._payload["input"])) for record in applied
+                }
+                operation_payloads = {record.record_id: record._payload for record in records if record.kind == "op_completed"}
+                logical_results = {}
+                if parked:
+                    state = logical_state or self._logical_state()
+                    for record in parked:
+                        operation = state.operations.get(record._payload["source_operation_id"])
+                        attempt = operation.attempts.get(record._payload["source_attempt"]) if operation is not None else None
+                        if attempt is not None and attempt.result is not None:
+                            logical_results[record.record_id] = attempt.result._payload["result"]
+                with (
+                    logical_turn_wait_results(logical_results),
+                    logical_inputs(logical_input_items),
+                    logical_operation_payloads(operation_payloads),
+                ):
+                    result = super().commit(records, consumed, guarded=guarded, prepare=prepare_records)
+            else:
+                result = super().commit(records, consumed, guarded=guarded, prepare=prepare_records)
+            return result
+        except Conflict as exc:
+            if (
+                str(exc) == "commit identity has different bytes"
+                and self.store.lease_status(self.sid)[1] != self.scope.lease.epoch
+            ):
+                raise LeaseLost("stale worker replayed a superseded commit identity") from exc
+            raise
+        finally:
+            if logical_state is not None:
+                self.state = logical_state if len(self.records) == record_count else self._logical_state()
+
+    def _logical_state(self):
+        if self.content_reader is None or self.state is not self.fold.state:
+            return self.state
+        signature = self.runtime.world.cached_state_signature(self.store, self.sid, self.records)
+        self.runtime.world._content_signatures[self.sid] = signature
+        cached = self.runtime._logical_snapshots.get(self.sid)
+        if cached is not None and cached.signature == signature:
+            return cached.fold.state
+        hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
+        prefix = cached.hydrated_records if cached is not None else ()
+        if cached is not None and cached.signature[0] == signature[0][: len(prefix)]:
+            fold, hydrated = extend_hydrated_fold(cached.fold, self.records[len(prefix) :], hydration, raw_applied_inputs=True)
+            hydrated_records = cached.hydrated_records + hydrated
+            hydrated_by_id = cached.hydrated_by_id | {row.record.record_id: row for row in hydrated}
+            definitions_by_id = cached.definitions_by_id | {
+                row.record.record_id: _parse_definition(row.record._payload["definition"])
+                for row in hydrated
+                if row.record.kind == "turn_started"
+            }
+        else:
+            fold, hydrated_records = extend_hydrated_fold(None, self.records, hydration, raw_applied_inputs=True)
+            hydrated_by_id = {row.record.record_id: row for row in hydrated_records}
+            definitions_by_id = {
+                row.record.record_id: _parse_definition(row.record._payload["definition"])
+                for row in hydrated_records
+                if row.record.kind == "turn_started"
+            }
+        self.runtime._logical_snapshots[self.sid] = LogicalSnapshot(
+            signature,
+            fold,
+            hydrated_records,
+            hydrated_by_id,
+            definitions_by_id,
+        )
+        return fold.state
+
+    def _logical_record(self, record: Record) -> StoredRecord | None:
+        self._logical_state()
+        snapshot = self.runtime._logical_snapshots.get(self.sid)
+        return snapshot.hydrated_by_id.get(record.record_id) if snapshot is not None else None
+
+    def _hydrated_input(self, item: InboxItem) -> InboxItem:
+        signature = self.runtime.world._content_signatures.get(self.sid)
+        if signature is None:
+            signature = self.runtime.world.cached_state_signature(self.store, self.sid, self.records)
+            self.runtime.world._content_signatures[self.sid] = signature
+        key = (signature[2:], item.encode())
+        cached = self.runtime._hydrated_inputs.get(key)
+        if cached is None:
+            hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
+            cached = hydrate_input(item, hydration)
+            self.runtime._hydrated_inputs[key] = cached
+        return cached
+
+    def record_content_ref(self, record: Record, slot: str):
+        stored = next(
+            (row for row in self.records if row.record is record or row.record.record_id == record.record_id),
+            None,
+        )
+        retained = stored.record if stored is not None else record
+        return super().record_content_ref(Record.parse(retained.encode()), slot)
+
+    def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any:
+        operation = self.state.operations.get(record.operation_id or "")
+        attempt = operation.attempts.get(record.attempt) if operation is not None and record.attempt is not None else None
+        if attempt is not None and attempt.prepared is not None:
+            prepared = Record.parse(self.stored_record(attempt.prepared).record.encode())
+            try:
+                prepared_ref = self._content_field(prepared, slot)
+            except RecordError:
+                pass
+            else:
+                supplied_ref = ref.to_dict() if isinstance(ref, ContentRef) else ref
+                if prepared_ref == supplied_ref:
+                    return super().hydrate_record_field(prepared, slot, prepared_ref)
+        stored = next(
+            (row for row in self.records if row.record is record or row.record.record_id == record.record_id),
+            None,
+        )
+        if stored is None:
+            return super().hydrate_record_field(record, slot, ref)
+        raw = Record.parse(stored.record.encode())
+        raw_ref = self._content_field(raw, slot)
+        logical = self._logical_record(raw)
+        if logical is None:
+            return super().hydrate_record_field(raw, slot, raw_ref)
+        value = self._content_field(logical.record, slot)
+        supplied = ref.to_dict() if isinstance(ref, ContentRef) else ref
+        if supplied not in (raw_ref, value):
+            raise RecordError(f"content field disagrees with record payload: {record.kind}/{slot}")
+        return copy_json(value)
+
+    def hydrate_plan(self, record: Record) -> Record:
+        stored = self.stored_record(record)
+        logical = self._logical_record(stored.record)
+        return logical.record if logical is not None else super().hydrate_plan(Record.parse(stored.record.encode()))
+
+    def hydrated_definition(self, record: Record) -> DefinitionContent:
+        stored = self.stored_record(record)
+        self._logical_state()
+        return self.runtime._logical_snapshots[self.sid].definitions_by_id[stored.record.record_id]
+
+    def hydrate_parked_wait(self, operation_id: str, attempt: int, wait: dict[str, Any]) -> dict[str, Any]:
+        if self.state is self.fold.state:
+            return super().hydrate_parked_wait(operation_id, attempt, wait)
+        stored = next(
+            (
+                row.record
+                for row in reversed(self.records)
+                if row.record.kind == "op_parked" and row.record.operation_id == operation_id and row.record.attempt == attempt
+            ),
+            None,
+        )
+        return super().hydrate_parked_wait(operation_id, attempt, stored._payload if stored is not None else wait)
+
+    @contextmanager
+    def _logical_state_scope(self):
+        state = self.state
+        nested = state is not self.fold.state
+        if self.content_reader is None:
+            yield state
+            return
+        self.state = self._logical_state()
+        try:
+            yield self.state
+        finally:
+            self.state = self._logical_state() if nested else self.fold.state
+
+    @contextmanager
+    def _raw_child_verification_scope(self):
+        verify_completion = inputs.verify_completion
+
+        def verify_stored_child(store, parent_id, handle, item):
+            if item.kind == "child_result":
+                stored = store.read_input(parent_id, item.input_id)
+                if stored is not None and stored.item.kind == "child_result":
+                    item = stored.item
+            return verify_completion(store, parent_id, handle, item)
+
+        with patch.object(inputs, "verify_completion", verify_stored_child):
+            yield
+
+    @contextmanager
+    def _logical_approval_input_scope(self):
+        verify_input = _reducer._input
+
+        def verify_input_with_logical_wait(state, record, consumed):
+            payload = record._payload
+            if (
+                record.kind == "input_applied"
+                and payload["disposition"] == "applied"
+                and payload["input"]["kind"] == "approval_answer"
+            ):
+                operation_id = payload["input"]["payload"]["operation_id"]
+                attempt_number = payload["input"]["payload"]["attempt"]
+                attempt = state.operations[operation_id].attempts[attempt_number]
+                scope = attempt.wait["handle"].get("scope")
+                hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
+                parked = next(
+                    (
+                        row
+                        for row in reversed(self.records)
+                        if row.record.kind == "op_parked"
+                        and row.record.operation_id == operation_id
+                        and row.record.attempt == attempt_number
+                    ),
+                    None,
+                )
+                if parked is not None and declared_content_ref(scope) is not None:
+                    attempt.wait = hydrate_records((parked,), hydration)[0].record.payload
+                logical_item = self._hydrated_input(InboxItem(**payload["input"]))
+                with _reducer.logical_inputs({record.record_id: logical_item}):
+                    return verify_input(state, record, consumed)
+            return verify_input(state, record, consumed)
+
+        with patch.object(_reducer, "_input", verify_input_with_logical_wait):
+            yield
+
     def task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
-        return self.state.turns[self.state.active_turn_id].start.task()
+        return self._task()
 
     def _task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
-        return self.state.turns[self.state.active_turn_id].start._task()
+        start = self.state.turns[self.state.active_turn_id].start
+        if self.content_reader is None:
+            return start._task()
+        return self.hydrated_definition(start).task
 
     def run(self, steps: Generator[object, Any, Any]):
         response = None
@@ -496,9 +846,26 @@ class SimDriver(CoreDriver):
                 return self.store.next_drive_delay_ms(self.sid, lease=lease)
         if isinstance(request, (_driver_recovery.Definition, inputs.CurrentDefinition)):
             task = request.start if isinstance(request, _driver_recovery.Definition) else request.task
-            return inputs.DefinitionFacts(
+            facts = inputs.DefinitionFacts(
                 self.runtime._definitions, self.runtime.definition_bindings(task), self.runtime.registry
             )
+            if isinstance(request, _driver_recovery.Definition) and self.runtime.verify_frozen_definition:
+                start = self.state.turns[self.state.active_turn_id].start
+                frozen = self.hydrated_definition(start)
+                frozen_definition = {
+                    "agent_name": frozen.agent_name,
+                    "memory_settings": frozen.memory_settings,
+                    "child_tools": list(frozen.child_tools),
+                    "model_binding": frozen.model_binding,
+                    "capabilities": frozen.capabilities,
+                    "task": frozen.task.to_dict(),
+                    "tools": list(frozen.tools),
+                }
+                runtime_digest = facts.definitions.definition_digest(task, facts.bindings, facts.catalog)
+                if runtime_digest != digest(frozen_definition):
+                    # Route the runtime mismatch through the core's existing failed-turn path.
+                    start._payload["definition_digest"] = runtime_digest
+            return facts
         if isinstance(request, _driver_recovery.BindHostState):
             return self.runtime.shared_state(request.task)
         if isinstance(request, _driver_recovery.Hook):
@@ -647,6 +1014,37 @@ class SimDriver(CoreDriver):
         return self._handle_dispatch(request)
 
     def _handle_dispatch(self, request):
+        if isinstance(request, inputs.PublishTurnStarted):
+
+            def prepare_turn_started(tx):
+                writer = self.content_writer(tx)
+                content = publish_turn_started(
+                    writer,
+                    request.definition,
+                    request.budget,
+                    admission_definition_digest=request.admission_definition_digest,
+                )
+                record = self.record(
+                    "turn_started",
+                    {
+                        "input_ids": [request.input_id],
+                        "definition": content.definition.to_dict(),
+                        "definition_digest": content.definition_digest,
+                        "handler_version": request.handler_version,
+                        "budget": content.budget.to_dict(),
+                        "binding": None,
+                        "generation": request.generation,
+                    },
+                    tid=request.tid,
+                )
+                object.__setattr__(
+                    record,
+                    "_sim_logical_payload",
+                    record.payload | {"definition": request.definition, "budget": request.budget},
+                )
+                return [record]
+
+            return self.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, _driver_dispatch.PrepareContext):
             self.context_plan, self.context_task = request.plan, request.task
             self.context_shared = self.shared_state()
@@ -893,7 +1291,11 @@ class SimDriver(CoreDriver):
     def transcript(self):
         from vv_agent.kernel._context import project_context
 
-        return project_context(self.records, self.state, _message_cache=self.fold._messages)
+        if self.content_reader is None:
+            return project_context(self.records, self.state, _message_cache=self.fold._messages)
+        state = self._logical_state()
+        records = self.runtime._logical_snapshots[self.sid].hydrated_records
+        return project_context(records, state, _message_cache=self.fold._messages)
 
     def shared_state(self):
         if self.state.active_turn_id is None:
@@ -907,7 +1309,14 @@ class SimDriver(CoreDriver):
         return self.run(planning.effective_model(self))
 
     def step(self):
-        return self.run(_driver_recovery.step(self, one_turn=self.one_turn))
+        # Recovery retries start from hydrated values; commit still publishes the raw record.
+        with (
+            self._logical_state_scope(),
+            self._raw_child_verification_scope(),
+            self._logical_approval_input_scope(),
+            patch.object(_driver_recovery, "make_record", make_record_before_publication, create=True),
+        ):
+            return self.run(_driver_recovery.step(self, one_turn=self.one_turn))
 
     def close(self, status, reason, result=None, *, transferred=False):
         return self.run(_driver_recovery.close(self, status, reason, result, transferred=transferred))

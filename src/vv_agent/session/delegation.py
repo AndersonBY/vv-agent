@@ -18,10 +18,8 @@ from vv_agent.kernel._child_delegation import error as error
 from vv_agent.kernel._child_delegation import success as success
 from vv_agent.kernel._child_store import (
     _store_tenant_id,
-    ordinary_result_for_children,
+    child_outcome,
 )
-from vv_agent.kernel._content import ContentRef
-from vv_agent.kernel._hydration import SessionHydrator
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -52,12 +50,10 @@ from .children import ChildSession
 from .content_runtime import (
     INPUT_ACTOR_ATTRIBUTES,
     INPUT_CONTENT,
-    SESSION_ATTRIBUTES,
-    SESSION_WORKSPACE,
     SessionContentWriter,
     durable_content_reader,
-    read_record_json,
 )
+from .projection import SessionHydration, hydrate_records
 from .records import CHILD_ADMISSION, InboxItem, Record, copy_json, validate
 from .reducer import ExecutionState
 from .result import project_result
@@ -69,28 +65,14 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 
-def _record_content(store: SessionStore, sid: str, raw, slot: str):
-    try:
-        ContentRef.from_dict(raw)
-    except (TypeError, ValueError):
-        return raw
-    value = read_record_json(
-        store,
-        tenant_id=_store_tenant_id(store),
-        session_id=sid,
-        record_seq=1,
-        ref=raw,
-        slot=slot,
-    )
-    if slot != SESSION_ATTRIBUTES:
-        return value
-    hydrator = SessionHydrator(
-        durable_content_reader(store, tenant_id=_store_tenant_id(store), session_id=sid),
-        tenant_id=_store_tenant_id(store),
-        session_id=sid,
-        owner="record:1",
-    )
-    return hydrator.nested("session_created", {"attributes": raw}, slot, value)
+def _hydrated_records(store: SessionStore, sid: str, records):
+    hydration = SessionHydration.from_store(store, tenant_id=_store_tenant_id(store), session_id=sid)
+    return hydrate_records(records, hydration)
+
+
+def _created_record(store: SessionStore, sid: str) -> Record:
+    stored = store.read(sid, limit=1).records[0]
+    return _hydrated_records(store, sid, (stored,))[0].record
 
 
 def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:
@@ -239,12 +221,13 @@ def assemble(
 
     from ._dispatch_delegation import ChildCompilationHost
 
-    return ChildCompilationHost(runtime, context).run(assemble_steps(store, plan, task))
+    attributes = _created_record(store, plan.session_id).payload["attributes"]
+    return ChildCompilationHost(runtime, context, session_attributes=attributes).run(assemble_steps(store, plan, task))
 
 
-def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Record | None = None) -> Runtime:
-    created = created if created is not None else store.read(sid, limit=1).records[0].record
-    attributes = _record_content(store, sid, created.payload["attributes"], SESSION_ATTRIBUTES)
+def reconstruct(runtime: Runtime, store: SessionStore, sid: str) -> Runtime:
+    created = _created_record(store, sid)
+    attributes = created.payload["attributes"]
     admission = attributes["child_admission"]
     validate(admission, CHILD_ADMISSION)
     if admission["handler_version"] != runtime.handler_version:
@@ -254,7 +237,7 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Rec
     # Reapply current host restrictions; the task keeps the frozen restrictions as well.
     context = SimpleNamespace(
         shared_state=runtime.bind_state(task.initial_shared_state, task),
-        workspace=Path(_record_content(store, sid, created._payload["workspace"], SESSION_WORKSPACE)),
+        workspace=Path(created.payload["workspace"]),
         workspace_backend=runtime.config.workspace_backend,
     )
     if context.workspace_backend is None:
@@ -287,15 +270,17 @@ def outcome(
 ) -> SubTaskOutcome:
     snapshot = snapshot if snapshot is not None else store.read_state(sid)
     state, rows, _ = snapshot
+    created = _hydrated_records(store, sid, rows[:1])[0].record
+    attributes = created.payload["attributes"]
     turn_id = (
         turn_id
         or state.active_turn_id
         or next(
             reversed(state.turns),
-            _record_content(store, sid, rows[0].record._payload["attributes"], SESSION_ATTRIBUTES)["child_handle"]["turn_id"],
+            attributes["child_handle"]["turn_id"],
         )
     )
-    admission = _record_content(store, sid, rows[0].record._payload["attributes"], SESSION_ATTRIBUTES).get("child_admission")
+    admission = attributes.get("child_admission")
     name = admission["definition"]["agent_name"] if admission else runtime.agent.name
     if turn_id not in state.turns:
         return SubTaskOutcome(sid, name, AgentStatus.RUNNING, session_id=sid)
@@ -324,24 +309,45 @@ def outcome(
     )
 
 
+def _ordinary_result_for_children(
+    store: SessionStore,
+    plan: Record,
+    handles: list[dict[str, Any]],
+    first: tuple[ExecutionState, tuple[StoredRecord, ...], int],
+) -> ToolExecutionResult:
+    results = []
+    for index, handle in enumerate(handles):
+        snapshot = first if index == 0 else store.read_state(handle["session_id"])
+        rows = _hydrated_records(store, handle["session_id"], snapshot[1])
+        terminal = next(row for row in rows if row.record.kind == "turn_ended" and row.record.turn_id == handle["turn_id"])
+        results.append(child_outcome(plan, terminal))
+    if len(results) == 1:
+        return results[0]
+    return ToolExecutionResult(
+        plan._payload["request"]["id"],
+        json.dumps([result.to_dict() for result in results]),
+        status_code=ToolResultStatus.ERROR
+        if any(result.status_code == ToolResultStatus.ERROR for result in results)
+        else ToolResultStatus.SUCCESS,
+        metadata={"children": [result.metadata for result in results]},
+    )
+
+
 def result_for_children(
     store: SessionStore, plan: Record, handles: list[dict[str, Any]], runtime: Runtime
 ) -> ToolExecutionResult:
     first = store.read_state(handles[0]["session_id"])
-    admission = _record_content(
-        store,
-        handles[0]["session_id"],
-        first[1][0].record._payload["attributes"],
-        SESSION_ATTRIBUTES,
-    ).get("child_admission")
+    admission = (
+        _hydrated_records(store, handles[0]["session_id"], first[1][:1])[0].record.payload["attributes"].get("child_admission")
+    )
     if admission is None:
-        return ordinary_result_for_children(store, plan, handles, first_snapshot=first)
+        return _ordinary_result_for_children(store, plan, handles, first)
     mode = admission["mode"]
     if mode == "configured":
         outcomes = []
         for i, h in enumerate(handles):
             snapshot = first if i == 0 else store.read_state(h["session_id"])
-            rt = reconstruct(runtime, store, h["session_id"], created=snapshot[1][0].record)
+            rt = reconstruct(runtime, store, h["session_id"])
             outcomes.append(outcome(store, h["session_id"], rt, h["turn_id"], snapshot=snapshot))
         values = iter(outcomes)
         ctx = SimpleNamespace(
@@ -352,7 +358,7 @@ def result_for_children(
         )
     else:
         h = handles[0]
-        rt = reconstruct(runtime, store, h["session_id"], created=first[1][0].record)
+        rt = reconstruct(runtime, store, h["session_id"])
         projected = project_result(store, h["session_id"], h["turn_id"], runtime=rt, snapshot=first)
         result = ToolExecutionResult(
             "",
@@ -379,13 +385,8 @@ def result_for_children(
 
 
 def admitted_result(store: SessionStore, plan: Record, handles: list[dict[str, Any]]) -> ToolExecutionResult:
-    created = store.read(handles[0]["session_id"], limit=1).records[0].record
-    admission = _record_content(
-        store,
-        handles[0]["session_id"],
-        created._payload["attributes"],
-        SESSION_ATTRIBUTES,
-    ).get("child_admission")
+    created = _created_record(store, handles[0]["session_id"])
+    admission = created.payload["attributes"].get("child_admission")
     if not admission:
         if len(handles) > 1:
             return ToolExecutionResult(plan._payload["request"]["id"], json.dumps(handles), metadata={"children": handles})
@@ -451,7 +452,6 @@ class ChildTasks:
         snapshot = self.store.read_state(task_id)
         state, _, _ = snapshot
         value = outcome(self.store, task_id, rt, snapshot=snapshot)
-        latest_turn = state.turns[next(reversed(state.turns))] if state.turns else None
         if state.active_turn_id is not None and state.phase == "active":
             value = replace(value, status=AgentStatus.RUNNING)
         if state.active_turn_id is None and (
@@ -461,13 +461,19 @@ class ChildTasks:
             )
         ):
             value = replace(value, status=AgentStatus.RUNNING)
-        attributes = _record_content(self.store, task_id, created.payload["attributes"], SESSION_ATTRIBUTES)
+        attributes = _created_record(self.store, task_id).payload["attributes"]
         task = AgentTask.from_dict(attributes["child_admission"]["definition"]["task"])
+        latest_turn = state.turns[next(reversed(state.turns))] if state.turns else None
+        task_title = task.user_prompt
+        if latest_turn is not None:
+            stored_start = next(row for row in snapshot[1] if row.record.record_id == latest_turn.start.record_id)
+            hydrated_start = _hydrated_records(self.store, task_id, (stored_start,))[0].record
+            task_title = AgentTask.from_dict(hydrated_start.payload["definition"]["task"]).user_prompt
         return SimpleNamespace(
             task_id=task_id,
             session_id=task_id,
             agent_name=value.agent_name,
-            task_title=latest_turn.start._payload["definition"]["task"]["user_prompt"] if latest_turn else task.user_prompt,
+            task_title=task_title,
             parent_run_id=task.metadata.get("parent_run_id"),
             parent_tool_call_id=task.metadata.get("parent_tool_call_id"),
             outcome=value,
@@ -493,8 +499,7 @@ class ChildTasks:
     def control(self, task_id: str, input_id: str, kind: str, payload: dict[str, Any]) -> None:
         if self.get(task_id) is None:
             raise KeyError(task_id)
-        created = self.store.read(task_id, limit=1).records[0].record
-        attributes = _record_content(self.store, task_id, created._payload["attributes"], SESSION_ATTRIBUTES)
+        attributes = _created_record(self.store, task_id).payload["attributes"]
         h = attributes["child_handle"]
         state, _, _ = self.store.read_state(task_id)
         turn_id = state.active_turn_id or h["turn_id"]

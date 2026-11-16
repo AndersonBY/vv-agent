@@ -14,6 +14,8 @@ from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, 
 from vv_agent.kernel._content_publication import (
     declared_record_content,
     link_declared_record_content,
+    publish_content_container,
+    publish_json,
     publish_record_content,
     publish_turn_started,
 )
@@ -112,7 +114,7 @@ def test_legal_refs_are_preserved_and_only_declared_slots_are_linked() -> None:
     writer = _Writer([])
     writer.remember(definition_ref, {"agent_name": "kernel", "task": {"user_prompt": "work"}})
 
-    published = publish_turn_started(writer, definition_ref.to_dict(), budget_ref)
+    published = publish_turn_started(writer, definition_ref, budget_ref)
     assert published.definition == definition_ref
     assert published.budget == budget_ref
     assert published.definition_digest == reference_digest(definition_ref)
@@ -173,6 +175,21 @@ def test_plain_values_are_put_once_and_child_digest_is_checked() -> None:
     assert rejected.puts == []
 
 
+def test_producer_entries_preserve_only_typed_refs() -> None:
+    typed = _ref("typed")
+    typed_writer = _Writer([])
+    assert publish_json(typed_writer, typed) == typed
+    assert publish_content_container(typed_writer, typed, slot="attributes").ref == typed
+    assert typed_writer.puts == []
+
+    reference_shaped_json = typed.to_dict()
+    json_ref = _ref("json")
+    json_writer = _Writer([json_ref])
+    published = publish_json(json_writer, reference_shaped_json)
+    assert published == json_ref
+    assert json_writer.puts == [reference_shaped_json]
+
+
 def _plain_record(kind: str, payload: dict, *, suffix: str = "1", session_id: str = "session-a") -> Record:
     operation_id = f"operation/{suffix}"
     turn_id = "turn-a"
@@ -210,7 +227,7 @@ def test_publisher_handles_planned_and_completed_refs_and_digests() -> None:
             "request_digest": digest(request),
             "context_version": "7",
             "dependencies": [],
-            "tool": tool_ref.to_dict(),
+            "tool": tool_ref,
             "idempotency_key": "operation/1",
             "budget_admission": budget_admission,
             "not_before_ms": None,
@@ -225,7 +242,7 @@ def test_publisher_handles_planned_and_completed_refs_and_digests() -> None:
         {
             "result": result,
             "result_digest": digest(result),
-            "usage": usage_ref.to_dict(),
+            "usage": usage_ref,
             "shared_state": None,
             "evidence": evidence,
             "execution_started": True,
@@ -279,13 +296,13 @@ def test_publisher_does_not_recursively_guess_unknown_slots() -> None:
         {
             "op_kind": "model",
             "purpose": "primary",
-            "request": request_ref.to_dict(),
+            "request": request_ref,
             "request_digest": reference_digest(request_ref),
             "context_version": "1",
             "dependencies": [],
-            "tool": tool_ref.to_dict(),
+            "tool": tool_ref,
             "idempotency_key": None,
-            "budget_admission": budget_ref.to_dict(),
+            "budget_admission": budget_ref,
             "not_before_ms": None,
             "provider_binding": "model",
             "consumed_unknowns": [],
@@ -524,7 +541,10 @@ def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monke
             ("default", "s", turn.seq, "definition"),
         )
 
-        driver.commit([record], guarded=True)
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            replay = declared_record_content((turn.record,), ((turn.record.record_id, turn.seq),))
+            link_declared_record_content(writer, replay)
 
         assert puts == [definition, budget]
         links = store._rows(

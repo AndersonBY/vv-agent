@@ -6,13 +6,16 @@ import json
 from dataclasses import replace
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._child_store import ChildSession, child_delivery, completion_input
+from vv_agent.kernel._child_store import ChildSession, child_delivery
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, Unknown
-from vv_agent.kernel._records import InboxItem, SessionSpec
+from vv_agent.kernel._records import InboxItem
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolExecutionResult
+from vv_agent.session.content_runtime import CHILD_RESULT, INPUT_ACTOR_ATTRIBUTES, SessionContentWriter
+from vv_agent.session.projection import hydrate_records, hydration_for_session_store
 
-from .world import FaultyStore, SimWorld, WorkerDeath, require
+from .world import FaultyStore, SimClock, SimWorld, WorkerDeath, require
 
 SCENARIOS = (
     "tools",
@@ -128,14 +131,19 @@ class Provider:
 TOOL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}
 
 
+def _hydrated_records_by_id(w, sid, rows):
+    hydration = hydration_for_session_store(w.connection("observer"), sid)
+    return {row.record.record_id: row.record for row in hydrate_records(rows, hydration)}
+
+
 def scan_after_hint_loss(w, provider, children, *, ready_active=False):
     observer = w.connection("observer")
     if ready_active:
-        state, rows, _ = observer.read_state("s")
+        state, rows, _ = w.read_state("s")
         require(state.active_turn_id is not None and observer.is_runnable("s"), "I4", "hint loss did not reach READY ACTIVE work")
         w.events.append({"lost_hints": len(w.queue), "ready_active_head": rows[-1].seq})
     w.scan(provider=provider, children=children, participant="worker-1", rounds=4)
-    require(observer.read_state("s")[0].active_turn_id is None, "I4", "fair SQL scan did not finish READY ACTIVE work")
+    require(w.read_state("s")[0].active_turn_id is None, "I4", "fair SQL scan did not finish READY ACTIVE work")
 
 
 def lease_takeover(w, provider):
@@ -150,7 +158,11 @@ def lease_takeover(w, provider):
     def entry(participant):
         if not owner:
             owner.append(participant)
-        result = w.drive(participant=participant, provider=provider)
+        try:
+            result = w.drive(participant=participant, provider=provider)
+        except LeaseLost:
+            w.events.append({"stale_drive_rejected": participant})
+            return
         if owner and owner[0] != participant and not raced:
             require(result is False, "I2", "competing worker acquired an unexpired lease")
             w.events.append({"contender_refused": participant})
@@ -235,7 +247,7 @@ def reject_forged_tool_receipts(w, provider):
     for item in (forged_usage, forged_result):
         w.push("s", item)
     w.drive(provider=provider, participant="worker-1")
-    state, rows, _ = w.connection("observer").read_state("s")
+    state, rows, _ = w.read_state("s")
     for item in (forged_usage, forged_result):
         require(
             state.applied_inputs[item.input_id].payload["disposition"] == "rejected",
@@ -253,11 +265,14 @@ def reject_forged_tool_receipts(w, provider):
 
 
 def check_metered_tool(w, provider):
-    state, rows, _ = w.connection("observer").read_state("s")
+    state, rows, _ = w.read_state("s")
     completion = next(r.record for r in rows if r.record.kind == "op_completed" and "/tool/" in (r.record.operation_id or ""))
+    logical_completion = _hydrated_records_by_id(w, "s", rows)[completion.record_id]
     measured = json.loads(provider.store._one("SELECT usage FROM sim_effect")[0])
+    raw_usage = ContentRef.from_dict(completion._payload["usage"])
+    require(raw_usage.content_id, "I5", "tool completion did not retain a raw usage ContentRef")
     require(
-        canonical_json_bytes(completion.payload["usage"]) == canonical_json_bytes(measured),
+        canonical_json_bytes(logical_completion.payload["usage"]) == canonical_json_bytes(measured),
         "I5",
         "tool usage differs from external SQL receipt",
     )
@@ -276,7 +291,7 @@ def check_metered_tool(w, provider):
     require(provider.authenticate(conflict, plan), "I5", "conflict case never reached authenticated receipt admission")
     w.push("s", conflict)
     w.drive(provider=provider, participant="worker-1")
-    state, rows, _ = w.connection("observer").read_state("s")
+    state, rows, _ = w.read_state("s")
     applied = state.applied_inputs[conflict.input_id].payload
     require(
         applied["disposition"] == "rejected" and applied["reason"] == "result conflict",
@@ -292,10 +307,10 @@ def approval_reply(w, provider):
     w.drive(provider=provider)
     w.check()
     require(not any(call[3] == "tool" for call in w.calls), "I1", "unapproved effect was dispatched")
-    observer = w.connection("observer")
-    state, rows, _ = observer.read_state("s")
+    w.connection("observer")
+    state, rows, _ = w.read_state("s")
     park = next(row.record for row in rows if row.record.kind == "op_parked")
-    handle = park.payload["handle"]
+    handle = _hydrated_records_by_id(w, "s", rows)[park.record_id].payload["handle"]
     require(handle["kind"] == "approval", "approval", "tool did not wait for host approval")
     valid = InboxItem(
         "approval-valid",
@@ -323,7 +338,7 @@ def approval_reply(w, provider):
         item = invalid.pop(w.choices.choose("approval/invalid-reply", sorted(invalid)))
         w.push("s", item)
         w.drive(provider=provider, participant="worker-1")
-        state, rows, _ = observer.read_state("s")
+        state, rows, _ = w.read_state("s")
         require(tuple(w.calls) == before, "I1", "bad or stale approval dispatched external work")
         require(
             state.applied_inputs[item.input_id].payload["disposition"] == "rejected"
@@ -338,10 +353,17 @@ def approval_reply(w, provider):
     # A new input identity with the same resolved request also cannot send again.
     w.push("s", replace(valid, input_id="approval-late-copy"))
     w.scan(provider=provider, participant="worker-1")
-    state, rows, _ = observer.read_state("s")
+    state, rows, _ = w.read_state("s")
     require(
         state.applied_inputs[valid.input_id].payload["disposition"] == "applied", "approval", "valid approval was not applied"
     )
+    raw_applied = next(
+        row.record
+        for row in rows
+        if row.record.kind == "input_applied" and row.record._payload["input"]["input_id"] == valid.input_id
+    )
+    raw_scope = ContentRef.from_dict(raw_applied._payload["input"]["payload"]["scope"])
+    require(raw_scope.content_id, "approval", "approval answer did not retain a raw scope ContentRef")
     for key in ("approval-copy", "approval-late-copy"):
         require(state.applied_inputs[key].payload["disposition"] == "noop", "approval", "resolved approval was applied again")
     starts = [row for row in rows if row.record.kind == "op_started" and row.record.operation_id == park.operation_id]
@@ -372,12 +394,15 @@ def future_input(w, provider):
     w.events.append({"future_input_held": "future", "available_ms": due, "observed_ms": now})
     # SQLite advances injected time; PostgreSQL sleeps against unchanged SQL time.
     deadline = w.clock.monotonic() + 10
-    while (remaining := due - observer._now()) > 0:
-        require(w.clock.monotonic() < deadline, "scheduler", "database due-time wait exceeded ten seconds")
-        w.clock.sleep(min(remaining / 1000, 0.1))
+    if isinstance(w.clock, SimClock):
+        w.clock.sleep(max(0, due - observer._now()) / 1000)
+    else:
+        while (remaining := due - observer._now()) > 0:
+            require(w.clock.monotonic() < deadline, "scheduler", "database due-time wait exceeded ten seconds")
+            w.clock.sleep(min(remaining / 1000, 0.1))
     require(observer.is_runnable("s"), "I4", "due input did not make SQL work runnable")
     require(w.scan(provider=provider, participant="worker-1"), "I4", "SQL scanner did not recover the due input")
-    state, rows, _ = observer.read_state("s")
+    state, rows, _ = w.read_state("s")
     applications = [
         row for row in rows if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "future"
     ]
@@ -425,12 +450,12 @@ def _audit_executor_stops(w):
 
 def _drive_until_parked(w, sid, *, participant, provider, children):
     """Reschedule only an executor stop while establishing the I7 precondition."""
-    observer = w.connection("observer")
+    w.connection("observer")
     for drive_number in range(1, 5):
         event_start = len(w.events)
         w.drive(sid, participant=participant, provider=provider, children=children)
         w.check()
-        state, rows, _ = observer.read_state(sid)
+        state, rows, _ = w.read_state(sid)
         terminals = [row.record for row in rows if row.record.kind == "turn_ended"]
         require(not terminals, "I7", f"{sid} ended before root cancellation")
         parked_tools = [op for op in state.operations.values() if op.kind == "tool" and op.state == "parked"]
@@ -470,15 +495,15 @@ def _drive_until_parked(w, sid, *, participant, provider, children):
 
 def cancel_descendants(w, provider):
     _audit_executor_stops(w)
-    parent_children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "child work")}
-    child_children = {"effect": lambda _plan: ChildSession(SessionSpec("grandchild", "sim", "/tmp"), "grandchild work")}
+    parent_children = {"effect": lambda _plan: ChildSession(w.child_spec("s", "child"), "child work")}
+    child_children = {"effect": lambda _plan: ChildSession(w.child_spec("child", "grandchild"), "grandchild work")}
     _drive_until_parked(w, "s", participant="worker-0", provider=provider, children=parent_children)
     _drive_until_parked(w, "child", participant="child-worker", provider=provider, children=child_children)
     _drive_until_parked(w, "grandchild", participant="grandchild-worker", provider=provider, children={})
     observer = w.connection("observer")
     turns = {}
     for sid, parent in (("s", None), ("child", "s"), ("grandchild", "child")):
-        state, rows, _ = observer.read_state(sid)
+        state, rows, _ = w.read_state(sid)
         require(
             state.active_turn_id is not None and bool(state.waits) and bool(state.operations), "I7", f"{sid} never became active"
         )
@@ -515,7 +540,7 @@ def cancel_descendants(w, provider):
         w.drive(parent, participant=participant, children=children, provider=provider)
         w.check()
     for sid in turns:
-        state, rows, _ = observer.read_state(sid)
+        state, rows, _ = w.read_state(sid)
         terminals = [row.record for row in rows if row.record.kind == "turn_ended"]
         require(
             state.active_turn_id is None and len(terminals) == 1 and terminals[0].payload["status"] == "cancelled",
@@ -565,7 +590,7 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         return w.summary()
     children = {}
     if w.scenario in {"children", "cancel"}:
-        children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "child work")}
+        children = {"effect": lambda _plan: ChildSession(w.child_spec("s", "child"), "child work")}
     fault = (w.scenario, "op_completed", "tool") if w.scenario in {"precommit", "postcommit", "reply_loss"} else None
     if w.scenario == "tools":
         fault = ("postcommit", "op_planned", "model")
@@ -576,7 +601,10 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
     if w.scenario == "accepted_lost":
         w.after_external = lambda worker: worker.die("accepted before ledger commit")
     # An independent host and scanner can run while a real driver is at a safe hook.
-    w.enqueue("host/duplicate", lambda: w.push("s", InboxItem("initial", "user", {"content": "go"})))
+    w.enqueue(
+        "host/duplicate",
+        lambda: w.push("s", w.connection("host").read_input("s", "initial").item),
+    )
     w.enqueue("transport/wake", lambda: w.queue.extend(["s", "s"]))
     if w.scenario == "factory_not_ready":
         w.drive(provider=provider, factory=w.not_ready)
@@ -602,8 +630,10 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
     if w.scenario == "definition_mismatch":
         rt = w.runtime("s", "worker-1", provider=provider)
         schema = json.loads(json.dumps(rt.registry.get_schema("effect")))
-        schema["function"]["description"] = "Changed tool definition after the turn was frozen."
+        schema["function"]["parameters"]["properties"]["mode"] = {"type": "string"}
+        schema["function"]["parameters"]["required"] = ["mode"]
         rt.registry.register_schema("effect", schema)
+        rt.verify_frozen_definition = True
         if "worker-1" not in w.workers:
             w.workers["worker-1"] = FaultyStore(w.connection("worker-1"), w, "worker-1")
         w.runtimes[("s", "worker-1")] = rt
@@ -616,29 +646,34 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         w.push("s", provider.callback())
         w.push("s", replace(provider.callback(), input_id="late-duplicate"))
     if children:
-        handle = next(iter(w.connection("observer").read_state("s")[0].waits.values()))["handle"]
         if w.scenario == "cancel":
             w.push("s", InboxItem("cancel", "control", {"action": "cancel"}, "s/turn/initial"))
             w.drive(provider=provider, children=children)
         w.drive("child", participant="child-worker")
-        child_state, rows, _ = w.connection("observer").read_state("child")
+        child_state, rows, _ = w.read_state("child")
         terminal = next(r for r in rows if r.record.kind == "turn_ended")
         delivery = w.connection("delivery")
         for _ in range(2):
             with delivery.atomic() as tx:
                 child_delivery(delivery, tx, "child")
-        w.push("s", replace(completion_input(handle, terminal), input_id="child-redelivery"))
-        forged = replace(
-            completion_input(handle, terminal),
-            input_id="child-forged",
-            payload={
-                **completion_input(handle, terminal).payload,
-                "session_id": "s",
-            },
-        )
-        w.push("s", forged)
+        delivered = delivery.read_input("s", f"child/child/{terminal.record.record_id}")
+        assert delivered is not None
+        template = delivered.item
+        for input_id, payload in (
+            ("child-redelivery", template.payload),
+            ("child-forged", template.payload | {"session_id": "s"}),
+        ):
+            item = replace(template, input_id=input_id, payload=payload)
+            with delivery.atomic() as tx:
+                writer = SessionContentWriter.bind(tx, tenant_id=delivery.tenant_id, session_id="s")
+                tx.push("s", item)
+                assert item.actor is not None
+                writer.link_input(input_id, ContentRef.from_dict(item.actor["attributes"]), INPUT_ACTOR_ATTRIBUTES)
+                if item.payload["result"] is not None:
+                    writer.link_input(input_id, ContentRef.from_dict(item.payload["result"]), CHILD_RESULT)
+            w.queue.append("s")
         w.drive(provider=provider, children=children)
-        parent = w.connection("observer").read_state("s")[0]
+        parent = w.read_state("s")[0]
         require(parent.applied_inputs["child-forged"].payload["disposition"] == "rejected", "I6", "forged child accepted")
         require(parent.applied_inputs["child-redelivery"].payload["disposition"] == "noop", "I6", "child result applied twice")
         if w.scenario == "cancel":
@@ -655,12 +690,14 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         children,
         ready_active=w.scenario in {"tools", "accepted_lost", "model_result_precommit", "definition_mismatch", "metered_tool"},
     )
-    state, rows, _ = w.connection("observer").read_state("s")
+    state, rows, _ = w.read_state("s")
     require(state.active_turn_id is None, "I4", "fair SQL scan did not finish this bounded scenario")
     if w.scenario == "definition_mismatch":
-        terminal = next(r.record for r in rows if r.record.kind == "turn_ended")
+        terminal = next(r for r in rows if r.record.kind == "turn_ended")
+        logical_terminal = hydrate_records((terminal,), hydration_for_session_store(w.connection("observer"), "s"))[0]
         require(
-            terminal.payload["status"] == "failed" and terminal.payload["reason"] == "handler_schema_or_capability_mismatch",
+            logical_terminal.record.payload["status"] == "failed"
+            and logical_terminal.record.payload["reason"] == "handler_schema_or_capability_mismatch",
             "definition",
             "changed runtime did not fail its frozen definition check",
         )

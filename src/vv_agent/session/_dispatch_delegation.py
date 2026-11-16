@@ -21,8 +21,9 @@ if TYPE_CHECKING:
 
 
 class ChildCompilationHost:
-    def __init__(self, runtime: Runtime, context: ToolContext):
+    def __init__(self, runtime: Runtime, context: ToolContext, session_attributes: dict[str, Any]):
         self.runtime, self.context = runtime, context
+        self.session_attributes = session_attributes
         self.transfer = None
         self.agent: Any = None
         self.config: Any = None
@@ -48,6 +49,8 @@ class ChildCompilationHost:
             self.agent = target_agent(runtime, request.selector, request.mode, request.sub)
         elif request is core.ChildRead.AGENT_NAME:
             return self.agent.name
+        elif request is core.ChildRead.SESSION_ATTRIBUTES:
+            return self.session_attributes
         elif isinstance(request, core.CompileChild):
             config = child_config(runtime, context, self.agent, request.mode, request.sub)
             if request.request.exclude_files_pattern:

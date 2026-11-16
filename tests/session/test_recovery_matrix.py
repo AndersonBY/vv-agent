@@ -17,7 +17,7 @@ from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session.kernel import Runtime, drive, read_state
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.supervisor import tick
 from vv_agent.tools.function import FunctionTool, function_tool
@@ -27,7 +27,7 @@ from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
 from .controlled import ControlledProvider
-from .helpers import content_ref, principal
+from .helpers import content_ref, create_fixture_session, principal, push_fixture_input, wrap_fixture_store
 from .helpers import item as helper_item
 
 MODEL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}
@@ -45,15 +45,20 @@ def runtime(database, steps, tools=(), **kwargs):
 
 
 def start(store, sid="s"):
-    with store.atomic() as tx:
-        tx.create(
-            SessionSpec(sid, principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
-            consumers=("events",),
-        )
-        tx.push(
-            sid,
-            replace(helper_item("initial", actor=principal("test")), payload={"content": content_ref("go")}),
-        )
+    store = wrap_fixture_store(store)
+    create_fixture_session(
+        store,
+        sid,
+        attributes={
+            "seed": {
+                "messages": [],
+                "shared_state": {},
+                "unseen_input_protection": True,
+                "response_rejection": True,
+            }
+        },
+    )
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
 
 
 def test_completed_results_are_reused(store, database):

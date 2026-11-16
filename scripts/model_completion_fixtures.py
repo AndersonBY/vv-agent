@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from tests.session.test_model_completion_evidence import CASES, run_completion_case
 from vv_agent.session.sqlite import SQLiteStore

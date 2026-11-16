@@ -306,7 +306,7 @@ class SessionCreatedContent:
 
 
 def declared_content_ref(value: Any) -> ContentRef | None:
-    """Return a valid declared reference, or ``None`` for a plain producer value."""
+    """Parse a reference-form value from an explicit replay or link path."""
 
     if isinstance(value, ContentRef):
         return value
@@ -316,6 +316,28 @@ def declared_content_ref(value: Any) -> ContentRef | None:
         if isinstance(value, Mapping) and set(value) == _CONTENT_REF_FIELDS:
             raise ValueError("malformed ContentRef") from None
         return None
+
+
+def producer_content_ref(value: Any) -> ContentRef | None:
+    """Return an explicitly typed producer reference; mappings are opaque JSON."""
+
+    return value if isinstance(value, ContentRef) else None
+
+
+def _producer_ref(writer: ContentSessionWriter, value: Any) -> ContentRef | None:
+    """Accept a mapping only when this writer explicitly returned its ref."""
+
+    typed = producer_content_ref(value)
+    if typed is not None:
+        published_refs = getattr(writer, "_published_refs", None)
+        if isinstance(published_refs, set):
+            published_refs.add(typed)
+        return typed
+    try:
+        ref = ContentRef.from_dict(value)
+    except (TypeError, ValueError):
+        return None
+    return ref if ref in getattr(writer, "_published_refs", ()) else None
 
 
 def make_record_before_publication(
@@ -360,10 +382,38 @@ def make_record_before_publication(
     )
 
 
-def publish_json(writer: ContentSessionWriter, value: Any) -> ContentRef:
-    """Preserve a legal reference and put only plain producer content."""
+def make_retained_record_before_publication(
+    kind: str,
+    *,
+    session_id: str,
+    payload: dict[str, Any],
+    turn_id: str | None = None,
+    operation_id: str | None = None,
+    attempt: int | None = None,
+) -> Record:
+    """Rebuild a committed record while preserving refs at closed content slots."""
 
-    declared = declared_content_ref(value)
+    retained = deepcopy(payload)
+    for path, _slot, value in _payload_slots(kind, retained):
+        if value is _MISSING or value is None:
+            continue
+        ref = declared_content_ref(value)
+        if ref is not None:
+            _set_path(retained, path, ref)
+    return make_record_before_publication(
+        kind,
+        session_id=session_id,
+        turn_id=turn_id,
+        operation_id=operation_id,
+        attempt=attempt,
+        payload=retained,
+    )
+
+
+def publish_json(writer: ContentSessionWriter, value: Any) -> ContentRef:
+    """Preserve a typed or explicitly returned ref and put other mappings as JSON."""
+
+    declared = _producer_ref(writer, value)
     return writer.put_json(value) if declared is None else declared
 
 
@@ -376,24 +426,35 @@ def publish_content_container(
 ) -> PublishedContentValue:
     """Publish one outer container and only its explicitly declared nested refs."""
 
-    declared = declared_content_ref(value)
+    declared = _producer_ref(writer, value)
     if declared is not None:
         if not nested:
             return PublishedContentValue(declared)
-        # Reused refs need no publication; inspect them only when the writer
-        # exposes its bound read capability.
         read_json = getattr(writer, "get_json", None)
         if not callable(read_json):
-            return PublishedContentValue(declared)
+            raise ValueError(f"declared content container cannot be inspected: {slot}")
         content = read_json(declared)
-        return PublishedContentValue(declared, _declared_nested_links(content, nested, slot))
+        prepared = deepcopy(content)
+        nested_links: list[PublishedNestedContentLink] = []
+        changed = False
+        for path, nested_slot, nested_value in _expand_nested_slots(prepared, nested, slot):
+            if nested_value is _MISSING or nested_value is None:
+                continue
+            nested_declared = declared_content_ref(nested_value)
+            nested_ref = nested_declared if nested_declared is not None else writer.put_json(nested_value)
+            changed = changed or nested_declared is None
+            _set_path(prepared, path, nested_ref.to_dict())
+            nested_links.append(PublishedNestedContentLink(nested_slot, nested_ref))
+        ref = writer.put_json(prepared) if changed else declared
+        return PublishedContentValue(ref, tuple(nested_links))
 
     prepared = deepcopy(value)
     nested_links: list[PublishedNestedContentLink] = []
     for path, nested_slot, nested_value in _expand_nested_slots(prepared, nested, slot):
         if nested_value is _MISSING or nested_value is None:
             continue
-        nested_ref = publish_json(writer, nested_value)
+        declared = _producer_ref(writer, nested_value)
+        nested_ref = writer.put_json(nested_value) if declared is None else declared
         _set_path(prepared, path, nested_ref.to_dict())
         nested_links.append(PublishedNestedContentLink(nested_slot, nested_ref))
     return PublishedContentValue(writer.put_json(prepared), tuple(nested_links))
@@ -408,7 +469,7 @@ def declare_input_content(writer: ContentSessionWriter, item: InboxItem) -> Inpu
         for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
             if value is _MISSING or value is None:
                 continue
-            declared = declared_content_ref(value)
+            declared = producer_content_ref(value)
             ref = writer.assert_input(item.input_id, declared, slot) if declared is not None else writer.put_json(value)
             _set_path(payload, path, ref.to_dict())
             links.append(DeclaredInputContentLink(item.input_id, slot, ref))
@@ -479,7 +540,7 @@ def publish_turn_started(
 ) -> TurnStartedContent:
     """Publish one turn definition and budget through the transaction writer."""
 
-    declared = declared_content_ref(definition)
+    declared = _producer_ref(writer, definition)
     if declared is None and admission_definition_digest is not None and digest(definition) != admission_definition_digest:
         raise ValueError("child admission definition digest mismatch")
     definition_ref = publish_content_container(
@@ -522,12 +583,18 @@ def publish_record_content(writer: ContentSessionWriter, records: Iterable[Recor
             for path, slot, value in _expand_slot(payload, content_slot.path, content_slot.slot):
                 if value is _MISSING or value is None:
                     continue
-                published_content = publish_content_container(
-                    writer,
-                    value,
-                    slot=slot,
-                    nested=content_slot.nested,
-                )
+                if record.kind == "input_applied" and (slot == INPUT_ACTOR_ATTRIBUTES or slot.startswith("input.payload.")):
+                    ref = declared_content_ref(value)
+                    if ref is None:
+                        raise ValueError(f"applied input content slot is not a ContentRef: {record.record_id}/{slot}")
+                    published_content = PublishedContentValue(ref)
+                else:
+                    published_content = publish_content_container(
+                        writer,
+                        value,
+                        slot=slot,
+                        nested=content_slot.nested,
+                    )
                 ref = published_content.ref
                 _set_path(payload, path, ref.to_dict())
                 changed = True
@@ -609,22 +676,6 @@ def _append_record_link(
         raise ValueError(f"record content slot is declared more than once: {record.record_id}/{slot}")
     seen_links.add(key)
     links.append(DeclaredRecordContentLink(record.record_id, slot, ref))
-
-
-def _declared_nested_links(
-    root: Any,
-    nested: tuple[NestedContentSlot, ...],
-    outer_slot: str,
-) -> tuple[PublishedNestedContentLink, ...]:
-    links: list[PublishedNestedContentLink] = []
-    for _path, slot, value in _expand_nested_slots(root, nested, outer_slot):
-        if value is _MISSING or value is None:
-            continue
-        ref = declared_content_ref(value)
-        if ref is None:
-            raise ValueError(f"nested content slot is not a ContentRef: {slot}")
-        links.append(PublishedNestedContentLink(slot, ref))
-    return tuple(links)
 
 
 def _expand_nested_slots(

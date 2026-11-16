@@ -31,7 +31,7 @@ def invoke_model(self: _Driver, plan: Record, task, context, started: Record, pr
         {"operation_id": plan.operation_id, "attempt": plan.attempt, "call_id": f"{plan.operation_id}/{plan.attempt}"}
     )
     request.metadata["purpose"] = plan._payload["purpose"]
-    response_policy = self.records[0].record._payload["attributes"].get("seed", {}).get("response_rejection", False)
+    response_policy = self.session_attributes().get("seed", {}).get("response_rejection", False)
     if started._payload.get("endpoint_id"):
         request.metadata.setdefault("vv_session", {})["endpoint_id"] = started._payload["endpoint_id"]
     if plan._payload["purpose"] == "output_repair":

@@ -8,7 +8,6 @@ from hashlib import sha256
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
-from vv_agent.kernel._content import ContentRef
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
@@ -201,7 +200,6 @@ def fork_thread(kernel, host, params):
             source_content = content_writer(tenant_id=kernel.tenant_id, session_id=source)
             source_principal = page.records[0].record._payload["principal"]
             source_workspace = page.records[0].record._payload["workspace"]
-            attributes_labels = ContentRef.from_dict(attributes_ref).labels
 
             def destination_spec(writer):
                 principal_attributes = writer.copy_json_from(source_content, source_principal["attributes"])
@@ -210,7 +208,7 @@ def fork_thread(kernel, host, params):
                     spec,
                     principal=source_principal | {"attributes": principal_attributes.to_dict()},
                     workspace=workspace.to_dict(),
-                    attributes=writer.put_json(attributes, labels=attributes_labels).to_dict(),
+                    attributes=spec.attributes,
                 )
 
             receipt = destination.create_session(

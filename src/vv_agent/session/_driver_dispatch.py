@@ -204,7 +204,11 @@ class _DispatchHost:
             assert self.preflight is not None
             return self.preflight.handle(request)
         elif isinstance(request, delegation.ChildBindingMode):
-            self.child_compiler = ChildCompilationHost(driver.runtime, self.context)
+            self.child_compiler = ChildCompilationHost(
+                driver.runtime,
+                self.context,
+                session_attributes=driver.session_attributes(),
+            )
             return self.child_compiler.handle(request)
         elif isinstance(request, delegation.ChildRequest):
             assert self.child_compiler is not None

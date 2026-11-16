@@ -14,15 +14,15 @@ from . import _driver_inputs as inputs
 from . import _driver_outcomes as outcomes
 from . import _driver_planning as planning
 from . import _output_phase as output
+from ._content_publication import make_retained_record_before_publication
 from ._context import protected_start
 from ._driver import CoreDriver
 from ._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from ._execution_values import AgentTask
-from ._hydration import reference_digest
 from ._message_values import Message
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance
 from ._record_codec import RecordError
-from ._records import InboxItem, Record, copy_json, digest, make_record
+from ._records import InboxItem, Record, copy_json, digest
 from ._retained_budget import retained_budget_inputs, retained_evaluator
 from ._state import Attempt
 from ._summary_requests import pending_compaction_requests, summary_pending
@@ -162,12 +162,39 @@ def _retained_budget(state, tid):
     return retained_evaluator(value) if value is not None else None
 
 
-def _definition_digest(driver, start):
+def _preserve_endpoint_history(current: dict[str, Any], retained: dict[str, Any]) -> None:
+    for binding, old in [
+        (current["model_binding"], retained),
+        *[
+            (value, retained.get("internal", {}).get(purpose, {}))
+            for purpose, value in current["model_binding"].get("internal", {}).items()
+        ],
+    ]:
+        if "endpoints" in old:
+            binding["endpoints"] = old["endpoints"]
+            for limit in ("context_length", "max_output_tokens"):
+                if limit not in old:
+                    binding.pop(limit, None)
+
+
+def _definition_matches(driver, start):
     definition = driver.hydrated_definition(start)
-    yield Definition(definition.task)
-    ref = driver.record_content_ref(start, "definition")
-    assert ref is not None
-    return reference_digest(ref)
+    facts = yield Definition(definition.task)
+    frozen = {
+        "agent_name": definition.agent_name,
+        "memory_settings": definition.memory_settings,
+        "child_tools": list(definition.child_tools),
+        "model_binding": definition.model_binding,
+        "capabilities": definition.capabilities,
+        "task": definition.task.to_dict(),
+        "tools": list(definition.tools),
+    }
+    if "endpoints" not in frozen["model_binding"]:
+        current = facts.definitions.definition_digest(definition.task, facts.bindings, facts.catalog)
+        return current == digest(frozen)
+    current = facts.definitions.definition(definition.task, facts.bindings, facts.catalog)
+    _preserve_endpoint_history(current, frozen["model_binding"])
+    return digest(current) == digest(frozen)
 
 
 def _compact(driver, *, requested_by=None):
@@ -316,10 +343,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                 for op in self.state.operations.values()
             )
             and (self.state.turns[self.state.active_turn_id].start._payload["handler_version"] == (yield Read.HANDLER_VERSION))
-            and (
-                (yield from _definition_digest(self, self.state.turns[self.state.active_turn_id].start))
-                == self.state.turns[self.state.active_turn_id].start._payload["definition_digest"]
-            )
+            and (yield from _definition_matches(self, self.state.turns[self.state.active_turn_id].start))
             and (yield from _compose(self, compaction.finish_summary(self)))
         ):
             return True
@@ -351,7 +375,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
         if task.metadata.get("vv_session", {}).get("input_blocked"):
             yield from close(self, "failed", "agent_failed", task.metadata.setdefault("vv_session", {})["input_blocked"])
             return True
-        if (yield from _definition_digest(self, turn.start)) != turn.start._payload["definition_digest"]:
+        if not (yield from _definition_matches(self, turn.start)):
             yield from close(self, "failed", "handler_schema_or_capability_mismatch")
             return True
         evaluator = yield from _compose(self, outcomes.live_budget_steps(self))
@@ -481,7 +505,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     due = a.unknown._payload["retry_at_ms"] or 0
                     if due > now:
                         return False
-                    next_plan = make_record(
+                    next_plan = make_retained_record_before_publication(
                         "op_planned",
                         session_id=self.sid,
                         turn_id=tid,
@@ -556,7 +580,8 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                             and (
                                 r.record._payload["input"]["kind"] == "steer"
                                 or (r.record._payload["input"]["kind"] == "user" and r.record._payload["target_wait_id"])
-                                or r.record._payload["reason"] == "background child notification"
+                                or self.hydrate_record_field(r.record, "input_reason", r.record._payload["reason"])
+                                == "background child notification"
                             )
                         )
                         or (r.record.kind == "op_completed" and r.record._payload["context"] == "correction")

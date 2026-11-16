@@ -41,7 +41,12 @@ from .content_runtime import (
 from .content_store import LocalKeyProvider
 from .context import project_context
 from .kernel import drive
-from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
+from .projection import (
+    fold_hydrated_records,
+    hydrate_record_payload,
+    hydrate_records,
+    hydration_for_session_store,
+)
 from .records import InboxItem, SessionSpec
 from .reducer import _fold_factory_for
 from .result import project_result
@@ -375,7 +380,24 @@ class SessionDriver:
 
     def messages(self, sid: str) -> list[Message]:
         state, records, _ = self.store.read_state(sid)
+        if records:
+            hydration = hydration_for_session_store(self.store, sid)
+            raw_records = records
+            records = hydrate_records(raw_records, hydration)
+            state = fold_hydrated_records(records, raw_records, _fold_factory_for(self.store), hydration)
         return [m for m in project_context(records, state, _fold_factory=_fold_factory_for(self.store)) if m.role != "system"]
+
+    def session_attributes(self, sid: str) -> dict[str, Any]:
+        page = self.store.read(sid, limit=1)
+        if not page.records:
+            raise KeyError(sid)
+        attributes = hydrate_record_payload(
+            page.records[0],
+            hydration_for_session_store(self.store, sid),
+        )["attributes"]
+        if type(attributes) is not dict:
+            raise ValueError("session attributes must be a JSON object")
+        return attributes
 
     def waits(
         self, sid: str, runtime: Runtime | None = None, *, snapshot=None

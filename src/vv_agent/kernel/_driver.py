@@ -38,6 +38,7 @@ _RECORD_CONTENT_PATHS: dict[tuple[str, str], tuple[str, ...]] = {
     ("session_created", SESSION_ATTRIBUTES): ("attributes",),
     ("turn_started", "definition"): ("definition",),
     ("turn_started", "budget"): ("budget",),
+    ("input_applied", "input_reason"): ("reason",),
     ("op_planned", "request"): ("request",),
     ("op_planned", "tool"): ("tool",),
     ("op_planned", "budget_admission"): ("budget_admission",),
@@ -466,6 +467,9 @@ class CoreDriver:
         assert self.state.active_turn_id is not None
         return self.hydrated_definition(self.state.turns[self.state.active_turn_id].start).task
 
+    def _logical_preflight(self, records: list[Record], encoded_records: list[Record]) -> None:
+        """Validate logical semantics inside the caller-owned transaction."""
+
     def commit(
         self,
         records: list[Record],
@@ -502,16 +506,21 @@ class CoreDriver:
                         prepared_records.extend(prepare(tx))
                 committed = {stored.record.record_id: stored.record for stored in self.records}
                 record_ids = [record.record_id for record in prepared_records]
+                new_records: list[Record] = prepared_records
                 if any(record_id in committed for record_id in record_ids):
                     if not all(record_id in committed for record_id in record_ids):
                         raise Conflict("commit mixes new records with already committed record ids")
                     prepared_records = [committed[record_id] for record_id in record_ids]
+                    new_records = []
                 if has_record_content(prepared_records):
                     with phase("publish"):
                         content_writer = require_record_link_writer(self.content_writer(tx))
                         publication = publish_record_content(content_writer, prepared_records)
                         commit_records = list(publication.records)
                         declarations = publication.links
+                if new_records:
+                    with phase("logical_preflight"):
+                        self._logical_preflight(new_records, commit_records)
                 with phase("before_commit"):
                     self._hook("before_commit", commit_records[-1] if commit_records else None)
                 # SQL append calls this only after encoding and immutable history

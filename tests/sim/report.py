@@ -20,12 +20,12 @@ from tempfile import TemporaryDirectory, gettempdir
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_WORKERS = 8
+MAX_WORKERS = 10
 POSTGRES_CONNECTIONS_PER_WORKER = 16
 POSTGRES_ADMIN_CONNECTION_RESERVE = 4
 POSTGRES_CLEANUP_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2)
 AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
-DEFAULT_WORKERS = min(5, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
+DEFAULT_WORKERS = min(10, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
 
 
 class _PostgresDatabase(str):

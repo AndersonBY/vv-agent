@@ -5,13 +5,15 @@ from __future__ import annotations
 import inspect
 import sys
 import threading
+from dataclasses import replace
 
 import pytest
 
 from vv_agent.kernel._child_store import ChildSession
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._lease_scope import LeaseOwnership, apply_controls
-from vv_agent.kernel._records import InboxItem, SessionSpec
+from vv_agent.kernel._records import InboxItem
 from vv_agent.kernel._store import LeaseLost
 
 from .assembly import Scope
@@ -34,6 +36,11 @@ def driver(world, sid="s", participant="manual"):
 
 def terminal_status(rows, tid):
     return next(r.record.payload["status"] for r in rows if r.record.kind == "turn_ended" and r.record.turn_id == tid)
+
+
+def assert_control(actual, expected):
+    assert replace(actual, actor=None) == expected
+    assert ContentRef.from_dict(actual.actor["attributes"]).content_id
 
 
 def until(worker, predicate):
@@ -84,7 +91,8 @@ def test_l2_stop_after_committed_renewal_preserves_fencing_and_control(tmp_path,
         world.enqueue("l2/committed-renewal-then-stop", lambda: build.poll(heartbeat_store))
         assert world.step()
         poll = returned[0]
-        assert poll.controls == (control,)
+        assert len(poll.controls) == 1
+        assert_control(poll.controls[0], control)
         assert build.lease == initial and not build.successful_ready
         assert heartbeat_store._one("SELECT lease_until_ms FROM sk_session WHERE session_id=%s", ("s",))[0] == (
             poll.lease.expires_at_ms
@@ -103,7 +111,13 @@ def test_l2_stop_after_committed_renewal_preserves_fencing_and_control(tmp_path,
         assert world.step()
         _state, rows, _ = worker.store.read_state("s")
         assert terminal_status(rows, tid) == "cancelled"
-        assert len([r for r in rows if r.record.kind == "input_applied" and r.record.payload["input"] == control.to_dict()]) == 1
+        applied_controls = [
+            InboxItem(**r.record.payload["input"])
+            for r in rows
+            if r.record.kind == "input_applied" and r.record.payload["input"]["input_id"] == control.input_id
+        ]
+        assert len(applied_controls) == 1
+        assert_control(applied_controls[0], control)
         assert worker.store.read_input("s", control.input_id).consumed_seq is not None
         assert not world.calls
         assert max(r.writer_epoch for r in rows) == initial.epoch + 1
@@ -139,7 +153,8 @@ def test_l2_factory_handoff_poll_leaves_controls_for_formal_driver(tmp_path, mon
             lambda: world.drive(participant="factory-worker", factory=factory),
         )
         assert world.step()
-        assert polls and polls[0].controls == (control,)
+        assert polls and len(polls[0].controls) == 1
+        assert_control(polls[0].controls[0], control)
         assert terminal_status(worker.store.read("s").records, tid) == "cancelled"
         assert worker.store.read_input("s", "handoff-cancel").consumed_seq is not None
         assert not world.calls
@@ -150,7 +165,7 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
     with SimWorld(tmp_path / "l3.sqlite", seed=L3_SEED) as world:
         world.install_write_observer()
         world.create()
-        children = {"effect": lambda _plan: ChildSession(SessionSpec("child", "sim", "/tmp"), "go")}
+        children = {"effect": lambda _plan: ChildSession(world.child_spec("s", "child"), "go")}
         world.drive(children=children)
         worker = driver(world)
         old_tid = worker.state.active_turn_id

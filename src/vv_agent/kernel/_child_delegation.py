@@ -20,6 +20,7 @@ from ._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
 class ChildRead(Enum):
     MAX_HANDOFFS = auto()
     AGENT_NAME = auto()
+    SESSION_ATTRIBUTES = auto()
     WORKSPACE = auto()
     TODO_LIST = auto()
     BUDGET_LIMITS = auto()
@@ -157,7 +158,8 @@ def assemble(
             return None
         assert isinstance(mode, str)
         created = store.read(plan.session_id, limit=1).records[0].record
-        parent_admission = created._payload["attributes"].get("child_admission", {})
+        parent_attributes = yield ChildRead.SESSION_ATTRIBUTES
+        parent_admission = parent_attributes.get("child_admission", {})
         count = parent_admission.get("handoff_count", 0)
         maximum = parent_admission.get(
             "max_handoffs", task.metadata.get("vv_session", {}).get("max_handoffs", (yield ChildRead.MAX_HANDOFFS))

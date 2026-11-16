@@ -208,10 +208,11 @@ def finish_summary(driver: CompactionView) -> Generator[object, Any, bool]:
         if op.turn_id != tid or op.kind != "model" or op.selected_attempt is None or (oid in accepted):
             continue
         a = op.attempts[op.selected_attempt]
+        result_value = _hydrated_completed_result(driver, a.result) if a.result is not None else None
         if (
             a.plan._payload["purpose"] != "compaction"
-            or a.result is None
-            or a.result._payload["result"].get("error_code")
+            or result_value is None
+            or result_value.get("error_code")
             or (a.context != "normal")
         ):
             continue
@@ -235,7 +236,7 @@ def finish_summary(driver: CompactionView) -> Generator[object, Any, bool]:
             continue
         accepted_result = yield from _summary_compaction.accept_summary(
             plan,
-            _hydrated_completed_result(driver, a.result).get("content", ""),
+            result_value.get("content", ""),
             protected_start=manager.protected_start,
             recovery_tool_available=manager.recovery_tool_available,
             effective_context_window=manager.effective_context_window,
@@ -305,7 +306,7 @@ def compact_context(
         selected = primary[-1].selected_attempt
         assert selected is not None
         last_result = primary[-1].attempts[selected].result
-        last_seq = next(r.seq for r in driver.records if r.record == last_result)
+        last_seq = next(r.seq for r in driver.records if r.record.record_id == last_result.record_id)
         if any(r.seq > last_seq and r.record.kind == "context_compacted" for r in driver.records):
             return False
     if failures > max_ptl_retries:
@@ -463,7 +464,12 @@ def extract_memory(
             return False
         receipt = op.attempts[op.selected_attempt].result
         assert receipt is not None
-        state = yield ApplyExtractionReceipt(source, current_tokens, cycle, receipt._payload["result"].get("content", ""))
+        state = yield ApplyExtractionReceipt(
+            source,
+            current_tokens,
+            cycle,
+            _hydrated_completed_result(driver, receipt).get("content", ""),
+        )
         record = yield CreateBoundary("session_memory_saved", oid, {"state": state}, source_operation_id=oid)
         yield CommitRecords([record])
         yield CompactionRequest.SAVE_MEMORY_PROJECTION
@@ -532,7 +538,7 @@ def finish_compact(
         return False
     key, start = pending
     start_id = _boundary(driver, "memory_started", key)
-    start_seq = next(row.seq for row in driver.records if row.record == start_id)
+    start_seq = next(row.seq for row in driver.records if row.record.record_id == start_id.record_id)
     micro = [
         row.record._payload["micro_usage"]
         for row in driver.records
@@ -555,7 +561,8 @@ def finish_compact(
         if not changed and any(
             op.kind == "model"
             and op.attempts[1].plan._payload["purpose"] == "compaction"
-            and op.attempts[1].plan._payload["request"]["metadata"].get("source_digest") == start["metadata"].get("source_digest")
+            and _hydrated_plan(driver, op.attempts[1].plan)._payload["request"]["metadata"].get("source_digest")
+            == start["metadata"].get("source_digest")
             for op in driver.state.operations.values()
         ):
             metadata["compaction_error"] = "summary_unavailable"
@@ -578,6 +585,9 @@ def _task(driver: CompactionView):
 
 
 def _hydrated_record(driver: CompactionView, record: Record) -> Record:
+    retained = Record.parse(record.encode())
+    if record._payload != retained._payload:
+        return record
     if hasattr(driver, "stored_record") and hasattr(driver, "hydrator_for"):
         return hydrate_record(cast(CoreDriver, driver), record)
     return record

@@ -1,6 +1,7 @@
 """F2d-3 SDK producers versus durable child admission and reconstruction."""
 
 import json
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
@@ -25,7 +26,8 @@ from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import InboxItem, Record, RecordError, digest
+from vv_agent.session.projection import SessionHydration, hydrate_records
+from vv_agent.session.records import InboxItem, Record, RecordError, copy_json, digest
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
@@ -42,8 +44,26 @@ from vv_agent.types import (
 )
 
 from .conftest import open_store
+from .helpers import push_fixture_input, wrap_fixture_store
 from .test_runner_parity import RESOLVED
-from .test_tools_control_parity import Restart, admit, runtime
+from .test_tools_control_parity import Restart, admit
+from .test_tools_control_parity import runtime as _runtime
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+@contextmanager
+def open_fixture_store(database):
+    with open_store(database) as raw_store:
+        yield wrap_fixture_store(raw_store)
+
+
+def runtime(store, database, agent, config, llm, **kwargs):
+    result = _runtime(store, database, agent, config, llm, **kwargs)
+    return replace(result, heartbeat_store=lambda: open_fixture_store(database))
 
 
 def normalize(value):
@@ -168,10 +188,12 @@ def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, b
         child_rows = read_state(store, h["session_id"])[1]
         terminal = next(r for r in child_rows if r.record.kind == "turn_ended")
         item = completion_input(h, terminal)
+        applied = store.read_state("control")[0].applied_inputs[item.input_id]
+        stored = InboxItem(**applied.payload["input"])
         with store.atomic() as tx:
-            assert tx.push("control", item).replayed
+            assert tx.push("control", stored).replayed
         with pytest.raises(Conflict), store.atomic() as tx:
-            tx.push("control", replace(item, payload=item.payload | {"result": "forged"}))
+            tx.push("control", replace(stored, payload=stored.payload | {"status": "failed"}))
     drive(store, "control", runtime=rt)
     assert len([r for r in read_state(store, "control")[1] if r.record.kind == "turn_ended"]) == 1
     assert len([e for e in new.events if e.type == "sub_run_completed"]) == len(
@@ -245,7 +267,10 @@ def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database,
     child_id = child_handles(
         next(r.record.payload["handle"] for r in store.read_state("control")[1] if r.record.kind == "op_parked")
     )[0]["session_id"]
-    admission = store.read(child_id, limit=1).records[0].record.payload["attributes"]["child_admission"]
+    raw_created = store.read(child_id, limit=1).records[0]
+    child_hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=child_id)
+    created = hydrate_records((raw_created,), child_hydration)[0].record
+    admission = created.payload["attributes"]["child_admission"]
     assert admission["budget"]["max_tool_calls"] == 4
     assert "forbidden" in admission["definition"]["task"]["metadata"]["_vv_agent_disallowed_tools"]
     if mode == "configured":
@@ -431,7 +456,13 @@ def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, 
         rt = runtime(store, database, first, replace(config, max_handoffs=depth + 100), llm_for(config))
         store._fold_cache = None
     drain(store, "control", rt)
-    rows = [store.read(s, limit=1).records[0].record for s in store.list_sessions() if s != "control"]
+    rows = []
+    for sid in store.list_sessions():
+        if sid == "control":
+            continue
+        raw_created = store.read(sid, limit=1).records[0]
+        hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=sid)
+        rows.append(hydrate_records((raw_created,), hydration)[0].record)
     assert sorted(r.payload["attributes"]["child_admission"]["handoff_count"] for r in rows) == list(range(1, depth + 1))
     result = project_result(store, "control", "control/turn/initial", runtime=rt)
     if depth == 2:
@@ -462,7 +493,7 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
 
     agent = Agent("bound", "Bound.", tools=[bound])
     steps = [LLMResponse("", [ToolCall("a", "bound", {}), ToolCall("b", "bound", {})]), LLMResponse("done")]
-    with pytest.raises(RecordError):
+    with pytest.raises(ValueError, match="unsupported JSON value type Host"):
         Runner.run_sync(
             agent,
             "go",
@@ -653,8 +684,11 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
         drive(store, "control", runtime=rt)
     store._fold_cache = None
     rt = runtime(store, database, parent, config, parent_llm(config))
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("cancel-parent", "control", {"action": "cancel"}, "control/turn/initial"))
+    push_fixture_input(
+        store,
+        "control",
+        InboxItem("cancel-parent", "control", {"action": "cancel"}, "control/turn/initial"),
+    )
     drive(store, "control", runtime=rt)
     ids = [sid for sid in store.list_sessions() if sid != "control"]
     assert len(ids) == (2 if mode == "batch" else 1)
@@ -779,8 +813,8 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
 
     def parent_worker():
         try:
-            with open_store(database) as worker_store:
-                drive(worker_store, "control", runtime=rt)
+            with open_store(database) as raw_store:
+                drive(wrap_fixture_store(raw_store), "control", runtime=rt)
         except BaseException as exc:
             errors.append(exc)
 
@@ -964,7 +998,9 @@ def test_child_admission_closed_fields_and_rollback(store, database, tmp_path, m
     sid = next(s for s in store.list_sessions() if s != "control")
     retained = store.read(sid, limit=1).records[0].record
     assert retained.encode() == canonical_json_bytes(retained.to_dict())
-    created = retained.to_dict()
+    hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=sid)
+    hydrated = hydrate_records((store.read(sid, limit=1).records[0],), hydration)[0].record
+    created = retained.to_dict() | {"payload": copy_json(hydrated.payload)}
     admission = created["payload"]["attributes"]["child_admission"]
     if mutation in {"extra", "sub_config", "digest"}:
         if mutation == "extra":

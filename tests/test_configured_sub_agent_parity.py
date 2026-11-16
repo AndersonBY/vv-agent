@@ -11,6 +11,7 @@ from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
+from vv_agent.session.projection import SessionHydration, hydrate_records
 from vv_agent.types import (
     AgentStatus,
     AgentTask,
@@ -308,10 +309,18 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
             result = start_runner(driver, "children", agent, "go", run_config=config).result()
         rows = driver.store.read_state("children")[1]
         case = _contract()["producer_cases"][0]
-        parked = next(r.record for r in rows if r.record.record_id == case["record_id"])
+        hydration = SessionHydration.from_store(driver.store, tenant_id=driver.tenant_id, session_id="children")
+        hydrated_rows = hydrate_records(rows, hydration)
+        parked = next(r.record for r in hydrated_rows if r.record.record_id == case["record_id"])
         assert parked.payload == case["admission"]
         created_child = driver.store.read_state(_contract()["identity"]["session_id"])[1]
-        task = next(r.record.payload["definition"]["task"] for r in created_child if r.record.kind == "turn_started")
+        child_hydration = SessionHydration.from_store(
+            driver.store,
+            tenant_id=driver.tenant_id,
+            session_id=_contract()["identity"]["session_id"],
+        )
+        hydrated_child = hydrate_records(created_child, child_hydration)
+        task = next(r.record.payload["definition"]["task"] for r in hydrated_child if r.record.kind == "turn_started")
         assert task == _contract()["task_projection"], (task["metadata"], _contract()["task_projection"]["metadata"])
         assert task["metadata"] == _contract()["metadata_projection"]
         events = [e.to_dict() for e in result.events if isinstance(e, (SubRunStartedEvent, SubRunCompletedEvent))]
@@ -367,7 +376,13 @@ def test_configured_sub_agent_uses_atomic_frozen_child_definitions(tmp_path: Pat
         handles = child_handles(parked.record.payload["handle"])
         assert len(handles) == (2 if batch else 1)
         for child in handles:
-            created = driver.store.read(child["session_id"], limit=1).records[0].record
+            raw_created = driver.store.read(child["session_id"], limit=1).records[0]
+            hydration = SessionHydration.from_store(
+                driver.store,
+                tenant_id=driver.tenant_id,
+                session_id=child["session_id"],
+            )
+            created = hydrate_records((raw_created,), hydration)[0].record
             admission = created.payload["attributes"]["child_admission"]
             assert created.payload["parent_session_id"] == "configured"
             assert admission["definition"]["task"]["max_cycles"] == 3

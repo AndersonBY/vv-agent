@@ -27,7 +27,8 @@ from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.session.kernel import drive
-from vv_agent.session.records import InboxItem, copy_json
+from vv_agent.session.projection import hydrate_stored_record, hydration_for_session_store
+from vv_agent.session.records import InboxItem, Record, copy_json
 from vv_agent.session.result import project_result
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.types import (
@@ -47,6 +48,16 @@ BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list
 InterruptionMessageProvider = Callable[[], list[Message]]
 
 logger = logging.getLogger(__name__)
+
+
+def _hydrated_task(driver: Any, session_id: str, record: Record) -> AgentTask:
+    stored = next(
+        (row for row in driver.store.read(session_id).records if row.record.record_id == record.record_id),
+        None,
+    )
+    if stored is None:
+        raise RuntimeError("retained turn start is missing from the session ledger")
+    return hydrate_stored_record(stored, hydration_for_session_store(driver.store, session_id)).record.task()
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,12 +631,20 @@ class AgentSession:
 
     @property
     def shared_state(self):
-        state, rows, _ = self.driver.store.read_state(self.session_id)
+        state, _, _ = self.driver.store.read_state(self.session_id)
         if state.turns:
             return copy_json(
                 project_result(self.driver.store, self.session_id, next(reversed(state.turns))).raw_result.shared_state
             )
-        return copy_json(rows[0].record.payload["attributes"].get("seed", {}).get("shared_state", {}))
+        seed = self.driver.session_attributes(self.session_id).get("seed")
+        if seed is None:
+            return {}
+        if not isinstance(seed, dict):
+            raise ValueError("session seed must be an object")
+        shared_state = seed.get("shared_state", {})
+        if not isinstance(shared_state, dict):
+            raise ValueError("session seed shared_state must be an object")
+        return copy_json(shared_state)
 
     def _runtime(self):
         handle = self._active_run_handle
@@ -634,7 +653,11 @@ class AgentSession:
         if handle is None:
             state, _, _ = self.driver.store.read_state(self.session_id)
             definition = self.definition
-            task = state.turns[next(reversed(state.turns))].start.task() if state.turns and definition else None
+            task = (
+                _hydrated_task(self.driver, self.session_id, state.turns[next(reversed(state.turns))].start)
+                if state.turns and definition
+                else None
+            )
             agent = self.agent
             if agent is None:
                 assert definition is not None
@@ -769,9 +792,17 @@ class InteractiveAgentClient:
 
         seed = session if session is not None else {"messages": [], "shared_state": shared_state or {}}
         if session is None and shared_state is None and session_id is not None:
-            with suppress(KeyError, Conflict):
-                retained_seed = self.driver.store.read(session_id, limit=1).records[0].record.payload["attributes"]["seed"]
-                seed = {"messages": retained_seed.get("messages", []), "shared_state": retained_seed.get("shared_state", {})}
+            try:
+                retained_seed = self.driver.session_attributes(session_id).get("seed")
+            except (Conflict, KeyError):
+                retained_seed = None
+            if retained_seed is not None:
+                if not isinstance(retained_seed, dict):
+                    raise ValueError("session seed must be an object")
+                seed = {
+                    "messages": retained_seed.get("messages", []),
+                    "shared_state": retained_seed.get("shared_state", {}),
+                }
         if not isinstance(seed, dict) or set(seed) != {"messages", "shared_state"}:
             raise ValueError("session seed requires exactly messages and shared_state")
         if not isinstance(seed["messages"], list):
@@ -925,7 +956,7 @@ class InteractiveAgentClient:
         retained_state = self.driver.store.read_state(session_id)[0]
         retained_turn = retained_state.turns.get(retained_state.active_turn_id) if retained_state.active_turn_id else None
         task = (
-            retained_turn.start.task()
+            _hydrated_task(self.driver, session_id, retained_turn.start)
             if retained_turn
             else self.prepare_task(
                 prompt=prompt,

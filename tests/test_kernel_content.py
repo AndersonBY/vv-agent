@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from support.contract import fixture_root
@@ -160,10 +161,10 @@ def test_forget_fixture_cases_are_classified(case: dict) -> None:
     tombstone = content.ForgetTombstone.from_dict(case["tombstone"])
     head = _head(lifecycle["export_cases"][0])
     if case["accepted"]:
-        tombstone.verify(head)
+        tombstone.verify(head, scope_root_session_id=head.session_id)
         return
     with pytest.raises(content.ContentLifecycleError) as caught:
-        tombstone.verify(head)
+        tombstone.verify(head, scope_root_session_id=head.session_id)
     expected = {
         "tombstone_head_mismatch": content.ContentErrorCode.TOMBSTONE_HEAD_MISMATCH,
         "tombstone_session_reuse": content.ContentErrorCode.FORGOTTEN_SESSION_REUSE,
@@ -213,6 +214,39 @@ def test_include_content_line_requires_the_referenced_content_key() -> None:
     content_line["key_id"] = "key/other"
     with pytest.raises(content.ContentBindingMismatch):
         content.ExportDocument.from_dict(case["header"], case["lines"]).verify(_head(case))
+
+
+def test_export_content_refs_ignore_reference_shaped_opaque_json() -> None:
+    opaque_ref = content.ContentRef(
+        "content/opaque-provider-value",
+        "a" * 64,
+        4,
+        "key/foreign-owner",
+        content.ContentLabels(),
+    ).to_dict()
+    record = SimpleNamespace(
+        kind="boundary_recorded",
+        _payload={
+            "stage": "before_memory",
+            "data": {
+                "messages": [],
+                "shared_state": None,
+                "provider_observation": {"reference": opaque_ref},
+            },
+        },
+    )
+
+    assert content._record_content_refs(record) == []
+    content._verify_record_tenant(record, "default")
+
+
+def test_export_tenant_validation_reads_only_closed_principal_fields() -> None:
+    record = SimpleNamespace(
+        kind="session_created",
+        _payload={"principal": {"tenant_id": "other"}, "attributes": {"tenant_id": "other"}},
+    )
+    with pytest.raises(content.ContentBindingMismatch, match="record tenant does not match"):
+        content._verify_record_tenant(record, "default")
 
 
 def test_module_implementation_contains_no_test_double_or_key_material() -> None:

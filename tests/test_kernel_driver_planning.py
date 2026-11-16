@@ -34,7 +34,13 @@ def folded_view(root):
 
     fold = Fold(normalize_memory_settings=unused, count_messages=unused)
     state = fold.extend(records, consumed_inputs=[InboxItem(**r._payload["input"]) for r in records if r.kind == "input_applied"])
-    return SimpleNamespace(state=state, records=fold.history, fold=fold, sid=first.session_id)
+    return SimpleNamespace(
+        state=state,
+        records=fold.history,
+        fold=fold,
+        sid=first.session_id,
+        session_attributes=lambda: first.payload["attributes"],
+    )
 
 
 def scripted_host(steps, view, *, hook=None, endpoints=None):

@@ -31,6 +31,11 @@ NormalizeMemorySettings = Callable[[dict[str, Any], int | None], dict[str, Any]]
 _LOGICAL_WAIT_RESULTS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_turn_wait_results", default=None)
 _LOGICAL_INPUTS: ContextVar[dict[str, InboxItem] | None] = ContextVar("logical_inputs", default=None)
 _LOGICAL_OPERATION_PAYLOADS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_operation_payloads", default=None)
+_LOGICAL_OPERATION_REQUESTS: ContextVar[dict[tuple[str, int], str] | None] = ContextVar(
+    "logical_operation_requests", default=None
+)
+_LOGICAL_BOUNDARY_SOURCES: ContextVar[dict[str, list[Message]] | None] = ContextVar("logical_boundary_sources", default=None)
+_LOGICAL_BOUNDARY_PAYLOADS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_boundary_payloads", default=None)
 
 
 @contextmanager
@@ -60,6 +65,33 @@ def logical_operation_payloads(payloads: dict[str, dict[str, Any]]):
         _LOGICAL_OPERATION_PAYLOADS.reset(token)
 
 
+@contextmanager
+def logical_operation_requests(requests: dict[tuple[str, int], str]):
+    token = _LOGICAL_OPERATION_REQUESTS.set(requests)
+    try:
+        yield
+    finally:
+        _LOGICAL_OPERATION_REQUESTS.reset(token)
+
+
+@contextmanager
+def logical_boundary_sources(sources: dict[str, list[Message]]):
+    token = _LOGICAL_BOUNDARY_SOURCES.set(sources)
+    try:
+        yield
+    finally:
+        _LOGICAL_BOUNDARY_SOURCES.reset(token)
+
+
+@contextmanager
+def logical_boundary_payloads(payloads: dict[str, dict[str, Any]]):
+    token = _LOGICAL_BOUNDARY_PAYLOADS.set(payloads)
+    try:
+        yield
+    finally:
+        _LOGICAL_BOUNDARY_PAYLOADS.reset(token)
+
+
 class CountMessages(Protocol):
     def __call__(self, messages: list[dict[str, Any]], *, model: str) -> int: ...
 
@@ -71,6 +103,26 @@ class TransitionError(ValueError):
 def require(condition: bool, reason: str) -> None:
     if not condition:
         raise TransitionError(reason)
+
+
+def _is_retained(value: Any, reason: str) -> bool:
+    """Identify an S1 value while leaving its plaintext semantics to logical hydration."""
+
+    try:
+        return declared_content_ref(value) is not None
+    except ValueError as exc:
+        raise TransitionError(reason) from exc
+
+
+def retry_request_identity(request: dict[str, Any]) -> str:
+    value = copy_json(request)
+    metadata = value.get("metadata")
+    if type(metadata) is dict:
+        session = metadata.get("vv_session")
+        if type(session) is dict:
+            session.pop("cycle_index", None)
+            session.pop("shared_state", None)
+    return digest(value)
 
 
 def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]) -> None:
@@ -130,10 +182,23 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
     if item.kind == "model_selection":
         require(item.target_turn_id is None and item.generation is None, "selection needs session scope")
         require(not state.closed, "selection after session close")
-        require(item.payload["selection"] is None or "model_binding" in p, "selection needs resolved binding")
-        if item.payload["selection"] is not None:
-            require(p["model_binding"]["model"] == item.payload["selection"]["model"], "selection binding model mismatch")
-        state.model_selection = record if item.payload["selection"] is not None else None
+        selection = p["input"]["payload"]["selection"]
+        if selection is None:
+            state.model_selection = None
+            return
+        require("model_binding" in p, "selection needs resolved binding")
+        retained_selection = _is_retained(selection, "selection contains a malformed ContentRef")
+        retained_binding = _is_retained(p["model_binding"], "selection binding contains a malformed ContentRef")
+        require(retained_selection, "selection input must retain a ContentRef")
+        require(type(p["model_binding"]) is dict, "selection binding must be an object")
+        if not retained_binding:
+            logical_selection = item.payload["selection"]
+            require(type(logical_selection) is dict, "logical selection must be an object")
+            require(p["model_binding"].get("model") == logical_selection.get("model"), "selection binding model mismatch")
+        logical_record = record
+        if not retained_binding:
+            logical_record = replace(record, payload=p | {"input": item.to_dict()})
+        state.model_selection = logical_record
         return
     if item.kind not in {"user", "follow_up"} and not session_control and not evidence_input:
         require(tid == state.active_turn_id and tid in state.turns, "applied input needs active target turn")
@@ -202,7 +267,13 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
 
 
 def _plan(state: ExecutionState, record: Record) -> None:
-    p, oid, tid, number = record._payload, record.operation_id, record.turn_id, record.attempt
+    logical_payloads = _LOGICAL_OPERATION_PAYLOADS.get() or {}
+    p, oid, tid, number = (
+        logical_payloads.get(record.record_id, record._payload),
+        record.operation_id,
+        record.turn_id,
+        record.attempt,
+    )
     assert oid is not None and tid is not None and number is not None
     require(tid == state.active_turn_id, "plan outside active turn")
     turn = state.turns[tid]
@@ -218,14 +289,22 @@ def _plan(state: ExecutionState, record: Record) -> None:
     else:
         require(op.turn_id == tid and op.kind == p["op_kind"], "operation identity changed")
         previous = op.attempts[max(op.attempts)]
-        rejection_retry = (
-            op.kind == "model"
-            and p["purpose"] != "output_repair"
-            and previous.state == "completed"
-            and previous.result is not None
-            and previous.result._payload["result"].get("error_code") == "model_request_rejected"
-            and previous.result._payload["result"].get("rejection", {}).get("retryable") is True
+        retained_result = previous.result is not None and _is_retained(
+            previous.result._payload["result"], "model result contains a malformed ContentRef"
         )
+        if retained_result:
+            # The reference form proves only that the prior model attempt completed.
+            # Hydrated fold validates rejection code and retryability below.
+            rejection_retry = op.kind == "model" and p["purpose"] != "output_repair" and previous.state == "completed"
+        else:
+            rejection_retry = (
+                op.kind == "model"
+                and p["purpose"] != "output_repair"
+                and previous.state == "completed"
+                and previous.result is not None
+                and previous.result._payload["result"].get("error_code") == "model_request_rejected"
+                and previous.result._payload["result"].get("rejection", {}).get("retryable") is True
+            )
         require(number == max(op.attempts) + 1, "retry attempt is not sequential")
         require(
             rejection_retry
@@ -233,14 +312,27 @@ def _plan(state: ExecutionState, record: Record) -> None:
             "retry not authorized",
         )
         require(rejection_retry or op.selected_attempt is None, "retry after adopted result")
+        previous_payload = logical_payloads.get(previous.plan.record_id, previous.plan._payload)
+        if _is_retained(p["request"], "retry request contains a malformed ContentRef") and not _is_retained(
+            previous_payload["request"], "previous retry request contains a malformed ContentRef"
+        ):
+            p = copy_json(p)
+            for slot in ("request", "tool", "budget_admission"):
+                p[slot] = copy_json(previous_payload[slot])
+        previous_operation_id, previous_attempt = previous.plan.operation_id, previous.plan.attempt
+        assert previous_operation_id is not None and previous_attempt is not None
+        previous_identity = (_LOGICAL_OPERATION_REQUESTS.get() or {}).get((previous_operation_id, previous_attempt))
+        if previous_identity is None:
+            previous_identity = retry_request_identity(previous_payload["request"])
         require(
-            p["request_digest"] == previous.execution_plan._payload["request_digest"]
-            and p["provider_binding"] == previous.execution_plan._payload["provider_binding"]
-            and p["context_version"] == previous.plan._payload["context_version"]
-            and p["purpose"] == previous.plan._payload["purpose"],
-            "retry changed request, context, purpose or provider",
+            retry_request_identity(p["request"]) == previous_identity,
+            "retry changed request",
         )
-        if op.kind == "model":
+        require(p["provider_binding"] == previous_payload["provider_binding"], "retry changed provider")
+        require(p["context_version"] == previous_payload["context_version"], "retry changed context")
+        require(p["purpose"] == previous_payload["purpose"], "retry changed purpose")
+        if op.kind == "model" and not _is_retained(p["request"], "model request contains a malformed ContentRef"):
+            # A retained request hides endpoint_order and retryability inside C; logical fold validates both.
             order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
             require(number <= max(2, len(order)), "model retry limit exceeded")
         due = previous.unknown._payload["retry_at_ms"] if previous.unknown else None
@@ -257,7 +349,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt = source.attempts[ref["attempt"]]
         require(source.turn_id == tid and source_attempt.state == "unknown", "request did not consume an unknown")
         source_attempt.unknown_consumed = True
-    order = p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
+    retained_request = _is_retained(p["request"], "operation request contains a malformed ContentRef")
+    order = None if retained_request else p["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order")
     if order is not None:
         require(
             op.kind == "model"
@@ -271,24 +364,38 @@ def _plan(state: ExecutionState, record: Record) -> None:
 
 
 def _operation(state: ExecutionState, record: Record) -> None:
-    p = (_LOGICAL_OPERATION_PAYLOADS.get() or {}).get(record.record_id, record._payload)
+    logical_payloads = _LOGICAL_OPERATION_PAYLOADS.get() or {}
+    p = logical_payloads.get(record.record_id, record._payload)
     oid, number = record.operation_id, record.attempt
     assert oid is not None and number is not None
     op = state.operations.get(oid)
     require(op is not None and op.turn_id == record.turn_id and number in op.attempts, "operation/attempt/turn mismatch")
     assert op is not None
     attempt, turn = op.attempts[number], state.turns[op.turn_id]
+    execution_plan_payload = logical_payloads.get(attempt.execution_plan.record_id, attempt.execution_plan._payload)
     if record.kind == "op_prepared":
         require(op.kind != "model" and attempt.state == "planned" and attempt.prepared is None, "invalid hook preparation")
         require(
             op.turn_id == state.active_turn_id and not turn.cancelled and not turn.suspended, "prepare outside executable turn"
         )
-        require(p["request"]["id"] == attempt.plan._payload["request"]["id"], "hook changed tool call identity")
-        require(
-            p["tool"] == turn.start._payload["definition"]["capabilities"].get(p["request"]["name"], {}),
-            "hook changed frozen capability",
-        )
-        require(p["op_kind"] == ("interaction" if p["request"]["name"] == "ask_user" else "tool"), "hook kind mismatch")
+        retained_request = _is_retained(p["request"], "prepared request contains a malformed ContentRef")
+        retained_definition = _is_retained(turn.start._payload["definition"], "turn definition contains a malformed ContentRef")
+        if p["tool"] is not None:
+            retained_tool = _is_retained(p["tool"], "prepared tool contains a malformed ContentRef")
+            require(
+                retained_request == retained_tool == retained_definition,
+                "hook preparation mixes retained and hydrated content",
+            )
+        else:
+            require(retained_request == retained_definition, "hook preparation mixes retained and hydrated content")
+        if not retained_request:
+            # Call identity, frozen capabilities and hook kind require the hydrated request/definition.
+            require(p["request"]["id"] == attempt.plan._payload["request"]["id"], "hook changed tool call identity")
+            require(
+                p["tool"] == turn.start._payload["definition"]["capabilities"].get(p["request"]["name"], {}),
+                "hook changed frozen capability",
+            )
+            require(p["op_kind"] == ("interaction" if p["request"]["name"] == "ask_user" else "tool"), "hook kind mismatch")
         attempt.prepared = record
     elif record.kind == "op_started":
         require(
@@ -306,13 +413,18 @@ def _operation(state: ExecutionState, record: Record) -> None:
             all(state.operations[dep].state == "completed" for dep in attempt.plan._payload["dependencies"]),
             "unfinished dependency",
         )
-        order = attempt.plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
         endpoint = p.get("endpoint_id")
-        require(
-            (op.kind == "model" and bool(order) and endpoint == order[(number - 1) % len(order)])
-            or (not order and endpoint is None),
-            "dispatch endpoint differs from frozen routing",
-        )
+        request = attempt.plan._payload["request"]
+        if _is_retained(request, "dispatch request contains a malformed ContentRef"):
+            # Endpoint order lives inside the request C object; logical fold verifies the selected endpoint.
+            require(op.kind == "model" or endpoint is None, "non-model dispatch has an endpoint")
+        else:
+            order = request.get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
+            require(
+                (op.kind == "model" and bool(order) and endpoint == order[(number - 1) % len(order)])
+                or (not order and endpoint is None),
+                "dispatch endpoint differs from frozen routing",
+            )
         attempt.state, attempt.dispatch, attempt.wait = "started", record, None
     elif record.kind == "op_parked":
         require(op.turn_id == state.active_turn_id and not turn.cancelled, "park outside active turn")
@@ -340,7 +452,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
         require(not before or handle["kind"] in {"approval", "user", "child"}, "provider park needs dispatch")
         if handle["kind"] == "user":
             require(
-                attempt.execution_plan._payload["op_kind"] == "interaction" and before,
+                execution_plan_payload["op_kind"] == "interaction" and before,
                 "user wait requires undispatched interaction",
             )
         if "interaction_result" in p:
@@ -349,22 +461,22 @@ def _operation(state: ExecutionState, record: Record) -> None:
             result = ToolExecutionResult.from_dict(p["interaction_result"])
             require(
                 handle["kind"] == "user"
-                and result.tool_call_id == attempt.execution_plan._payload["request"]["id"]
+                and result.tool_call_id == execution_plan_payload["request"]["id"]
                 and result.directive == ToolDirective.WAIT_USER
                 and result.status_code == ToolResultStatus.WAIT_RESPONSE,
                 "invalid interaction result",
             )
         if handle["kind"] == "approval":
             require(
-                before and handle["request_digest"] == attempt.execution_plan._payload["request_digest"],
+                before and handle["request_digest"] == execution_plan_payload["request_digest"],
                 "approval request mismatch",
             )
         if handle["kind"] == "provider":
             require(
                 handle["operation_id"] == oid
                 and handle["attempt"] == number
-                and handle["request_digest"] == attempt.execution_plan._payload["request_digest"]
-                and handle["provider"] == attempt.execution_plan._payload["provider_binding"],
+                and handle["request_digest"] == execution_plan_payload["request_digest"]
+                and handle["provider"] == execution_plan_payload["provider_binding"],
                 "provider handle mismatch",
             )
         if handle["kind"] == "child":
@@ -408,8 +520,8 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 == {
                     "operation_id": record.operation_id,
                     "attempt": record.attempt,
-                    "tool_call_id": attempt.execution_plan._payload["request"]["id"],
-                    "arguments_sha256": digest(attempt.execution_plan._payload["request"]["arguments"]),
+                    "tool_call_id": execution_plan_payload["request"]["id"],
+                    "arguments_sha256": digest(execution_plan_payload["request"]["arguments"]),
                 },
                 "artifact source does not match admitted operation",
             )
@@ -572,11 +684,51 @@ def _compacted(
     require(tid == state.active_turn_id and tid in state.turns, "compaction outside active turn")
     assert tid is not None
     require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "compaction after cancel/suspend")
+    definition = state.turns[tid].start._payload["definition"]
+    retained_definition = _is_retained(definition, "turn definition contains a malformed ContentRef")
+    replacements = p["replacement"]
+    retained_replacements = [
+        _is_retained(value, "compaction replacement contains a malformed ContentRef") for value in replacements
+    ]
+    retained_evidence = _is_retained(p["evidence_manifest"], "compaction evidence contains a malformed ContentRef")
+    require(
+        not any(retained_replacements) or all(retained_replacements),
+        "compaction replacement mixes retained and hydrated content",
+    )
+    if retained_definition or any(retained_replacements) or retained_evidence:
+        # Raw replay can prove ownership and transition shape, while plaintext
+        # project_context and receipt validation belong to logical hydration.
+        require(all(retained_replacements), "retained compaction requires ContentRef replacements")
+        require(retained_evidence, "retained compaction requires a ContentRef evidence manifest")
+        if p["mode"] == "micro":
+            require(p["summary_operation_id"] is None and bool(replacements), "invalid retained micro replacement")
+        else:
+            op = state.operations.get(p["summary_operation_id"])
+            require(
+                op is not None and op.turn_id == tid and op.kind == "model" and op.selected_attempt is not None,
+                "summary has no adopted result",
+            )
+            assert op is not None and op.selected_attempt is not None
+            attempt = op.attempts[op.selected_attempt]
+            require(
+                attempt.plan._payload["purpose"] == "compaction" and attempt.result is not None and attempt.context == "normal",
+                "not a summary receipt",
+            )
+            assert attempt.result is not None
+            require(
+                _is_retained(attempt.plan._payload["request"], "summary request contains a malformed ContentRef"),
+                "summary request must retain its ContentRef",
+            )
+            require(
+                _is_retained(attempt.result._payload["result"], "summary result contains a malformed ContentRef"),
+                "summary result must retain its ContentRef",
+            )
+        state.compactions.append(record)
+        return
     source = state._protection.messages if state._protection is not None else project_context(history, state)
     require(digest([m.to_dict() for m in source]) == p["source_digest"], "compaction source mismatch")
     replacement = [Message.from_dict(m) for m in p["replacement"]]
     ids = message_ids(source)
-    definition = state.turns[tid].start._payload["definition"]
     protected = protected_start(history, state)
     try:
         settings = normalize_memory_settings(definition["memory_settings"], protected)
@@ -855,7 +1007,11 @@ class Fold:
                             and 0 < int(version) <= history[-1].seq,
                             "invalid input-protection context version",
                         )
-                    protection = protected_start(history, state)
+                    protection = (
+                        protected_start(history, state)
+                        if not _is_retained(p["request"], "model request contains a malformed ContentRef")
+                        else None
+                    )
                     if protection is not None:
                         assert state._protection is not None
                         retained_start(
@@ -899,6 +1055,8 @@ class Fold:
                 logical_result = record.record_id in (_LOGICAL_WAIT_RESULTS.get() or {})
                 if type(result_value) is dict and logical_result:
                     question = result_value.get("metadata", {}).get("question", result_value["content"])
+                definition = turn.start._payload["definition"]
+                retained_definition = _is_retained(definition, "turn definition contains a malformed ContentRef")
                 retained_source = (
                     declared_content_ref(result_value) is not None
                     and declared_content_ref(question) is not None
@@ -906,7 +1064,7 @@ class Fold:
                         (
                             source.kind == "model"
                             and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
-                            and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user"
+                            and (retained_definition or definition["task"]["no_tool_policy"] == "wait_user")
                         )
                         or source.kind == "tool"
                     )
@@ -923,7 +1081,7 @@ class Fold:
                                 and not result_value.get("error_code")
                                 and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
                                 and question == result_value["content"]
-                                and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user"
+                                and (retained_definition or definition["task"]["no_tool_policy"] == "wait_user")
                             )
                             or (
                                 source.kind == "tool"
@@ -978,6 +1136,7 @@ class Fold:
                 state.usage_observations[p["meter_id"]] = p["observation"]
                 state.usage_values[p["meter_id"]] = record
             elif kind == "boundary_recorded":
+                p = (_LOGICAL_BOUNDARY_PAYLOADS.get() or {}).get(record.record_id, p)
                 context_source = None
                 require(tid == state.active_turn_id and tid in state.turns, "boundary outside active turn")
                 assert tid is not None
@@ -985,11 +1144,13 @@ class Fold:
                 key = (tid, p["stage"], p["boundary_id"])
                 require(key not in state.boundaries, "boundary recorded twice")
                 if p["source_digest"] is not None:
-                    context_source = (
-                        state._protection.messages
-                        if state._protection is not None
-                        else project_context(history, state, _message_cache=self._messages)
-                    )
+                    context_source = (_LOGICAL_BOUNDARY_SOURCES.get() or {}).get(record.record_id)
+                    if context_source is None:
+                        context_source = (
+                            state._protection.messages
+                            if state._protection is not None
+                            else project_context(history, state, _message_cache=self._messages)
+                        )
                     require(self._messages.source_digest(context_source) == p["source_digest"], "boundary source mismatch")
                 oid = p["source_operation_id"]
                 if oid is not None:
@@ -1013,12 +1174,31 @@ class Fold:
                     from vv_agent.kernel._cycle_values import AfterCycleDecision, AfterCycleStop
 
                     data = p["data"]
-                    AfterCycleDecision(
-                        data["action"],
-                        tuple(data["steering_messages"]),
-                        tuple(data["disallow_tools"]),
-                        AfterCycleStop(**data["stop"]) if data["stop"] else None,
+                    retained_content = any(
+                        (
+                            any(
+                                _is_retained(message, "after-cycle steering contains a malformed ContentRef")
+                                for message in data["steering_messages"]
+                            ),
+                            (
+                                data["stop"] is not None
+                                and _is_retained(data["stop"]["message"], "after-cycle stop contains a malformed ContentRef")
+                            ),
+                            (
+                                data["error"] is not None
+                                and _is_retained(data["error"], "after-cycle error contains a malformed ContentRef")
+                            ),
+                            _is_retained(data["shared_state"], "after-cycle shared state contains a malformed ContentRef"),
+                        )
                     )
+                    if not retained_content:
+                        # Raw boundaries retain content as refs; the logical fold parses and validates plaintext values.
+                        AfterCycleDecision(
+                            data["action"],
+                            tuple(data["steering_messages"]),
+                            tuple(data["disallow_tools"]),
+                            AfterCycleStop(**data["stop"]) if data["stop"] else None,
+                        )
                     require(
                         oid is not None and state.operations[oid].selected_attempt is not None,
                         "cycle decision needs an adopted model result",
@@ -1038,28 +1218,34 @@ class Fold:
                 elif p["stage"] == "budget":
                     from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot
 
-                    require(
-                        BudgetUsageSnapshot.from_dict(p["data"]["usage"]).to_dict() == p["data"]["usage"],
-                        "budget snapshot contains unknown or incomplete fields",
-                    )
-                    if p["data"]["exhaustion"]:
+                    usage = p["data"]["usage"]
+                    if not _is_retained(usage, "budget usage contains a malformed ContentRef"):
+                        # Raw boundaries retain usage/exhaustion as refs; the logical fold parses their exact schema.
                         require(
-                            BudgetExhaustion.from_dict(p["data"]["exhaustion"]).to_dict() == p["data"]["exhaustion"],
+                            BudgetUsageSnapshot.from_dict(usage).to_dict() == usage,
+                            "budget snapshot contains unknown or incomplete fields",
+                        )
+                    exhaustion = p["data"]["exhaustion"]
+                    if exhaustion and not _is_retained(exhaustion, "budget exhaustion contains a malformed ContentRef"):
+                        require(
+                            BudgetExhaustion.from_dict(exhaustion).to_dict() == exhaustion,
                             "budget exhaustion contains unknown or incomplete fields",
                         )
                 elif p["stage"] in {"memory_started", "memory_completed"}:
                     from vv_agent.kernel._event_validation import validate_retained_event
 
                     event = p["data"]["event"]
-                    validate_retained_event(event)
-                    require(
-                        event["type"]
-                        == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),
-                        "memory lifecycle type mismatch",
-                    )
-                    require(
-                        event["run_id"] == tid and event["session_id"] == state.session_id, "memory lifecycle identity mismatch"
-                    )
+                    if not _is_retained(event, "memory event contains a malformed ContentRef"):
+                        validate_retained_event(event)
+                        require(
+                            event["type"]
+                            == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),
+                            "memory lifecycle type mismatch",
+                        )
+                        require(
+                            event["run_id"] == tid and event["session_id"] == state.session_id,
+                            "memory lifecycle identity mismatch",
+                        )
                     if p["stage"] == "memory_completed":
                         require((tid, "memory_started", p["boundary_id"]) in state.boundaries, "memory completion without start")
                 state.boundaries[key] = record

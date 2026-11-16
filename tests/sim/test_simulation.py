@@ -7,6 +7,9 @@ from concurrent.futures import Executor, Future
 
 import pytest
 
+from vv_agent.kernel._content import ContentRef
+from vv_agent.session.projection import hydrate_records, hydration_for_session_store
+
 from .report import DEFAULT_WORKERS, run_campaign, seed_results, versions
 from .scenarios import SCENARIOS, run_scenario
 from .world import SimWorld
@@ -18,6 +21,41 @@ def test_real_driver_recovery(sim_database, scenario):
         result = run_scenario(world, scenario)
         assert result["calls"]
         world.check(quiescent=True, every_prefix=True)
+        if scenario == "unknown_idempotent":
+            state, rows, _ = world.read_state("s")
+            operation = next(op for op in state.operations.values() if op.kind == "tool")
+            raw_retry = next(
+                row.record
+                for row in rows
+                if row.record.kind == "op_planned"
+                and row.record.operation_id == operation.attempts[1].plan.operation_id
+                and row.record.attempt == 2
+            )
+            assert ContentRef.from_dict(raw_retry._payload["request"]).content_id
+            assert ContentRef.from_dict(raw_retry._payload["budget_admission"]).content_id
+            assert operation.attempts[2].plan.payload["request"]["id"] == "job"
+            assert raw_retry._payload["idempotency_key"] == operation.attempts[1].plan.payload["idempotency_key"]
+
+
+@pytest.mark.parametrize("scenario", ["accepted", "unknown_idempotent", "late_result"])
+def test_sim_driver_receipts_restore_published_raw_records(sim_database, scenario):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, scenario)
+        world.check(quiescent=True, every_prefix=True)
+        _, rows, _ = world.read_state("s")
+        stored = {row.record.record_id: row for row in rows}
+        completed = [row.record for row in rows if row.record.kind == "op_completed"]
+        assert completed
+        assert all(ContentRef.from_dict(record._payload["result"]).content_id for record in completed)
+
+        drivers = {id(driver): driver for runtime in world.runtimes.values() if (driver := runtime._active_driver) is not None}
+        assert any(len(driver.records) == len(rows) for driver in drivers.values())
+        for driver in drivers.values():
+            for held in driver.records:
+                persisted = stored[held.record.record_id]
+                assert held == persisted
+                assert held.record.encode() == persisted.record.encode()
+                assert held.record.digest == persisted.record.digest
 
 
 def test_seed_replay(tmp_path):
@@ -56,14 +94,30 @@ def test_step_oracles_detect_changes_without_new_records(sim_database, fault, in
                 host._rows("UPDATE sk_inbox SET consumed_seq=NULL WHERE session_id='s' AND input_id='initial'")
         else:
             rt = world.runtimes[("s", "worker-0")]
-            state, _, _ = store.read_state("s")
+            state, rows, _ = store.read_state("s")
             operation = next(op for op in state.operations.values() if op.kind == "tool")
-            plan = operation.attempts[1].execution_plan
+            raw_plan = operation.attempts[1].execution_plan
+            hydration = hydration_for_session_store(store, "s")
+            plan = next(row.record for row in hydrate_records(rows, hydration) if row.record.record_id == raw_plan.record_id)
             context = CallContext(plan._payload["idempotency_key"], plan)
             rt.providers["effect"].submit(plan, context=context)
         assert store._head("s")[:2] == before
         with pytest.raises(InvariantViolation, match=invariant):
             world.check()
+
+
+def test_cancel_child_delivery_keeps_null_result_and_actor_reference(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "cancel")
+        _, child_rows, _ = world.read_state("child")
+        terminal = next(row.record for row in child_rows if row.record.kind == "turn_ended")
+        assert terminal._payload["status"] == "cancelled"
+        assert terminal._payload["result"] is None
+
+        delivered = world.connection("observer").read_input("s", "child-redelivery")
+        assert delivered is not None
+        assert delivered.item.payload["result"] is None
+        assert ContentRef.from_dict(delivered.item.actor["attributes"]).content_id
 
 
 def test_empty_scan_cannot_claim_i4(sim_database):
@@ -185,7 +239,7 @@ def test_campaign_identity_once_and_matching_replay(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("workers", [0, 9])
+@pytest.mark.parametrize("workers", [0, 11])
 def test_worker_cap_rejects_invalid_counts_before_any_seed(workers):
     with pytest.raises(ValueError, match="workers"):
         next(seed_results(workers=workers))

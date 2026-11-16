@@ -2,21 +2,40 @@
 
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
 
 from vv_agent.kernel._child_store import completion_input
+from vv_agent.kernel._content_publication import link_declared_input_content
 from vv_agent.session import children
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.projection import SessionHydration, hydrate_records
+from vv_agent.session.records import InboxItem
 from vv_agent.session.store import Conflict
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import content_ref, item, principal, record
+from .helpers import (
+    content_ref,
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    item,
+    push_fixture_input,
+    read_fixture_state,
+    record,
+    wrap_fixture_store,
+)
 from .test_recovery_matrix import runtime
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
 
 
 @function_tool
@@ -25,35 +44,31 @@ def child_task() -> str:
 
 
 def start(store, sid="s"):
-    with store.atomic() as tx:
-        tx.create(
-            SessionSpec(
-                sid,
-                principal(f"{sid}-user"),
-                content_ref(f"{sid}/workspace"),
-                attributes=content_ref(f"{sid}/attributes"),
-            ),
-            consumers=("events",),
-        )
-        prompt = item("initial", "user", actor=principal(f"{sid}-user"))
-        tx.push(sid, replace(prompt, payload={"content": content_ref(f"{sid}/initial")}))
+    create_fixture_session(store, sid, workspace=f"/tmp/{sid}")
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "initial"}))
 
 
-def parent_runtime(database, *, background=False, steps=None, hook=lambda *_: None):
-    return runtime(
+def fixture_runtime(store, database, sid, steps, tools=(), **kwargs):
+    result = runtime(database, steps, tools, content_reader=fixture_content_reader(store, sid), **kwargs)
+    return replace(result, heartbeat_store=lambda: open_fixture_store(database))
+
+
+@contextmanager
+def open_fixture_store(database):
+    with open_store(database) as raw_store:
+        yield wrap_fixture_store(raw_store)
+
+
+def parent_runtime(store, database, *, sid="s", background=False, steps=None, hook=lambda *_: None):
+    return fixture_runtime(
+        store,
         database,
+        sid,
         steps if steps is not None else [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent done")],
         [child_task],
         children={
             "child_task": lambda plan: children.ChildSession(
-                SessionSpec(
-                    "child",
-                    principal("child-user"),
-                    content_ref("child/workspace"),
-                    attributes=content_ref("child/attributes"),
-                ),
-                "do child",
-                background=background,
+                fixture_child_spec(store, plan.session_id, "child"), "do child", background=background
             )
         },
         hook=hook,
@@ -62,7 +77,7 @@ def parent_runtime(database, *, background=False, steps=None, hook=lambda *_: No
 
 def parked(store, database, **kwargs):
     start(store)
-    rt = parent_runtime(database, **kwargs)
+    rt = parent_runtime(store, database, **kwargs)
     drive(store, "s", runtime=rt)
     state, records, _ = read_state(store, "s")
     handle = next(r.record.payload["handle"] for r in records if r.record.kind == "op_parked")
@@ -70,7 +85,11 @@ def parked(store, database, **kwargs):
 
 
 def complete_child(store, database):
-    drive(store, "child", runtime=runtime(database, [LLMResponse("child done")]))
+    drive(
+        store,
+        "child",
+        runtime=fixture_runtime(store, database, "child", [LLMResponse("child done")]),
+    )
 
 
 def delivered(store):
@@ -80,6 +99,14 @@ def delivered(store):
 
 def child_result(store):
     return next(i.item for i in store.peek_inbox("s") if i.item.kind == "child_result")
+
+
+def push_published_input(store, session_id, value):
+    with store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+        receipt = tx.push(session_id, value)
+        link_declared_input_content(writer, value)
+        return receipt
 
 
 def test_blocking_child_success(store, database):
@@ -98,20 +125,25 @@ def test_blocking_child_success(store, database):
         for r in records
         if r.record.kind == "op_completed" and r.record.operation_id == handle["delivery_target"]["operation_id"]
     )
+    hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id="s")
+    hydrated_applied, hydrated_result = hydrate_records((applied, result), hydration)
     assert applied.commit_id == result.commit_id
-    assert result.record.payload["result"]["content"] == "child done"
+    assert hydrated_applied.record.payload["input"]["payload"]["result"] == "child done"
+    assert hydrated_result.record.payload["result"]["content"] == "child done"
     assert not rt.llm.steps
 
 
 def delivery_worker(database, pipe, point):
-    with open_store(database) as store, store.atomic() as tx:
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store)
+        with store.atomic() as tx:
 
-        def hook(at):
-            if at == point:
-                pipe.send("barrier")
-                pipe.recv()
+            def hook(at):
+                if at == point:
+                    pipe.send("barrier")
+                    pipe.recv()
 
-        children.child_delivery(store, tx, "child", hook=hook)
+            children.child_delivery(store, tx, "child", hook=hook)
 
 
 @pytest.mark.parametrize("point", ["before_parent_inbox", "after_parent_inbox", "after_child_ack"])
@@ -149,16 +181,17 @@ def test_twenty_concurrent_completion_duplicates_and_conflict(store, database):
     item = child_result(store)
 
     def push(_):
-        with open_store(database) as other, other.atomic() as tx:
-            return tx.push("s", item).replayed
+        with open_store(database) as raw_store:
+            other = wrap_fixture_store(raw_store)
+            with other.atomic() as tx:
+                return tx.push("s", item).replayed
 
     with ThreadPoolExecutor(max_workers=20) as pool:
         assert all(pool.map(push, range(20)))
     with pytest.raises(Conflict), store.atomic() as tx:
         tx.push("s", replace(item, payload=item.payload | {"result": content_ref("forged")}))
     drive(store, "s", runtime=rt)
-    with store.atomic() as tx:
-        tx.push("s", replace(item, input_id="identical-other-id"))
+    push_published_input(store, "s", replace(item, input_id="identical-other-id"))
     drive(store, "s", runtime=rt)
     state, _, _ = read_state(store, "s")
     assert state.applied_inputs["identical-other-id"].payload["disposition"] == "noop"
@@ -170,15 +203,15 @@ def test_parent_cancel_cascades_and_late_result_audit(store, database, child_sta
     if child_started:
         complete_child(store, database)
     target = handle["delivery_target"]
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
-        )
+    push_fixture_input(
+        store,
+        "s",
+        item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+    )
     drive(store, "s", runtime=rt)
     if not child_started:
         assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox("child"))
-        drive(store, "child", runtime=runtime(database, []))
+        drive(store, "child", runtime=fixture_runtime(store, database, "child", []))
     delivered(store)
     drive(store, "s", runtime=rt)
     state, records, _ = read_state(store, "s")
@@ -223,7 +256,7 @@ def test_background_child_notification_at_safe_point(store, database):
         ("turn_id", "wrong-turn"),
         ("terminal_seq", 1),
         ("terminal_digest", "0" * 64),
-        ("result", content_ref("forged")),
+        ("result", "forged"),
         ("generation", 99),
         ("target_turn_id", "wrong-parent-turn"),
     ],
@@ -238,12 +271,18 @@ def test_child_completion_rejects_untrusted_or_mismatched_identity(store, databa
         if field in {"generation", "target_turn_id"}
         else replace(item, payload=item.payload | {field: value})
     )
-    with store.atomic() as tx:
-        tx.push("s", item)
+    if field == "session_id":
+        with pytest.raises(Conflict, match="missing child session"):
+            push_fixture_input(store, "s", item)
+    else:
+        push_fixture_input(store, "s", item)
     drive(store, "s", runtime=rt)
     state, _, _ = read_state(store, "s")
     assert state.phase == "parked"
-    assert state.applied_inputs[item.input_id].payload["disposition"] == "rejected"
+    if field == "session_id":
+        assert item.input_id not in state.applied_inputs
+    else:
+        assert state.applied_inputs[item.input_id].payload["disposition"] == "rejected"
 
 
 def test_store_rejects_success_with_waiting_live_child(store, database):
@@ -267,11 +306,11 @@ def test_child_creation_rolls_back_with_parent_park(store, database):
         if point == "before_commit" and record and record.kind == "op_parked":
             raise RuntimeError("crash before parent park")
 
-    rt = parent_runtime(database, hook=hook)
+    rt = parent_runtime(store, database, hook=hook)
     with pytest.raises(RuntimeError, match="crash before parent park"):
         drive(store, "s", runtime=rt)
     assert store.list_sessions() == ("s",)
-    drive(store, "s", runtime=parent_runtime(database, steps=[]))
+    drive(store, "s", runtime=parent_runtime(store, database, steps=[]))
     assert store.list_sessions() == ("child", "s")
     assert read_state(store, "s")[0].phase == "parked"
 
@@ -281,7 +320,8 @@ def test_background_notification_waits_for_frozen_model_then_forces_next_model(s
 
     def frozen(request):
         captured.append(request)
-        with open_store(database) as other:
+        with open_store(database) as raw_store:
+            other = wrap_fixture_store(raw_store)
             complete_child(other, database)
             delivered(other)
         return LLMResponse("candidate before child completion")
@@ -311,7 +351,7 @@ def test_late_background_notification_does_not_open_turn(store, database):
     complete_child(store, database)
     delivered(store)
     drive(store, "s", runtime=rt)
-    state, records, _ = read_state(store, "s")
+    state, records, _ = read_fixture_state(store, "s")
     assert state.active_turn_id is None
     assert len([r for r in records if r.record.kind == "turn_ended"]) == 1
     assert (
@@ -323,20 +363,18 @@ def test_late_background_notification_does_not_open_turn(store, database):
 def test_child_completion_older_generation_cannot_overwrite_successor(store, database):
     rt, _, handle = parked(store, database)
     target = handle["delivery_target"]
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
-        )
+    push_fixture_input(
+        store,
+        "s",
+        item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+    )
     drive(store, "s", runtime=rt)
     complete_child(store, database)  # The durable cancel wins before the child's first model.
-    with store.atomic() as tx:
-        follow_up = item("next", "follow_up", generation=2, actor=principal("s-user"))
-        tx.push("s", replace(follow_up, payload={"content": content_ref("new generation")}))
-    drive(store, "s", runtime=runtime(database, [LLMResponse("new result")]))
+    push_fixture_input(store, "s", InboxItem("next", "follow_up", {"content": "new generation"}, generation=2))
+    drive(store, "s", runtime=fixture_runtime(store, database, "s", [LLMResponse("new result")]))
     delivered(store)
     drive(store, "s", runtime=rt)
-    state, records, _ = read_state(store, "s")
+    state, records, _ = read_fixture_state(store, "s")
     assert state.operations[target["operation_id"]].attempts[1].context == "audit"
     assert [r.record.payload["result"] for r in records if r.record.kind == "turn_ended"] == [None, "new result"]
 
@@ -346,8 +384,8 @@ def test_twenty_concurrent_child_consumers_deliver_once(store, database):
     complete_child(store, database)
 
     def deliver(_):
-        with open_store(database) as other:
-            return delivered(other)
+        with open_store(database) as raw_store:
+            return delivered(wrap_fixture_store(raw_store))
 
     with ThreadPoolExecutor(max_workers=20) as pool:
         results = list(pool.map(deliver, range(20)))
@@ -381,30 +419,22 @@ def test_store_cannot_forge_child_completion_without_terminal_input(store, datab
 
 def test_cancel_live_child_recursively_reaches_grandchild(store, database):
     parent_rt, _, handle = parked(store, database)
-    child_rt = parent_runtime(database)
+    child_rt = parent_runtime(store, database, sid="child")
     child_rt.children = {
-        "child_task": lambda plan: children.ChildSession(
-            SessionSpec(
-                "grandchild",
-                principal("grandchild-user"),
-                content_ref("grandchild/workspace"),
-                attributes=content_ref("grandchild/attributes"),
-            ),
-            "nested child",
-        )
+        "child_task": lambda plan: children.ChildSession(fixture_child_spec(store, plan.session_id, "grandchild"), "nested child")
     }
     drive(store, "child", runtime=child_rt)
     assert read_state(store, "child")[0].phase == "parked"
     target = handle["delivery_target"]
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
-        )
+    push_fixture_input(
+        store,
+        "s",
+        item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+    )
     drive(store, "s", runtime=parent_rt)
     drive(store, "child", runtime=child_rt)
     assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox("grandchild"))
-    drive(store, "grandchild", runtime=runtime(database, []))
+    drive(store, "grandchild", runtime=fixture_runtime(store, database, "grandchild", []))
     for sid in ("s", "child", "grandchild"):
         assert [r.record.payload["status"] for r in read_state(store, sid)[1] if r.record.kind == "turn_ended"] == ["cancelled"]
 
@@ -433,7 +463,7 @@ def test_handler_version_stop_with_child_wait_retains_unconfirmed_child(store, d
     rt, _, handle = parked(store, database)
     rt.handler_version = "replaced"
     drive(store, "s", runtime=rt)
-    terminal = next(r.record for r in read_state(store, "s")[1] if r.record.kind == "turn_ended")
+    terminal = next(r.record for r in read_fixture_state(store, "s")[1] if r.record.kind == "turn_ended")
     assert terminal.payload["status"] == "failed"
     assert terminal.payload["reason"] == "handler_version_mismatch"
     assert handle["delivery_target"]["operation_id"] in terminal.payload["unconfirmed_operations"]
@@ -443,24 +473,22 @@ def test_handler_version_stop_with_child_wait_retains_unconfirmed_child(store, d
 def test_old_child_audit_during_new_model_does_not_force_another_model(store, database):
     rt, _, handle = parked(store, database)
     target = handle["delivery_target"]
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
-        )
+    push_fixture_input(
+        store,
+        "s",
+        item("cancel", "control", action="cancel", target_turn_id=target["turn_id"], generation=target["generation"]),
+    )
     drive(store, "s", runtime=rt)
     complete_child(store, database)
-    with store.atomic() as tx:
-        follow_up = item("next", "follow_up", generation=2, actor=principal("s-user"))
-        tx.push("s", replace(follow_up, payload={"content": content_ref("new generation")}))
+    push_fixture_input(store, "s", InboxItem("next", "follow_up", {"content": "new generation"}, generation=2))
 
     def newer_model(request):
-        with open_store(database) as other:
-            delivered(other)
+        with open_store(database) as raw_store:
+            delivered(wrap_fixture_store(raw_store))
         return LLMResponse("new generation result")
 
-    drive(store, "s", runtime=runtime(database, [newer_model]))
-    state, records, _ = read_state(store, "s")
+    drive(store, "s", runtime=fixture_runtime(store, database, "s", [newer_model]))
+    state, records, _ = read_fixture_state(store, "s")
     assert state.operations[target["operation_id"]].attempts[1].context == "audit"
     assert [r.record.payload["result"] for r in records if r.record.kind == "turn_ended"] == [None, "new generation result"]
     assert sum(op.kind == "model" and op.turn_id == "s/turn/next" for op in state.operations.values()) == 1
@@ -470,7 +498,7 @@ def test_read_schema_drift_closes_parent_and_requests_child_cancellation(store, 
     from copy import deepcopy
 
     start(store)
-    rt = parent_runtime(database)
+    rt = parent_runtime(store, database)
     current = rt.registry.get_schema("read_file")
     old = deepcopy(current)
     old["function"]["parameters"]["properties"].pop("start_char")
@@ -479,6 +507,7 @@ def test_read_schema_drift_closes_parent_and_requests_child_cancellation(store, 
     assert any(row.record.kind == "op_parked" for row in read_state(store, "s")[1])
     rt.registry.register_schema("read_file", current)
     drive(store, "s", runtime=rt)
-    ended = next(row.record for row in read_state(store, "s")[1] if row.record.kind == "turn_ended")
+    ended = next(row for row in read_state(store, "s")[1] if row.record.kind == "turn_ended")
+    ended = hydrate_records((ended,), SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id="s"))[0].record
     assert ended.payload["reason"] == "handler_schema_or_capability_mismatch"
     assert any(row.item.kind == "control" and row.item.payload["action"] == "cancel" for row in store.peek_inbox("child"))

@@ -17,7 +17,7 @@ from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch
 from vv_agent.session.kernel import Runtime, drive, read_state
 from vv_agent.session.projection import project_records
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure
@@ -25,6 +25,7 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
 from .conftest import open_store
+from .helpers import create_fixture_session, fixture_child_spec, fixture_content_reader, push_fixture_input, wrap_fixture_store
 from .test_runner_parity import RESOLVED, echo, observe
 
 
@@ -32,39 +33,43 @@ class Restart(BaseException):
     pass
 
 
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
 def admit(store, config, sid="control"):
-    with store.atomic() as tx:
-        tx.create(
-            SessionSpec(
-                sid,
-                "test",
-                str(config.workspace),
-                attributes={
-                    "seed": {
-                        "messages": [m.to_dict() for m in config.initial_messages or []],
-                        "shared_state": config.shared_state or {},
-                        "unseen_input_protection": not bool(config.initial_messages),
-                    }
-                },
-            ),
-            consumers=("events",),
-        )
-        tx.push(sid, InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(
+        store,
+        sid,
+        workspace=str(config.workspace),
+        attributes={
+            "seed": {
+                "messages": [m.to_dict() for m in config.initial_messages or []],
+                "shared_state": config.shared_state or {},
+                "unseen_input_protection": not bool(config.initial_messages),
+            }
+        },
+    )
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
 
 
 def runtime(store, database, agent, config, llm, **kwargs):
+    session_id = kwargs.pop("sid", "control")
+    kwargs.setdefault("content_reader", fixture_content_reader(store, session_id))
     return Runtime(agent, config, RESOLVED, llm, lambda: open_store(database), **kwargs)
 
 
 @pytest.fixture
 def database_clock(store, monkeypatch):
     now = 1_000_000
-    monkeypatch.setattr(type(store), "clock_sql", str(now))
+    raw_store = store._root_store
+    monkeypatch.setattr(type(raw_store), "clock_sql", str(now))
 
     def advance(milliseconds):
         nonlocal now
         now += milliseconds
-        monkeypatch.setattr(type(store), "clock_sql", str(now))
+        monkeypatch.setattr(type(raw_store), "clock_sql", str(now))
 
     return advance
 
@@ -74,23 +79,23 @@ def records(store, sid="control", kind=None):
 
 
 def reply(store, park, *, text="blue", input_id="reply", sid="control"):
-    with store.atomic() as tx:
-        tx.push(
-            sid,
-            InboxItem(
-                input_id,
-                "user",
-                {
-                    "content": {
-                        "interaction_id": park.payload.get("interaction_id") or park.payload["handle"]["interaction_id"],
-                        **({"operation_id": park.operation_id} if park.operation_id else {}),
-                        "text": text,
-                    }
-                },
-                park.turn_id,
-                0,
-            ),
-        )
+    push_fixture_input(
+        store,
+        sid,
+        InboxItem(
+            input_id,
+            "user",
+            {
+                "content": {
+                    "interaction_id": park.payload.get("interaction_id") or park.payload["handle"]["interaction_id"],
+                    **({"operation_id": park.operation_id} if park.operation_id else {}),
+                    "text": text,
+                }
+            },
+            park.turn_id,
+            0,
+        ),
+    )
 
 
 def approval_answer(store, park, decision="approve", input_id="answer"):
@@ -109,8 +114,7 @@ def approval_answer(store, park, decision="approve", input_id="answer"):
         park.turn_id,
         0,
     )
-    with store.atomic() as tx:
-        tx.push("control", answer)
+    push_fixture_input(store, "control", answer)
     return answer
 
 
@@ -160,8 +164,7 @@ def test_dynamic_schema_new_turn_parity(store, database, tmp_path):
     rt = runtime(store, database, agent, config, ScriptedLLM([first, first]))
     drive(store, "control", runtime=rt)
     changed_registry(rt.registry)
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("second", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("second", "user", {"content": "go"}))
     drive(store, "control", runtime=rt)
     assert schema_seen == ["first", "second", "first", "second"]
 
@@ -418,8 +421,7 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
     assert result.payload["result"] == old["output"]
     assert len(records(store, kind="op_parked")) == 1
     # Replace both runtime and broker; session grants come from durable answers.
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("next", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("next", "user", {"content": "go"}))
     drive(
         store,
         "control",
@@ -750,8 +752,7 @@ def test_cancellation_control_result_event_parity(store, database, tmp_path, coo
     worker.start()
     try:
         assert entered.wait(3)
-        with store.atomic() as tx:
-            tx.push("control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
+        push_fixture_input(store, "control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
         worker.join(3)
         assert not worker.is_alive() and not errors
         end = records(store, kind="turn_ended")[0]
@@ -838,7 +839,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
     agent = Agent("parent", "parent", tools=[delegate])
     admit(store, config)
     children = {
-        "delegate": lambda plan: ChildSession(SessionSpec("child", "test", str(tmp_path)), "child", background=background)
+        "delegate": lambda plan: ChildSession(fixture_child_spec(store, plan.session_id, "child"), "child", background=background)
     }
     steps: list[ScriptStep] = [LLMResponse("", [call])]
     if background:
@@ -879,8 +880,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
         child_worker.start()
         assert child_entered.wait(3)
     try:
-        with store.atomic() as tx:
-            tx.push("control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
+        push_fixture_input(store, "control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
         drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([]), children=children))
         assert records(store, kind="turn_ended")[0].payload["status"] == "cancelled"
         if child_started:
@@ -1073,8 +1073,7 @@ def test_rejected_broker_session_grant_cannot_authorize_next_tool(store, databas
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     assert effects == []
     assert broker.is_session_allowed("effect")
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("next", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("next", "user", {"content": "go"}))
     drive(
         store,
         "control",

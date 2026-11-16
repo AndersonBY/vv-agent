@@ -439,8 +439,7 @@ class MessageProcessor:
         try:
             context = None
             try:
-                creation = self._run_adapter.kernel.store.read(input_id).records[0].record
-                context = creation._payload["attributes"].get("app_server_context")
+                context = self._run_adapter.kernel.session_attributes(input_id).get("app_server_context")
             except (KeyError, Conflict):
                 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 

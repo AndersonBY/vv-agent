@@ -38,6 +38,18 @@ def test_storage_protocol_and_generic_commit_append_calls_remain_allowed(tmp_pat
     assert check_kernel_boundaries(tmp_path) == []
 
 
+def test_postgres_sql_composition_constructors_are_allowed(tmp_path):
+    source(
+        tmp_path,
+        "def compose(schema, table, role):\n"
+        "    from psycopg import sql\n"
+        "    query = sql.SQL('SELECT * FROM {}.{} WHERE role = {}')\n"
+        "    return query.format(sql.Identifier(schema), sql.Identifier(table), sql.Literal(role))\n",
+        "_postgres.py",
+    )
+    assert check_kernel_boundaries(tmp_path) == []
+
+
 @pytest.mark.parametrize("filename", ["_sql.py", "_sqlite.py", "_postgres.py"])
 def test_only_the_exact_storage_implementations_may_use_low_level_storage_apis(tmp_path, filename):
     source(

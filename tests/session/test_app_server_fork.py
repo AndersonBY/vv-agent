@@ -9,11 +9,17 @@ from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef
 from vv_agent.session.context import project_context
 from vv_agent.session.context_view import context_view
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.projection import (
+    fold_hydrated_records,
+    hydrate_record_payload,
+    hydrate_records,
+    hydration_for_session_store,
+)
+from vv_agent.session.reducer import _fold_factory_for
 from vv_agent.types import LLMResponse, Message, ToolArtifactRef, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
-from .helpers import content_ref, principal
+from .helpers import create_fixture_session, wrap_fixture_store
 from .test_compaction import SUMMARY, tool_history
 
 
@@ -84,6 +90,18 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         assert calls[-1].model == "base"
         send(a, "clear", "thread/model/select", {"threadId": sid, "inputId": "clear", "selection": None})
         run_turn(a, sid, "restore", t2)
+        cleared_state, cleared_records, _ = store.read_state(sid)
+        hydration = hydration_for_session_store(store, sid)
+        clear_payload = next(
+            payload
+            for row in cleared_records
+            if row.record.kind == "input_applied"
+            and (payload := hydrate_record_payload(row, hydration))["input"]["input_id"] == "clear"
+        )
+        assert clear_payload["disposition"] == "applied"
+        assert clear_payload["input"]["payload"] == {"selection": None}
+        assert "model_binding" not in clear_payload
+        assert cleared_state.model_selection is None
         assert calls[-1].model == "small" and calls[-1].model_settings.max_tokens == 1000
         assert store.read_state("source")[1] == original_records
     finally:
@@ -91,6 +109,7 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
 
 
 def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_grant(store, tmp_path, monkeypatch):
+    store = wrap_fixture_store(store)
     backend = LocalWorkspaceBackend(tmp_path / "source")
     target = LocalWorkspaceBackend(tmp_path / "prepared")
     artifact_path = ".vv-agent/artifacts/session-source/old.txt"
@@ -128,20 +147,21 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
     monkeypatch.setattr(host, "build_run_config", binding)
     a = server_for(store, host)
     try:
-        with store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "source",
-                    principal("source-user"),
-                    content_ref("source/workspace"),
-                    attributes=content_ref("source/attributes"),
-                ),
-                consumers=("events", "traces", "app_server"),
-            )
+        create_fixture_session(
+            store,
+            "source",
+            attributes={
+                "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
+                "seed": {"messages": [message.to_dict() for message in history], "shared_state": {}},
+            },
+            consumers=("events", "traces", "app_server"),
+            subject_id="source-user",
+        )
         first = run_turn(a, "source", "first")
         send(a, "compact", "thread/compact/start", {"threadId": "source", "actionId": "summary"})
         a.run_adapter.join()
-        state, records, _ = store.read_state("source")
+        _, records, _ = store.read_state("source")
+        hydration = hydration_for_session_store(store, "source")
         compactions = [r for r in records if r.record.kind == "context_compacted"]
         assert compactions, str(
             [
@@ -157,15 +177,25 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
             ]
         )
         compact = compactions[-1]
-        assert compact.record._payload["evidence_manifest"]["artifacts"][0]["artifact_ref"] == artifact.to_dict()
+        compact_payload = hydrate_record_payload(compact, hydration)
+        assert compact_payload["evidence_manifest"]["artifacts"][0]["artifact_ref"] == artifact.to_dict()
         params = {"threadId": "source", "forkId": "copy", "workspace": {"snapshot": "prepared"}}
         fork = send(a, "fork", "thread/fork", params)
         sid = fork["threadId"]
-        baseline = store.read_state(sid)[1][0].record._payload["attributes"]["app_server_context"]["task"]
+        fork_creation = store.read_state(sid)[1][0]
+        fork_attributes = hydrate_record_payload(fork_creation, hydration_for_session_store(store, sid))["attributes"]
+        baseline = fork_attributes["app_server_context"]["task"]
         assert baseline["initial_messages"] == [] and baseline["initial_shared_state"] == {}
         assert baseline["user_prompt"] == "" and "vv_session" not in baseline["metadata"]
-        copied = project_context(store.read_state(sid)[1], store.read_state(sid)[0])
-        assert [m.to_dict() for m in copied] == [m.to_dict() for m in project_context(records, state)]
+        copied = [Message.from_dict(message) for message in fork_attributes["seed"]["messages"]]
+        hydrated_records = hydrate_records(records, hydration)
+        logical_state = fold_hydrated_records(hydrated_records, records, _fold_factory_for(store), hydration)
+        source_messages = project_context(
+            hydrated_records,
+            logical_state,
+            _fold_factory=_fold_factory_for(store),
+        )
+        assert [m.to_dict() for m in copied] == [m.to_dict() for m in source_messages]
         assert MemoryManager().compaction_evidence(copied)["artifacts"][0]["artifact_ref"] == artifact.to_dict()
         assert context_view(store, sid)["lastCompaction"] == context_view(store, "source")["lastCompaction"]
         assert target.read_bytes(artifact_path) == body.encode()
@@ -176,10 +206,12 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
         assert context_view(store, early["threadId"])["lastCompaction"] is None
         run_turn(a, sid, "fork-turn")
         assert any(m.name == "memory_summary" for m in calls[-1].messages)
+        fork_hydration = hydration_for_session_store(store, sid)
         recovery = next(
-            row.record.payload["result"]
+            hydrate_record_payload(row, fork_hydration)["result"]
             for row in store.read_state(sid)[1]
-            if row.record.kind == "op_completed" and row.record.payload["result"].get("tool_call_id") == "recover"
+            if row.record.kind == "op_completed"
+            and hydrate_record_payload(row, fork_hydration)["result"].get("tool_call_id") == "recover"
         )
         assert recovery["error_code"] == "artifact_read_denied", recovery
         assert not any(m.role == "tool" and body in m.content for m in calls[-1].messages)

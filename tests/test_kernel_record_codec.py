@@ -169,18 +169,29 @@ def test_all_canonical_codec_rejections_reject_without_historical_fallback():
     assert rejected_layers
 
 
-def test_trusted_storage_allocation_cases_are_enforced_by_the_python_codec():
+def test_trusted_storage_producer_capture_cases_are_enforced_by_the_python_codec():
     from support.contract import fixture_root
 
     fixture = json.loads((fixture_root() / "trusted_storage_s1.json").read_text())
-    assert fixture["status"] == "contract-allocation-only"
+    assert fixture["status"] == "producer-captured"
+    assert fixture["provenance"]["producer_capture"] is True
+    assert fixture["revision"] == fixture["provenance"]["source_revision"]
+    assert len(fixture["revision"]) == 40
+    assert fixture["record_schema_version"] == "S1"
+    assert fixture["inbox_schema_version"] == "S1"
     bases = {case["name"]: case["wire"] for case in fixture["accepted_cases"]}
     for case in fixture["accepted_cases"]:
         body = base64.b64decode(case["bytes_base64"], validate=True)
+        assert sha256(body).hexdigest() == case["sha256"]
+        assert case["canonical_json_base64"] == case["bytes_base64"]
+        assert case["canonical_json_utf8_bytes"] == len(body)
+        assert case["wire"]["schema_version"] == "S1"
+        assert case["wire"]["feature_level"] == 1
         codec_type = records.InboxItem if "actor" in case["wire"] else records.Record
         parsed = codec_type.parse(body)
         assert parsed.to_dict() == case["wire"]
         assert parsed.encode() == body
+        assert case["content_refs"]
     for case in fixture["rejected_cases"]:
         wire = json.loads(json.dumps(bases[case["base"]]))
         for patch in case["patch"]:

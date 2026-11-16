@@ -131,6 +131,7 @@ def _tombstone_message(value: ForgetTombstone) -> bytes:
             "domain": "vv-agent/S1/purge",
             "tenant_id": value.tenant_id,
             "session_id": value.session_id,
+            "scope_root_session_id": value.scope_root_session_id,
             "final_seq": value.final_seq,
             "chain_digest": value.chain_digest,
             "deleted_ms": value.deleted_ms,

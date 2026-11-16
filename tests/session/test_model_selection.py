@@ -3,15 +3,16 @@
 from dataclasses import replace
 from threading import Event, Thread
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from vv_agent.events import ModelCallCompletedEvent
+from vv_agent.kernel._content import ContentRef
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.compaction import manager_for
-from vv_agent.session.kernel import _Driver, drive
-from vv_agent.session.projection import project_records
+from vv_agent.session.kernel import _Driver, _Scope, drive
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
 from vv_agent.session.records import InboxItem, RecordError
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict
@@ -19,8 +20,17 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
+from .helpers import (
+    content_ref,
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    principal,
+    push_fixture_input,
+    wrap_fixture_store,
+)
 from .test_provider_usage import ReceiptProvider
-from .test_recovery_matrix import MODEL_USAGE, runtime, start
+from .test_recovery_matrix import MODEL_USAGE, runtime
 
 SELECTION: dict[str, Any] = {
     "model": "B",
@@ -34,13 +44,36 @@ def echo() -> str:
     return "ok"
 
 
+class ModelSelectionReceiptProvider(ReceiptProvider):
+    def authenticate(self, item, plan):
+        return (
+            item.kind == "provider_result"
+            and item.target_turn_id == self.item.target_turn_id
+            and item.generation == self.item.generation
+            and item.payload == self.item.payload
+            and item.payload["operation_id"] == plan.operation_id
+            and item.payload["attempt"] == plan.attempt
+            and item.payload["request_digest"] == plan.payload["request_digest"]
+        )
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+def start(store, sid="s"):
+    create_fixture_session(store, sid)
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
+
+
 def switch(store, selection=SELECTION, input_id="select", sid="s"):
     item = InboxItem(input_id, "model_selection", {"selection": selection})
-    with store.atomic() as tx:
-        return tx.push(sid, item)
+    return push_fixture_input(store, sid, item)
 
 
-def routed(database, steps_a, steps_b=(), **kwargs):
+def routed(database, steps_a, steps_b=(), *, store, sid="s", **kwargs):
+    kwargs.setdefault("content_reader", fixture_content_reader(store, sid))
     rt = runtime(database, steps_a, [echo], **kwargs)
     b = ScriptedLLM(list(steps_b))
 
@@ -63,9 +96,20 @@ def routed(database, steps_a, steps_b=(), **kwargs):
     return rt, b
 
 
-def plans(store):
+def plans(store, sid="s"):
+    hydration = hydration_for_session_store(store, sid)
     return [
-        r.record for r in store.read_state("s")[1] if r.record.kind == "op_planned" and r.record.payload["purpose"] == "primary"
+        SimpleNamespace(
+            record=row.record,
+            payload=hydrate_record_payload(row, hydration),
+            operation_id=row.record.operation_id,
+            turn_id=row.record.turn_id,
+            attempt=row.record.attempt,
+            encode=row.record.encode,
+            to_dict=row.record.to_dict,
+        )
+        for row in store.read_state(sid)[1]
+        if row.record.kind == "op_planned" and row.record.payload["purpose"] == "primary"
     ]
 
 
@@ -83,7 +127,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
         return LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})
 
     b_usage = {"prompt_tokens": 200, "completion_tokens": 50 if output_cap else 0, "prompt_tokens_details": {"cached_tokens": 0}}
-    rt, b = routed(database, [first], [LLMResponse("done", raw={"usage": b_usage})])
+    rt, b = routed(database, [first], [LLMResponse("done", raw={"usage": b_usage})], store=store)
     resolve = rt.model_resolver
     assert resolve is not None
 
@@ -107,7 +151,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     try:
         assert entered.wait(10)
         with open_store(database) as other:
-            switch(other, choice)
+            switch(wrap_fixture_store(other), choice)
     finally:
         release.set()
         thread.join(15)
@@ -118,8 +162,12 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     request = b_plan.payload["request"]
     assert request["model"] == "B" and request["route"] == SELECTION["route"]
     assert request["model_settings"]["reasoning"] == {"effort": "high"}
-    state, records, _ = store.read_state("s")
-    events = [e for e in project_records(records) if isinstance(e, ModelCallCompletedEvent)]
+    _state, records, _ = store.read_state("s")
+    events = [
+        e
+        for e in project_records(records, hydration=hydration_for_session_store(store, "s"))
+        if isinstance(e, ModelCallCompletedEvent)
+    ]
     assert [(e.model, e.backend) for e in events] == [("scripted", "scripted"), ("B", "anthropic")]
     result = project_result(store, "s", a_plan.turn_id, runtime=rt)
     assert [(c.model, c.backend) for c in result.raw_result.token_usage.model_calls] == [
@@ -129,9 +177,10 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     assert len({e.call_id for e in events}) == 2
     assert [e.usage.total_tokens for e in events] == [12300, 200 + b_usage["completion_tokens"]]
     # Capacity uses persisted selection even on a fresh worker, with no new resolution.
-    state.active_turn_id = a_plan.turn_id
-    driver = cast(Any, SimpleNamespace(state=state, records=records, runtime=rt, sid="s"))
-    driver.effective_model = lambda: _Driver.effective_model(driver)
+    lease = store.acquire("s", owner="model-selection-capacity", ttl_ms=15_000)
+    assert lease is not None
+    driver = _Driver(store, "s", rt, _Scope(lease, rt, now_ms=store._now()))
+    driver.state.active_turn_id = a_plan.turn_id
     manager = manager_for(driver)
     assert (manager.model, manager.model_context_window, manager.reserved_output_tokens) == ("B", 8192, expected_reserve)
 
@@ -139,7 +188,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
 @pytest.mark.capability("model-selection")
 def test_persistent_latest_wins_clear_reject_and_idempotency(store, database):
     start(store)
-    rt, b = routed(database, [LLMResponse("A")], [LLMResponse("B1"), LLMResponse("B2")])
+    rt, b = routed(database, [LLMResponse("A")], [LLMResponse("B1"), LLMResponse("B2")], store=store)
     switch(store, {"model": "bad", "route": {}}, "bad-first")
     switch(store)
     assert switch(store).replayed
@@ -149,14 +198,12 @@ def test_persistent_latest_wins_clear_reject_and_idempotency(store, database):
     assert plans(store)[0].payload["request"]["model"] == "B"
     # A later unresolvable selection cannot replace the accepted B selection.
     switch(store, {"model": "B", "route": {"backend_type": "denied"}}, "bad-route")
-    with store.atomic() as tx:
-        tx.push("s", InboxItem("turn2", "user", {"content": "next"}))
+    push_fixture_input(store, "s", InboxItem("turn2", "user", {"content": "next"}))
     drive(store, "s", runtime=rt)
     assert plans(store)[1].payload["request"]["model"] == "B"
     switch(store, SELECTION, "again")
     switch(store, None, "clear")
-    with store.atomic() as tx:
-        tx.push("s", InboxItem("turn3", "user", {"content": "next"}))
+    push_fixture_input(store, "s", InboxItem("turn3", "user", {"content": "next"}))
     drive(store, "s", runtime=rt)
     assert plans(store)[2].payload["request"]["model"] == "scripted"
     assert not b.steps
@@ -190,7 +237,7 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
         calls.append((request.model, endpoint))
         if endpoint == "a" and calls.count(("scripted", "a")) == 1:
             with open_store(database) as writer:
-                switch(writer)
+                switch(wrap_fixture_store(writer))
             return LLMResponse("", [ToolCall("a-tool", "echo", {})], raw={"usage": MODEL_USAGE})
         if endpoint == "b1":
             raise TimeoutError("receipt lost")
@@ -201,7 +248,7 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
     monkeypatch.setattr(VvLlmClient, "complete", complete)
 
     def build(**kwargs):
-        rt = runtime(database, [], [echo], **kwargs)
+        rt = runtime(database, [], [echo], content_reader=fixture_content_reader(store, "s"), **kwargs)
         rt.agent.output_validation_enabled = True
         rt.agent.output_validator = lambda value, ctx: (
             OutputValidationResult.accept() if value == "valid" else OutputValidationResult.reject("invalid", "bad answer")
@@ -240,12 +287,15 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
     with pytest.raises(WorkerDeath):
         drive(store, "s", runtime=build(hook=die))
     with open_store(database) as writer:
-        switch(writer, None, "clear-after-b-plan")
+        switch(wrap_fixture_store(writer), None, "clear-after-b-plan")
     drive(store, "s", runtime=build())
     assert calls == [("scripted", "a"), ("B", "b1"), ("B", "b2"), ("scripted", "a")]
     a, b1, b2, cleared = plans(store)
     assert b1.payload["request"] == b2.payload["request"]
     assert b1.operation_id == b2.operation_id and (b1.attempt, b2.attempt) == (1, 2)
+    b1_request_ref = ContentRef.from_dict(b1.record.payload["request"])
+    b2_request_ref = ContentRef.from_dict(b2.record.payload["request"])
+    assert b2_request_ref.content_id == b1_request_ref.content_id
     assert b1.payload["request"]["metadata"]["vv_session"]["endpoint_order"] == ["b1", "b2"]
     assert a.payload["request"]["model"] == cleared.payload["request"]["model"] == "scripted"
     result = project_result(store, "s", a.turn_id)
@@ -264,7 +314,7 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
 def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
     start(store)
     retained = []
-    provider = ReceiptProvider({"content": "", "tool_calls": [ToolCall("echo", "echo", {}).to_dict()]}, MODEL_USAGE)
+    provider = ModelSelectionReceiptProvider({"content": "", "tool_calls": [ToolCall("echo", "echo", {}).to_dict()]}, MODEL_USAGE)
 
     def die(point, plan):
         if point == cut and plan is not None and plan.kind == "op_planned" and plan.payload.get("purpose") == "primary":
@@ -274,7 +324,12 @@ def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
             raise WorkerDeath
 
     # The commit hook receives the record at after_commit; before/after call receives plan.
-    rt, _ = routed(database, [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})], hook=die)
+    rt, _ = routed(
+        database,
+        [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
+        store=store,
+        hook=die,
+    )
     with pytest.raises(WorkerDeath):
         drive(store, "s", runtime=rt)
     original = plans(store)[0]
@@ -283,11 +338,11 @@ def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
         database,
         [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
         [LLMResponse("B", raw={"usage": MODEL_USAGE})],
+        store=store,
         providers={"model": provider},
     )
     if cut == "after_external_call":
-        with store.atomic() as tx:
-            tx.push("s", provider.item)
+        push_fixture_input(store, "s", provider.item)
     drive(store, "s", runtime=fresh)
     assert plans(store)[0].encode() == original.encode()
     assert all(p.payload["request"]["model"] == "scripted" for p in plans(store) if p.operation_id == original.operation_id)
@@ -295,7 +350,11 @@ def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
     assert not b.steps
     if cut == "after_external_call":
         assert len(fresh.llm.steps) == 1  # authentic receipt, no duplicate call
-    events = [e for e in project_records(store.read_state("s")[1]) if isinstance(e, ModelCallCompletedEvent)]
+    events = [
+        e
+        for e in project_records(store.read_state("s")[1], hydration=hydration_for_session_store(store, "s"))
+        if isinstance(e, ModelCallCompletedEvent)
+    ]
     assert [(e.model, e.usage.total_tokens) for e in events] == [("scripted", 12300), ("B", 12300)]
 
 
@@ -319,7 +378,12 @@ def test_selection_codec_rejects_invalid(selection):
 
 
 def test_selection_codec_roundtrip_and_scope():
-    item = InboxItem("s", "model_selection", {"selection": SELECTION})
+    item = InboxItem(
+        "s",
+        "model_selection",
+        {"selection": content_ref("selection")},
+        actor=principal("fixture/model-selection"),
+    )
     assert InboxItem.parse(item.encode()) == item
     for changed in (replace(item, target_turn_id="t"), replace(item, generation=0), replace(item, schema_version=2)):
         with pytest.raises(RecordError):
@@ -332,8 +396,14 @@ def selection_worker(database, pipe, cut):
             pipe.send(("barrier", plan.to_dict()))
             pipe.recv()
 
-    rt, _ = routed(database, [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})], hook=stop)
     with open_store(database) as worker_store:
+        worker_store = wrap_fixture_store(worker_store)
+        rt, _ = routed(
+            database,
+            [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
+            store=worker_store,
+            hook=stop,
+        )
         drive(worker_store, "s", runtime=rt)
 
 
@@ -355,16 +425,21 @@ def test_process_kill_recovery_uses_original_plan(store, database, cut):
         original = receive(parent, "barrier")
         # Different connection, no lease: this must survive the holder's death.
         with open_store(database) as writer:
-            switch(writer)
+            switch(wrap_fixture_store(writer))
         kill(proc, parent, database)
         rt, b = routed(
             database,
             [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
             [LLMResponse("B", raw={"usage": MODEL_USAGE})],
+            store=store,
         )
         drive(store, "s", runtime=rt)
         retained = plans(store)
-        assert retained[0].to_dict() == original
+        if cut == "after_commit":
+            assert retained[0].record.to_dict() == original
+        else:
+            assert retained[0].record.record_id == original["record_id"]
+            assert retained[0].payload == original["payload"]
         assert retained[0].payload["request"]["model"] == "scripted"
         assert retained[-1].payload["request"]["model"] == "B"
         assert not b.steps
@@ -381,25 +456,22 @@ def test_selection_is_local_to_one_session_and_default_rejects(store, database):
     start(store)
     start(store, "child")
     switch(store)
-    drive(store, "s", runtime=runtime(database, [LLMResponse("A")]))
+    drive(store, "s", runtime=runtime(database, [LLMResponse("A")], content_reader=fixture_content_reader(store, "s")))
     assert store.read_state("s")[0].applied_inputs["select"].payload["disposition"] == "rejected"
-    rt, _ = routed(database, [], [LLMResponse("B")])
+    rt, _ = routed(database, [], [LLMResponse("B")], store=store)
     switch(store, input_id="valid")
-    with store.atomic() as tx:
-        tx.push("s", InboxItem("turn2", "user", {"content": "next"}))
+    push_fixture_input(store, "s", InboxItem("turn2", "user", {"content": "next"}))
     drive(store, "s", runtime=rt)
-    child_rt, _ = routed(database, [LLMResponse("child A")])
+    child_rt, _ = routed(database, [LLMResponse("child A")], store=store, sid="child")
     drive(store, "child", runtime=child_rt)
     assert store.read_state("child")[0].model_selection is None
-    child_plans = [r.record for r in store.read_state("child")[1] if r.record.kind == "op_planned"]
-    assert child_plans[0].payload["request"]["model"] == "scripted"
+    assert plans(store, "child")[0].payload["request"]["model"] == "scripted"
 
 
 def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, database):
     from .test_compaction import SUMMARY, history
-    from .test_compaction import start as start_imported
 
-    start_imported(store)
+    start(store)
     requests = []
 
     def too_long(request):
@@ -410,7 +482,7 @@ def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, da
         requests.append(request)
         return LLMResponse("B", raw={"usage": MODEL_USAGE})
 
-    rt, _ = routed(database, [LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})], [too_long, answer])
+    rt, _ = routed(database, [LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})], [too_long, answer], store=store)
     resolve = rt.model_resolver
     assert resolve is not None
 
@@ -435,23 +507,31 @@ def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, da
 @pytest.mark.capability("model-selection")
 def test_parent_selection_does_not_propagate_to_real_child(store, database):
     from vv_agent.session.children import ChildSession, child_delivery
-    from vv_agent.session.records import SessionSpec
 
     from .test_children import child_task
 
     start(store)
-    rt, b = routed(database, [], [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent B")])
+    rt, b = routed(
+        database,
+        [],
+        [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent B")],
+        store=store,
+    )
     rt.agent.tools = [child_task]
-    rt.children = {"child_task": lambda plan: ChildSession(SessionSpec("child", "test", "/tmp"), "child work")}
+    rt.children = {"child_task": lambda plan: ChildSession(fixture_child_spec(store, "s", "child"), "child work")}
     switch(store)
     drive(store, "s", runtime=rt)
     assert store.read_state("s")[0].phase == "parked"
-    drive(store, "child", runtime=runtime(database, [LLMResponse("child A")]))
+    drive(
+        store,
+        "child",
+        runtime=runtime(database, [LLMResponse("child A")], content_reader=fixture_content_reader(store, "child")),
+    )
     with store.atomic() as tx:
         assert child_delivery(store, tx, "child")
     drive(store, "s", runtime=rt)
-    child_state, rows, _ = store.read_state("child")
+    child_state, _rows, _ = store.read_state("child")
     assert child_state.model_selection is None
-    assert next(r.record for r in rows if r.record.kind == "op_planned").payload["request"]["model"] == "scripted"
+    assert plans(store, "child")[0].payload["request"]["model"] == "scripted"
     assert all(p.payload["request"]["model"] == "B" for p in plans(store))
     assert not b.steps

@@ -13,8 +13,9 @@ import vv_agent.budget as budget_module
 from vv_agent.budget import BudgetEvaluator, HostCost, RunBudgetLimits
 from vv_agent.kernel import _driver_outcomes as core
 from vv_agent.kernel._driver_planning import ProviderAvailable
+from vv_agent.kernel._sql import stored_input_proof
 from vv_agent.session import tool_results
-from vv_agent.session.records import InboxItem, digest
+from vv_agent.session.records import InboxItem
 
 
 class AtReceipt(BaseException):
@@ -121,14 +122,16 @@ def test_resource_preparation_precedes_actual_durable_cancellation_audit(tmp_pat
         def prepare(record, result, backend):
             prepared = original(record, result, backend)
             item = InboxItem("cancel-at-preparation", "control", {"action": "cancel"}, plan.turn_id, 0)
-            with worker.store.atomic() as tx:
-                tx.push(worker.sid, item)
+            world.push(worker.sid, item)
             worker.refresh()
+            stored = worker.store.read_input(worker.sid, item.input_id)
+            assert stored is not None
             applied = worker.record(
                 "input_applied",
                 {
-                    "input": item.to_dict(),
-                    "input_digest": digest(item.to_dict()),
+                    "input": stored.item.to_dict(),
+                    "input_digest": stored.item.digest,
+                    "input_proof": stored_input_proof(stored),
                     "disposition": "applied",
                     "reason": None,
                     "target_operation_id": None,

@@ -1002,7 +1002,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -1051,7 +1051,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 12
+            "session_seq": 7
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -2491,7 +2491,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -2540,7 +2540,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 12
+            "session_seq": 7
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -6823,7 +6823,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -6872,7 +6872,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 12
+            "session_seq": 7
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -8245,7 +8245,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -8298,7 +8298,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 12
+            "session_seq": 7
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -8745,7 +8745,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -8784,7 +8784,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 15,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -8822,7 +8822,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 18
+            "session_seq": 10
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -9718,7 +9718,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -9757,7 +9757,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 15,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -9795,7 +9795,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 18
+            "session_seq": 10
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -10691,7 +10691,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -10730,7 +10730,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 15,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -10768,7 +10768,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 18
+            "session_seq": 10
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -22794,7 +22794,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 6,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -22843,7 +22843,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 12
+            "session_seq": 7
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",

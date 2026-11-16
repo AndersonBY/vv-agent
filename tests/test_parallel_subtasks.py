@@ -8,6 +8,7 @@ from session.test_delegation_parity import routed
 from support.kernel_runtime import start_runner
 
 from vv_agent import Agent, RunConfig, SubAgentConfig
+from vv_agent.session.projection import SessionHydration, hydrate_records
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import INVALID_EXCLUDE_FILES_PATTERN_CODE, INVALID_EXCLUDE_FILES_PATTERN_MESSAGE
@@ -44,11 +45,17 @@ def tool_result(handle):
     return result.raw_result.cycles[0].tool_results[0]
 
 
+def hydrated_created(driver, sid):
+    raw = driver.store.read(sid, limit=1).records[0]
+    hydration = SessionHydration.from_store(driver.store, tenant_id=driver.tenant_id, session_id=sid)
+    return hydrate_records((raw,), hydration)[0].record
+
+
 def test_create_sub_task_lineage_is_frozen_from_parent_turn(driver, tmp_path):
     handle = start(driver, tmp_path, {"agent_id": "worker", "task_description": "work"}, [LLMResponse("done")])
     assert tool_result(handle).status_code is ToolResultStatus.SUCCESS
     child = next(sid for sid in driver.store.list_sessions() if sid != "parent")
-    created = driver.store.read(child, limit=1).records[0].record
+    created = hydrated_created(driver, child)
     metadata = created.payload["attributes"]["child_admission"]["definition"]["task"]["metadata"]
     assert metadata["parent_run_id"] == handle.run_id
     assert metadata["parent_tool_call_id"] == "delegate"
@@ -79,10 +86,8 @@ def test_create_sub_task_accepts_portable_non_capturing_group(driver, tmp_path):
     )
     assert tool_result(handle).status_code is ToolResultStatus.SUCCESS
     child = next(sid for sid in driver.store.list_sessions() if sid != "parent")
-    assert (
-        driver.store.read(child, limit=1).records[0].record.payload["attributes"]["child_admission"]["exclude_files_pattern"]
-        == pattern
-    )
+    created = hydrated_created(driver, child)
+    assert created.payload["attributes"]["child_admission"]["exclude_files_pattern"] == pattern
 
 
 @pytest.mark.parametrize("wait", [False, True])

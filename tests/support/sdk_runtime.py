@@ -14,6 +14,7 @@ from vv_agent.kernel._provider_outcomes import Unknown
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session import kernel
+from vv_agent.session.content_runtime import durable_content_reader
 from vv_agent.session.runtime import Runtime, RuntimeNotReady
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata
@@ -38,6 +39,7 @@ class _SynchronousInvoker:
 def sdk_runtime(world: SDKWorld, sid: str, participant: str, *, provider=None, children=None) -> Runtime:
     """Construct the real SDK runtime from SimWorld-owned scripted facts."""
     model_fact = world.scripted_model_callback(sid)
+    store = world.connection(participant)
 
     class Model(ScriptedLLM):
         def complete(self, request):
@@ -73,6 +75,11 @@ def sdk_runtime(world: SDKWorld, sid: str, participant: str, *, provider=None, c
         lease_retry_sleep=world.clock.sleep,
         lease_retry_jitter=lambda first, second: first,
         wake=world.queue.append,
+        content_reader=durable_content_reader(
+            store,
+            tenant_id=store.tenant_id,
+            session_id=sid,
+        ),
     )
 
 

@@ -31,19 +31,42 @@ creation and open runtime sessions through tenant startup validation. See
 [PostgreSQL tenant RLS](postgres-rls.md). A shared gateway remains an explicitly
 weaker trust mode and does not provide tenant credential isolation.
 
-The S1 logical skeleton stores content positions as `ContentRef` values instead
-of host, user or model plaintext. The producer/codec phase validates reference
-shape but does not yet hydrate content; the runtime reports that hydration is
-unavailable. The content store and key-provider integration, encryption,
-decryption, deletion lifecycle and end-to-end admission and checkpoint signing
-remain incomplete. Signature slots and checkpoint columns exist, and the codec
-checks their encoded shape, but that is not proof of authenticity. P2 is not
-complete while those content and security boundaries remain open.
+S1 stores content positions as `ContentRef` values instead of host, user or
+model plaintext. A provider-bound SQLite or PostgreSQL store now creates the
+session data key, encrypts session creation, input and record content, records
+the owning slot link, and verifies the tenant, session, key, size, labels, HMAC
+and AEAD authentication tag when reading it back. Kernel, projection and App
+Server paths hydrate declared content slots through that store, including
+nested links and records reopened from a durable file. Missing links, an
+unbound key provider, a cross-tenant or cross-session reference, tampering and
+an unavailable or destroying key fail closed.
 
-There are no decoders for pre-S1 versions and no in-place migration tool on
-this branch. The new runtime rejects old record and inbox envelopes; a store
-file or PostgreSQL schema that fails the exact S1 checks is also rejected.
-Those rules cover finished sessions as well as running ones.
+The included `LocalKeyProvider` is for development and tests. Production hosts
+must inject a key provider whose wrapped-key storage, credential isolation and
+irreversible destroy operation meet their security model. Content follows the
+links created by the runtime; arbitrary plaintext in an undeclared field is not
+protected by this path.
+
+Authenticity is a separate opt-in boundary. A configured ledger signer signs
+checkpoint and input-admission proofs, while export and deletion require a
+verifier or signer for their evidence. Structural hashes and explicitly
+hash-only modes do not establish trusted authenticity; hosts must not describe
+them as signed history. `SessionDeletionStore` provides explicit, fenced forget
+and purge operations with cascading tombstones and key/content destruction, but
+the runtime does not schedule retention or expose an implicit public deletion
+operation. Callers must provide an authorized actor and a signer unless they
+deliberately accept the documented `allow_unsigned` hash-only mode. Provider
+copies, host tables, logs and backups outside the store remain separate
+retention domains.
+
+The S1 upgrade boundary remains strict. There are no decoders for pre-S1
+versions, no import tool and no in-place migration on this branch. The new
+runtime rejects old record and inbox envelopes; a store file or PostgreSQL
+schema that fails the exact S1 checks is also rejected. Those rules cover
+finished sessions as well as running ones. Hosts must quiesce and copy the
+product history they need before crossing the boundary, then use a fresh exact
+S1 store. An old runtime cannot read S1 rows, and rollback cannot make those
+rows old-compatible.
 
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
@@ -119,13 +142,18 @@ and makes the principal, actor and content-reference shapes closed. Pre-S1
 stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
 migration or import tool is provided.
 
-This branch implements the S1 skeleton schema, tenant-bound store routing,
-producer/codec boundary and explicit PostgreSQL tenant RLS installation. It
-does not complete P2. Content hydration and the key/content lifecycle are not
-integrated, and admission, input and checkpoint signatures are not yet
-authenticated end to end. Hosts must not claim encrypted content or signed
-history from these interfaces alone, and must not claim database credential
-isolation without the explicit tenant role installation and startup checks.
+This branch implements the S1 schema, tenant-bound store routing, the
+producer/codec boundary, explicit PostgreSQL tenant RLS installation, encrypted
+content and key-provider integration, declared content hydration, fenced
+forget/purge primitives, and checkpoint, input-admission and tombstone signing
+when a ledger signer is configured. P2 still depends on the documented host
+key-provider and signer policy, explicit deletion orchestration, and the exact
+S1 upgrade cutover; none of those become automatic from installing the schema.
+The development `LocalKeyProvider` is not a production key service. Hash-only
+or unsigned modes are not proof of authenticity, deletion does not erase
+provider or host copies outside the store, and no import or in-place migration
+is provided. Hosts must not claim database credential isolation without the
+explicit tenant role installation and startup checks.
 
 Contract 39 narrows failed closed-session diagnostics to
 `invalid session schema`. This is a public diagnostic change, but accepted and

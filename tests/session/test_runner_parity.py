@@ -13,11 +13,14 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.session.context import project_context
 from vv_agent.session.kernel import Runtime, drive, read_state
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydration_for_session_store, project_records
 from vv_agent.session.records import InboxItem, Record, SessionSpec
+from vv_agent.session.result import project_result
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
+
+from .helpers import create_fixture_session, fixture_content_reader, push_fixture_input, wrap_fixture_store
 
 RESOLVED = ResolvedModelConfig("scripted", "m", "m", "m", [])
 COMMON_EVENTS = {
@@ -47,34 +50,38 @@ def observe(agent, steps, config, *, kernel, provider_settings=None):
         }
     with SQLiteStore.standalone(":memory:") as store:
         store.install_schema()
-        with store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "parity",
-                    "test",
-                    str(config.workspace),
-                    attributes={
-                        "seed": {
-                            "messages": [m.to_dict() for m in config.initial_messages or []],
-                            "shared_state": config.shared_state or {},
-                        }
-                    },
-                ),
-                consumers=("events",),
-            )
-            tx.push("parity", InboxItem("input", "user", {"content": "go"}))
-        rt = Runtime(agent, config, RESOLVED, provider.llm, lambda: nullcontext(store))
+        store = wrap_fixture_store(store)
+        create_fixture_session(
+            store,
+            "parity",
+            workspace=str(config.workspace),
+            attributes={
+                "seed": {
+                    "messages": [m.to_dict() for m in config.initial_messages or []],
+                    "shared_state": config.shared_state or {},
+                }
+            },
+        )
+        push_fixture_input(store, "parity", InboxItem("input", "user", {"content": "go"}))
+        rt = Runtime(
+            agent,
+            config,
+            RESOLVED,
+            provider.llm,
+            lambda: nullcontext(store),
+            content_reader=fixture_content_reader(store, "parity"),
+        )
         drive(store, "parity", runtime=rt)
-        state, records, _ = read_state(store, "parity")
-        terminal = next(r.record.payload for r in reversed(records) if r.record.kind == "turn_ended")
-        snapshots = [r.record.payload["shared_state"] for r in records if r.record.kind == "op_completed"]
+        _, records, _ = read_state(store, "parity")
+        result = project_result(store, "parity", "parity/turn/input", runtime=rt)
+        hydration = hydration_for_session_store(store, "parity")
         return {
-            "output": terminal["result"],
-            "tools": [(m.tool_call_id, m.content) for m in project_context(records, state) if m.role == "tool"],
-            "events": [e.type for e in project_records(records) if e.type in COMMON_EVENTS],
-            "tool_lifecycle": tool_lifecycle(project_records(records)),
-            "budget": normalized_budget(terminal["budget"]),
-            "shared": next((v for v in reversed(snapshots) if v is not None), config.shared_state or {}),
+            "output": result.final_output,
+            "tools": [(m.tool_call_id, m.content) for m in result.raw_result.messages if m.role == "tool"],
+            "events": [e.type for e in project_records(records, hydration=hydration) if e.type in COMMON_EVENTS],
+            "tool_lifecycle": tool_lifecycle(project_records(records, hydration=hydration)),
+            "budget": normalized_budget(result.budget_usage.to_dict() if result.budget_usage else {}),
+            "shared": result.raw_result.shared_state,
         }
 
 

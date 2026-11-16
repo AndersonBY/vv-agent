@@ -53,10 +53,14 @@ FILES = {
 FILES.update(REPLACEMENTS["REPLACE"])
 
 
-def test_contract_40_session_corpus_is_allocation_only():
+def test_contract_40_trusted_storage_has_real_python_producer_capture():
     trusted_storage = json.loads((fixture_root() / "trusted_storage_s1.json").read_text())
-    assert trusted_storage["status"] == "contract-allocation-only"
-    assert trusted_storage["provenance"]["producer_capture"] is False
+    assert trusted_storage["status"] == "producer-captured"
+    assert trusted_storage["provenance"]["producer_capture"] is True
+    assert re.fullmatch(r"[0-9a-f]{40}", trusted_storage["revision"])
+    assert trusted_storage["revision"] == trusted_storage["provenance"]["source_revision"]
+    assert trusted_storage["record_schema_version"] == "S1"
+    assert trusted_storage["inbox_schema_version"] == "S1"
     historical = trusted_storage["provenance"]["historical_capture"]
     assert historical.endswith("session_record_diagnostics.json")
 
@@ -70,8 +74,8 @@ def checked_bytes(vector):
 @pytest.fixture(scope="module")
 def generated_fixtures(tmp_path_factory):
     trusted_storage = json.loads((fixture_root() / "trusted_storage_s1.json").read_text())
-    if trusted_storage.get("status") == "contract-allocation-only":
-        pytest.skip("contract 40 session corpus is allocation-only until the encrypted content-store and signing producers land")
+    if trusted_storage.get("status") == "producer-captured":
+        pytest.skip("focused S1 producer capture is covered; the full contract 40 corpus remains pending")
     root = tmp_path_factory.mktemp("kernel-fixtures")
     directories = [root / "first"]
     coverage_runs = []
