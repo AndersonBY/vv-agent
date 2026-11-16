@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import RLock
 from typing import Any
 from uuid import uuid4
@@ -173,7 +174,25 @@ class SessionDriver:
         self.store = self._root_store if bound_tenant == self.tenant_id else self._root_store.for_tenant(self.tenant_id)
         bound_provider = content_key_provider_for(self._root_store)
         self.uses_development_content_key_provider = content_key_provider is None and bound_provider is None
-        self.content_key_provider = content_key_provider or bound_provider or LocalKeyProvider(secrets.token_bytes(32))
+        self._temporary_content_key_state: TemporaryDirectory[str] | None = None
+        if content_key_provider is not None:
+            self.content_key_provider = content_key_provider
+        elif bound_provider is not None:
+            self.content_key_provider = bound_provider
+        elif isinstance(concrete_store, CoreSQLiteStore) and concrete_store.path == ":memory:":
+            # The in-memory session store cannot outlive this driver, so keep its
+            # development key lifecycle beside it instead of sharing the process
+            # environment's durable key-state database.
+            self._temporary_content_key_state = TemporaryDirectory(prefix="vv-agent-session-keys-")
+            self.content_key_provider = LocalKeyProvider(
+                secrets.token_bytes(32),
+                state_path=Path(self._temporary_content_key_state.name) / "key-state.sqlite3",
+            )
+        else:
+            if self._owns_store and isinstance(self._root_store, CoreSQLiteStore):
+                with self._root_store._connection_lock:
+                    self._root_store.connection.close()
+            raise ValueError("durable SessionDriver stores require an explicit content_key_provider")
         bind_content_key_provider(self._root_store, self.content_key_provider)
         self.store = wrap_session_content_store(self.store, self.content_key_provider)
         self.path = self._root_store.path if isinstance(self._root_store, CoreSQLiteStore) else None
@@ -210,6 +229,9 @@ class SessionDriver:
         if self._owns_store and isinstance(self._root_store, CoreSQLiteStore):
             with self._root_store._connection_lock:
                 self._root_store.connection.close()
+        if self._temporary_content_key_state is not None:
+            self._temporary_content_key_state.cleanup()
+            self._temporary_content_key_state = None
 
     def _on_close(self, callback):
         self._close_callbacks.append(callback)

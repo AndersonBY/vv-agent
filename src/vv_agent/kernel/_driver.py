@@ -9,7 +9,7 @@ from dataclasses import replace
 from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter
+from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter, SessionHead
 from vv_agent.kernel._content_publication import (
     has_record_content,
     has_record_content_payload,
@@ -95,11 +95,13 @@ class CoreDriver:
         hook: Callable[[str, Record | None], None],
         emit_phase: Callable[[float, dict[str, Any]], None],
         content_reader: ContentReader | None = None,
+        expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> None:
         self.store, self.sid, self.scope = store, sid, scope
         self._fold_factory, self._clock = fold_factory, clock
         self._observe_cost, self._hook, self._emit_phase = observe_cost, hook, emit_phase
         self.content_reader = content_reader
+        self._expected_head = expected_head
         self._hydrators: dict[int, SessionHydrator] = {}
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
@@ -111,7 +113,7 @@ class CoreDriver:
         return self._clock
 
     def load_state(self) -> None:
-        self.state, self.records, self.watermark = self.store.read_state(self.sid)
+        self.state, self.records, self.watermark = self.store.read_state(self.sid, expected_head=self._expected_head)
         self._stored_by_id = {stored.record.record_id: stored for stored in self.records}
         self.fold = self._fold_factory()
         self.fold.state = self.state
@@ -536,6 +538,7 @@ class CoreDriver:
                         records=tuple(commit_records),
                         consume_input_ids=consumed,
                         expected_inbox_seq=self.watermark if guarded else None,
+                        expected_head=self._expected_head,
                     )
                 links = resolve_record_content_links(declarations, receipt.record_sequences)
                 if links:
@@ -571,6 +574,8 @@ class CoreDriver:
                         "exception_type": error or atomic_error,
                     },
                 )
+        if self._expected_head is not None:
+            self._expected_head = self.store.verify_ledger(self.sid)
         self._hook("after_commit", commit_records[-1] if commit_records else None)
         if receipt.replayed:
             self.refresh()

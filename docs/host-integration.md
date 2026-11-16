@@ -582,6 +582,31 @@ result is a conflict, even after the operation completed.
 Keep billing rows in the same transaction as the consumer `ack`, so
 deduplication stays with the cursor.
 
+## Ledger integrity
+
+Configure every SQL connection used by a signed deployment with the trusted
+ledger signer for writes and the verifier that retains the required public keys
+for reads and exports. Signed sessions require checkpoints for every record and
+a valid admission proof for every inbox item. Missing signer material, partial
+proofs, an unavailable key or a key identifier that does not verify the stored
+bytes fails closed. A duplicate input may carry its original proof for replay;
+the store compares it with the first admission and rejects a changed proof or
+body.
+
+For a rollback-resistant recovery, retain a head anchor outside the session
+database and pass it as `expected_head` when reading or appending. Check it
+before signing the next record. `export_session` accepts the same anchor, while
+`verify_ledger` verifies the complete SQL prefix and returns the observed head.
+Without an independent anchor, signature checks still find altered retained
+bytes but cannot prove that a signed tail was not deleted or rolled back.
+
+`configure_input_admission(allow_unsigned=True)` selects the local hash-only
+mode explicitly. It reports structural consistency only and must not be used to
+claim database tamper resistance, historical authenticity or input identity.
+Signed evidence cannot be exported under that mode. Export with a verifier that
+holds the relevant historical public keys; current writes use the active key
+identifier returned by the signer binding.
+
 ## What to keep in your own database
 
 The session store is an execution ledger. Its records are readable only by the
@@ -594,6 +619,36 @@ messages to show the user and to seed a follow-up session, shared state, the
 final outcome and usage. Write them in the same projection transaction that
 acks the consumer cursor. See
 [session data and upgrades](upgrading.md#session-data-and-upgrades).
+
+### Encrypted content lifecycle
+
+Bind content reads and writes to the exact tenant, session and content
+reference. S1 encryption authenticates those boundaries in the key-wrap AAD,
+content AAD and HMAC framing, so moving a ciphertext, reference, key or content
+line to another tenant or session fails closed. Content export defaults to the
+skeleton. Hydration is an explicit include-content operation: call
+`SQLContentStore.export_content_lines(...)` only with the references selected
+from an already verified session snapshot. Missing content raises
+`ContentUnavailable`; an unavailable or destroyed key raises `KeyUnavailable`.
+The skeleton path must not call either read or hydration.
+
+The development `LocalKeyProvider` persists active and destroyed key identity in
+a local SQLite state file. Configure its location with the provider's
+`state_path` argument or `VV_AGENT_LOCAL_KEY_STATE`; preserve that file across
+process restarts. Losing it fails reads closed because wrapped keys no longer
+have active lifecycle state. It is still a development provider, not a
+production KMS.
+
+`SessionDeletionStore` fences a root and all descendants before deleting their
+keys, content and SQL rows. Forget retains the reference-form ledger skeleton and
+one complete tombstone per session; purge removes the registered session tables
+and retains only those tombstones. Repeating either operation is idempotent.
+The SQL content store deletes local ciphertext rows itself. A row with an
+external object locator also requires an idempotent cleaner attached with
+`set_object_locator_cleaner(...)`; without that capability deletion raises
+`ContentCleanupUnavailable`, and any cleaner exception remains a failed,
+retryable deletion rather than an assumed remote success. Provider copies, host
+tables, logs, exports and backups remain outside this deletion boundary.
 
 ## Model selection
 

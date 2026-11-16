@@ -8,7 +8,8 @@ persist atomically. Identifier fields are opaque, non-empty strings.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -69,6 +70,10 @@ class ContentStoreError(RuntimeError):
 
 class ContentUnavailable(ContentStoreError):
     """The requested tenant, session, or content object is absent."""
+
+
+class ContentCleanupUnavailable(ContentStoreError):
+    """An external content object could not be confirmed deleted."""
 
 
 class KeyUnavailable(ContentStoreError):
@@ -758,6 +763,10 @@ def _validate_export_line(kind: ExportLineKind, value: dict[str, Any]) -> None:
         _text(value["content_id"], "content export content_id", InvalidExport)
         _text(value["key_id"], "content export key_id", InvalidExport)
         _text(value["slot"], "content export slot", InvalidExport)
+        try:
+            canonical_json_bytes(value["decoded_value"], "content export value")
+        except (TypeError, ValueError) as exc:
+            raise InvalidExport("content export value must be canonical JSON data") from exc
     elif kind is ExportLineKind.CHECKPOINT:
         fields = {"line", "seq", "chain_digest", "key_id", "signature", "signed_ms"}
         _closed_mapping(value, fields, InvalidExport, "checkpoint export line")
@@ -776,37 +785,58 @@ def _validate_export_line(kind: ExportLineKind, value: dict[str, Any]) -> None:
         _hash(value["chain_digest"], "manifest chain_digest", InvalidExport)
 
 
-def _content_refs(slots: Iterable[tuple[str, Any]]) -> list[ContentRef]:
-    from ._content_publication import _MISSING
+@dataclass(frozen=True, slots=True)
+class _ContentSlotRef:
+    slot: str
+    ref: ContentRef
+    nested: tuple[Any, ...] = ()
 
-    refs: list[ContentRef] = []
-    for slot, value in slots:
-        if value is _MISSING or value is None:
-            continue
+
+def _declared_content_slots(
+    kind: str,
+    source: dict[str, Any],
+    *,
+    input_content: bool = False,
+    actor_attributes: Any = None,
+) -> tuple[_ContentSlotRef, ...]:
+    from ._content_publication import _MISSING, _content_slot_specs, _expand_slot, declared_content_ref, input_content_slots
+
+    content_slots = input_content_slots(kind) if input_content else _content_slot_specs(kind, source)
+    refs: list[_ContentSlotRef] = []
+    for content_slot in content_slots:
+        for _path, slot, value in _expand_slot(source, content_slot.path, content_slot.slot):
+            if value is _MISSING or value is None:
+                continue
+            try:
+                ref = declared_content_ref(value)
+            except ValueError as exc:
+                raise InvalidExport(f"{slot} content slot contains a malformed ContentRef") from exc
+            if ref is None:
+                raise InvalidExport(f"{slot} content slot does not contain a ContentRef")
+            refs.append(_ContentSlotRef(slot, ref, () if input_content else tuple(content_slot.nested)))
+
+    if not input_content and actor_attributes is not None:
         try:
-            refs.append(value if isinstance(value, ContentRef) else ContentRef.from_dict(value))
-        except (TypeError, ValueError) as exc:
-            raise InvalidExport(f"{slot} content slot does not contain a ContentRef") from exc
-    return refs
+            ref = declared_content_ref(actor_attributes)
+        except ValueError as exc:
+            raise InvalidExport(f"{INPUT_ACTOR_ATTRIBUTES} content slot contains a malformed ContentRef") from exc
+        if ref is None:
+            raise InvalidExport(f"{INPUT_ACTOR_ATTRIBUTES} content slot does not contain a ContentRef")
+        refs.append(_ContentSlotRef(INPUT_ACTOR_ATTRIBUTES, ref))
+    return tuple(refs)
 
 
-def _record_content_refs(record: Record) -> list[ContentRef]:
-    from ._content_publication import _payload_slots
-
-    return _content_refs((slot, value) for _path, slot, value in _payload_slots(record.kind, record._payload))
+def _record_content_refs(record: Record) -> list[_ContentSlotRef]:
+    return list(_declared_content_slots(record.kind, record._payload))
 
 
-def _input_content_refs(item: InboxItem) -> list[ContentRef]:
-    from ._content_publication import _expand_slot, input_content_slots
-
-    slots = [
-        (slot, value)
-        for content_slot in input_content_slots(item.kind)
-        for _path, slot, value in _expand_slot(item.payload, content_slot.path, content_slot.slot)
-    ]
-    if item.actor is not None:
-        slots.append((INPUT_ACTOR_ATTRIBUTES, item.actor["attributes"]))
-    return _content_refs(slots)
+def _input_content_refs(item: InboxItem) -> tuple[_ContentSlotRef, ...]:
+    return _declared_content_slots(
+        item.kind,
+        item.payload,
+        input_content=True,
+        actor_attributes=item.actor["attributes"] if item.actor is not None else None,
+    )
 
 
 def _length_prefixed(value: str) -> bytes:
@@ -1164,28 +1194,106 @@ class ExportDocument:
             if applied is None or applied._payload["input"]["input_id"] != item.input_id:
                 raise InvalidExport("inbox consumption does not identify its applied record")
 
-        available_refs: dict[str, ContentRef] = {}
+        expected_refs: Counter[tuple[str, ContentRef]] = Counter()
+        refs_by_slot_id: dict[tuple[str, str], ContentRef] = {}
+        nested_by_slot_ref: dict[tuple[str, ContentRef], tuple[Any, ...]] = {}
+
+        def add_refs(refs: tuple[_ContentSlotRef, ...]) -> None:
+            for declared in refs:
+                previous = refs_by_slot_id.get((declared.slot, declared.ref.content_id))
+                if previous is not None and previous != declared.ref:
+                    raise ContentBindingMismatch("one content id maps to conflicting content references")
+                refs_by_slot_id[(declared.slot, declared.ref.content_id)] = declared.ref
+                expected_refs[(declared.slot, declared.ref)] += 1
+                if declared.nested:
+                    nested_by_slot_ref[(declared.slot, declared.ref)] = declared.nested
+
         for line in self.lines:
             if line.kind is ExportLineKind.RECORD:
                 record = records_by_seq[line.value["storage_envelope"]["seq"]]
-                refs = _record_content_refs(record)
+                add_refs(_record_content_refs(record))
             elif line.kind is ExportLineKind.INBOX:
                 item = inboxes_by_seq[line.value["input_seq"]][0]
-                refs = _input_content_refs(item)
-            else:
-                continue
-            for ref in refs:
-                previous = available_refs.get(ref.content_id)
-                if previous is not None and previous != ref:
-                    raise ContentBindingMismatch("one content id maps to conflicting content references")
-                available_refs[ref.content_id] = ref
+                add_refs(_input_content_refs(item))
 
-        for line in self.lines:
-            if line.kind is not ExportLineKind.CONTENT:
+        content_lines = [line.value for line in self.lines if line.kind is ExportLineKind.CONTENT]
+        top_refs = dict(refs_by_slot_id)
+        for content in content_lines:
+            ref = top_refs.get((content["slot"], content["content_id"]))
+            declared_slot = content["slot"]
+            if ref is None:
+                candidates = [
+                    candidate for (slot, content_id), candidate in top_refs.items() if content_id == content["content_id"]
+                ]
+                unique = {candidate for candidate in candidates}
+                if len(unique) != 1:
+                    continue
+                ref = next(iter(unique))
+                declared_slot = next(
+                    slot
+                    for (slot, content_id), candidate in top_refs.items()
+                    if content_id == ref.content_id and candidate == ref
+                )
+            if ref.key_id != content["key_id"]:
                 continue
-            ref = available_refs.get(line.value["content_id"])
-            if ref is None or ref.key_id != line.value["key_id"]:
-                raise ContentBindingMismatch("content export line does not match a referenced content key")
+            nested = nested_by_slot_ref.get((declared_slot, ref))
+            if not nested:
+                continue
+            from ._content_publication import _MISSING, _expand_slot, declared_content_ref
+
+            for content_slot in nested:
+                nested_slot = f"{content['slot']}.{content_slot.slot}"
+                try:
+                    expanded = tuple(_expand_slot(content["decoded_value"], content_slot.path, nested_slot))
+                except ValueError as exc:
+                    raise InvalidExport("content export container does not match its declared nested slots") from exc
+                for _path, slot, value in expanded:
+                    if value is _MISSING or value is None:
+                        continue
+                    try:
+                        nested_ref = declared_content_ref(value)
+                    except ValueError as exc:
+                        raise InvalidExport(f"{slot} content slot contains a malformed ContentRef") from exc
+                    if nested_ref is None:
+                        raise InvalidExport(f"{slot} content slot does not contain a ContentRef")
+                    previous = refs_by_slot_id.get((slot, nested_ref.content_id))
+                    if previous is not None and previous != nested_ref:
+                        raise ContentBindingMismatch("one content id maps to conflicting content references")
+                    refs_by_slot_id[(slot, nested_ref.content_id)] = nested_ref
+                    expected_refs[(slot, nested_ref)] += 1
+
+        exported_refs: Counter[tuple[str, ContentRef]] = Counter()
+        has_unbound_content_line = False
+        for content in content_lines:
+            ref = refs_by_slot_id.get((content["slot"], content["content_id"]))
+            declared_slot = content["slot"]
+            if ref is None:
+                candidates = [
+                    (slot, candidate)
+                    for (slot, content_id), candidate in refs_by_slot_id.items()
+                    if content_id == content["content_id"]
+                ]
+                unique = {candidate for _slot, candidate in candidates}
+                if len(unique) != 1:
+                    raise ContentBindingMismatch("content export line does not match a referenced content key")
+                has_unbound_content_line = True
+                declared_slot, ref = next((slot, candidate) for slot, candidate in candidates if candidate in unique)
+            if ref.key_id != content["key_id"]:
+                raise ContentBindingMismatch("content export line does not match a referenced content key and slot")
+            try:
+                content_size = len(canonical_json_bytes(content["decoded_value"], "content export value"))
+            except (TypeError, ValueError) as exc:
+                raise InvalidExport("content export value must be canonical JSON data") from exc
+            if content_size != ref.size:
+                raise ContentIntegrityError("content export value size does not match its ContentRef")
+            exported_refs[(declared_slot, ref)] += 1
+
+        if (
+            self.header.content_mode is ExportContentMode.INCLUDE_CONTENT
+            and not has_unbound_content_line
+            and exported_refs != expected_refs
+        ):
+            raise InvalidExport("include-content export does not cover every referenced content object")
 
     def to_dict(self) -> dict[str, Any]:
         return {"header": self.header.to_dict(), "lines": [line.to_dict() for line in self.lines]}
@@ -1211,6 +1319,7 @@ __all__ = [
     "Classification",
     "ContentBinding",
     "ContentBindingMismatch",
+    "ContentCleanupUnavailable",
     "ContentErrorCode",
     "ContentIdentity",
     "ContentIntegrityError",

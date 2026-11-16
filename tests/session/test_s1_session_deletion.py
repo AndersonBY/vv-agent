@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from base64 import b64decode, b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -22,12 +24,17 @@ from vv_agent.kernel._content import (
     KeyUnavailable,
     Principal,
     TombstoneState,
+    _tombstone_message,
 )
+from vv_agent.kernel._postgres import SCHEMA_TABLES as POSTGRES_SCHEMA_TABLES
 from vv_agent.kernel._records import InboxItem, SessionSpec
 from vv_agent.kernel._sql import LedgerIntegrityError, SessionNotLive, SQLStore
+from vv_agent.kernel._sqlite import SCHEMA_TABLES as SQLITE_SCHEMA_TABLES
 from vv_agent.kernel._store import Conflict
 from vv_agent.session.content_store import LocalKeyProvider, SQLContentStore
 from vv_agent.session.deletion import (
+    PURGE_DELETE_TABLES,
+    SESSION_DELETION_TABLES,
     DeletionAuthenticity,
     DeletionSignerUnavailable,
     SessionDeletionStore,
@@ -165,6 +172,23 @@ def _count(store: SQLiteStore, table: str, session_id: str) -> int:
         f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
         (TENANT, session_id),
     )[0]
+
+
+def _tombstone(store: SQLiteStore, session_id: str):
+    return store.for_tenant(TENANT)._tombstone(session_id)
+
+
+@pytest.mark.parametrize(
+    ("backend", "schema_tables"),
+    (("sqlite", SQLITE_SCHEMA_TABLES), ("postgres", POSTGRES_SCHEMA_TABLES)),
+)
+def test_deletion_inventory_is_closed_over_backend_schema(backend: str, schema_tables: frozenset[str]) -> None:
+    # sk_settings is the database singleton (schema major and write level), not tenant session data.
+    expected_session_tables = schema_tables - {"sk_settings"}
+    assert set(SESSION_DELETION_TABLES) == expected_session_tables
+    assert "sk_settings" not in SESSION_DELETION_TABLES
+    assert SESSION_DELETION_TABLES[-1] == "sk_tombstone"
+    assert set(PURGE_DELETE_TABLES) == expected_session_tables - {"sk_tombstone"}
 
 
 def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, monkeypatch) -> None:
@@ -316,7 +340,9 @@ def test_forget_cascades_tombstones_and_content_over_the_entire_scope(tmp_path) 
         assert signer is not None
         _create_session(store, "root")
         _create_session(store, "child", parent="root")
+        _create_session(store, "grandchild", parent="child")
         adapter, child_ref = _publish_content(store, provider, "child")
+        adapter, grandchild_ref = _publish_content(store, provider, "grandchild")
         with store.for_tenant(TENANT).atomic():
             actor_ref = adapter.put(TENANT, "root", b"provider actor", ContentLabels())
         actor = Principal(TENANT, "user/deleter", "user", actor_ref)
@@ -324,25 +350,30 @@ def test_forget_cascades_tombstones_and_content_over_the_entire_scope(tmp_path) 
 
         receipt = deletion.forget_session(TENANT, "root", actor=actor)
 
-        assert set(receipt.session_ids) == {"root", "child"}
+        assert set(receipt.session_ids) == {"root", "child", "grandchild"}
         states = dict(
             store._rows(
                 "SELECT session_id,deletion_state FROM sk_session WHERE tenant_id=%s ORDER BY session_id",
                 (TENANT,),
             )
         )
-        assert states == {"child": "forgotten", "root": "forgotten"}
+        assert states == {"child": "forgotten", "grandchild": "forgotten", "root": "forgotten"}
         tombstones = deletion.verify_tombstones(TENANT, "root")
-        assert {item.session_id for item in tombstones} == {"root", "child"}
+        assert {item.session_id for item in tombstones} == {"root", "child", "grandchild"}
         assert {item.scope_root_session_id for item in tombstones} == {"root"}
         assert {item.actor.attributes.key_id for item in tombstones} == {actor_ref.key_id}
         assert actor_ref.key_id != signer.key_id
         assert _count(store, "sk_content", "child") == 0
+        assert _count(store, "sk_content", "grandchild") == 0
         assert _count(store, "sk_session_key", "child") == 0
+        assert _count(store, "sk_session_key", "grandchild") == 0
         assert _count(store, "sk_record", "root") == 1
         assert _count(store, "sk_record", "child") == 1
+        assert _count(store, "sk_record", "grandchild") == 1
         with pytest.raises(ContentUnavailable):
             adapter.get(TENANT, "child", child_ref)
+        with pytest.raises(ContentUnavailable):
+            adapter.get(TENANT, "grandchild", grandchild_ref)
 
         store._rows(
             "UPDATE sk_tombstone SET scope_root_session_id='other' WHERE tenant_id=%s AND session_id='child'",
@@ -367,17 +398,7 @@ def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(tmp_p
         tombstones = deletion.verify_tombstones(TENANT, "root")
         assert {item.session_id for item in tombstones} == {"root", "child", "grandchild"}
         assert all(item.state is TombstoneState.COMPLETE for item in tombstones)
-        for table in (
-            "sk_session",
-            "sk_record",
-            "sk_inbox",
-            "sk_consumer",
-            "sk_commit",
-            "sk_checkpoint",
-            "sk_session_key",
-            "sk_content",
-            "sk_content_link",
-        ):
+        for table in PURGE_DELETE_TABLES:
             assert store._one(f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s", (TENANT,))[0] == 0
         assert (
             store._one(
@@ -445,3 +466,287 @@ def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path) -> None:
             "SELECT COUNT(*) FROM sk_tombstone WHERE tenant_id=%s AND session_id='session'",
             (TENANT,),
         ) == (0,)
+
+
+def test_child_forget_then_parent_forget_cascades_three_levels(tmp_path) -> None:
+    path = tmp_path / "child-before-parent-forget.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    retention = _principal(subject_id="service/retention")
+    compliance = _principal(subject_id="service/compliance")
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        _create_session(store, "grandchild", parent="child")
+        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+
+        child_receipt = deletion.forget_session(TENANT, "child", actor=retention)
+        parent_receipt = deletion.forget_session(TENANT, "root", actor=compliance)
+
+        assert set(child_receipt.session_ids) == {"child", "grandchild"}
+        assert set(parent_receipt.session_ids) == {"root", "child", "grandchild"}
+        states = dict(store._rows("SELECT session_id,deletion_state FROM sk_session WHERE tenant_id=%s", (TENANT,)))
+        assert states == {"root": "forgotten", "child": "forgotten", "grandchild": "forgotten"}
+        child_tombstone = _tombstone(store, "child")
+        grandchild_tombstone = _tombstone(store, "grandchild")
+        root_tombstone = _tombstone(store, "root")
+        assert child_tombstone is not None and grandchild_tombstone is not None and root_tombstone is not None
+        assert child_tombstone.scope_root_session_id == "root"
+        assert grandchild_tombstone.scope_root_session_id == "root"
+        assert child_tombstone.actor == compliance
+        assert grandchild_tombstone.actor == compliance
+        assert root_tombstone.actor == compliance
+        assert signer.verify(child_tombstone.key_id, _tombstone_message(child_tombstone), b64decode(child_tombstone.signature))
+
+
+def test_retention_forget_then_compliance_admin_purge_is_accepted(tmp_path) -> None:
+    path = tmp_path / "different-actors.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    retention = _principal(subject_id="service/retention")
+    compliance = _principal(subject_id="service/compliance")
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        adapter, _ref_value = _publish_content(store, provider, "child")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+
+        forgotten = deletion.forget_session(TENANT, "root", actor=retention)
+        purged = deletion.purge_session(TENANT, "root", actor=compliance)
+
+        assert set(forgotten.session_ids) == {"root", "child"}
+        assert set(purged.session_ids) == {"root", "child"}
+        tombstones = deletion.verify_tombstones(TENANT, "root")
+        assert {item.session_id for item in tombstones} == {"root", "child"}
+        assert {item.actor.subject_id for item in tombstones} == {compliance.subject_id}
+        assert all(item.state is TombstoneState.COMPLETE for item in tombstones)
+
+
+def test_child_forget_then_parent_purge_preserves_descendant_tombstone_evidence(tmp_path) -> None:
+    path = tmp_path / "child-before-parent-purge.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    retention = _principal(subject_id="service/retention")
+    compliance = _principal(subject_id="service/compliance")
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        _create_session(store, "grandchild", parent="child")
+        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        child_forget = deletion.forget_session(TENANT, "child", actor=retention)
+        child_tombstone = _tombstone(store, "child")
+        assert child_tombstone is not None
+
+        receipt = deletion.purge_session(TENANT, "root", actor=compliance)
+
+        assert set(child_forget.session_ids) == {"child", "grandchild"}
+        assert set(receipt.session_ids) == {"root", "child", "grandchild"}
+        retained = {item.session_id: item for item in deletion.verify_tombstones(TENANT, "root")}
+        assert set(retained) == {"root", "child", "grandchild"}
+        assert retained["child"].scope_root_session_id == "root"
+        assert retained["child"].actor == compliance
+
+
+def test_repeated_forget_reuses_complete_tombstones_without_destroying_again(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "repeat-forget.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    actor = _principal()
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "session")
+        adapter, _ref_value = _publish_content(store, provider, "session")
+        calls: list[str] = []
+        original_destroy = provider.destroy
+
+        def counted_destroy(tenant_id: str, key_id: str):
+            calls.append(key_id)
+            return original_destroy(tenant_id, key_id)
+
+        monkeypatch.setattr(provider, "destroy", counted_destroy)
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        first = deletion.forget_session(TENANT, "session", actor=actor)
+        first_tombstone = _tombstone(store, "session")
+        assert first_tombstone is not None
+        second = deletion.forget_session(TENANT, "session", actor=actor)
+        second_tombstone = _tombstone(store, "session")
+
+        assert first == second
+        assert calls
+        assert len(calls) == 1
+        assert first_tombstone.signature == second_tombstone.signature
+
+
+def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(tmp_path) -> None:
+    path = tmp_path / "external-cleanup.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        adapter, ref = _publish_content(store, provider, "child")
+        store._rows(
+            "UPDATE sk_content SET ciphertext=NULL,object_locator=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (b"remote://content/child", TENANT, "child", ref.content_id),
+        )
+        calls: list[bytes] = []
+
+        def cleaner(_tenant_id: str, _session_id: str, locator: bytes) -> None:
+            calls.append(locator)
+            if len(calls) == 1:
+                raise RuntimeError("remote deletion outcome unknown")
+
+        adapter.set_object_locator_cleaner(cleaner)
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+
+        retention = _principal(subject_id="service/retention")
+        with pytest.raises(RuntimeError, match="outcome unknown"):
+            deletion.forget_session(TENANT, "root", actor=retention)
+        pending = store._rows(
+            "SELECT s.deletion_state,t.state FROM sk_session s JOIN sk_tombstone t "
+            "ON t.tenant_id=s.tenant_id AND t.session_id=s.session_id WHERE s.tenant_id=%s",
+            (TENANT,),
+        )
+        assert set(pending) == {("forgetting", "pending")}
+
+        receipt = deletion.forget_session(TENANT, "root", actor=retention)
+
+        assert set(receipt.session_ids) == {"root", "child"}
+        assert calls == [b"remote://content/child", b"remote://content/child"]
+        assert all(item.state is TombstoneState.COMPLETE for item in deletion.verify_tombstones(TENANT, "root"))
+
+
+def test_incomplete_locked_scope_is_rejected_before_content_erasure(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "incomplete-scope.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        _create_session(store, "grandchild", parent="child")
+        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+        original_begin = SQLStore.begin_forget
+
+        def incomplete_scope(store: SQLStore, *args, **kwargs):
+            scope = original_begin(store, *args, **kwargs)
+            return tuple(session_id for session_id in scope if session_id != "grandchild")
+
+        monkeypatch.setattr(SQLStore, "begin_forget", incomplete_scope)
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        with pytest.raises(LedgerIntegrityError, match="root descendant inventory"):
+            deletion.forget_session(TENANT, "root", actor=_principal())
+        assert store._one(
+            "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id='grandchild'",
+            (TENANT,),
+        ) == (1,)
+
+
+def test_signed_tombstone_with_cross_scope_root_is_rejected(tmp_path) -> None:
+    path = tmp_path / "forged-scope.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        adapter, _ref_value = _publish_content(store, provider, "child")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        deletion.forget_session(TENANT, "child", actor=_principal(subject_id="service/retention"))
+        tombstone = _tombstone(store, "child")
+        assert tombstone is not None
+        forged_unsigned = replace(tombstone, scope_root_session_id="unrelated")
+        forged = replace(
+            forged_unsigned,
+            signature=b64encode(signer.bind_key().sign(_tombstone_message(forged_unsigned))).decode("ascii"),
+        )
+        store._rows(
+            "UPDATE sk_tombstone SET scope_root_session_id=%s,signature=%s WHERE tenant_id=%s AND session_id=%s",
+            (forged.scope_root_session_id, b64decode(forged.signature), TENANT, "child"),
+        )
+
+        scoped = deletion._scoped(TENANT)
+        authority = deletion._authority(scoped)
+        with pytest.raises(LedgerIntegrityError, match="scope root"):
+            deletion._verify_scope_evidence(
+                scoped,
+                TENANT,
+                "child",
+                ("child",),
+                require_present=True,
+                expected_states={"forgotten"},
+                require_complete=True,
+                authority=authority,
+            )
+
+
+def test_signed_tombstone_with_wrong_head_is_rejected(tmp_path) -> None:
+    path = tmp_path / "forged-head.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "session")
+        adapter, _ref_value = _publish_content(store, provider, "session")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        deletion.forget_session(TENANT, "session", actor=_principal())
+        tombstone = _tombstone(store, "session")
+        assert tombstone is not None
+        forged_unsigned = replace(tombstone, final_seq=tombstone.final_seq + 1)
+        forged = replace(
+            forged_unsigned,
+            signature=b64encode(signer.bind_key().sign(_tombstone_message(forged_unsigned))).decode("ascii"),
+        )
+        store._rows(
+            "UPDATE sk_tombstone SET final_seq=%s,signature=%s WHERE tenant_id=%s AND session_id=%s",
+            (forged.final_seq, b64decode(forged.signature), TENANT, "session"),
+        )
+
+        with pytest.raises(LedgerIntegrityError, match="final head"):
+            deletion.purge_session(TENANT, "session", actor=_principal(subject_id="service/compliance"))
+
+
+def test_scope_validation_uses_one_root_bounded_query(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "bounded-query.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        _create_session(store, "child", parent="root")
+        _create_session(store, "unrelated")
+        adapter, _ref_value = _publish_content(store, provider, "child")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        calls: list[str] = []
+        original_rows = store._rows
+
+        def counted_rows(query: str, params: tuple = ()):
+            calls.append(query)
+            return original_rows(query, params)
+
+        monkeypatch.setattr(store, "_rows", counted_rows)
+        members = deletion._read_scope(
+            store,
+            TENANT,
+            "root",
+            ("root", "child"),
+            require_present=True,
+        )
+
+        assert {member.session_id for member in members} == {"root", "child"}
+        assert len(calls) == 1
+        assert "WITH RECURSIVE deletion_scope" in calls[0]
+
+
+def test_deletion_table_counts_are_batched_across_scope_members(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "batched-counts.sqlite"
+    provider = LocalKeyProvider(MASTER_KEY)
+    with _sqlite(path) as (store, signer):
+        _create_session(store, "root")
+        adapter, _ref_value = _publish_content(store, provider, "root")
+        deletion = SessionDeletionStore(store, adapter, signer=signer)
+        calls: list[str] = []
+        original_rows = store._rows
+
+        def counted_rows(query: str, params: tuple = ()):
+            calls.append(query)
+            return original_rows(query, params)
+
+        monkeypatch.setattr(store, "_rows", counted_rows)
+        counts = deletion._count_rows_for_sessions(
+            store,
+            TENANT,
+            PURGE_DELETE_TABLES,
+            tuple(f"session-{index}" for index in range(20)),
+        )
+
+        assert len(calls) == 1
+        assert counts == dict.fromkeys(PURGE_DELETE_TABLES, 0)

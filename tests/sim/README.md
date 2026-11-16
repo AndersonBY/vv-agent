@@ -106,7 +106,7 @@ Keep the guard intact.
 | I6 | Real transactional child delivery is repeated, a second input identity is a no-op, and a forged child identity is rejected. |
 | I7 | Root cancellation terminates a nonempty parent → child → grandchild chain. All three sessions have started model work and are parked before cancellation; each descendant receives an actual bound cancel input and exactly one cancelled terminal. Late child deliveries cannot restart them. Wider/deeper trees are not generated. |
 | I8 | Cold record-prefix replay equals a long-lived incremental Fold and the store cache. Directed recovery tests check every prefix; smoke checks scheduler-step prefixes. |
-| I9 | Pending W2c; no hash-chain field or verifier exists in the baseline. |
+| I9 | Every regular SQLite/PostgreSQL world check recomputes record digests, the SQL chain and commit claims through the real store. Signed worlds additionally require and verify every checkpoint and input-admission proof; explicit hash-only worlds reject stray signed evidence. Missing proofs stop the check before another record or input can be trusted. |
 | I10 | Unsafe unknown does not authorize resend; recovery stays ambiguous until a durable provider receipt or actual child terminal evidence settles it. |
 | I11 | Pending W4; compatibility support sets and claim filtering do not exist in the baseline. |
 
@@ -134,7 +134,7 @@ The original 17 cases remain, with four additional participant cases:
   actual normalizer, token counter and real summary operation. Two bounded tool
   cycles create a reducible prefix; the accepted `context_compacted` record binds
   its adopted summary receipt, source digest, prefix/tail identities and
-  replacement. I9/I11 remain deferred.
+  replacement. I9 is active for every world; I11 remains deferred.
 
 Negative checks remove the actual SQL readiness filter, suppress the actual core
 child-to-grandchild cancellation helper, and submit a false child terminal
@@ -222,8 +222,9 @@ cases; those 17-scenario results do not establish expanded-code acceptance.
 The large-campaign requirements are 1,000,000 SQLite seeds and at least 10,000
 PostgreSQL seeds. Acceptance status belongs in the fixed-snapshot evidence and
 release notes.
-These results do not establish large-campaign reliability. I9/W2c and I11/W4
-remain later-phase requirements.
+These results do not establish large-campaign reliability. I11/W4 remains a
+later-phase requirement; I9/W2c is now exercised by every world check rather
+than only by directed tests.
 
 
 The expanded participant slice passed all 20 SQLite directed recovery cases

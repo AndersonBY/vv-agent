@@ -9,10 +9,33 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from vv_agent.kernel._state import ExecutionState
 
-from vv_agent.kernel._content import ContentSessionWriter
+from vv_agent.kernel._content import ContentSessionWriter, SessionHead
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 
 DEFAULT_TENANT_ID = "default"
+SESSION_DELETION_INVENTORY = (
+    "sk_session",
+    "sk_record",
+    "sk_inbox",
+    "sk_consumer",
+    "sk_commit",
+    "sk_checkpoint",
+    "sk_session_key",
+    "sk_content",
+    "sk_content_link",
+    "sk_tombstone",
+)
+SESSION_PURGE_DELETE_ORDER = (
+    "sk_content_link",
+    "sk_content",
+    "sk_inbox",
+    "sk_checkpoint",
+    "sk_consumer",
+    "sk_commit",
+    "sk_record",
+    "sk_session_key",
+    "sk_session",
+)
 
 
 class Conflict(ValueError):
@@ -136,6 +159,7 @@ class SessionTx(Protocol):
         records: tuple[Record, ...],
         consume_input_ids: tuple[str, ...] = (),
         expected_inbox_seq: int | None = None,
+        expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> CommitReceipt: ...
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None: ...
     def ack(self, batch: ConsumerBatch) -> None: ...
@@ -161,10 +185,29 @@ class SessionStore(Protocol):
 
     def control_records(self, session_id: str, *, through_seq: int) -> tuple[StoredRecord, ...]: ...
 
-    def read_state(self, session_id: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]: ...
+    def read_state(
+        self,
+        session_id: str,
+        *,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]: ...
     def list_sessions(self, *, limit: int = 100, after: str | None = None) -> tuple[str, ...]: ...
     def atomic(self) -> AbstractContextManager[SessionTx]: ...
-    def read(self, session_id: str, *, after_seq: int = 0, through_seq: int | None = None, limit: int = 1024) -> ReadPage: ...
+    def read(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        through_seq: int | None = None,
+        limit: int = 1024,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> ReadPage: ...
+    def verify_ledger(
+        self,
+        session_id: str,
+        *,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> tuple[int, str]: ...
     def peek_inbox(
         self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256, ready_only: bool = True
     ) -> tuple[StoredInput, ...]: ...

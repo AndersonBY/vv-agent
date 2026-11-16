@@ -13,7 +13,7 @@ from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.kernel import _driver_outcomes
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import ContentRef, SessionHead
 from vv_agent.kernel._content_publication import _payload_slots, declared_content_ref
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
@@ -92,7 +92,16 @@ def _is_content_ref(value: Any) -> bool:
 class _Driver(CoreDriver):
     scope: _Scope
 
-    def __init__(self, store: SessionStore, sid: str, runtime: Runtime, scope: _Scope, *, one_turn: bool = False):
+    def __init__(
+        self,
+        store: SessionStore,
+        sid: str,
+        runtime: Runtime,
+        scope: _Scope,
+        *,
+        one_turn: bool = False,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ):
         self.runtime, self.one_turn = runtime, one_turn
 
         def observe_cost() -> dict[str, Any] | None:
@@ -120,6 +129,7 @@ class _Driver(CoreDriver):
             hook=lambda point, record: runtime.hook(point, record),
             emit_phase=emit_phase,
             content_reader=runtime.content_reader,
+            expected_head=expected_head,
         )
 
     def commit(
@@ -660,6 +670,7 @@ def drive(
     *,
     runtime: Runtime | Callable[[str], Runtime],
     failure_backoff_ms: int = 1000,
+    expected_head: SessionHead | tuple[int, str] | None = None,
     _one_turn: bool = False,
     _wait_for_lease: bool = False,
 ) -> bool:
@@ -669,6 +680,7 @@ def drive(
         session_id,
         runtime=runtime,
         failure_backoff_ms=failure_backoff_ms,
+        expected_head=expected_head,
         _one_turn=_one_turn,
         _wait_for_lease=_wait_for_lease,
     )
@@ -680,6 +692,7 @@ def _drive(
     *,
     runtime: Runtime | Callable[[str], Runtime],
     failure_backoff_ms: int = 1000,
+    expected_head: SessionHead | tuple[int, str] | None = None,
     _one_turn: bool = False,
     _wait_for_lease: bool = False,
     clock: Clock | None = None,
@@ -691,6 +704,7 @@ def _drive(
         session_id,
         runtime=runtime,
         failure_backoff_ms=failure_backoff_ms,
+        expected_head=expected_head,
         one_turn=_one_turn,
         wait_for_lease=_wait_for_lease,
         clock=clock,

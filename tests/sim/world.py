@@ -7,6 +7,8 @@ machine or storage rules are reimplemented here.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import random
 import sqlite3
@@ -22,6 +24,7 @@ from session.helpers import content_ref, create_fixture_session, fixture_key_pro
 from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
+from vv_agent.kernel._sql import LedgerIntegrityError, _initial_chain_digest
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolCall
@@ -66,7 +69,9 @@ class SimSQLiteStore(SessionSQLiteStore):
         SQLiteStore.__init__(self, path, fold_factory=fold_factory, clock=clock)
         self._sim_verified_ledger_cache = None
 
-    def _verified_records(self, session_id, through):
+    def _verified_records(self, session_id, through, **kwargs):
+        if kwargs:
+            return super()._verified_records(session_id, through, **kwargs)
         params = (self.tenant_id, session_id, through)
         record_rows = tuple(
             self._rows(
@@ -105,9 +110,32 @@ class SimPostgresStore(SessionPostgresStore):
 
 
 PENDING = {
-    "I9": "W2c: chain_digest and chain verifier do not exist at the P1 baseline",
     "I11": "W4: worker support sets and claim compatibility filtering do not exist at the P1 baseline",
 }
+
+
+class SimLedgerSigner:
+    """Deterministic test signer; production hosts inject an external verifier."""
+
+    def __init__(self, seed: int) -> None:
+        self.key_id = f"sim-ledger-{seed}"
+        self.key = hashlib.sha256(f"sim-ledger:{seed}".encode()).digest()
+
+    def bind_key(self):
+        signer = self
+
+        class Bound:
+            key_id = signer.key_id
+
+            @staticmethod
+            def sign(message: bytes) -> bytes:
+                return hmac.new(signer.key, message, hashlib.sha256).digest()
+
+        return Bound()
+
+    def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
+        expected = hmac.new(self.key, message, hashlib.sha256).digest()
+        return key_id == self.key_id and hmac.compare_digest(signature, expected)
 
 
 class InvariantViolation(AssertionError):
@@ -250,10 +278,12 @@ class FaultyStore:
 
 
 class SimWorld:
-    def __init__(self, database, *, seed=0, replay=None):
+    def __init__(self, database, *, seed=0, replay=None, signed=False):
         self.database, self.seed = database, seed
         self.clock = SimClock() if isinstance(database, Path) else SystemClock()
         self.choices = Choices(seed, replay)
+        self.signed = signed
+        self.ledger_signer = SimLedgerSigner(seed) if signed else None
         self.stack = ExitStack()
         self.connections, self.workers, self.keepers = {}, {}, {}
         self.events, self.calls, self.admissions = [], [], []
@@ -262,6 +292,7 @@ class SimWorld:
         self.folds, self.prefixes, self.runtimes, self.snapshots = {}, {}, {}, {}
         self.verified_folds, self.verified_prefixes = {}, {}
         self._signature_cache = {}
+        self._ledger_checks = {}
         self._content_signatures, self._content_bodies = {}, {}
         self.queue = []
         self.after_external = None
@@ -295,6 +326,10 @@ class SimWorld:
             else:
                 context = SimPostgresStore.standalone(self.database)
             raw_store = self.stack.enter_context(context)
+            raw_store.configure_input_admission(
+                self.ledger_signer,
+                allow_unsigned=self.ledger_signer is None,
+            )
             if not isinstance(raw_store, SQLiteStore) and self.postgres_runtime_ready:
                 self._set_postgres_runtime_timeouts(raw_store)
             elif not isinstance(raw_store, SQLiteStore):
@@ -331,6 +366,52 @@ class SimWorld:
         version = sqlite_state_version(store, sid)
         self.snapshots[sid] = CachedHydratedState(signature, fold, records, inbox_seq, version)
         return fold.state, records, inbox_seq
+
+    def check_ledger(self, sid):
+        """Run the production ledger verifier and compare its complete SQL prefix."""
+
+        store = self.connection("observer")
+        version = sqlite_state_version(store, sid)
+        cached = self._ledger_checks.get(sid)
+        if version is not None and cached is not None and cached[0] == version:
+            return cached[1]
+        head, inbox_seq = store._head(sid)[:2]
+        try:
+            verified, chains = store._verified_records(sid, head)
+            require(
+                len(verified) == len(chains) == head,
+                "I9",
+                f"seed={self.seed} session={sid} verifier returned an incomplete prefix",
+            )
+            if self.signed:
+                checkpoint_count = store._one(
+                    "SELECT count(*) FROM sk_checkpoint WHERE tenant_id=%s AND session_id=%s",
+                    (store.tenant_id, sid),
+                )[0]
+                require(
+                    checkpoint_count == head,
+                    "I9",
+                    f"seed={self.seed} session={sid} checkpoint count {checkpoint_count}, head={head}",
+                )
+            else:
+                checkpoint_count = store._one(
+                    "SELECT count(*) FROM sk_checkpoint WHERE tenant_id=%s AND session_id=%s",
+                    (store.tenant_id, sid),
+                )[0]
+                require(
+                    checkpoint_count == 0,
+                    "I9",
+                    f"seed={self.seed} session={sid} hash-only ledger contains checkpoint evidence",
+                )
+            store._stored_inputs(sid, inbox_seq)
+        except LedgerIntegrityError as exc:
+            raise InvariantViolation("I9", f"seed={self.seed} session={sid}: {exc}") from exc
+        previous = chains[-1] if chains else _initial_chain_digest(store.tenant_id, sid)
+        if head:
+            self.covered.add("I9")
+        if version is not None:
+            self._ledger_checks[sid] = (version, previous)
+        return previous
 
     def cached_state_signature(self, store, sid, records=None):
         version = sqlite_state_version(store, sid)
@@ -634,6 +715,7 @@ class SimWorld:
     def check(self, *, quiescent=False, every_prefix=False):
         store = self.connection("observer")
         for sid in store.list_sessions():
+            self.check_ledger(sid)
             state, rows, _ = self.read_state(sid)
             checked_inputs = self._check_inputs(sid, rows)
             _inputs, applications = checked_inputs

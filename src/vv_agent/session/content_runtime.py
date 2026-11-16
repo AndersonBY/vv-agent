@@ -28,6 +28,7 @@ from vv_agent.kernel._content import (
     ContentSessionWriter,
     KeyProvider,
     Principal,
+    SessionHead,
     SourceKind,
 )
 from vv_agent.kernel._content_publication import (
@@ -683,6 +684,7 @@ class _ContentSessionTxAdapter:
         records,
         consume_input_ids: tuple[str, ...] = (),
         expected_inbox_seq: int | None = None,
+        expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> CommitReceipt:
         return self._tx.append(
             session_id,
@@ -692,6 +694,7 @@ class _ContentSessionTxAdapter:
             records=records,
             consume_input_ids=consume_input_ids,
             expected_inbox_seq=expected_inbox_seq,
+            expected_head=expected_head,
         )
 
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None:

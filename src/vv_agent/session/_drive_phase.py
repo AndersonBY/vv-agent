@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
+from vv_agent.kernel._content import SessionHead
 from vv_agent.kernel._drive import (
     FACTORY_HEARTBEAT_SECONDS,
     FACTORY_LEASE_TTL_MS,
@@ -29,6 +30,7 @@ def drive_with_runtime(
     *,
     runtime: Runtime | Callable[[str], Runtime],
     failure_backoff_ms: int = 1000,
+    expected_head: SessionHead | tuple[int, str] | None = None,
     one_turn: bool = False,
     wait_for_lease: bool = False,
     clock: Clock | None = None,
@@ -70,6 +72,7 @@ def drive_with_runtime(
                     cast(Runtime, selected),
                     cast(_Scope, scope),
                     one_turn=one_turn,
+                    expected_head=expected_head,
                 ),
             )
 

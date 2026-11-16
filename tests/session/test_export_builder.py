@@ -12,8 +12,8 @@ from vv_agent.kernel._content import (
     ContentLabels,
     ContentRef,
     ExportContentMode,
+    ExportDocument,
     ExportLineKind,
-    ExportModeMismatch,
     ForgottenSessionReuse,
     InvalidExport,
     InvalidTombstone,
@@ -22,6 +22,7 @@ from vv_agent.kernel._content import (
 )
 from vv_agent.kernel._sql import LedgerIntegrityError, SessionNotLive, stored_input_proof
 from vv_agent.kernel._store import Conflict
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.deletion import SessionDeletionStore
 from vv_agent.session.export import export_session
@@ -69,6 +70,18 @@ class Verifier:
     def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
         signer = self._signers.get(key_id)
         return signer is not None and signer.verify(key_id, message, signature)
+
+
+class RotatingSigner:
+    def __init__(self, active: Signer, *historical: Signer) -> None:
+        self.active = active
+        self.verifier = Verifier(active, *historical)
+
+    def bind_key(self):
+        return self.active.bind_key()
+
+    def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
+        return self.verifier.verify(key_id, message, signature)
 
 
 def _create(store: SQLiteStore, session_id: str = SESSION, *, parent: str | None = None) -> None:
@@ -222,6 +235,7 @@ def test_export_session_builds_complete_verified_skeleton(tmp_path) -> None:
 def test_empty_inbox_hash_only_export_is_explicitly_unsigned(tmp_path) -> None:
     with SQLiteStore.standalone(str(tmp_path / "hash-only.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         _create(store)
 
         document = export_session(store, SESSION)
@@ -273,7 +287,7 @@ def test_reopened_signed_store_without_verifier_cannot_make_unsigned_export(tmp_
 
     with (
         SQLiteStore.standalone(str(path)) as reopened,
-        pytest.raises(LedgerIntegrityError, match="signer is required"),
+        pytest.raises(LedgerIntegrityError, match="verifier is required"),
     ):
         export_session(reopened, SESSION)
 
@@ -282,6 +296,49 @@ def test_reopened_signed_store_without_verifier_cannot_make_unsigned_export(tmp_
         head = _head(document, signer.key_id)
         document.verify(head, signer, expected_head=(head.final_seq, head.chain_digest))
         assert sum(line.kind is ExportLineKind.CHECKPOINT for line in document.lines) == 3
+
+
+def test_key_rotation_keeps_historical_checkpoints_and_input_proofs_verifiable(tmp_path) -> None:
+    old_signer = Signer("ledger-old")
+    new_signer = Signer("ledger-new")
+    verifier = Verifier(old_signer, new_signer)
+    with SQLiteStore.standalone(str(tmp_path / "rotated.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(old_signer)
+        _create(store)
+        with store.atomic() as tx:
+            tx.push(SESSION, item("old-input"))
+        lease = store.acquire(SESSION, owner="rotation-test", ttl_ms=10_000)
+        assert lease is not None
+        with store.atomic() as tx:
+            tx.append(
+                SESSION,
+                lease=lease,
+                expected_seq=1,
+                commit_id="old-turn",
+                records=(record("turn_started", sid=SESSION),),
+            )
+        assert store.release(lease)
+
+        store.configure_input_admission(RotatingSigner(new_signer, old_signer))
+        lease = store.acquire(SESSION, owner="rotation-test", ttl_ms=10_000)
+        assert lease is not None
+        with store.atomic() as tx:
+            tx.append(
+                SESSION,
+                lease=lease,
+                expected_seq=2,
+                commit_id="new-usage",
+                records=(record("usage_observed", sid=SESSION, meter_id="rotation", observation=1),),
+            )
+
+        document = export_session(store, SESSION, signer=verifier)
+        head = _head(document, new_signer.key_id)
+        document.verify(head, verifier, expected_head=(head.final_seq, head.chain_digest))
+        checkpoints = [line.value for line in document.lines if line.kind is ExportLineKind.CHECKPOINT]
+        inbox = next(line.value for line in document.lines if line.kind is ExportLineKind.INBOX)
+        assert [checkpoint["key_id"] for checkpoint in checkpoints] == ["ledger-old", "ledger-old", "ledger-new"]
+        assert inbox["input"]["admission_proof"]["admission_key_id"] == old_signer.key_id
 
 
 def test_forgotten_signed_session_exports_retained_skeleton(tmp_path) -> None:
@@ -327,7 +384,7 @@ def test_forgotten_signed_session_exports_retained_skeleton(tmp_path) -> None:
 
         with pytest.raises(InvalidTombstone, match="tombstone signature is invalid"):
             export_session(store.for_tenant(TENANT), SESSION, signer=checkpoint_signer)
-        with pytest.raises(InvalidExport, match="checkpoint signature is invalid"):
+        with pytest.raises(LedgerIntegrityError, match="checkpoint signature is invalid"):
             export_session(store.for_tenant(TENANT), SESSION, signer=tombstone_signer)
 
 
@@ -444,7 +501,7 @@ def test_export_rejects_wrong_tenant_session_and_expected_head(tmp_path) -> None
             export_session(store.for_tenant("other-tenant"), SESSION, signer=signer)
         with pytest.raises(Conflict):
             export_session(store, "missing-session", signer=signer)
-        with pytest.raises(ContentBindingMismatch, match="expected head"):
+        with pytest.raises(ContentBindingMismatch, match="expected_head"):
             export_session(
                 store,
                 SESSION,
@@ -453,10 +510,41 @@ def test_export_rejects_wrong_tenant_session_and_expected_head(tmp_path) -> None
             )
 
 
-def test_export_rejects_content_hydration_mode(tmp_path) -> None:
+def test_export_includes_content_only_when_explicitly_requested(tmp_path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "include-content-keys.sqlite3")
     with SQLiteStore.standalone(str(tmp_path / "include-content.sqlite")) as store:
         store.install_schema()
-        _create(store)
+        store.configure_input_admission(allow_unsigned=True)
+        with store.atomic() as tx:
+            writer = SessionContentWriter(tx=tx, tenant_id=TENANT, session_id=SESSION, key_provider=provider)
 
-        with pytest.raises(ExportModeMismatch, match="does not hydrate content"):
-            export_session(store, SESSION, content_mode=ExportContentMode.INCLUDE_CONTENT)
+            def spec(content) -> SessionSpec:
+                principal_value, _ = content.service_principal("export-host")
+                return SessionSpec(
+                    SESSION,
+                    principal_value,
+                    content.put_json("/workspace").to_dict(),
+                    attributes=content.put_json({"purpose": "include-content"}).to_dict(),
+                )
+
+            writer.create_session(spec, consumers=())
+
+        skeleton = export_session(store, SESSION)
+        assert not any(line.kind is ExportLineKind.CONTENT for line in skeleton.lines)
+
+        document = export_session(
+            store,
+            SESSION,
+            content_mode=ExportContentMode.INCLUDE_CONTENT,
+            content_store=SQLiteContentStore(store, provider),
+        )
+        content_lines = [line.value for line in document.lines if line.kind is ExportLineKind.CONTENT]
+        assert {str(line["decoded_value"]) for line in content_lines} == {
+            "{'role': 'export-host'}",
+            "/workspace",
+            "{'purpose': 'include-content'}",
+        }
+        document.verify(_head(document, "hash-only"))
+        without_content = [line.to_dict() for line in document.lines if line.kind is not ExportLineKind.CONTENT]
+        with pytest.raises(InvalidExport, match="does not cover every referenced"):
+            ExportDocument.from_dict(document.header.to_dict(), without_content).verify(_head(document, "hash-only"))

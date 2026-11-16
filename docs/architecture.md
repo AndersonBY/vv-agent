@@ -32,6 +32,17 @@ before publishing either value. The hydrated principal is available to
 `ToolContext` and `LlmRequest` as internal metadata for policy, routing and
 audit, and is excluded from prompts and provider request bodies.
 
+The S1 SQL ledger is an ordered hash chain. A signed deployment writes and
+verifies one checkpoint for every record from `session_created` onward, and
+signs the complete immutable inbox envelope at admission. Checkpoint, input and
+tombstone verification use key identifiers resolved by the injected verifier,
+so key rotation can retain historical keys without a database key registry.
+Recovery and append verify all required checkpoints and input proofs before
+signing new bytes; hash-only mode is an explicit local configuration and only
+establishes structural hash consistency. An independent `expected_head` supplied
+to read, append, verify or export is the completeness anchor for deleted-tail
+and rollback detection. A head read from the same database is not that anchor.
+
 `kernel/_drive.py` owns lease acquisition, factory admission, the drive loop and
 idle/release ordering. `session/_drive_phase.py` constructs the SDK runtime,
 heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;
@@ -281,6 +292,20 @@ content lifecycle values, error classes and store protocols.
 operations; `session/sqlite.py` and `session/postgres.py` bind those operations
 to their driver-specific connections. Kernel hydration imports the content
 contract errors directly and has no dependency on a concrete content backend.
+S1 key wrapping, content AAD and content HMAC use canonical JSON framing with a
+version, domain, purpose, tenant and session where applicable. The AAD also
+binds content identity, key, size and labels. `SQLContentStore` can hydrate
+canonical JSON content lines only for an explicitly supplied set of references;
+skeleton export never calls that path.
+
+The development `LocalKeyProvider` keeps non-secret key lifecycle state in a
+small SQLite file. Its path is selected by `state_path`, then
+`VV_AGENT_LOCAL_KEY_STATE`, and otherwise by the user's state directory and a
+master-key fingerprint. A destroyed key remains unavailable to a new provider
+instance with the same state file. The SQL content store owns ciphertext-row and
+link deletion; an external object locator also requires an explicitly attached,
+idempotent cleaner. Missing cleaner capability fails the forget before key
+destruction, and a cleaner error remains retryable.
 
 `kernel/_child_store.py` owns child admission, cancellation, terminal delivery,
 authenticity checks and ordinary child-result assembly over the store ports.

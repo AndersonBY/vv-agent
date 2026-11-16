@@ -63,19 +63,51 @@ The included `LocalKeyProvider` is for development and tests. Production hosts
 must inject a key provider whose wrapped-key storage, credential isolation and
 irreversible destroy operation meet their security model. Content follows the
 links created by the runtime; arbitrary plaintext in an undeclared field is not
-protected by this path.
+protected by this path. The development provider now persists non-secret key
+lifecycle state in SQLite instead of process memory. Preserve its `state_path`
+file, or the file selected by `VV_AGENT_LOCAL_KEY_STATE`, across restarts so a
+destroyed key cannot be unwrapped by a new process. Omitting or losing that state
+fails closed; it does not make wrapped keys readable again.
 
-Authenticity is a separate opt-in boundary. A configured ledger signer signs
-checkpoint and input-admission proofs, while export and deletion require a
-verifier or signer for their evidence. Structural hashes and explicitly
-hash-only modes do not establish trusted authenticity; hosts must not describe
-them as signed history. `SessionDeletionStore` provides explicit, fenced forget
-and purge operations with cascading tombstones and key/content destruction, but
-the runtime does not schedule retention or expose an implicit public deletion
-operation. Callers must provide an authorized actor and a signer unless they
-deliberately accept the documented `allow_unsigned` hash-only mode. Provider
-copies, host tables, logs and backups outside the store remain separate
-retention domains.
+Durable `SessionDriver` and `AppServer` stores must receive an explicit
+`content_key_provider`. Only a driver-owned in-memory SQLite store gets a
+temporary development provider, which is removed when the driver closes.
+
+S1 key wrapping, content AAD and content HMAC now include versioned purpose and
+tenant/session framing. Content and wrapped keys created before this W2d framing
+are not accepted by this branch. The branch remains an unreleased S1 cutover, so
+hosts must create a fresh exact S1 store rather than carrying an earlier local S1
+file across this revision.
+
+Authenticity is a separate opt-in boundary. A signed deployment configures the
+ledger signer before opening a SQL connection. It writes one checkpoint for
+each record from `session_created` onward and signs the complete immutable inbox
+envelope, including original sequence, receive time and body digest. Recovery
+and append verify those proofs before signing new bytes. Missing or invalid
+proofs, a partial checkpoint set or a signing key that does not match its
+identifier fail closed and roll back the attempted transaction. Historical
+checkpoints, input proofs and tombstones remain verifiable after key rotation
+when the injected verifier retains their public keys.
+
+An independently retained `expected_head` must be supplied to read, append,
+verify or export when the caller needs protection from deletion of the latest
+signed tail. Without that external anchor, retained altered bytes are detected
+by the chain and signatures, but the result makes no rollback or complete-tail
+claim. Structural hashes and explicitly configured `allow_unsigned` hash-only
+mode establish only hash consistency; they do not establish database tamper
+resistance, historical authenticity or input identity/approval attribution.
+Signed evidence cannot be exported in that hash-only mode.
+
+`SessionDeletionStore` provides explicit, fenced forget and purge operations
+with cascading tombstones and key/content destruction, but the runtime does not
+schedule retention or expose an implicit public deletion operation. Callers
+must provide an authorized actor and a signer unless they deliberately accept
+the documented `allow_unsigned` hash-only mode. Provider copies, host tables,
+logs and backups outside the store remain separate retention domains. A SQL row
+backed by an external object locator is not
+considered deleted until the host attaches an idempotent object cleaner and that
+cleaner succeeds. Missing capability and unknown or failed remote outcomes stop
+the deletion with the session still fenced and retryable.
 
 The S1 upgrade boundary remains strict. There are no decoders for pre-S1
 versions, no import tool and no in-place migration on this branch. The new

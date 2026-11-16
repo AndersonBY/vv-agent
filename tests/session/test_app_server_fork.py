@@ -9,6 +9,7 @@ from vv_agent.kernel._content import Principal
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef
 from vv_agent.session.content_runtime import SESSION_PRINCIPAL_ATTRIBUTES, SessionContentWriter
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.context import project_context
 from vv_agent.session.context_view import context_view
 from vv_agent.session.fork import fork_thread
@@ -34,8 +35,13 @@ def send(server, identity, method, params):
     return wire["result"]
 
 
-def server_for(store, host):
-    server = AppServer(store=store, host=host, transport=ChannelTransport(connection_id="test", outbound_capacity=10000))
+def server_for(store, host, state_path):
+    server = AppServer(
+        store=store,
+        content_key_provider=LocalKeyProvider(b"f" * 32, state_path=state_path),
+        host=host,
+        transport=ChannelTransport(connection_id="test", outbound_capacity=10000),
+    )
     send(server, "init", "initialize", {"clientInfo": {"name": "test"}})
     return server
 
@@ -63,7 +69,7 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
     monkeypatch.setattr(
         host, "resolve_model", lambda req: (selected.llm, selected_config) if req["model"] == "small" else original(req)
     )
-    a = server_for(store, host)
+    a = server_for(store, host, tmp_path / "selected-model-keys.sqlite3")
     try:
         send(a, "create", "thread/start", {"inputId": "source"})
         send(
@@ -119,7 +125,7 @@ def test_direct_fork_copies_persisted_principal_attributes_once(store, tmp_path)
             workspace=tmp_path,
         ),
     )
-    server = server_for(store, host)
+    server = server_for(store, host, tmp_path / "fork-keys.sqlite3")
     try:
         send(server, "create", "thread/start", {"inputId": "source"})
         source_created = store.read("source", limit=1).records[0].record.payload
@@ -194,7 +200,7 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
         return replace(host._run_config, workspace_backend=target if req.metadata.get("workspace") else backend)
 
     monkeypatch.setattr(host, "build_run_config", binding)
-    a = server_for(store, host)
+    a = server_for(store, host, tmp_path / "summary-keys.sqlite3")
     try:
         create_fixture_session(
             store,

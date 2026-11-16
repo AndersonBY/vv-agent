@@ -10,9 +10,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
+import sqlite3
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, runtime_checkable
 
@@ -22,29 +26,55 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import (
     ContentBindingMismatch,
+    ContentCleanupUnavailable,
     ContentIntegrityError,
     ContentLabels,
     ContentLinkConflict,
     ContentRef,
     ContentUnavailable,
+    ExportLine,
+    ExportLineKind,
     KeyDestroyOutcome,
     KeyDestroyStatus,
     KeyProvider,
     KeyUnavailable,
     WrappedDataKey,
 )
+from vv_agent.kernel._content_publication import _MISSING, _expand_nested_slots, declared_content_ref
 from vv_agent.kernel._content_store import ContentLink, ContentState, SessionKeyRecord, SessionKeyState
 
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
 _KEY_WRAP_PREFIX = b"vv-agent/S1/key-wrap/v1\0"
+_KEY_STATE_ENV = "VV_AGENT_LOCAL_KEY_STATE"
 _STAGING_PIN_MS = 5 * 60 * 1000
 
 
-@dataclass(slots=True)
-class _LocalKeyState:
-    session_id: str
-    destroyed: bool = False
+ObjectLocatorCleaner = Callable[[str, str, bytes], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ContentExportRef:
+    """One exported reference with its persisted SQL owner and declared slot."""
+
+    record_seq: int | None
+    input_id: str | None
+    slot: str
+    ref: ContentRef
+    nested: tuple[Any, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (self.record_seq is None) == (self.input_id is None):
+            raise ContentBindingMismatch("content export requires exactly one owner")
+        if self.record_seq is not None and (type(self.record_seq) is not int or self.record_seq <= 0):
+            raise ContentBindingMismatch("record_seq must be a positive integer")
+        if self.input_id is not None and (not isinstance(self.input_id, str) or not self.input_id):
+            raise ContentBindingMismatch("input_id must be a non-empty string")
+        _link_slot(self.slot)
+        if not isinstance(self.ref, ContentRef):
+            raise TypeError("content export ref must be ContentRef")
+        if not isinstance(self.nested, tuple):
+            raise TypeError("content export nested declarations must be a tuple")
 
 
 def _text(value: object, field_name: str) -> str:
@@ -57,6 +87,8 @@ def _key_wrap_aad(tenant_id: str, session_id: str, key_id: str) -> bytes:
     return canonical_json_bytes(
         {
             "domain": "vv-agent/S1/key-wrap",
+            "framing_version": 1,
+            "purpose": "session-data-key",
             "tenant_id": tenant_id,
             "session_id": session_id,
             "key_id": key_id,
@@ -65,17 +97,88 @@ def _key_wrap_aad(tenant_id: str, session_id: str, key_id: str) -> bytes:
     )
 
 
+def _default_local_key_state_path(master_key: bytes) -> Path:
+    configured = os.environ.get(_KEY_STATE_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    state_root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    fingerprint = hashlib.sha256(master_key).hexdigest()[:24]
+    return state_root / "vv-agent" / f"local-content-keys-{fingerprint}.sqlite3"
+
+
 class LocalKeyProvider:
     """Development/test-only key provider with a caller-injected AES-256 master key."""
 
     provider_id = "local-development-v1"
 
-    def __init__(self, master_key: bytes) -> None:
+    def __init__(self, master_key: bytes, *, state_path: str | Path | None = None) -> None:
         if not isinstance(master_key, bytes) or len(master_key) != _DATA_KEY_BYTES:
             raise ValueError("master_key must be exactly 32 bytes")
         self._master_key = master_key
-        self._states: dict[tuple[str, str], _LocalKeyState] = {}
+        self._state_path = Path(state_path).expanduser() if state_path is not None else _default_local_key_state_path(master_key)
         self._lock = RLock()
+        self._initialize_state()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._state_path, timeout=30)
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    def _initialize_state(self) -> None:
+        self._state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        master_fingerprint = hashlib.sha256(self._master_key).hexdigest()
+        with self._connect() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS local_content_key_state ("
+                "singleton INTEGER PRIMARY KEY CHECK (singleton=1),"
+                "master_fingerprint TEXT NOT NULL"
+                ") STRICT"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS local_content_keys ("
+                "tenant_id TEXT NOT NULL,"
+                "session_id TEXT NOT NULL,"
+                "key_id TEXT PRIMARY KEY,"
+                "destroyed INTEGER NOT NULL CHECK (destroyed IN (0,1)),"
+                "evidence_id TEXT"
+                ") STRICT"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO local_content_key_state(singleton,master_fingerprint) VALUES (1,?)",
+                (master_fingerprint,),
+            )
+            stored_fingerprint = connection.execute(
+                "SELECT master_fingerprint FROM local_content_key_state WHERE singleton=1"
+            ).fetchone()
+            if stored_fingerprint != (master_fingerprint,):
+                raise ValueError("local key state belongs to a different master key")
+        with suppress(OSError):
+            self._state_path.chmod(0o600)
+
+    def _key_state(self, key_id: str) -> tuple[str, str, bool, str | None] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT tenant_id,session_id,destroyed,evidence_id FROM local_content_keys WHERE key_id=?",
+                (key_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1], bool(row[2]), row[3]
+
+    def _persist_new_key(self, tenant_id: str, session_id: str, key_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO local_content_keys(tenant_id,session_id,key_id,destroyed,evidence_id) VALUES (?,?,?,0,NULL)",
+                    (tenant_id, session_id, key_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ContentBindingMismatch("session data key identifier is already registered") from exc
+
+    def _require_active_key(self, tenant_id: str, session_id: str, key_id: str) -> None:
+        state = self._key_state(key_id)
+        if state is None or state[2] or state[:2] != (tenant_id, session_id):
+            raise KeyUnavailable("session data key is unavailable")
 
     def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
         tenant_id = _text(tenant_id, "tenant_id")
@@ -85,8 +188,7 @@ class LocalKeyProvider:
         data_key = secrets.token_bytes(_DATA_KEY_BYTES)
         aad = _key_wrap_aad(tenant_id, session_id, key_id)
         wrapped = _KEY_WRAP_PREFIX + nonce + AESGCM(self._master_key).encrypt(nonce, data_key, aad)
-        with self._lock:
-            self._states[(tenant_id, key_id)] = _LocalKeyState(session_id)
+        self._persist_new_key(tenant_id, session_id, key_id)
         return WrappedDataKey(tenant_id, session_id, key_id, wrapped)
 
     def _decrypt_wrapped_key(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
@@ -113,56 +215,53 @@ class LocalKeyProvider:
         session_id = _text(session_id, "session_id")
         if not isinstance(wrapped_key, WrappedDataKey):
             raise KeyUnavailable("wrapped data key is unavailable")
-        with self._lock:
-            state = self._states.get((tenant_id, wrapped_key.key_id))
-            if (
-                state is None
-                or state.destroyed
-                or state.session_id != session_id
-                or wrapped_key.tenant_id != tenant_id
-                or wrapped_key.session_id != session_id
-            ):
-                raise KeyUnavailable("session data key is unavailable")
+        if wrapped_key.tenant_id != tenant_id or wrapped_key.session_id != session_id:
+            raise KeyUnavailable("wrapped data key does not belong to the session binding")
+        self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
 
         return self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
 
     def restore_data_key(self, wrapped_key: WrappedDataKey) -> None:
-        """Restore an active process-local state for a durable wrapped envelope."""
+        """Validate persistent lifecycle state for a durable wrapped envelope."""
         if not isinstance(wrapped_key, WrappedDataKey):
             raise KeyUnavailable("wrapped data key is unavailable")
         tenant_id = _text(wrapped_key.tenant_id, "tenant_id")
         session_id = _text(wrapped_key.session_id, "session_id")
+        self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
         self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
-        with self._lock:
-            state = self._states.get((tenant_id, wrapped_key.key_id))
-            if state is not None and (state.destroyed or state.session_id != session_id):
-                raise KeyUnavailable("session data key is unavailable")
-            if state is None:
-                self._states[(tenant_id, wrapped_key.key_id)] = _LocalKeyState(session_id)
 
     def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
         tenant_id = _text(tenant_id, "tenant_id")
         key_id = _text(key_id, "key_id")
-        with self._lock:
-            state = self._states.get((tenant_id, key_id))
-            if state is None:
-                owner = next((item_tenant for item_tenant, item_key in self._states if item_key == key_id), None)
-                if owner is not None:
-                    return KeyDestroyOutcome(
-                        False,
-                        KeyDestroyStatus.BINDING_MISMATCH,
-                        None,
-                        "Session key belongs to another tenant.",
-                    )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT tenant_id,session_id,destroyed,evidence_id FROM local_content_keys WHERE key_id=?",
+                (key_id,),
+            ).fetchone()
+            if row is None:
                 return KeyDestroyOutcome(
                     False,
                     KeyDestroyStatus.KEY_UNAVAILABLE,
                     None,
                     "Session key is unavailable.",
                 )
-            status = KeyDestroyStatus.ALREADY_DESTROYED if state.destroyed else KeyDestroyStatus.DESTROYED
-            state.destroyed = True
-        return KeyDestroyOutcome(True, status, f"local-key-destroy-{secrets.token_urlsafe(18)}")
+            owner_tenant, _owner_session, destroyed, evidence_id = row
+            if owner_tenant != tenant_id:
+                return KeyDestroyOutcome(
+                    False,
+                    KeyDestroyStatus.BINDING_MISMATCH,
+                    None,
+                    "Session key belongs to another tenant.",
+                )
+            if destroyed:
+                return KeyDestroyOutcome(True, KeyDestroyStatus.ALREADY_DESTROYED, evidence_id)
+            evidence_id = f"local-key-destroy-{secrets.token_urlsafe(18)}"
+            connection.execute(
+                "UPDATE local_content_keys SET destroyed=1,evidence_id=? WHERE key_id=? AND destroyed=0",
+                (evidence_id, key_id),
+            )
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, evidence_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,21 +276,39 @@ def _content_aad(
     session_id: str,
     content_id: str,
     key_id: str,
+    mac: str,
     size: int,
     labels: ContentLabels,
 ) -> bytes:
     return canonical_json_bytes(
         {
             "domain": "vv-agent/S1/content",
+            "framing_version": 1,
+            "purpose": "content-ciphertext",
             "tenant_id": tenant_id,
             "session_id": session_id,
             "content_id": content_id,
             "key_id": key_id,
+            "mac": mac,
             "size": size,
             "labels": labels.to_dict(),
         },
         "content AAD",
     )
+
+
+def _content_mac(data_key: bytes, tenant_id: str, session_id: str, plaintext: bytes) -> str:
+    framing = canonical_json_bytes(
+        {
+            "domain": "vv-agent/S1/content-mac",
+            "framing_version": 1,
+            "purpose": "content-ref",
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+        },
+        "content MAC framing",
+    )
+    return hmac.digest(data_key, framing + b"\0" + plaintext, hashlib.sha256).hex()
 
 
 class InMemoryEncryptedContentStore:
@@ -229,7 +346,7 @@ class InMemoryEncryptedContentStore:
             data_key = self._key_provider.unwrap(tenant_id, session_id, wrapped_key)
             if len(data_key) != _DATA_KEY_BYTES:
                 raise KeyUnavailable("session data key has an invalid size")
-            mac = hmac.digest(data_key, plaintext, hashlib.sha256).hex()
+            mac = _content_mac(data_key, tenant_id, session_id, plaintext)
             identity = (tenant_id, session_id, wrapped_key.key_id, mac, labels)
             existing_id = self._dedup.get(identity)
             if existing_id is not None:
@@ -238,7 +355,7 @@ class InMemoryEncryptedContentStore:
             content_id = f"content_{secrets.token_urlsafe(32)}"
             size = len(plaintext)
             nonce = secrets.token_bytes(_NONCE_BYTES)
-            aad = _content_aad(tenant_id, session_id, content_id, wrapped_key.key_id, size, labels)
+            aad = _content_aad(tenant_id, session_id, content_id, wrapped_key.key_id, mac, size, labels)
             ciphertext = AESGCM(data_key).encrypt(nonce, plaintext, aad)
             ref = ContentRef(content_id=content_id, mac=mac, size=size, key_id=wrapped_key.key_id, labels=labels)
             self._contents[(tenant_id, session_id, content_id)] = _StoredContent(ref, nonce, ciphertext)
@@ -289,6 +406,7 @@ class InMemoryEncryptedContentStore:
                         session_id,
                         stored.ref.content_id,
                         stored.ref.key_id,
+                        stored.ref.mac,
                         stored.ref.size,
                         stored.ref.labels,
                     ),
@@ -297,7 +415,7 @@ class InMemoryEncryptedContentStore:
                 raise ContentIntegrityError("content failed AEAD authentication") from exc
             if len(plaintext) != ref.size:
                 raise ContentIntegrityError("content size does not match its reference")
-            actual_mac = hmac.digest(data_key, plaintext, hashlib.sha256).hex()
+            actual_mac = _content_mac(data_key, tenant_id, session_id, plaintext)
             if not hmac.compare_digest(actual_mac, ref.mac):
                 raise ContentIntegrityError("content failed HMAC authentication")
             return plaintext
@@ -435,11 +553,21 @@ class SQLContentStore:
         key_provider: KeyProvider,
         *,
         provider_id: str | None = None,
+        object_locator_cleaner: ObjectLocatorCleaner | None = None,
     ) -> None:
         self._backend = backend
         self._key_provider = key_provider
         inferred_provider_id = getattr(key_provider, "provider_id", None)
         self._provider_id = _text(provider_id if provider_id is not None else inferred_provider_id, "provider_id")
+        if object_locator_cleaner is not None and not callable(object_locator_cleaner):
+            raise TypeError("object_locator_cleaner must be callable")
+        self._object_locator_cleaner = object_locator_cleaner
+
+    def set_object_locator_cleaner(self, cleaner: ObjectLocatorCleaner) -> None:
+        """Attach the idempotent external object deletion capability."""
+        if not callable(cleaner):
+            raise TypeError("object locator cleaner must be callable")
+        self._object_locator_cleaner = cleaner
 
     def _require_transaction(self) -> None:
         self._backend.require_transaction()
@@ -584,7 +712,7 @@ class SQLContentStore:
         wrapped = self.create_session_key(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
         data_key = self._unwrap(tenant_id, session_id, key)
-        mac = hmac.digest(data_key, plaintext, hashlib.sha256).hex()
+        mac = _content_mac(data_key, tenant_id, session_id, plaintext)
         _labels, labels_bytes = _labels_from_storage(canonical_json_bytes(labels.to_dict()))
         existing_row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
@@ -604,7 +732,7 @@ class SQLContentStore:
         ciphertext = AESGCM(data_key).encrypt(
             nonce,
             plaintext,
-            _content_aad(tenant_id, session_id, content_id, wrapped.key_id, size, labels),
+            _content_aad(tenant_id, session_id, content_id, wrapped.key_id, mac, size, labels),
         )
         ref = ContentRef(content_id=content_id, mac=mac, size=size, key_id=wrapped.key_id, labels=labels)
         now_ms = self._backend.now_ms()
@@ -695,16 +823,131 @@ class SQLContentStore:
             plaintext = AESGCM(data_key).decrypt(
                 nonce,
                 ciphertext,
-                _content_aad(tenant_id, session_id, stored.content_id, stored.key_id, stored.size, stored.labels),
+                _content_aad(
+                    tenant_id,
+                    session_id,
+                    stored.content_id,
+                    stored.key_id,
+                    stored.mac,
+                    stored.size,
+                    stored.labels,
+                ),
             )
         except (InvalidTag, ValueError) as exc:
             raise ContentIntegrityError("content failed AEAD authentication") from exc
         if len(plaintext) != ref.size:
             raise ContentIntegrityError("content size does not match its reference")
-        actual_mac = hmac.digest(data_key, plaintext, hashlib.sha256).hex()
+        actual_mac = _content_mac(data_key, tenant_id, session_id, plaintext)
         if not hmac.compare_digest(actual_mac, ref.mac):
             raise ContentIntegrityError("content failed HMAC authentication")
         return plaintext
+
+    def export_content_lines(
+        self,
+        tenant_id: str,
+        session_id: str,
+        refs: Iterable[ContentExportRef],
+    ) -> tuple[ExportLine, ...]:
+        """Decrypt referenced canonical JSON values for an explicit content export.
+
+        The caller must first verify the retained ledger snapshot. This method
+        requires the caller's transaction and validates every read against the
+        persisted tenant/session/owner/slot link. Declared nested references are
+        read from the authenticated outer value and follow the same link checks.
+        """
+        tenant_id = _text(tenant_id, "tenant_id")
+        session_id = _text(session_id, "session_id")
+        self._require_transaction()
+        requested: list[ContentExportRef] = []
+        seen: dict[tuple[int | None, str | None, str, ContentRef], tuple[Any, ...]] = {}
+        by_content_id: dict[str, ContentRef] = {}
+        for request in refs:
+            if not isinstance(request, ContentExportRef):
+                raise TypeError("content export references must be ContentExportRef values")
+            previous = by_content_id.get(request.ref.content_id)
+            if previous is not None and previous != request.ref:
+                raise ContentBindingMismatch("one content id has conflicting export references")
+            identity = (request.record_seq, request.input_id, request.slot, request.ref)
+            previous_nested = seen.get(identity)
+            if previous_nested is not None and previous_nested != request.nested:
+                raise ContentBindingMismatch("one content export slot has conflicting nested declarations")
+            if previous_nested is not None:
+                continue
+            seen[identity] = request.nested
+            by_content_id[request.ref.content_id] = request.ref
+            requested.append(request)
+
+        lines: list[ExportLine] = []
+        for request in requested:
+            self._export_content_ref(tenant_id, session_id, request, seen=set(), lines=lines)
+        return tuple(lines)
+
+    def _export_content_ref(
+        self,
+        tenant_id: str,
+        session_id: str,
+        request: ContentExportRef,
+        *,
+        seen: set[tuple[int | None, str | None, str, ContentRef]],
+        lines: list[ExportLine],
+    ) -> None:
+        identity = (request.record_seq, request.input_id, request.slot, request.ref)
+        if identity in seen:
+            return
+        seen.add(identity)
+        self.assert_link(
+            tenant_id,
+            session_id,
+            request.ref,
+            request.slot,
+            record_seq=request.record_seq,
+            input_id=request.input_id,
+        )
+        plaintext = self.get(tenant_id, session_id, request.ref)
+        try:
+            decoded_value = json.loads(plaintext)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContentIntegrityError("content export value is not valid JSON") from exc
+        if canonical_json_bytes(decoded_value, "content export value") != plaintext:
+            raise ContentIntegrityError("content export value is not canonical JSON")
+        lines.append(
+            ExportLine(
+                ExportLineKind.CONTENT,
+                {
+                    "line": "content",
+                    "content_id": request.ref.content_id,
+                    "key_id": request.ref.key_id,
+                    "slot": request.slot,
+                    "decoded_value": decoded_value,
+                },
+            )
+        )
+
+        try:
+            nested_values = tuple(_expand_nested_slots(decoded_value, request.nested, request.slot))
+        except ValueError as exc:
+            raise ContentIntegrityError("content export container does not match its declared nested slots") from exc
+        for _path, slot, value in nested_values:
+            if value is _MISSING or value is None:
+                continue
+            try:
+                nested_ref = declared_content_ref(value)
+            except ValueError as exc:
+                raise ContentIntegrityError(f"{slot} nested content slot contains a malformed ContentRef") from exc
+            if nested_ref is None:
+                raise ContentIntegrityError(f"{slot} nested content slot does not contain a ContentRef")
+            self._export_content_ref(
+                tenant_id,
+                session_id,
+                ContentExportRef(
+                    record_seq=request.record_seq,
+                    input_id=request.input_id,
+                    slot=slot,
+                    ref=nested_ref,
+                ),
+                seen=seen,
+                lines=lines,
+            )
 
     def _require_owner(self, tenant_id: str, session_id: str, owner_column: str, owner: int | str) -> None:
         table = "sk_record" if owner_column == "record_seq" else "sk_inbox"
@@ -869,7 +1112,8 @@ class SQLContentStore:
         self._require_live(tenant_id, session_id)
         now_ms = self._backend.now_ms()
         candidates = self._backend.fetchall(
-            "SELECT c.content_id FROM sk_content c WHERE c.tenant_id={p} AND c.session_id={p} "
+            "SELECT c.content_id,c.object_locator FROM sk_content c "
+            "WHERE c.tenant_id={p} AND c.session_id={p} "
             "AND c.state IN ('staged','gc_pending') "
             "AND (c.pin_until_ms IS NULL OR c.pin_until_ms<={p}) "
             "AND NOT EXISTS (SELECT 1 FROM sk_content_link l WHERE l.tenant_id=c.tenant_id "
@@ -878,7 +1122,8 @@ class SQLContentStore:
             (tenant_id, session_id, now_ms),
         )
         collected = 0
-        for (content_id,) in candidates:
+        cleaner = self._object_locator_cleaner
+        for content_id, object_locator in candidates:
             marked = self._backend.run(
                 "UPDATE sk_content SET state='gc_pending',pin_until_ms=NULL "
                 "WHERE tenant_id={p} AND session_id={p} AND content_id={p} "
@@ -890,6 +1135,18 @@ class SQLContentStore:
             )
             if not marked:
                 continue
+            if object_locator is not None:
+                if cleaner is None:
+                    continue
+                try:
+                    locator = _blob(object_locator, "content object locator")
+                    cleaned = cleaner(tenant_id, session_id, locator) is None
+                except Exception:
+                    cleaned = False
+                if not cleaned:
+                    # The object may have been deleted even when the remote result was lost.
+                    # Keep the row as a durable retry marker; cleaners must be idempotent.
+                    continue
             collected += self._backend.run(
                 "DELETE FROM sk_content WHERE tenant_id={p} AND session_id={p} AND content_id={p} "
                 "AND state='gc_pending' "
@@ -924,13 +1181,27 @@ class SQLContentStore:
             # A provider that can still confirm ALREADY_DESTROYED may purge rows.
             with suppress(KeyUnavailable):
                 self._restore_key(key)
+        locator_rows = self._backend.fetchall(
+            "SELECT object_locator FROM sk_content WHERE tenant_id={p} AND session_id={p} "
+            "AND object_locator IS NOT NULL ORDER BY content_id",
+            (tenant_id, session_id),
+        )
+        cleaner = self._object_locator_cleaner
+        if locator_rows and cleaner is None:
+            raise ContentCleanupUnavailable("external content object cleanup capability is unavailable; content was not deleted")
+
         outcome = self._key_provider.destroy(tenant_id, key.key_id)
         if outcome.status is KeyDestroyStatus.BINDING_MISMATCH:
             raise ContentBindingMismatch(outcome.reason or "session key binding mismatch")
         if outcome.status not in {KeyDestroyStatus.DESTROYED, KeyDestroyStatus.ALREADY_DESTROYED}:
             raise KeyUnavailable(outcome.reason or "session data key is not destroyed")
 
-        # Key revocation is confirmed before any durable content row is removed.
+        # Key revocation is confirmed before any content object or row is removed.
+        for (locator_value,) in locator_rows:
+            locator = _blob(locator_value, "content object locator")
+            assert cleaner is not None
+            if cleaner(tenant_id, session_id, locator) is not None:
+                raise ContentCleanupUnavailable("external content object cleanup did not confirm deletion")
         self._backend.run(
             "DELETE FROM sk_content_link WHERE tenant_id={p} AND session_id={p}",
             (tenant_id, session_id),

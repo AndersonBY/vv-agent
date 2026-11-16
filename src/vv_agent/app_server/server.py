@@ -16,6 +16,7 @@ class AppServer:
         transport: AppServerTransport | None = None,
         host: AppServerHost | None = None,
         store=None,
+        content_key_provider=None,
         state_manager: ThreadStateManager | None = None,
         router: OutgoingRouter | None = None,
         processor: MessageProcessor | None = None,
@@ -25,7 +26,7 @@ class AppServer:
 
         self.transport = transport or StdioJsonlTransport()
         self.host = host or DefaultAppServerHost()
-        self.kernel = SessionDriver(store=store)
+        self.kernel = SessionDriver(store=store, content_key_provider=content_key_provider)
         self.store = _KernelThreadStore(self.kernel)
         self.state_manager = state_manager or ThreadStateManager()
         self.router = router or OutgoingRouter()

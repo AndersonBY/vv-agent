@@ -13,12 +13,20 @@ from hashlib import sha256
 from typing import Any, Protocol
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import ContentBindingMismatch, ForgetTombstone, Principal, TombstoneState, _tombstone_message
+from vv_agent.kernel._content import (
+    ContentBindingMismatch,
+    ForgetTombstone,
+    Principal,
+    SessionHead,
+    TombstoneState,
+    _tombstone_message,
+)
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec, _MessageCache
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._store import (
     DEFAULT_TENANT_ID,
+    SESSION_PURGE_DELETE_ORDER,
     CommitReceipt,
     Conflict,
     ConsumerBatch,
@@ -49,6 +57,7 @@ _INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
 _CHAIN_DOMAIN = b"vv-agent/S1"
 _CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
 _RECORD_READ_PAGE_SIZE = 256
+_CONFIGURED_VERIFIER = object()
 
 
 class InputAdmissionProofError(Conflict):
@@ -210,6 +219,39 @@ def _input_body(item: InboxItem) -> bytes:
     return replace(item, admission_proof=None).encode()
 
 
+def _require_expected_head(
+    expected_head: SessionHead | tuple[int, str] | None,
+    *,
+    tenant_id: str,
+    session_id: str,
+    head_seq: int,
+    chain_digest: str,
+) -> None:
+    """Compare a caller-owned head anchor with the SQL row before trusting it."""
+
+    if expected_head is None:
+        return
+    if isinstance(expected_head, SessionHead):
+        expected = (
+            expected_head.tenant_id,
+            expected_head.session_id,
+            expected_head.final_seq,
+            expected_head.chain_digest,
+        )
+    elif (
+        type(expected_head) is tuple
+        and len(expected_head) == 2
+        and type(expected_head[0]) is int
+        and isinstance(expected_head[1], str)
+    ):
+        expected = (tenant_id, session_id, expected_head[0], expected_head[1])
+    else:
+        raise TypeError("expected_head must be SessionHead or (final_seq, chain_digest)")
+    actual = (tenant_id, session_id, head_seq, chain_digest)
+    if expected != actual:
+        raise ContentBindingMismatch(f"ledger head does not match expected_head at seq {head_seq}")
+
+
 def stored_input_proof(stored: StoredInput) -> dict[str, Any] | None:
     """Build the exact record proof copied from an authenticated inbox row."""
 
@@ -362,6 +404,33 @@ class SQLStore:
             root._input_admission_signer,
         )
 
+    def _ledger_integrity_mode(self) -> str:
+        """Return the configured policy without consulting mutable proof rows."""
+
+        configured, allow_unsigned, _signer = self._input_admission_policy()
+        if not configured:
+            return "unconfigured"
+        return "hash-only" if allow_unsigned else "signed"
+
+    def _resolve_ledger_verifier(
+        self,
+        verifier: Any,
+        signed: bool | None,
+    ) -> tuple[bool, Any | None]:
+        """Resolve explicit proof mode once for a verification boundary."""
+
+        configured, allow_unsigned, configured_verifier = self._input_admission_policy()
+        if verifier is _CONFIGURED_VERIFIER:
+            verifier = configured_verifier
+        resolved_signed = configured and not allow_unsigned if signed is None else signed
+        return resolved_signed, verifier
+
+    def _requires_input_integrity_gate(self, session_id: str) -> bool:
+        """Signed/hash-only stores gate every input; unconfigured stores only
+        enter this path when retained proof rows prove the mode cannot be downgraded."""
+
+        return self._ledger_integrity_mode() != "unconfigured" or self._has_input_admission_evidence(session_id)
+
     @contextmanager
     def _inherit_runtime_configuration(self, manager: AbstractContextManager[SQLStore]) -> Iterator[SQLStore]:
         """Configure an independent connection with this store's process-wide policy."""
@@ -458,33 +527,46 @@ class SQLStore:
             raise LedgerIntegrityError("ledger signer returned an invalid key binding")
         return bound
 
-    def _verify_checkpoints(self, session_id: str, chains: tuple[str, ...]) -> None:
-        configured, allow_unsigned, signer = self._input_admission_policy()
-        signed = configured and not allow_unsigned
-        if signed and signer is None:
-            raise LedgerIntegrityError("ledger signer is unavailable for checkpoint verification")
+    def _verify_checkpoints(
+        self,
+        session_id: str,
+        chains: tuple[str, ...],
+        *,
+        verifier: Any = _CONFIGURED_VERIFIER,
+        signed: bool | None = None,
+    ) -> None:
+        signed, verifier = self._resolve_ledger_verifier(verifier, signed)
+        if signed and verifier is None:
+            raise LedgerIntegrityError("ledger verifier is unavailable for checkpoint verification")
         rows = self._rows(
             "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
-            "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
-            (self.tenant_id, session_id, len(chains)),
+            "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+            (self.tenant_id, session_id),
         )
         if not signed:
             if rows:
-                raise LedgerIntegrityError("ledger signer is required to verify stored checkpoints")
+                raise LedgerIntegrityError(f"ledger verifier is required to verify stored checkpoint at seq {rows[0][0]}")
             return
-        if len(rows) != len(chains):
-            raise LedgerIntegrityError("ledger checkpoint is missing")
-        assert signer is not None
-        for expected_seq, row in enumerate(rows, 1):
+        if len(rows) < len(chains):
+            raise LedgerIntegrityError(f"ledger checkpoint is missing at seq {len(rows) + 1}")
+        if len(rows) > len(chains):
+            raise LedgerIntegrityError(f"ledger checkpoint outlives the record chain at seq {len(chains) + 1}")
+        for expected_seq in range(1, len(chains) + 1):
+            row = rows[expected_seq - 1]
             seq, stored_chain, key_id, signature, signed_ms = row
-            if seq != expected_seq or stored_chain != chains[seq - 1]:
-                raise LedgerIntegrityError("ledger checkpoint does not match the record chain")
+            if seq != expected_seq:
+                raise LedgerIntegrityError(f"ledger checkpoint sequence gap or reorder at seq {expected_seq}")
+            if stored_chain != chains[seq - 1]:
+                raise LedgerIntegrityError(f"ledger checkpoint does not match the record chain at seq {seq}")
             if not isinstance(key_id, str) or not key_id or not isinstance(signature, bytes):
-                raise LedgerIntegrityError("ledger checkpoint has invalid signing material")
-            _natural(signed_ms, "checkpoint signed_ms")
+                raise LedgerIntegrityError(f"ledger checkpoint has invalid signing material at seq {seq}")
+            try:
+                _natural(signed_ms, "checkpoint signed_ms")
+            except ValueError as exc:
+                raise LedgerIntegrityError(f"ledger checkpoint has invalid signed_ms at seq {seq}") from exc
             message = _checkpoint_message(self.tenant_id, session_id, seq, stored_chain, key_id, signed_ms)
-            if not signer.verify(key_id, message, bytes(signature)):
-                raise LedgerIntegrityError("ledger checkpoint signature is invalid")
+            if not verifier.verify(key_id, message, bytes(signature)):
+                raise LedgerIntegrityError(f"ledger checkpoint signature is invalid at seq {seq}")
 
     def _verify_commits(self, session_id: str, chains: tuple[str, ...]) -> None:
         record_rows = self._rows(
@@ -607,18 +689,25 @@ class SQLStore:
         if set(claimed) != set(range(1, len(chains) + 1)):
             raise LedgerIntegrityError("ledger sequence is not fully claimed by commits")
 
-    def _stored_input(self, session_id: str, row: tuple[Any, ...]) -> StoredInput:
+    def _stored_input(
+        self,
+        session_id: str,
+        row: tuple[Any, ...],
+        *,
+        verifier: Any = _CONFIGURED_VERIFIER,
+        signed: bool | None = None,
+    ) -> StoredInput:
         """Validate and reconstruct one inbox row before any content hydration."""
 
         body, seq, received, consumed, checksum, key_id, signature, signed_ms = row
         if sha256(body).hexdigest() != checksum:
-            raise Conflict("stored input digest mismatch")
+            raise InputAdmissionProofError(f"stored input digest mismatch at input_seq {seq}")
         base = InboxItem.parse(body)
         if base.admission_proof is not None:
-            raise InputAdmissionProofError("stored input body duplicates admission proof")
+            raise InputAdmissionProofError(f"stored input body duplicates admission proof at input_seq {seq}")
         columns = (key_id, signature, signed_ms)
         if any(value is None for value in columns) and not all(value is None for value in columns):
-            raise InputAdmissionProofError("stored input admission proof is incomplete")
+            raise InputAdmissionProofError(f"stored input admission proof is incomplete at input_seq {seq}")
         proof = None
         if all(value is not None for value in columns):
             proof = {
@@ -629,29 +718,53 @@ class SQLStore:
         item = replace(base, admission_proof=proof)
         item.encode()
         if item.actor is None or item.actor["tenant_id"] != self.tenant_id:
-            raise Conflict("input actor belongs to another tenant")
+            raise InputAdmissionProofError(f"input actor belongs to another tenant at input_seq {seq}")
 
-        configured, allow_unsigned, signer = self._input_admission_policy()
-        if configured:
-            if allow_unsigned:
-                if proof is not None:
-                    raise InputAdmissionProofError("unsigned input admission must not contain a proof")
-            else:
-                if signer is None or proof is None:
-                    raise InputAdmissionProofError("signed input admission proof is missing")
-                message = _input_admission_message(
-                    self.tenant_id,
-                    session_id,
-                    item.input_id,
-                    seq,
-                    received,
-                    checksum,
-                    proof["admission_key_id"],
-                    proof["admission_signed_ms"],
-                )
-                if not signer.verify(proof["admission_key_id"], message, bytes(signature)):
-                    raise InputAdmissionProofError("signed input admission signature is invalid")
+        signed, verifier = self._resolve_ledger_verifier(verifier, signed)
+        if proof is not None and not signed:
+            raise InputAdmissionProofError(f"ledger verifier is required for input admission proof at input_seq {seq}")
+        if signed:
+            if verifier is None or proof is None:
+                raise InputAdmissionProofError(f"signed input admission proof is missing at input_seq {seq}")
+            message = _input_admission_message(
+                self.tenant_id,
+                session_id,
+                item.input_id,
+                seq,
+                received,
+                checksum,
+                proof["admission_key_id"],
+                proof["admission_signed_ms"],
+            )
+            if not verifier.verify(proof["admission_key_id"], message, bytes(signature)):
+                raise InputAdmissionProofError(f"signed input admission signature is invalid at input_seq {seq}")
         return StoredInput(item, seq, received, consumed)
+
+    def _stored_inputs(self, session_id: str, inbox_seq: int) -> tuple[StoredInput, ...]:
+        """Validate the complete contiguous inbox snapshot used by a ledger boundary."""
+
+        rows = self._rows(
+            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
+            (self.tenant_id, session_id),
+        )
+        for expected_seq in range(1, inbox_seq + 1):
+            if expected_seq > len(rows):
+                raise InputAdmissionProofError(f"stored input is missing at input_seq {expected_seq}")
+            if rows[expected_seq - 1][1] != expected_seq:
+                raise InputAdmissionProofError(f"stored input sequence gap or reorder at input_seq {expected_seq}")
+        if len(rows) != inbox_seq:
+            raise InputAdmissionProofError(f"stored input count exceeds session inbox_seq at input_seq {inbox_seq + 1}")
+        return tuple(self._stored_input(session_id, row) for row in rows)
+
+    def _has_input_admission_evidence(self, session_id: str) -> bool:
+        return bool(
+            self._one(
+                "SELECT EXISTS(SELECT 1 FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND "
+                "(admission_key_id IS NOT NULL OR admission_signature IS NOT NULL OR admission_signed_ms IS NOT NULL))",
+                (self.tenant_id, session_id),
+            )[0]
+        )
 
     @contextmanager
     def _bound_append(self, lease: Lease) -> Iterator[None]:
@@ -752,7 +865,18 @@ class SQLStore:
             raise LedgerIntegrityError("stored record body is not canonical JCS")
         return StoredRecord(record, seq, commit, epoch, created)
 
-    def _verified_records(self, session_id: str, through: int) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+    def _verified_records(
+        self,
+        session_id: str,
+        through: int,
+        *,
+        verifier: Any = _CONFIGURED_VERIFIER,
+        signed: bool | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        explicitly_unsigned = signed is False
+        signed, verifier = self._resolve_ledger_verifier(verifier, signed)
+        if explicitly_unsigned and self._ledger_integrity_mode() == "unconfigured":
+            raise LedgerIntegrityError("ledger integrity requires an explicit signed signer or allow_unsigned hash-only mode")
         previous = _initial_chain_digest(self.tenant_id, session_id)
         chains: list[str] = []
         stored_rows: list[tuple[Any, ...]] = []
@@ -766,7 +890,7 @@ class SQLStore:
                 (self.tenant_id, session_id, cursor, through, _RECORD_READ_PAGE_SIZE),
             )
             if not rows:
-                raise LedgerIntegrityError("log sequence gap")
+                raise LedgerIntegrityError(f"log sequence gap at seq {cursor + 1}")
             for expected_seq, row in enumerate(rows, cursor + 1):
                 (
                     body,
@@ -785,16 +909,16 @@ class SQLStore:
                     commit_position,
                 ) = row
                 if seq != expected_seq:
-                    raise LedgerIntegrityError("log sequence gap or reorder")
+                    raise LedgerIntegrityError(f"log sequence gap or reorder at seq {expected_seq}; found {seq}")
                 actual_digest = sha256(body).hexdigest()
                 if actual_digest != checksum:
-                    raise LedgerIntegrityError("stored record digest mismatch")
+                    raise LedgerIntegrityError(f"stored record digest mismatch at seq {seq}")
                 try:
                     value = json.loads(body)
                     if canonical_json_bytes(value, "stored record body") != body:
-                        raise LedgerIntegrityError("stored record body is not canonical JCS")
+                        raise LedgerIntegrityError(f"stored record body is not canonical JCS at seq {seq}")
                 except (TypeError, ValueError) as exc:
-                    raise LedgerIntegrityError("stored record body is not canonical JCS") from exc
+                    raise LedgerIntegrityError(f"stored record body is not canonical JCS at seq {seq}") from exc
                 if not isinstance(value, dict) or (
                     value.get("record_id"),
                     value.get("session_id"),
@@ -812,20 +936,23 @@ class SQLStore:
                     operation_id,
                     attempt,
                 ):
-                    raise LedgerIntegrityError("stored record SQL identity does not match its body")
-                _natural(epoch, "record writer_epoch")
-                _natural(created_ms, "record created_ms")
-                _natural(commit_position, "record commit_position")
+                    raise LedgerIntegrityError(f"stored record SQL identity does not match its body at seq {seq}")
+                try:
+                    _natural(epoch, "record writer_epoch")
+                    _natural(created_ms, "record created_ms")
+                    _natural(commit_position, "record commit_position")
+                except ValueError as exc:
+                    raise LedgerIntegrityError(f"stored record metadata is invalid at seq {seq}") from exc
                 actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
                 if stored_chain != actual_chain:
-                    raise LedgerIntegrityError("stored record chain digest mismatch")
+                    raise LedgerIntegrityError(f"stored record chain digest mismatch at seq {seq}")
                 previous = actual_chain
                 chains.append(actual_chain)
                 stored_rows.append((body, seq, commit_id, epoch, created_ms, checksum))
             cursor = expected_seq
         if cursor != through:
-            raise LedgerIntegrityError("log sequence gap")
-        self._verify_checkpoints(session_id, tuple(chains))
+            raise LedgerIntegrityError(f"log sequence gap at seq {cursor + 1}")
+        self._verify_checkpoints(session_id, tuple(chains), verifier=verifier, signed=signed)
         self._verify_commits(session_id, tuple(chains))
         return stored_rows, tuple(chains)
 
@@ -837,6 +964,7 @@ class SQLStore:
         if head == 0:
             raise LedgerIntegrityError("log sequence gap")
         stored_rows, chains = self._verified_records(session_id, head)
+        stored_inputs = self._stored_inputs(session_id, row[1]) if self._requires_input_integrity_gate(session_id) else None
         cached = self._cached_prefix(session_id)
         if cached is not None:
             valid = (
@@ -871,14 +999,21 @@ class SQLStore:
                 records.append(stored)
                 bodies.append(row_data[0])
                 cursor = stored.seq
-        consumed = []
-        for input_row in self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
-            "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s "
-            "AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
-            (self.tenant_id, session_id, row[1], through, head),
-        ):
-            consumed.append(self._stored_input(session_id, input_row).item)
+        if stored_inputs is not None:
+            consumed = [
+                stored.item
+                for stored in stored_inputs
+                if stored.consumed_seq is not None and through < stored.consumed_seq <= head
+            ]
+        else:
+            consumed = []
+            for input_row in self._rows(
+                "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+                "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s "
+                "AND consumed_seq>%s AND consumed_seq<=%s ORDER BY input_seq",
+                (self.tenant_id, session_id, row[1], through, head),
+            ):
+                consumed.append(self._stored_input(session_id, input_row).item)
         reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=bodies)
         prefix = _Prefix(
             self.tenant_id,
@@ -892,12 +1027,26 @@ class SQLStore:
         self._retain_prefix(prefix)
         return prefix
 
-    def read_state(self, session_id: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
-        # Preserve the public read boundary used by host snapshot/reconnect hooks.
-        self.read(session_id, limit=1)
-        # One statement captures a committed head; immutable prefix reads need no row lock.
+    def read_state(
+        self,
+        session_id: str,
+        *,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
         row = self._head(session_id)
         self._require_worker_level(row[3])
+        if expected_head is not None:
+            if self._ledger_integrity_mode() == "unconfigured":
+                raise LedgerIntegrityError(
+                    "expected_head reads require an explicit signed signer or allow_unsigned hash-only mode"
+                )
+            _require_expected_head(
+                expected_head,
+                tenant_id=self.tenant_id,
+                session_id=session_id,
+                head_seq=row[0],
+                chain_digest=self._chain_anchor(session_id, row[0]),
+            )
         prefix = self._prefix(session_id, row)
         return prefix.reducer.snapshot(), prefix.records, row[1]
 
@@ -947,7 +1096,15 @@ class SQLStore:
                 self._schedule(session_id, reducer.state)
                 return snapshot
 
-    def read(self, session_id: str, *, after_seq: int = 0, through_seq: int | None = None, limit: int = 1024) -> ReadPage:
+    def read(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        through_seq: int | None = None,
+        limit: int = 1024,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> ReadPage:
         _positive(limit, "limit")
         _natural(after_seq, "after_seq")
         if through_seq is not None:
@@ -956,7 +1113,19 @@ class SQLStore:
         self._require_worker_level(row[6])
         # Records are immutable: cap by the captured head without locking writers.
         head, inbox = row[:2]
+        if expected_head is not None and self._ledger_integrity_mode() == "unconfigured":
+            raise LedgerIntegrityError("expected_head reads require an explicit signed signer or allow_unsigned hash-only mode")
+        if expected_head is not None:
+            _require_expected_head(
+                expected_head,
+                tenant_id=self.tenant_id,
+                session_id=session_id,
+                head_seq=head,
+                chain_digest=self._chain_anchor(session_id, head),
+            )
         verified, _chains = self._verified_records(session_id, head)
+        if self._requires_input_integrity_gate(session_id):
+            self._stored_inputs(session_id, inbox)
         level = self._one(
             "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
             (self.tenant_id, session_id),
@@ -965,6 +1134,34 @@ class SQLStore:
         boundary = min(head, through_seq) if through_seq is not None else head
         rows = [row for row in verified if after_seq < row[1] <= boundary][:limit]
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
+
+    def verify_ledger(
+        self,
+        session_id: str,
+        *,
+        expected_head: SessionHead | tuple[int, str] | None = None,
+    ) -> tuple[int, str]:
+        """Verify the complete stored ledger and the optional external head anchor."""
+
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
+        head, inbox = row[:2]
+        if self._ledger_integrity_mode() == "unconfigured":
+            raise LedgerIntegrityError("verify_ledger requires an explicit signed signer or allow_unsigned hash-only mode")
+        chain_digest = self._chain_anchor(session_id, head)
+        _require_expected_head(
+            expected_head,
+            tenant_id=self.tenant_id,
+            session_id=session_id,
+            head_seq=head,
+            chain_digest=chain_digest,
+        )
+        _stored_rows, chains = self._verified_records(session_id, head)
+        if self._requires_input_integrity_gate(session_id):
+            self._stored_inputs(session_id, inbox)
+        if not chains or chains[-1] != chain_digest:
+            raise LedgerIntegrityError(f"ledger head chain mismatch at seq {head}")
+        return head, chains[-1]
 
     def lease_status(self, session_id: str) -> tuple[int, int, int]:
         self._require_live(session_id)
@@ -997,6 +1194,15 @@ class SQLStore:
         _natural(through_seq, "through_seq")
         row = self._require_live(session_id)
         self._require_worker_level(row[6])
+        head, inbox = row[:2]
+        if through_seq > head:
+            raise SequenceConflict("control records cannot read beyond the captured head")
+        if through_seq == 0:
+            return ()
+        verified, _chains = self._verified_records(session_id, through_seq)
+        if self._requires_input_integrity_gate(session_id):
+            self._stored_inputs(session_id, inbox)
+        verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
         rows = self._rows(
             "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
             "FROM sk_inbox i JOIN sk_record r ON r.tenant_id=i.tenant_id "
@@ -1010,14 +1216,22 @@ class SQLStore:
             (self.tenant_id, session_id),
         )[0]
         self._require_worker_level(level)
-        return tuple(self._stored(session_id, row) for row in rows)
+        return tuple(self._stored(session_id, verified_by_seq[row[1]]) for row in rows)
 
     def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]:
         """Indexed dependencies for a bounded event page, without folding session history."""
         row = self._require_live(session_id)
         self._require_worker_level(row[6])
-        found = {r.seq: r for r in records}
-        through = max(found, default=0)
+        through = max((stored.seq for stored in records), default=row[0])
+        if through > row[0]:
+            raise SequenceConflict("projection records cannot read beyond the captured head")
+        verified, _chains = self._verified_records(session_id, through)
+        if self._requires_input_integrity_gate(session_id):
+            self._stored_inputs(session_id, row[1])
+        verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
+        if any(stored.seq not in verified_by_seq for stored in records):
+            raise LedgerIntegrityError("projection input contains a record outside the verified ledger prefix")
+        found = {stored.seq: self._stored(session_id, verified_by_seq[stored.seq]) for stored in records}
         turns = {r.record.turn_id for r in records if r.record.turn_id}
         seen = set()
 
@@ -1032,7 +1246,7 @@ class SQLStore:
                 (self.tenant_id, session_id, oid, attempt, through),
             )
             for row in rows:
-                stored = self._stored(session_id, row)
+                stored = self._stored(session_id, verified_by_seq[row[1]])
                 found[stored.seq] = stored
                 if stored.record.kind == "op_planned" and stored.record._payload["op_kind"] != "model":
                     operation(stored.record._payload["dependencies"][0], 1)
@@ -1054,7 +1268,7 @@ class SQLStore:
                 (self.tenant_id, session_id, tid, through),
             )
             for row in rows:
-                stored = self._stored(session_id, row)
+                stored = self._stored(session_id, verified_by_seq[row[1]])
                 found[stored.seq] = stored
         for r in records:
             if r.record.kind != "turn_ended":
@@ -1069,7 +1283,7 @@ class SQLStore:
                 (self.tenant_id, session_id, r.record.turn_id, through),
             )
             for row in rows:
-                stored = self._stored(session_id, row)
+                stored = self._stored(session_id, verified_by_seq[row[1]])
                 found[stored.seq] = stored
             start = next(
                 row.record
@@ -1364,22 +1578,28 @@ class SQLStore:
         verifier: Any | None,
         allow_unsigned: bool,
         now: int,
+        state: TombstoneState = TombstoneState.PENDING,
     ) -> ForgetTombstone:
         existing = self._tombstone(entry.session_id, for_update=True)
         chain_digest = self._chain_anchor(entry.session_id, entry.head_seq)
         if entry.head_seq < 1:
             raise LedgerIntegrityError("deletion tombstone requires a retained record head")
         if existing is not None:
-            if (
-                existing.final_seq,
-                existing.chain_digest,
-                existing.actor,
-                existing.state,
-                existing.scope_root_session_id,
-            ) != (entry.head_seq, chain_digest, actor, TombstoneState.PENDING, scope_root_session_id):
-                raise LedgerIntegrityError("existing deletion tombstone does not match the fenced scope")
+            if (existing.final_seq, existing.chain_digest) != (entry.head_seq, chain_digest):
+                raise LedgerIntegrityError("existing deletion tombstone does not match the retained final head")
             self._verify_tombstone_object(existing, verifier, allow_unsigned=allow_unsigned)
-            return existing
+            if (existing.actor, existing.scope_root_session_id) == (actor, scope_root_session_id):
+                if existing.state is state:
+                    return existing
+                if existing.state is TombstoneState.COMPLETE and state is TombstoneState.PENDING:
+                    self._rows(
+                        "UPDATE sk_tombstone SET state='pending' WHERE tenant_id=%s AND session_id=%s",
+                        (self.tenant_id, entry.session_id),
+                    )
+                    return replace(existing, state=state)
+                raise LedgerIntegrityError("existing deletion tombstone has an incompatible lifecycle state")
+            if existing.state is TombstoneState.PENDING:
+                raise LedgerIntegrityError("a pending deletion tombstone belongs to a different actor or scope")
 
         if allow_unsigned:
             key_id = "hash-only/sha256"
@@ -1398,7 +1618,7 @@ class SQLStore:
             actor=actor,
             key_id=key_id,
             signature="AA==",
-            state=TombstoneState.PENDING,
+            state=state,
             scope_root_session_id=scope_root_session_id,
         )
         message = _tombstone_message(unsigned)
@@ -1410,21 +1630,30 @@ class SQLStore:
             signature=base64.b64encode(signature).decode("ascii"),
         )
         self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
-        self._rows(
-            "INSERT INTO sk_tombstone(tenant_id,session_id,final_seq,chain_digest,deleted_ms,actor,key_id,signature,"
-            "state,scope_root_session_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
-            (
-                self.tenant_id,
-                entry.session_id,
-                entry.head_seq,
-                chain_digest,
-                now,
-                canonical_json_bytes(actor.to_dict(), "tombstone actor"),
-                tombstone.key_id,
-                signature,
-                scope_root_session_id,
-            ),
+        values = (
+            entry.head_seq,
+            chain_digest,
+            now,
+            canonical_json_bytes(actor.to_dict(), "tombstone actor"),
+            tombstone.key_id,
+            signature,
+            state.value,
+            scope_root_session_id,
+            self.tenant_id,
+            entry.session_id,
         )
+        if existing is None:
+            self._rows(
+                "INSERT INTO sk_tombstone(tenant_id,session_id,final_seq,chain_digest,deleted_ms,actor,key_id,signature,"
+                "state,scope_root_session_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.tenant_id, entry.session_id, *values[:8]),
+            )
+        else:
+            self._rows(
+                "UPDATE sk_tombstone SET final_seq=%s,chain_digest=%s,deleted_ms=%s,actor=%s,key_id=%s,"
+                "signature=%s,state=%s,scope_root_session_id=%s WHERE tenant_id=%s AND session_id=%s",
+                values,
+            )
         return tombstone
 
     def begin_forget(
@@ -1463,15 +1692,20 @@ class SQLStore:
                 tombstone = self._tombstone(entry.session_id, for_update=True)
                 if tombstone is not None and tombstone.state is TombstoneState.COMPLETE:
                     chain_digest = self._chain_anchor(entry.session_id, entry.head_seq)
-                    if (
-                        entry.deletion_state != "forgotten"
-                        or tombstone.final_seq != entry.head_seq
-                        or tombstone.chain_digest != chain_digest
-                        or tombstone.actor != actor
-                        or tombstone.scope_root_session_id != session_id
-                    ):
-                        raise LedgerIntegrityError("completed tombstone does not match the forget scope")
-                    self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+                    if tombstone.final_seq != entry.head_seq or tombstone.chain_digest != chain_digest:
+                        raise LedgerIntegrityError("completed tombstone does not match the retained final head")
+                    if entry.deletion_state != "forgotten":
+                        raise LedgerIntegrityError("completed tombstone belongs to a session that is not forgotten")
+                    self._write_pending_tombstone(
+                        entry,
+                        actor,
+                        scope_root_session_id=session_id,
+                        bound_signer=bound_signer,
+                        verifier=verifier,
+                        allow_unsigned=allow_unsigned,
+                        now=now,
+                        state=TombstoneState.COMPLETE,
+                    )
                     continue
                 if entry.deletion_state == "forgotten":
                     raise LedgerIntegrityError("forgotten session is missing its complete tombstone")
@@ -1551,16 +1785,6 @@ class SQLStore:
                     "WHERE tenant_id=%s AND session_id=%s AND deletion_state!='purging'",
                     (self.tenant_id, entry.session_id),
                 )
-                existing = self._tombstone(entry.session_id, for_update=True)
-                if existing is not None and existing.state is TombstoneState.COMPLETE:
-                    if (
-                        existing.final_seq != entry.head_seq
-                        or existing.scope_root_session_id != session_id
-                        or existing.actor != actor
-                    ):
-                        raise LedgerIntegrityError("completed tombstone does not match the purge scope")
-                    self._verify_tombstone_object(existing, verifier, allow_unsigned=allow_unsigned)
-                    continue
                 self._write_pending_tombstone(
                     entry,
                     actor,
@@ -1591,19 +1815,14 @@ class SQLStore:
                 tombstone = self._tombstone(entry.session_id, for_update=True)
                 if tombstone is None or tombstone.state not in {TombstoneState.PENDING, TombstoneState.COMPLETE}:
                     raise LedgerIntegrityError("purge tombstone is missing or incomplete")
-            tables = (
-                "sk_content_link",
-                "sk_content",
-                "sk_inbox",
-                "sk_checkpoint",
-                "sk_consumer",
-                "sk_commit",
-                "sk_record",
-                "sk_session_key",
-                "sk_session",
-            )
+                if (
+                    tombstone.final_seq != entry.head_seq
+                    or tombstone.chain_digest != self._chain_anchor(entry.session_id, entry.head_seq)
+                    or tombstone.scope_root_session_id != session_id
+                ):
+                    raise LedgerIntegrityError("purge tombstone does not match the fenced scope or final head")
             for entry in scope:
-                for table in tables:
+                for table in SESSION_PURGE_DELETE_ORDER:
                     self._rows(
                         f"DELETE FROM {table} WHERE tenant_id=%s AND session_id=%s",
                         (self.tenant_id, entry.session_id),
@@ -1667,41 +1886,26 @@ class SQLSessionTx:
         self,
         session_id: str,
         commit_id: str,
-        body: bytes,
-        *metadata: Any,
+        manifest_body: bytes,
+        sequences: tuple[tuple[str, int], ...],
+        head: int,
+        now: int,
     ) -> None:
-        if len(metadata) == 3:
-            sequences, head, now = metadata
-            manifest_body = body
-        elif len(metadata) == 4:
-            legacy_body, sequences, head, now = metadata
-            if commit_id != "session/create":
-                raise LedgerIntegrityError("legacy commit metadata is only valid for session creation")
-            try:
-                legacy = json.loads(legacy_body)
-                consumers = tuple(legacy["consumers"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise LedgerIntegrityError("legacy commit body is invalid") from exc
-        else:
-            raise TypeError("commit metadata requires sequences, head and timestamp")
-        if not isinstance(body, bytes) or not isinstance(sequences, tuple):
+        if not isinstance(manifest_body, bytes) or not isinstance(sequences, tuple):
             raise LedgerIntegrityError("commit metadata is invalid")
-        if len(metadata) == 3:
-            try:
-                manifest = json.loads(manifest_body)
-                head_seq = manifest["head_seq"]
-                head_chain_digest = manifest["head_chain_digest"]
-                consume_input_ids = tuple(manifest["consume_input_ids"])
-                consumers = tuple(manifest["consumers"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise LedgerIntegrityError("commit manifest is invalid") from exc
-        else:
-            head_seq, consume_input_ids = 0, ()
+        try:
+            manifest = json.loads(manifest_body)
+            head_seq = manifest["head_seq"]
+            head_chain_digest = manifest["head_chain_digest"]
+            consume_input_ids = tuple(manifest["consume_input_ids"])
+            consumers = tuple(manifest["consumers"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LedgerIntegrityError("commit manifest is invalid") from exc
         _natural(head, "commit resulting head")
         _natural(now, "commit created_ms")
         if head != max([head_seq, *(seq for _, seq in sequences)]):
             raise LedgerIntegrityError("commit resulting head does not match its record sequences")
-        if len(metadata) == 3 and head_chain_digest != self.store._chain_anchor(session_id, head_seq):
+        if head_chain_digest != self.store._chain_anchor(session_id, head_seq):
             raise LedgerIntegrityError("commit head_chain_digest does not match the persisted head")
         record_refs: list[tuple[str, str]] = []
         for record_id, seq in sequences:
@@ -1718,12 +1922,12 @@ class SQLSessionTx:
             )
         stored_body = _commit_manifest(
             head_seq=head_seq,
-            head_chain_digest=head_chain_digest if len(metadata) == 3 else self.store._chain_anchor(session_id, head_seq),
+            head_chain_digest=head_chain_digest,
             records=tuple(record_refs),
             consume_input_ids=consume_input_ids,
             consumers=consumers,
         )
-        if len(metadata) == 3 and stored_body != manifest_body:
+        if stored_body != manifest_body:
             raise LedgerIntegrityError("commit manifest does not match persisted record digests")
         stored_digest = sha256(stored_body).hexdigest()
         for _record_id, seq in sequences:
@@ -1803,6 +2007,9 @@ class SQLSessionTx:
         signature = bound.sign(message)
         if not isinstance(signature, bytes) or not signature:
             raise LedgerIntegrityError("ledger signer returned an invalid signature")
+        verifier = self.store._input_admission_policy()[2]
+        if verifier is None or not verifier.verify(key_id, message, signature):
+            raise LedgerIntegrityError(f"ledger signer key binding does not verify checkpoint at seq {seq}")
         self.store._rows(
             "INSERT INTO sk_checkpoint(tenant_id,session_id,seq,chain_digest,key_id,signature,signed_ms) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s)",
@@ -1925,8 +2132,6 @@ class SQLSessionTx:
 
     def push(self, session_id: str, item: InboxItem) -> InputReceipt:
         self._active()
-        if item.admission_proof is not None:
-            raise InputAdmissionProofError("input admission proof is created inside the SQL transaction")
         body = _input_body(item)
         s = self.store
         assert item.actor is not None
@@ -1949,7 +2154,11 @@ class SQLSessionTx:
                 stored = s._stored_input(session_id, old[0])
                 if old[0][0] != body:
                     raise Conflict("input identity has different bytes")
+                if item.admission_proof is not None and item.admission_proof != stored.item.admission_proof:
+                    raise InputAdmissionProofError("replayed input admission proof does not match the original")
                 return InputReceipt(item.input_id, stored.input_seq, stored.received_ms, True)
+            if item.admission_proof is not None:
+                raise InputAdmissionProofError("input admission proof is created inside the SQL transaction")
             required = s._admit_level(
                 ceiling=ceiling,
                 required=s._input_level(item),
@@ -1976,6 +2185,10 @@ class SQLSessionTx:
                 signature = bound.sign(message)
                 if not isinstance(signature, bytes) or not signature:
                     raise InputAdmissionProofError("ledger signer returned an invalid signature")
+                if not signer.verify(key_id, message, signature):
+                    raise InputAdmissionProofError(
+                        f"ledger signer key binding does not verify input admission at input_seq {seq}"
+                    )
                 signed_ms = now
             s._rows(
                 "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,"
@@ -2012,6 +2225,7 @@ class SQLSessionTx:
         records: tuple[Record, ...],
         consume_input_ids: tuple[str, ...] = (),
         expected_inbox_seq: int | None = None,
+        expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> CommitReceipt:
         self._active()
         _identity(commit_id)
@@ -2047,6 +2261,18 @@ class SQLSessionTx:
         s = self.store
         s._require_live(session_id)
         captured = s._head(session_id)
+        if expected_head is not None:
+            if s._ledger_integrity_mode() == "unconfigured":
+                raise LedgerIntegrityError(
+                    "expected_head appends require an explicit signed signer or allow_unsigned hash-only mode"
+                )
+            _require_expected_head(
+                expected_head,
+                tenant_id=s.tenant_id,
+                session_id=session_id,
+                head_seq=captured[0],
+                chain_digest=s._chain_anchor(session_id, captured[0]),
+            )
         prefix = None
         reducer = None
         # Commit replay needs no history or live lease. Prepare new immutable history
@@ -2068,6 +2294,14 @@ class SQLSessionTx:
             row = s._lock(session_id)
             s._require_live_row(row)
             head_chain_digest = s._chain_anchor(session_id, expected_seq)
+            if expected_head is not None:
+                _require_expected_head(
+                    expected_head,
+                    tenant_id=s.tenant_id,
+                    session_id=session_id,
+                    head_seq=row[0],
+                    chain_digest=s._chain_anchor(session_id, row[0]),
+                )
             body = _commit_manifest(
                 head_seq=expected_seq,
                 head_chain_digest=head_chain_digest,
@@ -2216,8 +2450,8 @@ class SQLSessionTx:
         self._active()
         _positive(limit, "limit")
         s = self.store
-        last, level, deletion_state = s._one(
-            "SELECT c.last_seq,s.level,s.deletion_state FROM sk_consumer c "
+        last, head, inbox, level, deletion_state = s._one(
+            "SELECT c.last_seq,s.head_seq,s.inbox_seq,s.level,s.deletion_state FROM sk_consumer c "
             "JOIN sk_session s ON s.tenant_id=c.tenant_id AND s.session_id=c.session_id "
             f"WHERE c.tenant_id=%s AND c.session_id=%s AND c.consumer=%s{s.lock_clause}",
             (s.tenant_id, session_id, consumer),
@@ -2226,6 +2460,12 @@ class SQLSessionTx:
             raise SessionNotLive("session is fenced for deletion")
         if level > s.worker_level:
             return None
+        if last > head:
+            raise LedgerIntegrityError("consumer cursor is beyond the verified ledger head")
+        verified, _chains = s._verified_records(session_id, head)
+        if s._requires_input_integrity_gate(session_id):
+            s._stored_inputs(session_id, inbox)
+        verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
         rows = s._rows(
             """
@@ -2247,7 +2487,7 @@ class SQLSessionTx:
         if not rows:
             self.batches.pop(key, None)
             return None
-        records = tuple(s._stored(session_id, row) for row in rows)
+        records = tuple(s._stored(session_id, verified_by_seq[row[1]]) for row in rows)
         batch = ConsumerBatch(session_id, consumer, last + 1, records[-1].seq, records)
         self.batches[key] = batch
         return batch
