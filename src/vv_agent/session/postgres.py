@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 from vv_agent.kernel._content import KeyProvider
 from vv_agent.kernel._postgres import CLOCK as CLOCK
 from vv_agent.kernel._postgres import DDL as DDL
+from vv_agent.kernel._postgres import UNBOUND_INTERNAL_BINDING, RuntimeBinding, _read_runtime_binding
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import _connection_conninfo as _connection_conninfo
 
@@ -21,29 +22,101 @@ if TYPE_CHECKING:
 
 
 class PostgresStore(CorePostgresStore, SQLStore):
-    def __init__(self, connection: Connection[Any]):
-        super().__init__(connection, fold_factory=Fold)
+    def __init__(
+        self,
+        connection: Connection[Any],
+        *,
+        tenant_id: str | None = None,
+        runtime_binding: RuntimeBinding | None = None,
+    ):
+        if tenant_id is not None:
+            if runtime_binding is not None and runtime_binding != RuntimeBinding("tenant", tenant_id):
+                raise ValueError("session tenant conflicts with the PostgreSQL runtime binding")
+            runtime_binding = RuntimeBinding("tenant", tenant_id)
+        elif runtime_binding is None:
+            runtime_binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+        super().__init__(connection, fold_factory=Fold, runtime_binding=runtime_binding)
+        binding = self.runtime_binding
+        self._credential_tenant_id = tenant_id or (binding.tenant_id if binding.mode == "tenant" else None)
+        self._conninfo = _connection_conninfo(connection)
+        if self._credential_tenant_id is not None:
+            self._tenant_id = self._credential_tenant_id
+
+    @property
+    def credential_isolation(self) -> bool:
+        """Whether this exact store is backed by a verified tenant login."""
+
+        credential_tenant = getattr(self, "_credential_tenant_id", None)
+        binding = self.runtime_binding
+        return (
+            binding.mode == "tenant"
+            and credential_tenant is not None
+            and binding.tenant_id == credential_tenant
+            and self.tenant_id == credential_tenant
+        )
+
+    @property
+    def credential_tenant_id(self) -> str | None:
+        return getattr(self, "_credential_tenant_id", None)
+
+    def for_tenant(self, tenant_id: str):
+        credential_tenant = self.credential_tenant_id
+        if credential_tenant is not None and tenant_id != credential_tenant:
+            raise ValueError("tenant-isolated PostgreSQL stores cannot be routed to another tenant")
+        return super().for_tenant(tenant_id)
 
     @classmethod
     @contextmanager
     def standalone(cls, conninfo: str) -> Iterator[PostgresStore]:
         with cls._connect(conninfo) as connection:
-            yield cls(connection)
+            binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+            yield cls(connection, runtime_binding=binding)
 
     @classmethod
     @contextmanager
     def tenant_standalone(cls, conninfo: str, *, tenant_id: str) -> Iterator[PostgresStore]:
         with cls._connect(conninfo) as connection:
-            cls.verify_tenant_connection(connection, tenant_id)
-            yield cls(connection)
+            yield cls(connection, tenant_id=tenant_id)
+
+    @classmethod
+    @contextmanager
+    def worker_standalone(cls, conninfo: str) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=RuntimeBinding("worker"))
+
+    @classmethod
+    @contextmanager
+    def shared_gateway_standalone(cls, conninfo: str) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=RuntimeBinding("shared-gateway"))
+
+    @classmethod
+    @contextmanager
+    def schema_admin_standalone(cls, conninfo: str) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=UNBOUND_INTERNAL_BINDING)
 
     def _heartbeat_connection(self, conninfo: str):
-        return PostgresStore.standalone(conninfo)
+        if self.credential_isolation:
+            manager = PostgresStore.tenant_standalone(conninfo, tenant_id=self.tenant_id)
+        elif self.runtime_mode == "worker":
+            manager = PostgresStore.worker_standalone(conninfo)
+        elif self.runtime_mode == "shared-gateway":
+            manager = PostgresStore.shared_gateway_standalone(conninfo)
+        else:
+            manager = PostgresStore.standalone(conninfo)
+        return self._inherit_runtime_configuration(manager)
 
 
 def join_transaction(connection: Connection[Any]) -> SQLSessionTx:
     """Join the host's open transaction; never open a connection or commit it."""
-    return SQLSessionTx(PostgresStore(connection))
+
+    from psycopg.pq import TransactionStatus
+
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("join_transaction requires an open INTRANS PostgreSQL transaction")
+    binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+    return SQLSessionTx(PostgresStore(connection, runtime_binding=binding))
 
 
 class _PostgresContentBackend:

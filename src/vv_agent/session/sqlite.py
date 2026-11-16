@@ -30,7 +30,7 @@ class SQLiteStore(CoreSQLiteStore, SQLStore):
             yield store
 
     def _heartbeat_connection(self):
-        return SQLiteStore.standalone(self.path, clock=self.clock)
+        return self._inherit_runtime_configuration(SQLiteStore.standalone(self.path, clock=self.clock))
 
 
 class _SQLiteContentBackend:

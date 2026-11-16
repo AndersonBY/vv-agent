@@ -69,6 +69,10 @@ def test_write_level_is_atomic_and_session_level_is_monotonic(store):
     assert session_level(store) == 1
 
     set_write_level(store, 2)
+    with pytest.raises(UnsupportedFeatureLevel, match="session feature level 2 exceeds worker feature level 1"):
+        append(store, lease, [high], "worker-not-upgraded")
+
+    store.configure_worker(level=2)
     append(store, lease, [high], "promote")
     assert session_level(store) == 2
 
@@ -77,6 +81,7 @@ def test_write_level_is_atomic_and_session_level_is_monotonic(store):
     store.release(lease)
 
     set_write_level(store, 1)
+    store.configure_worker(level=1)
     assert store.acquire("s", owner="old", ttl_ms=10_000) is None
     store.configure_worker(level=2)
     low = acquire(store)
@@ -84,6 +89,81 @@ def test_write_level_is_atomic_and_session_level_is_monotonic(store):
         append(store, low, [record("usage_observed")], "lower-ceiling")
     assert session_level(store) == 2
     store.release(low)
+
+
+def test_held_lease_is_fenced_when_session_level_rises(store):
+    set_write_level(store, 2)
+    create(store, consumers=("host",))
+    store.configure_worker(level=1)
+    lease = acquire(store)
+    store._rows(
+        "UPDATE sk_session SET level=2 WHERE tenant_id=%s AND session_id='s'",
+        (store.tenant_id,),
+    )
+    counts = tuple(store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_record", "sk_commit", "sk_inbox"))
+    mismatch = "session feature level 2 exceeds worker feature level 1"
+
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        store.renew(lease, ttl_ms=10_000)
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        append(store, lease, [record("turn_ended")], "stale-writer")
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        store.next_drive_delay_ms("s", lease=lease)
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        store.defer_idle_drive(lease, poll_ms=1_000)
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        store.defer_drive(lease, retry_after_ms=1_000)
+    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
+        store.defer_projection("s", "host", retry_after_ms=1_000)
+
+    assert tuple(store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_record", "sk_commit", "sk_inbox")) == counts
+    assert store._rows("SELECT drive_retry_at_ms FROM sk_session WHERE session_id='s'")[0][0] == 0
+    assert store._rows("SELECT project_retry_at_ms FROM sk_consumer WHERE session_id='s'")[0][0] == 0
+    assert store.release(lease)
+
+    store.configure_worker(level=2)
+    high = store.acquire("s", owner="upgraded", ttl_ms=10_000)
+    assert high is not None
+    store.release(high)
+
+
+def test_high_worker_accepts_low_session(store):
+    store.configure_worker(level=2)
+    create(store)
+    assert session_level(store) == 1
+    lease = acquire(store)
+    store.release(lease)
+
+
+def test_host_push_and_commit_replay_do_not_require_worker_execution(store):
+    set_write_level(store, 2)
+    create(store, consumers=("host",))
+    store.configure_worker(level=2)
+    lease = acquire(store)
+    high = level_two_turn()
+    append(store, lease, [high], "promote")
+    store.release(lease)
+    store.configure_worker(level=1)
+
+    with store.atomic() as tx:
+        replayed_commit = tx.append(
+            "s",
+            lease=lease,
+            expected_seq=1,
+            commit_id="promote",
+            records=(high,),
+        )
+    assert replayed_commit.replayed
+
+    host_input = item("host-input")
+    with store.atomic() as tx:
+        first = tx.push("s", host_input)
+    with store.atomic() as tx:
+        replay = tx.push("s", host_input)
+    assert not first.replayed
+    assert replay.replayed
+    assert replay.input_seq == first.input_seq
+    assert session_level(store) == 2
 
 
 def test_incompatible_workers_skip_claims_and_projection_without_failure(store):
@@ -96,6 +176,7 @@ def test_incompatible_workers_skip_claims_and_projection_without_failure(store):
 
     store.configure_worker(level=1)
     assert store.acquire("s", owner="old", ttl_ms=10_000) is None
+    assert not store.is_runnable("s")
     assert store.list_runnable() == ()
     with store.atomic() as tx:
         assert tx.consumer_batch("s", "host") is None
@@ -108,6 +189,27 @@ def test_incompatible_workers_skip_claims_and_projection_without_failure(store):
         batch = tx.consumer_batch("s", "host")
         assert batch is not None and batch.through_seq == 2
     store.release(high)
+
+
+def test_projection_ack_rechecks_level_inside_transaction(store):
+    set_write_level(store, 2)
+    create(store, consumers=("host",))
+    store.configure_worker(level=2)
+    lease = acquire(store)
+    append(store, lease, [level_two_turn()], "promote")
+    store.release(lease)
+
+    with store.atomic() as tx:
+        batch = tx.consumer_batch("s", "host")
+        assert batch is not None
+        store._rows(
+            "UPDATE sk_session SET level=3 WHERE tenant_id=%s AND session_id='s'",
+            (store.tenant_id,),
+        )
+        with pytest.raises(UnsupportedFeatureLevel, match="session feature level 3 exceeds worker feature level 2"):
+            tx.ack(batch)
+
+    assert store._rows("SELECT last_seq FROM sk_consumer WHERE session_id='s' AND consumer='host'")[0][0] == 0
 
 
 def test_child_result_raises_parent_level_atomically(store):
@@ -163,6 +265,7 @@ def test_understated_level_cache_is_rejected_on_rebuild(store):
     set_write_level(store, 2)
     create(store)
     lease = acquire(store)
+    store.configure_worker(level=2)
     append(store, lease, [level_two_turn()], "promote")
     store.release(lease)
 

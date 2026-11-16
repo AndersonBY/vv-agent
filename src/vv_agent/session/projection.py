@@ -310,7 +310,12 @@ def hydrate_record_payload(
                 (("attributes",), SESSION_ATTRIBUTES, None),
             )
         )
+    seen_slots: set[tuple[tuple[str, ...], str]] = set()
     for path, slot, _value in declared_slots:
+        slot_key = (path, slot)
+        if slot_key in seen_slots:
+            continue
+        seen_slots.add(slot_key)
         if not include_input and record.kind == "input_applied" and path[:1] == ("input",):
             continue
         try:

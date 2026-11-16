@@ -71,13 +71,26 @@ Rules for host writes:
 string owned by `src/vv_agent/kernel/_postgres.py` and exported by
 `src/vv_agent/session/postgres.py`. A host that manages its own DDL must copy
 that literal from the installed release. SQLite files carry
-`PRAGMA user_version` 3, and the store refuses to open any other version.
+`PRAGMA user_version` 4 for the S1 store, and the store refuses to open any other version.
 
 The PostgreSQL DDL is the unisolated base schema. For credential-level tenant
 isolation, call `install_tenant_rls()` after schema installation and use
 `tenant_standalone()` when starting tenant work. Worker and shared-gateway
 logins are separate explicit modes; neither satisfies the tenant credential
 boundary. See [PostgreSQL tenant RLS](postgres-rls.md).
+
+The store checks the complete S1 catalog fingerprint when it opens or installs
+a non-empty database. SQLite uses an equivalent fingerprint and does not
+reconfigure the journal on heartbeat connections. Both adapters carry the
+worker feature level and input-admission configuration onto independent
+heartbeat connections, so a worker can renew a higher-level session without
+sharing its foreground connection.
+
+For App Server integrations, return the authenticated identity from
+`AppServerHost.resolve_principal(connection_id, method, params)`. The hook is
+a trusted host boundary; request parameters remain closed and cannot contain
+an actor or principal field. The runtime persists the identity and passes its
+immutable form to tools and model adapters outside the prompt.
 
 vv-agent has no schema migrator. Finish old sessions with the release that
 created them, then provision the current schema. Any schema change the host

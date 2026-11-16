@@ -23,6 +23,7 @@ from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import Conflict
+from vv_agent.session.surfaces import SessionDriver
 
 TENANT_A = "tenant-a"
 TENANT_B = "tenant-b"
@@ -118,6 +119,12 @@ def _usage_record(session_id: str):
 def _create(store: SQLStore, tenant_id: str, session_id: str, *, consumers: tuple[str, ...] = ("host",)):
     with store.atomic() as tx:
         return tx.create(_session(tenant_id, session_id), consumers=consumers)
+
+
+def test_raw_kernel_postgres_store_cannot_be_a_runtime_entrypoint():
+    raw_store = object.__new__(PostgresStore)
+    with pytest.raises(ValueError, match="raw kernel PostgreSQL stores"):
+        SessionDriver(store=raw_store, tenant_id=TENANT_A)
 
 
 @pytest.fixture(scope="session")
@@ -234,7 +241,10 @@ def test_tenant_queries_and_wrong_tenant_writes_cannot_touch_tenant_b(tenant_sto
 
     with pytest.raises(Conflict):
         tenant_a.read("b-owned")
-    assert tenant_a.peek_inbox("b-owned", ready_only=False) == ()
+    with pytest.raises(Conflict):
+        tenant_a.peek_inbox("b-owned", ready_only=False)
+    with pytest.raises(Conflict):
+        tenant_a.acquire("b-owned", owner="wrong-tenant-worker", ttl_ms=20_000)
 
     b_head = tenant_b.read("b-owned").head_seq
     b_inputs = tuple(item.item.input_id for item in tenant_b.peek_inbox("b-owned", ready_only=False))
@@ -377,6 +387,13 @@ def test_child_session_inherits_parent_tenant_and_rejects_cross_tenant_parent(te
         tx.create(_session(TENANT_B, "cross-tenant-child", parent_session_id="tenant-a-parent"), consumers=())
     with pytest.raises(Conflict):
         tenant_b.read("cross-tenant-child")
+
+    with pytest.raises(Conflict), tenant_a.atomic() as tx:
+        tx.create(_session(TENANT_A, "missing-parent-child", parent_session_id="missing-parent"), consumers=())
+    with pytest.raises(Conflict), tenant_a.atomic() as tx:
+        tx.create(_session(TENANT_B, "wrong-principal-child", parent_session_id="tenant-a-parent"), consumers=())
+    assert "missing-parent-child" not in tenant_a.list_sessions()
+    assert "wrong-principal-child" not in tenant_a.list_sessions()
 
 
 def test_tenant_facade_survives_concurrent_and_cold_sqlite_connections(tmp_path):

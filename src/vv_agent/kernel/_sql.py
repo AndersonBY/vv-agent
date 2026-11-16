@@ -269,7 +269,7 @@ class SQLStore:
 
     @property
     def worker_level(self) -> int:
-        return self._worker_level
+        return (self._root_store or self)._worker_level
 
     def configure_worker(self, *, level: int = 1) -> None:
         """Set the maximum feature level this process can execute or project."""
@@ -362,6 +362,17 @@ class SQLStore:
             root._input_admission_signer,
         )
 
+    @contextmanager
+    def _inherit_runtime_configuration(self, manager: AbstractContextManager[SQLStore]) -> Iterator[SQLStore]:
+        """Configure an independent connection with this store's process-wide policy."""
+
+        with manager as store:
+            store.configure_worker(level=self.worker_level)
+            configured, allow_unsigned, signer = self._input_admission_policy()
+            if configured:
+                store.configure_input_admission(signer, allow_unsigned=allow_unsigned)
+            yield store
+
     def _write_ceiling(self) -> int:
         """Read and lock the database-wide write ceiling inside the caller transaction."""
         rows = self._rows(f"SELECT storage_major,write_level FROM sk_settings WHERE singleton=1{self.lock_clause}")
@@ -374,6 +385,14 @@ class SQLStore:
         if effective > ceiling:
             raise UnsupportedFeatureLevel(f"feature level {effective} exceeds database write level {ceiling}")
         return effective
+
+    def _require_worker_level(self, required: int) -> None:
+        """Reject a worker that cannot execute the session's current format."""
+
+        required = _level(required, "session feature level")
+        worker_level = self.worker_level
+        if required > worker_level:
+            raise UnsupportedFeatureLevel(f"session feature level {required} exceeds worker feature level {worker_level}")
 
     def _input_level(self, item: InboxItem) -> int:
         required = _level(item.feature_level, "input feature_level")
@@ -393,13 +412,16 @@ class SQLStore:
         return required
 
     def _record_level(self, record: Record) -> int:
-        required = _record_level(record)
-        if record.kind == "input_applied":
-            input_item = record._payload["input"]
-            required = max(required, self._input_level(InboxItem(**input_item)))
-        return required
+        # Historical input_applied records retain their own validated skeleton. Looking up
+        # a child session again would make replay depend on deletion lifecycle.
+        return _record_level(record)
 
-    def _pending_input_level(self, session_id: str) -> int:
+    def _pending_input_level(self, session_id: str, *, require_worker: bool = True) -> int:
+        # A pusher may raise the session level after the caller captured its head.
+        # Check the live level before parsing any pending input body.
+        row = self._require_live(session_id)
+        if require_worker:
+            self._require_worker_level(row[6])
         required = 1
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
@@ -411,9 +433,16 @@ class SQLStore:
             required = max(required, self._input_level(self._stored_input(session_id, row).item))
         return required
 
-    def _verify_level_cache(self, session_id: str, records: tuple[StoredRecord, ...], cached_level: int) -> None:
+    def _verify_level_cache(
+        self,
+        session_id: str,
+        records: tuple[StoredRecord, ...],
+        cached_level: int,
+        *,
+        require_worker: bool = True,
+    ) -> None:
         required = max((self._record_level(stored.record) for stored in records), default=1)
-        required = max(required, self._pending_input_level(session_id))
+        required = max(required, self._pending_input_level(session_id, require_worker=require_worker))
         if _level(cached_level, "session level") < required:
             raise LedgerIntegrityError("session level cache is understated")
 
@@ -800,9 +829,11 @@ class SQLStore:
         self._verify_commits(session_id, tuple(chains))
         return stored_rows, tuple(chains)
 
-    def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
+    def _prefix(self, session_id: str, row: tuple[Any, ...], *, require_worker: bool = True) -> _Prefix:
         head, epoch = row[0], row[2]
         cached_level = row[3] if len(row) == 4 else row[6]
+        if require_worker:
+            self._require_worker_level(cached_level)
         if head == 0:
             raise LedgerIntegrityError("log sequence gap")
         stored_rows, chains = self._verified_records(session_id, head)
@@ -823,7 +854,7 @@ class SQLStore:
                 cached = _Prefix(self.tenant_id, session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
         if cached is not None and through == head:
-            self._verify_level_cache(session_id, cached.records, cached_level)
+            self._verify_level_cache(session_id, cached.records, cached_level, require_worker=require_worker)
             self._retain_prefix(cached)
             return cached
         records, bodies = [], []
@@ -857,7 +888,7 @@ class SQLStore:
             reducer,
             (cached.records if cached else ()) + tuple(records),
         )
-        self._verify_level_cache(session_id, prefix.records, cached_level)
+        self._verify_level_cache(session_id, prefix.records, cached_level, require_worker=require_worker)
         self._retain_prefix(prefix)
         return prefix
 
@@ -866,6 +897,7 @@ class SQLStore:
         self.read(session_id, limit=1)
         # One statement captures a committed head; immutable prefix reads need no row lock.
         row = self._head(session_id)
+        self._require_worker_level(row[3])
         prefix = self._prefix(session_id, row)
         return prefix.reducer.snapshot(), prefix.records, row[1]
 
@@ -902,12 +934,14 @@ class SQLStore:
         self._require_live(session_id)
         while True:
             captured = self._head(session_id)
+            self._require_worker_level(captured[3])
             self._fold_cache = None
             reducer = self._prefix(session_id, captured).reducer
             snapshot = reducer.snapshot()
             with self._transaction():
                 row = self._lock(session_id)
                 self._require_live_row(row)
+                self._require_worker_level(row[6])
                 if row[:3] != captured[:3]:
                     continue
                 self._schedule(session_id, reducer.state)
@@ -918,13 +952,16 @@ class SQLStore:
         _natural(after_seq, "after_seq")
         if through_seq is not None:
             _natural(through_seq, "through_seq")
-        self._require_live(session_id)
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
         # Records are immutable: cap by the captured head without locking writers.
-        head, inbox = self._one(
-            "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-            (self.tenant_id, session_id),
-        )
+        head, inbox = row[:2]
         verified, _chains = self._verified_records(session_id, head)
+        level = self._one(
+            "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )[0]
+        self._require_worker_level(level)
         boundary = min(head, through_seq) if through_seq is not None else head
         rows = [row for row in verified if after_seq < row[1] <= boundary][:limit]
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
@@ -938,7 +975,8 @@ class SQLStore:
         return head, epoch, max(0, (until or now) - now)
 
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
-        self._require_live(session_id)
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
             "FROM sk_inbox "
@@ -947,12 +985,18 @@ class SQLStore:
         )
         if not rows:
             return None
+        level = self._one(
+            "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )[0]
+        self._require_worker_level(level)
         return self._stored_input(session_id, rows[0])
 
     def control_records(self, session_id: str, *, through_seq: int) -> tuple[StoredRecord, ...]:
         """Read consumed control facts for catalog filtering without folding turns."""
         _natural(through_seq, "through_seq")
-        self._require_live(session_id)
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
         rows = self._rows(
             "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
             "FROM sk_inbox i JOIN sk_record r ON r.tenant_id=i.tenant_id "
@@ -961,11 +1005,17 @@ class SQLStore:
             "AND r.seq<=%s ORDER BY r.seq",
             (self.tenant_id, session_id, through_seq),
         )
+        level = self._one(
+            "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )[0]
+        self._require_worker_level(level)
         return tuple(self._stored(session_id, row) for row in rows)
 
     def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]:
         """Indexed dependencies for a bounded event page, without folding session history."""
-        self._require_live(session_id)
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
         found = {r.seq: r for r in records}
         through = max(found, default=0)
         turns = {r.record.turn_id for r in records if r.record.turn_id}
@@ -1042,7 +1092,8 @@ class SQLStore:
         _positive(limit, "limit")
         if through_input_seq is not None:
             _natural(through_input_seq, "through_input_seq")
-        self._require_live(session_id)
+        row = self._require_live(session_id)
+        self._require_worker_level(row[6])
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
@@ -1051,6 +1102,11 @@ class SQLStore:
             "AND consumed_seq IS NULL " + readiness + "AND (%s OR input_seq<=%s) ORDER BY input_seq LIMIT %s",
             (self.tenant_id, session_id, through_input_seq is None, through_input_seq or 0, limit),
         )
+        level = self._one(
+            "SELECT level FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )[0]
+        self._require_worker_level(level)
         return tuple(self._stored_input(session_id, row) for row in rows)
 
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None:
@@ -1060,7 +1116,7 @@ class SQLStore:
             row = self._lock(session_id)
             self._require_live_row(row)
             now = self._now()  # Must be read after the row lock, not at transaction start.
-            if row[6] > self._worker_level or (row[4] is not None and row[4] > now) or row[5] > now:
+            if row[6] > self.worker_level or (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(
@@ -1075,6 +1131,7 @@ class SQLStore:
             row = self._lock(lease.session_id)
             now = self._now()
             self._check_lease(lease.session_id, lease, row, now)
+            self._require_worker_level(row[6])
             renewed = Lease(lease.session_id, lease.owner, lease.epoch, now + ttl_ms, lease.tenant_id)
             self._rows(
                 "UPDATE sk_session SET lease_until_ms=%s WHERE tenant_id=%s AND session_id=%s",
@@ -1113,6 +1170,7 @@ class SQLStore:
             now = self._now()
             if lease is not None:
                 self._check_lease(session_id, lease, row, now)
+                self._require_worker_level(row[6])
             due = self._one(
                 "SELECT next_drive_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, session_id),
@@ -1128,6 +1186,7 @@ class SQLStore:
         sid = lease.session_id
         self._require_live(sid)
         captured = self._head(sid)
+        self._require_worker_level(captured[3])
         state = self._prefix(sid, captured).reducer.state
         with self._transaction():
             if lease_guard is not None:
@@ -1135,6 +1194,7 @@ class SQLStore:
             row = self._lock(sid)
             now = self._now()
             self._check_lease(sid, lease, row, now)
+            self._require_worker_level(row[6])
             scheduled = self._one(
                 "SELECT next_drive_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, sid),
@@ -1166,6 +1226,7 @@ class SQLStore:
             row = self._lock(lease.session_id)
             now = self._now()
             self._check_lease(lease.session_id, lease, row, now)
+            self._require_worker_level(row[6])
             self._rows(
                 "UPDATE sk_session SET drive_retry_at_ms=CASE WHEN drive_retry_at_ms>%s "
                 "THEN drive_retry_at_ms ELSE %s END WHERE tenant_id=%s AND session_id=%s",
@@ -1176,11 +1237,15 @@ class SQLStore:
         """Back off one consumer without claiming or delaying execution."""
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
-            self._require_live(session_id)
-            self._one(
-                f"SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s{self.lock_clause}",
+            _, level, deletion_state = self._one(
+                "SELECT c.last_seq,s.level,s.deletion_state FROM sk_consumer c "
+                "JOIN sk_session s ON s.tenant_id=c.tenant_id AND s.session_id=c.session_id "
+                f"WHERE c.tenant_id=%s AND c.session_id=%s AND c.consumer=%s{self.lock_clause}",
                 (self.tenant_id, session_id, consumer),
             )
+            if deletion_state != "live":
+                raise SessionNotLive("session is fenced for deletion")
+            self._require_worker_level(level)
             until = self._now() + retry_after_ms
             self._rows(
                 "UPDATE sk_consumer SET project_retry_at_ms=CASE WHEN project_retry_at_ms>%s "
@@ -1198,7 +1263,7 @@ class SQLStore:
                     "SELECT 1 FROM sk_session s CROSS JOIN clock t "
                     f"WHERE s.tenant_id=%s AND s.session_id=%s AND s.schema_version='S1' "
                     f"AND s.deletion_state='live' AND s.level<=%s AND {_DRIVE_RUNNABLE_SQL}",
-                    (self.tenant_id, session_id, self._worker_level),
+                    (self.tenant_id, session_id, self.worker_level),
                 )
             )
 
@@ -1233,12 +1298,12 @@ class SQLStore:
                 self.tenant_id,
                 cursor[0],
                 *cursor,
-                self._worker_level,
+                self.worker_level,
                 limit,
                 self.tenant_id,
                 cursor[0],
                 *cursor,
-                self._worker_level,
+                self.worker_level,
                 limit,
                 limit,
             ),
@@ -1814,7 +1879,9 @@ class SQLSessionTx:
                 consumers=ordered_consumers,
             )
             if not inserted:
-                s._prefix(spec.session_id, row)
+                # Create replay compares the already committed bytes and needs no
+                # worker execution capability for the existing history.
+                s._prefix(spec.session_id, row, require_worker=False)
                 old = s._one(
                     "SELECT body,created_ms FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
                     (tenant_id, spec.session_id, commit_id),
@@ -1984,9 +2051,13 @@ class SQLSessionTx:
         reducer = None
         # Commit replay needs no history or live lease. Prepare new immutable history
         # before the write lock; locked admission below rechecks both CAS and epoch.
-        if expected_seq == captured[0] and not s._rows(
-            "SELECT 1 FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
-            (s.tenant_id, session_id, commit_id),
+        if (
+            expected_seq == captured[0]
+            and captured[3] <= s.worker_level
+            and not s._rows(
+                "SELECT 1 FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (s.tenant_id, session_id, commit_id),
+            )
         ):
             prefix = s._prefix(session_id, captured)
             reducer = prefix.reducer.fork()
@@ -1995,6 +2066,7 @@ class SQLSessionTx:
         with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
             ceiling = s._write_ceiling()
             row = s._lock(session_id)
+            s._require_live_row(row)
             head_chain_digest = s._chain_anchor(session_id, expected_seq)
             body = _commit_manifest(
                 head_seq=expected_seq,
@@ -2008,7 +2080,9 @@ class SQLSessionTx:
                 (s.tenant_id, session_id, commit_id),
             )
             if old:
-                s._prefix(session_id, row)
+                # Commit replay verifies the existing ledger without acquiring
+                # execution capability. New history follows the gated path above.
+                s._prefix(session_id, row, require_worker=False)
                 stored = {
                     r.record_id: s._one(
                         "SELECT body,digest,seq FROM sk_record WHERE tenant_id=%s AND session_id=%s AND record_id=%s",
@@ -2033,6 +2107,13 @@ class SQLSessionTx:
                 ):
                     raise Conflict("commit identity has different bytes")
                 return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
+            s._require_worker_level(row[6])
+            required = s._admit_level(
+                ceiling=ceiling,
+                required=max((s._record_level(record) for record in records), default=1),
+                current=row[6],
+            )
+            s._require_worker_level(required)
             s._check_lease(session_id, lease, row, s._now())
             if expected_seq != row[0] or (expected_inbox_seq is not None and expected_inbox_seq != row[1]):
                 raise SequenceConflict("head or inbox watermark changed")
@@ -2040,11 +2121,6 @@ class SQLSessionTx:
                 raise SequenceConflict("head or epoch changed during append preparation")
             if prefix.head_digest != head_chain_digest:
                 raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
-            required = s._admit_level(
-                ceiling=ceiling,
-                required=max((s._record_level(record) for record in records), default=1),
-                current=row[6],
-            )
             sequences: list[tuple[str, int]] = []
             new: list[tuple[int, Record, int]] = []
             head = row[0]
@@ -2148,7 +2224,7 @@ class SQLSessionTx:
         )
         if deletion_state != "live":
             raise SessionNotLive("session is fenced for deletion")
-        if level > s._worker_level:
+        if level > s.worker_level:
             return None
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
         rows = s._rows(
@@ -2178,7 +2254,9 @@ class SQLSessionTx:
 
     def ack(self, batch: ConsumerBatch) -> None:
         self._active()
-        self.store._require_live(batch.session_id)
+        row = self.store._lock(batch.session_id)
+        self.store._require_live_row(row)
+        self.store._require_worker_level(row[6])
         key = (batch.session_id, batch.consumer)
         if self.batches.get(key) is not batch:
             raise Conflict("ack requires the batch issued by this transaction")

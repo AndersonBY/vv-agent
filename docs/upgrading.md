@@ -9,10 +9,28 @@ the default in-memory store, upgrading is an ordinary dependency bump; read the
 
 The unreleased 0.36 line introduces the S1 store boundary. S1 records and inbox
 items use `schema_version: "S1"`. The SQLite schema uses
-`PRAGMA user_version` 4, `sk_settings.storage_major='S1'` and write level 1;
-PostgreSQL uses the same storage major and exact table set. These are exact
-rejection boundaries. Missing, stale, unknown or partially initialized schemas
-are not selected for compatibility, and old rows are not rewritten in place.
+`PRAGMA user_version` 4 and `sk_settings.storage_major='S1'`. The initial
+database write level is 1; operations may raise it later to enable additive
+formats. PostgreSQL uses the same storage major and exact table set. Missing,
+stale, unknown or partially initialized schemas are not selected for
+compatibility, and old rows are not rewritten in place. SQLite also compares a
+versioned fingerprint of the tables, columns, constraints and indexes that form
+its read/write contract, so a matching table list cannot hide schema drift.
+
+Within S1, a release may add optional fields, enum values and record kinds only
+with a higher feature level. The defaults for omitted additions must preserve
+the previous behavior. Unknown fields and kinds remain rejected by the closed
+codec and reducer, and removing or changing an existing field still requires a
+new store major and the full boundary procedure below.
+
+For a rolling upgrade, install the same S1 schema, start workers configured for
+their maximum supported level, and keep the database `write_level` at its old
+value until every worker that can claim work has been upgraded. Then raise
+`write_level` transactionally. A worker below a session's level skips the
+session when claiming work and is fenced from renewing its lease, appending,
+deferring work or advancing a consumer projection. It may release an existing
+lease so an upgraded worker can take over. The worker level is a capability
+gate; it does not replace the database write ceiling or the exact schema checks.
 
 Tenant identity is part of the persisted key. Session, record, inbox, consumer,
 commit, checkpoint, key, content, content-link and tombstone rows carry

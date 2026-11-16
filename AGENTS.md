@@ -63,6 +63,10 @@ versioned source of truth for architecture, workflows, and model configuration.
   delete superseded readers, aliases, shims, migrations, fixtures, tests, and
   documentation in the same change across required implementations. Git tags
   provide old runtimes.
+- Within one storage major, add optional fields, enum values or record kinds
+  only behind a higher feature level. Missing additions must preserve the old
+  behavior, unknown fields and kinds must remain rejected, and changing the
+  meaning or removing an existing field still requires a new store major.
 - Do not keep old behavior alive in code for compatibility. Prefer a breaking
   replacement when it improves the design, and update active callers in the
   same change.

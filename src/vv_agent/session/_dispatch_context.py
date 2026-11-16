@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.kernel._call_context import CompiledCallFacts, approved_tool_call
+from vv_agent.kernel._content import Principal
 from vv_agent.kernel._tool_policy import apply_tool_context_policy
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.context import ExecutionContext
@@ -49,6 +50,28 @@ def begin_context(
     return _PreparedContext(metadata, ctx, workspace)
 
 
+def _session_principal(store: SessionStore | None, session_id: str | None) -> Principal | None:
+    if store is None or session_id is None:
+        return None
+    read = getattr(store, "read", None)
+    if not callable(read):
+        return None
+    try:
+        page = read(session_id, limit=1)
+    except KeyError:
+        return None
+    if not page.records:
+        return None
+    created = page.records[0].record
+    if created.kind != "session_created" or "principal" not in created.payload:
+        return None
+    principal = Principal.from_dict(created.payload["principal"])
+    tenant_id = getattr(store, "tenant_id", None)
+    if isinstance(tenant_id, str) and principal.tenant_id != tenant_id:
+        raise ValueError("session principal belongs to another tenant")
+    return principal
+
+
 def finish_context(
     runtime: Runtime,
     prepared: _PreparedContext,
@@ -74,6 +97,7 @@ def finish_context(
         else None,
         idempotency_key=facts.idempotency_key,
         metadata=facts.metadata(session_id),
+        principal=_session_principal(store, session_id),
     )
 
 

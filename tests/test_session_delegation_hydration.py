@@ -6,21 +6,35 @@ from typing import Any
 
 import pytest
 from session.helpers import fixture_child_spec, fixture_key_provider, wrap_fixture_store
+from session.helpers import record as fixture_record
+from session.test_app_server_fork import run_turn, send, server_for
 from support.kernel_runtime import start_runner
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
-from vv_agent.kernel._content import SESSION_WORKSPACE, ContentRef
+from vv_agent.app_server import DefaultAppServerHost
+from vv_agent.kernel._child_store import _bound_actor as bind_child_actor
+from vv_agent.kernel._content import (
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    SESSION_WORKSPACE,
+    Classification,
+    ContentLabels,
+    ContentRef,
+    ContentUnavailable,
+    Principal,
+    SourceKind,
+)
 from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import MissingContentLink
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle
 from vv_agent.session import delegation
-from vv_agent.session.children import ChildSession, child_delivery, child_handles
+from vv_agent.session.children import ChildSession, child_delivery, child_handles, create_child
 from vv_agent.session.content_reader import record_owner
 from vv_agent.session.content_runtime import SessionContentWriter
+from vv_agent.session.fork import fork_thread
 from vv_agent.session.kernel import drive
 from vv_agent.session.projection import SessionHydration, hydrate_records
-from vv_agent.session.records import InboxItem, digest
+from vv_agent.session.records import InboxItem, SessionSpec, digest
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
@@ -130,6 +144,137 @@ def test_reconstruct_hydrates_child_admission_nested_messages(tmp_path, monkeypa
     assert child_runtime.frozen_task.initial_messages == [initial]
     assert child_runtime.frozen_task.metadata["vv_session"]["input_messages"] == [input_message.to_dict()]
     assert created.payload["attributes"] == attributes_ref.to_dict()
+
+
+def test_child_admission_requires_owner_linked_parent_principal_content():
+    driver = SessionDriver()
+    principal = {
+        "tenant_id": "default",
+        "subject_id": "parent-user",
+        "subject_kind": "user",
+        "attributes": {"role": "owner"},
+    }
+    try:
+        driver.create("parent", "/workspace", principal=principal)
+        parent_created = driver.store.read("parent", limit=1).records[0]
+        plan = fixture_record("op_planned", sid="parent", tid="parent/turn", oid="parent-operation")
+
+        valid_spec = fixture_child_spec(driver.store, "parent", "valid-child")
+        with driver.store.atomic() as tx:
+            create_child(tx, ChildSession(valid_spec, "work"), plan, 0)
+        child_principal = driver.store.read("valid-child", limit=1).records[0].record.payload["principal"]
+        assert child_principal["tenant_id"] == "default"
+        assert child_principal["subject_id"] == "parent-user"
+        assert child_principal["subject_kind"] == "user"
+
+        with driver.store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=driver.tenant_id, session_id="parent")
+            unlinked = writer.put_json({"role": "forged"})
+        forged_spec = replace(
+            fixture_child_spec(driver.store, "parent", "forged-child"),
+            principal=parent_created.record.payload["principal"] | {"attributes": unlinked.to_dict()},
+        )
+        with pytest.raises(ContentUnavailable), driver.store.atomic() as tx:
+            create_child(tx, ChildSession(forged_spec, "work"), plan, 0)
+        assert "forged-child" not in driver.store.list_sessions()
+    finally:
+        driver.close()
+
+
+def test_child_admission_preserves_principal_and_workspace_labels():
+    driver = SessionDriver()
+    principal_labels = ContentLabels((SourceKind.USER,), Classification.CONFIDENTIAL)
+    workspace_labels = ContentLabels((SourceKind.SYSTEM,), Classification.RESTRICTED)
+    try:
+        with driver.store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=driver.tenant_id, session_id="parent")
+
+            def parent_spec(content):
+                principal_attributes = content.put_json({"role": "owner"}, labels=principal_labels)
+                workspace = content.put_json("/workspace", labels=workspace_labels)
+                return SessionSpec(
+                    "parent",
+                    Principal("default", "parent-agent", "agent", principal_attributes).to_dict(),
+                    workspace.to_dict(),
+                    attributes={},
+                )
+
+            writer.create_session(
+                parent_spec,
+                consumers=(),
+            )
+
+        plan = fixture_record("op_planned", sid="parent", tid="parent/turn", oid="parent-operation")
+        with driver.store.atomic() as tx:
+            create_child(tx, ChildSession(fixture_child_spec(driver.store, "parent", "child"), "work"), plan, 0)
+
+        child_created = driver.store.read("child", limit=1).records[0].record.payload
+        assert ContentRef.from_dict(child_created["principal"]["attributes"]).labels == principal_labels
+        assert ContentRef.from_dict(child_created["workspace"]).labels == workspace_labels
+        assert child_created["principal"]["subject_id"] == "parent-agent"
+        assert child_created["principal"]["subject_kind"] == "agent"
+    finally:
+        driver.close()
+
+
+def test_child_actor_content_ref_requires_principal_slot_and_plain_mapping_links():
+    driver = SessionDriver()
+    principal = {
+        "tenant_id": "default",
+        "subject_id": "parent-user",
+        "subject_kind": "user",
+        "attributes": {"role": "owner", "labels": "business", "size": 17},
+    }
+    try:
+        driver.create("parent", "/workspace", principal=principal)
+        created = driver.store.read("parent", limit=1).records[0].record.payload
+        persisted = Principal.from_dict(created["principal"])
+        workspace = ContentRef.from_dict(created["workspace"])
+
+        with driver.store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=driver.tenant_id, session_id="parent")
+            with pytest.raises(ValueError, match="plaintext mapping"):
+                bind_child_actor(
+                    writer,
+                    principal | {"attributes": workspace},
+                    subject_id="child-delivery",
+                )
+
+            actor, actor_ref = bind_child_actor(writer, persisted, subject_id="child-delivery")
+            assert writer.get_json(actor_ref) == principal["attributes"]
+            assert writer.get_json(actor["attributes"]) == principal["attributes"]
+
+            ingress_actor, ingress_ref = bind_child_actor(writer, principal, subject_id="child-delivery")
+            assert writer.get_json(ingress_ref) == principal["attributes"]
+            assert writer.get_json(ingress_actor["attributes"]) == principal["attributes"]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("slot", [SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE])
+def test_fork_rejects_tampered_creation_owner_links(tmp_path, slot):
+    with SQLiteStore.standalone(str(tmp_path / f"fork-{slot.replace('.', '-')}.sqlite")) as store:
+        store.install_schema()
+        host = DefaultAppServerHost(
+            agent=Agent("test", "Answer."),
+            run_config=RunConfig(
+                workspace=tmp_path,
+                model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("done")]),
+            ),
+        )
+        server = server_for(store, host)
+        try:
+            send(server, "create", "thread/start", {"inputId": "source"})
+            run_turn(server, "source", "turn")
+            with store.atomic() as tx:
+                tx.store._rows(
+                    "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id='source' AND record_seq=1 AND slot=%s",
+                    (store.tenant_id, slot),
+                )
+            with pytest.raises((ContentUnavailable, MissingContentLink)):
+                fork_thread(server.kernel, server.host, {"threadId": "source", "forkId": slot})
+        finally:
+            server.kernel.close()
 
 
 def test_configured_child_delivery_hydrates_result_owners_and_session_bindings(tmp_path) -> None:
@@ -283,5 +428,32 @@ def test_ordinary_child_delivery_hydrates_turn_result_without_admission(tmp_path
         ordinary = delegation.outcome(driver.store, "child", child_runtime)
         assert ordinary.agent_name == "worker"
         assert ordinary.final_answer == "child done"
+    finally:
+        driver.close()
+
+
+def test_session_principal_ref_shaped_ingress_attributes_hydrate_once() -> None:
+    plaintext_attributes = ContentRef(
+        content_id="content_plaintext_principal_attributes",
+        mac="0" * 64,
+        size=17,
+        key_id="key_plaintext_principal_attributes",
+        labels=ContentLabels((SourceKind.USER,), Classification.CONFIDENTIAL),
+    ).to_dict()
+    principal = {
+        "tenant_id": "default",
+        "subject_id": "ingress-user",
+        "subject_kind": "user",
+        "attributes": plaintext_attributes,
+    }
+    driver = SessionDriver()
+    try:
+        driver.create("session", "/workspace", principal=principal)
+        stored = driver.store.read("session", limit=1).records[0]
+        assert stored.record.payload["principal"]["attributes"] != plaintext_attributes
+
+        hydration = SessionHydration.from_store(driver.store, tenant_id=driver.tenant_id, session_id="session")
+        hydrated = hydrate_records((stored,), hydration)[0].record
+        assert hydrated.payload["principal"]["attributes"] == plaintext_attributes
     finally:
         driver.close()

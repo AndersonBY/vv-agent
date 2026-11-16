@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -8,10 +9,16 @@ from time import monotonic
 from uuid import uuid4
 
 import pytest
+from session.helpers import item as make_item
+from session.helpers import record as make_record
 
 from vv_agent.kernel import _postgres, _sqlite
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._postgres import PostgresStore
+from vv_agent.kernel._record_codec import RecordError
+from vv_agent.kernel._record_schema import PAYLOADS
 from vv_agent.kernel._sqlite import SQLiteStore
+from vv_agent.session.records import InboxItem, Record
 
 TABLES = {
     "sk_settings",
@@ -211,6 +218,7 @@ def test_sqlite_installs_complete_s1_schema_and_reopens(tmp_path):
         store.install_schema()
         assert store.connection.execute("PRAGMA user_version").fetchone() == (_sqlite.SCHEMA_VERSION,)
         assert store.connection.execute("SELECT * FROM sk_settings").fetchall() == [(1, "S1", 1)]
+        assert _sqlite._schema_fingerprint(store.connection) == _sqlite.SCHEMA_FINGERPRINT
 
         actual_tables = {
             row[0]
@@ -251,11 +259,49 @@ def test_sqlite_installs_complete_s1_schema_and_reopens(tmp_path):
             ),
         ) in _sqlite_foreign_keys(store.connection, "sk_inbox")
 
+        store.connection.execute("UPDATE sk_settings SET write_level=2")
         store.install_schema()
 
     with sqlite_store(path) as reopened:
         assert reopened.connection.execute("PRAGMA user_version").fetchone() == (_sqlite.SCHEMA_VERSION,)
-        assert reopened.connection.execute("SELECT storage_major FROM sk_settings").fetchone() == ("S1",)
+        assert reopened.connection.execute("SELECT storage_major,write_level FROM sk_settings").fetchone() == ("S1", 2)
+        reopened.install_schema()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "DROP INDEX sk_record_turn",
+        "CREATE INDEX rogue_record_index ON sk_record(created_ms)",
+        "CREATE TABLE sk_extra(value INTEGER)",
+        "CREATE VIEW sk_shadow AS SELECT 1 AS value",
+        "CREATE TRIGGER sk_shadow_trigger AFTER INSERT ON sk_settings BEGIN SELECT 1; END",
+        "DROP TABLE sk_checkpoint",
+        "ALTER TABLE sk_session DROP COLUMN handler_version",
+    ],
+)
+def test_sqlite_schema_fingerprint_rejects_key_drift(tmp_path, drift):
+    path = tmp_path / "drift.sqlite"
+    with sqlite_store(path) as store:
+        store.install_schema()
+        store.connection.execute(drift)
+        with pytest.raises(ValueError, match="unsupported session SQLite schema version"):
+            store.install_schema()
+
+    with pytest.raises(ValueError, match="unsupported session SQLite schema version"), sqlite_store(path):
+        pass
+
+
+def test_sqlite_schema_fingerprint_rejects_changed_check(tmp_path):
+    path = tmp_path / "changed-check.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(_sqlite.DDL.replace("write_level >= 1", "write_level >= 0"))
+    connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
+    connection.execute(f"PRAGMA user_version={_sqlite.SCHEMA_VERSION}")
+    connection.close()
+
+    with pytest.raises(ValueError, match="unsupported session SQLite schema version"), sqlite_store(path):
+        pass
 
 
 @pytest.mark.parametrize("version", [1, 3, 5])
@@ -333,6 +379,62 @@ def test_sqlite_s1_constraints_are_enforced(tmp_path):
             connection.execute("UPDATE sk_settings SET storage_major='S2'")
 
 
+def test_sqlite_kind_check_uses_identifier_boundary_while_codecs_stay_closed(tmp_path):
+    with sqlite_store(tmp_path / "record-kinds.sqlite") as store:
+        store.install_schema()
+        connection = store.connection
+        _insert_sqlite_session(connection)
+        _insert_sqlite_record(connection)
+        for seq, kind in enumerate(PAYLOADS, start=2):
+            connection.execute(
+                "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,kind,body,digest,chain_digest,"
+                "schema_version,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
+                "VALUES ('tenant-a','s',?,'r'||? ,?,X'7B7D',?,?,'S1','c'||?,?,0,0,0)",
+                (seq, seq, kind, ZERO_DIGEST, ZERO_DIGEST, seq, ZERO_DIGEST),
+            )
+
+        future_kinds = ("turn_policy_recorded", "future_record", "turn__record")
+        for seq, kind in enumerate(future_kinds, start=len(PAYLOADS) + 2):
+            connection.execute(
+                "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,kind,body,digest,chain_digest,"
+                "schema_version,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
+                "VALUES ('tenant-a','s',?,'future'||? ,?,X'7B7D',?,?,'S1','future'||?,?,0,0,0)",
+                (seq, seq, kind, ZERO_DIGEST, ZERO_DIGEST, seq, ZERO_DIGEST),
+            )
+
+        connection.execute(
+            "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,available_ms,received_ms) "
+            "VALUES ('tenant-a','s','future-input',1,'future_input_kind',X'7B7D',?,0,0)",
+            (ZERO_DIGEST,),
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,kind,body,digest,chain_digest,"
+                "schema_version,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
+                "VALUES ('tenant-a','s',30,'invalid-record','Future-Kind',X'7B7D',?,?,'S1','invalid',?,0,0,0)",
+                (ZERO_DIGEST, ZERO_DIGEST, ZERO_DIGEST),
+            )
+
+        for index, kind in enumerate(("Future-Kind", "_future", "9future", "")):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,available_ms,received_ms) "
+                    "VALUES ('tenant-a','s',?,? ,?,X'7B7D',?,0,0)",
+                    (f"invalid-{index}", index + 2, kind, ZERO_DIGEST),
+                )
+
+        record_value = json.loads(make_record("turn_started").encode())
+        record_value["kind"] = "future_record_kind"
+        with pytest.raises(RecordError):
+            Record.parse(canonical_json_bytes(record_value))
+
+        input_value = json.loads(make_item("future-input").encode())
+        input_value["kind"] = "future_input_kind"
+        with pytest.raises(RecordError):
+            InboxItem.parse(canonical_json_bytes(input_value))
+
+
 @pytest.fixture(scope="session")
 def postgres_admin_dsn() -> str:
     psycopg = pytest.importorskip("psycopg", reason="PostgreSQL tests need the postgres extra")
@@ -375,9 +477,8 @@ def test_postgres_rejects_non_s1_schema(postgres_database):
 
     with psycopg.connect(postgres_database, autocommit=True) as connection:
         connection.execute("CREATE TABLE sk_session(session_id text PRIMARY KEY)")
-        store = PostgresStore(connection, fold_factory=_fold_factory)
         with pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"):
-            store.install_schema()
+            PostgresStore(connection, fold_factory=_fold_factory)
 
 
 @pytest.mark.postgres

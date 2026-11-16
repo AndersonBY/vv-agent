@@ -5,10 +5,13 @@ from hashlib import sha256
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, ThreadForkParams
 from vv_agent.app_server import AppServer, AppServerClient, ChannelTransport, DefaultAppServerHost
+from vv_agent.kernel._content import Principal
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef
+from vv_agent.session.content_runtime import SESSION_PRINCIPAL_ATTRIBUTES, SessionContentWriter
 from vv_agent.session.context import project_context
 from vv_agent.session.context_view import context_view
+from vv_agent.session.fork import fork_thread
 from vv_agent.session.projection import (
     fold_hydrated_records,
     hydrate_record_payload,
@@ -106,6 +109,52 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         assert store.read_state("source")[1] == original_records
     finally:
         a.kernel.close()
+
+
+def test_direct_fork_copies_persisted_principal_attributes_once(store, tmp_path):
+    host = DefaultAppServerHost(
+        agent=Agent("test", "Be precise."),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("unused")]),
+            workspace=tmp_path,
+        ),
+    )
+    server = server_for(store, host)
+    try:
+        send(server, "create", "thread/start", {"inputId": "source"})
+        source_created = store.read("source", limit=1).records[0].record.payload
+        source_principal = Principal.from_dict(source_created["principal"])
+
+        forked = fork_thread(
+            server.kernel,
+            host,
+            {"threadId": "source", "forkId": "principal-copy"},
+            principal=source_principal,
+        )
+        destination = forked["threadId"]
+        destination_created = store.read(destination, limit=1).records[0].record.payload
+        source_ref = source_principal.attributes
+        destination_ref = Principal.from_dict(destination_created["principal"]).attributes
+
+        with store.atomic() as tx:
+            source_writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id="source")
+            destination_writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=destination)
+            assert destination_writer.get_json(destination_ref) == source_writer.get_json(source_ref)
+            principal_links = [
+                link
+                for link in destination_writer.durable.read_links(
+                    store.tenant_id,
+                    destination,
+                    record_seq=1,
+                )
+                if link.slot == SESSION_PRINCIPAL_ATTRIBUTES
+            ]
+
+        assert destination_ref.key_id != source_ref.key_id
+        assert destination_ref.labels == source_ref.labels
+        assert [link.ref for link in principal_links] == [destination_ref]
+    finally:
+        server.kernel.close()
 
 
 def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_grant(store, tmp_path, monkeypatch):

@@ -15,6 +15,7 @@ from vv_agent.types import (
 )
 
 if TYPE_CHECKING:
+    from vv_agent.kernel._content import Principal
     from vv_agent.runtime.context import ExecutionContext
     from vv_agent.session.delegation import ChildTasks
     from vv_agent.workspace.base import WorkspaceBackend
@@ -41,6 +42,18 @@ class ToolContext:
     idempotency_key: str | None = None
     session: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    principal: Principal | None = None
+
+    def __post_init__(self) -> None:
+        from vv_agent.kernel._content import Principal
+
+        if self.principal is not None and not isinstance(self.principal, Principal):
+            raise TypeError("principal must be a Principal or None")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "principal" and hasattr(self, name):
+            raise AttributeError("principal is read-only")
+        object.__setattr__(self, name, value)
 
     @property
     def run_id(self) -> str:

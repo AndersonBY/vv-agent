@@ -5,19 +5,26 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import replace
 from hashlib import sha256
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
+from vv_agent.kernel._content import ContentRef, ContentUnavailable
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
 from .compaction import memory_settings
-from .content_runtime import SESSION_ATTRIBUTES
+from .content_runtime import SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE
 from .context_view import context_messages, project_view
 from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
 from .records import SessionSpec, copy_json, digest, inherited_seed_policies
 from .reducer import _fold_factory_for
 from .store import Conflict
+from .surfaces import _persisted_principal, _principal_payload
+
+if TYPE_CHECKING:
+    from .content_runtime import SessionContentWriter
+    from .surfaces import PrincipalInput
 
 
 def validate_params(params):
@@ -60,7 +67,39 @@ def _artifact_backend(kernel, host, sid, binding):
     return runtime.memory_manager.workspace_backend or runtime.config.workspace_backend or runtime.workspace_backend
 
 
-def fork_thread(kernel, host, params):
+def _destination_principal(
+    principal: PrincipalInput | None,
+    writer: SessionContentWriter,
+    source_writer: SessionContentWriter,
+) -> dict[str, Any]:
+    if principal is None:
+        bound, _ = writer.service_principal("app-server")
+        return bound
+    persisted = _persisted_principal(principal)
+    if persisted is not None:
+        if persisted.tenant_id != writer.tenant_id:
+            raise PermissionError("fork principal tenant does not match the session tenant")
+        attributes = persisted.attributes
+        if attributes in writer._published_refs:
+            attributes_ref = attributes
+        else:
+            try:
+                verified = source_writer.assert_record(1, attributes, SESSION_PRINCIPAL_ATTRIBUTES)
+            except ContentUnavailable as exc:
+                raise ValueError("persisted fork principal requires target-session content proof") from exc
+            attributes_ref = writer.copy_json_from(source_writer, verified)
+        return persisted.to_dict() | {"attributes": attributes_ref.to_dict()}
+    payload = _principal_payload(principal)
+    if payload["tenant_id"] != writer.tenant_id:
+        raise PermissionError("fork principal tenant does not match the session tenant")
+    attributes = payload["attributes"]
+    if isinstance(attributes, ContentRef):
+        raise ValueError("host ingress principal attributes must be a plaintext mapping")
+    attributes_ref = writer.put_json(dict(attributes))
+    return dict(payload) | {"attributes": attributes_ref.to_dict()}
+
+
+def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
     source = params["threadId"]
     sid = "fork/" + digest([source, params["forkId"]])
     previous = _replay(kernel, sid, params)
@@ -202,11 +241,12 @@ def fork_thread(kernel, host, params):
             source_workspace = page.records[0].record._payload["workspace"]
 
             def destination_spec(writer):
-                principal_attributes = writer.copy_json_from(source_content, source_principal["attributes"])
+                source_content.assert_record(1, source_principal["attributes"], SESSION_PRINCIPAL_ATTRIBUTES)
+                source_content.assert_record(1, source_workspace, SESSION_WORKSPACE)
                 workspace = writer.copy_json_from(source_content, source_workspace)
                 return replace(
                     spec,
-                    principal=source_principal | {"attributes": principal_attributes.to_dict()},
+                    principal=_destination_principal(principal, writer, source_content),
                     workspace=workspace.to_dict(),
                     attributes=spec.attributes,
                 )

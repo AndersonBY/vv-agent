@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
+from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost, TrustedPrincipal
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.protocol import (
     ApprovalDecision,
@@ -34,6 +34,7 @@ from vv_agent.app_server.transport import ChannelTransport
 from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
 from vv_agent.session.interactions import InteractionError
 from vv_agent.session.store import Conflict
+from vv_agent.session.surfaces import _principal_payload
 
 CLIENT_METHODS: tuple[str, ...] = (
     "initialize",
@@ -169,19 +170,39 @@ class MessageProcessor:
             self._serialize_or_run(connection_id, request, lambda: self._handle_model_list(connection_id, request))
             return
         if request.method == "thread/start":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_start(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_thread_start(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "thread/fork":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_fork(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_thread_fork(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "thread/model/select":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_model_select(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_model_select(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "thread/context/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_context_read(connection_id, request))
             return
         if request.method == "thread/compact/start":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_compact_start(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_compact_start(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "thread/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
@@ -202,41 +223,84 @@ class MessageProcessor:
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_list(connection_id, request))
             return
         if request.method == "thread/archive":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_archive(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_thread_archive(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "thread/unsubscribe":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_unsubscribe(connection_id, request))
             return
         if request.method == "turn/start":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_start(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_turn_start(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "turn/resume":
             self._serialize_or_run(connection_id, request, lambda: self._handle_turn_resume(connection_id, request))
             return
         if request.method == "turn/steer":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_steer(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_turn_steer(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "turn/followUp":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_follow_up(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_turn_follow_up(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "turn/interrupt":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_interrupt(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_turn_interrupt(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "turn/action":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_action(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_turn_action(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "approval/resolve":
-            self._serialize_or_run(connection_id, request, lambda: self._handle_approval_resolve(connection_id, request))
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda principal=None: self._handle_approval_resolve(connection_id, request, principal),
+                uses_principal=True,
+            )
             return
         if request.method == "schema/export":
             self._serialize_or_run(connection_id, request, lambda: self._handle_schema_export(connection_id, request))
             return
         self._router.send_error(connection_id, request.id, AppServerError.method_not_found(request.method))
 
-    def _serialize_or_run(self, connection_id: str, request: JsonRpcRequest, handler: Callable[[], None]) -> None:
+    def _serialize_or_run(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        handler: Callable[..., None],
+        *,
+        uses_principal: bool = False,
+    ) -> None:
         def authorized_dispatch():
+            params = request.params if isinstance(request.params, dict) else {}
+            principal = None
             if request.method.startswith(("thread/", "turn/")) or request.method == "approval/resolve":
-                params = request.params if isinstance(request.params, dict) else {}
                 if not self._host.authorize(connection_id, request.method, params):
                     self._router.send_error(
                         connection_id,
@@ -248,7 +312,11 @@ class MessageProcessor:
                         ),
                     )
                     return
-            handler()
+                principal = self._trusted_principal(connection_id, request.method, params)
+            if uses_principal:
+                handler(principal)
+            else:
+                handler()
 
         try:
             future = self._serialization_queues.enqueue(
@@ -275,8 +343,27 @@ class MessageProcessor:
             self._router.send_error(
                 connection_id, request.id, AppServerError(AppServerErrorCode.SUBMISSION_TURN_MISMATCH, str(exc))
             )
+        except ValueError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
         except Exception as exc:
             self._router.send_error(connection_id, request.id, AppServerError.internal_error(str(exc)))
+
+    def _trusted_principal(
+        self,
+        connection_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> TrustedPrincipal | None:
+        resolver = getattr(self._host, "resolve_principal", None)
+        if not callable(resolver):
+            return None
+        principal = resolver(connection_id, method, params)
+        if principal is None:
+            return None
+        payload = _principal_payload(principal)
+        if payload["tenant_id"] != self._store.kernel.tenant_id:
+            raise PermissionError("principal tenant does not match the session store tenant")
+        return payload
 
     def _request_scope(self, request: JsonRpcRequest) -> RequestScope:
         if request.method == "model/list":
@@ -415,7 +502,12 @@ class MessageProcessor:
         model_request = ModelListRequest(agent_key=agent_key, provider=provider)
         self._router.send_response(connection_id, request.id, self._host.list_models(model_request).to_dict())
 
-    def _handle_thread_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_thread_start(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request, allow_missing=True)
         if params is None:
             return
@@ -450,7 +542,12 @@ class MessageProcessor:
                     task = runtime.compile("", input_id + "/context", control=True)
                     context = runtime._definition(task)
             payload = self._store.create_thread_receipt(
-                input_id=input_id, agent_key=agent_key, cwd=cwd, metadata=metadata, context=context
+                input_id=input_id,
+                agent_key=agent_key,
+                cwd=cwd,
+                metadata=metadata,
+                context=context,
+                principal=principal,
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
@@ -461,7 +558,12 @@ class MessageProcessor:
                 connection_id, "thread/started", {k: v for k, v in payload.items() if k not in {"accepted", "replayed"}}
             )
 
-    def _handle_thread_fork(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_thread_fork(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None:
             return
@@ -469,7 +571,7 @@ class MessageProcessor:
 
         try:
             validate_params(params)
-            result = self._run_adapter.fork_thread(params)
+            result = self._run_adapter.fork_thread(params, principal=principal)
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
@@ -480,14 +582,22 @@ class MessageProcessor:
             return
         self._router.send_response(connection_id, request.id, result)
 
-    def _handle_model_select(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_model_select(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None:
             return
         try:
             selection = ThreadModelSelectParams.from_dict(params)
             result = self._run_adapter.select_model(
-                thread_id=selection.thread_id, input_id=selection.input_id, selection=selection.selection
+                thread_id=selection.thread_id,
+                input_id=selection.input_id,
+                selection=selection.selection,
+                actor=principal,
             )
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
@@ -518,7 +628,12 @@ class MessageProcessor:
             return
         self._router.send_response(connection_id, request.id, result)
 
-    def _handle_compact_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_compact_start(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         import re
 
         from vv_agent.session.app_server import ContextVersionMismatch
@@ -544,7 +659,11 @@ class MessageProcessor:
             return
         try:
             result = self._run_adapter.compact_thread(
-                thread_id=thread_id, action_id=action_id, expected_context_version=expected, connection_id=connection_id
+                thread_id=thread_id,
+                action_id=action_id,
+                expected_context_version=expected,
+                connection_id=connection_id,
+                actor=principal,
             )
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
@@ -672,7 +791,12 @@ class MessageProcessor:
             {"threads": [self._thread_record_to_dict(record) for record in records]},
         )
 
-    def _handle_thread_archive(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_thread_archive(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None:
             return
@@ -680,7 +804,7 @@ class MessageProcessor:
         if not thread_id:
             return
         try:
-            self._store.archive_thread(thread_id)
+            self._store.archive_thread(thread_id, actor=principal)
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
@@ -754,11 +878,15 @@ class MessageProcessor:
                 return None
         return params
 
-    def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_turn_start(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._submission_params(connection_id, request)
         if params is None:
             return
-        self._run_adapter.subscribe(params["threadId"], connection_id)
         self._run_adapter.start_turn(
             connection_id=connection_id,
             thread_id=params["threadId"],
@@ -767,6 +895,7 @@ class MessageProcessor:
             expected_turn_id=params["expectedTurnId"],
             metadata=params.get("metadata"),
             request_id=request.id,
+            actor=principal,
         )
 
     def _handle_turn_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -805,13 +934,23 @@ class MessageProcessor:
         except TurnResumeError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
 
-    def _handle_turn_steer(self, connection_id: str, request: JsonRpcRequest) -> None:
-        self._handle_queue_input(connection_id, request, "steer")
+    def _handle_turn_steer(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
+        self._handle_queue_input(connection_id, request, "steer", principal)
 
-    def _handle_turn_follow_up(self, connection_id: str, request: JsonRpcRequest) -> None:
-        self._handle_queue_input(connection_id, request, "follow_up")
+    def _handle_turn_follow_up(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
+        self._handle_queue_input(connection_id, request, "follow_up", principal)
 
-    def _handle_queue_input(self, connection_id, request, kind):
+    def _handle_queue_input(self, connection_id, request, kind, principal):
         params = self._submission_params(connection_id, request)
         if params is None:
             return
@@ -822,12 +961,18 @@ class MessageProcessor:
             expected_turn_id=params["expectedTurnId"],
             kind=kind,
             input=params["input"],
+            actor=principal,
         )
         self._router.send_response(connection_id, request.id, payload)
         if kind == "follow_up":
             self._run_adapter.recover(connection_id, params["threadId"])
 
-    def _handle_turn_interrupt(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_turn_interrupt(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None or not self._closed_params(connection_id, request, params, {"threadId", "expectedTurnId", "actionId"}):
             return
@@ -841,13 +986,19 @@ class MessageProcessor:
                 turn_id=params["expectedTurnId"],
                 action_id=params["actionId"],
                 action={"kind": "cancel"},
+                actor=principal,
             )
         except (KeyError, TurnResumeError) as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
         self._router.send_response(connection_id, request.id, payload)
 
-    def _handle_turn_action(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_turn_action(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None:
             return
@@ -880,6 +1031,7 @@ class MessageProcessor:
                 action_id=action.action_id,
                 action=action.action,
                 connection_id=connection_id,
+                actor=principal,
             )
         except TurnResumeError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
@@ -889,7 +1041,12 @@ class MessageProcessor:
         for subscriber in self._state_manager.subscribers(action.thread_id):
             self._router.send_notification(subscriber, "thread/status/changed", status_payload)
 
-    def _handle_approval_resolve(self, connection_id: str, request: JsonRpcRequest) -> None:
+    def _handle_approval_resolve(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+        principal: TrustedPrincipal | None,
+    ) -> None:
         params = self._params_object(connection_id, request)
         if params is None:
             return
@@ -930,6 +1087,7 @@ class MessageProcessor:
                 turn_id=turn_id,
                 request_id=approval_request_id,
                 decision={"action": decision.value, "reason": reason, "metadata": decision_metadata},
+                actor=principal,
             )
         except SubmissionConflict:
             raise

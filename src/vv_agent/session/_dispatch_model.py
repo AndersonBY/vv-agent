@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from vv_agent.events import _project_provider_stream_payload
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 
 def invoke_model(self: _Driver, plan: Record, task, context, started: Record, prepared_client) -> Outcome:
-    request = request_from_dict(copy_json(plan._payload["request"]))
+    request = replace(request_from_dict(copy_json(plan._payload["request"])), principal=context.principal)
     request.metadata.update(
         {"operation_id": plan.operation_id, "attempt": plan.attempt, "call_id": f"{plan.operation_id}/{plan.attempt}"}
     )

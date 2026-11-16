@@ -17,6 +17,8 @@ from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.events import HostInteractionRequestedEvent, RunStateChangedEvent
 from vv_agent.interaction import derive_controller_command_id
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import INPUT_ACTOR_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, ContentRef
+from vv_agent.kernel._content_publication import publish_session_created_content
 from vv_agent.types import AgentStatus, Message
 
 from .content_runtime import SessionContentWriter
@@ -32,7 +34,7 @@ from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict
-from .surfaces import SessionDriver
+from .surfaces import PrincipalInput, SessionDriver, _principal_payload
 from .timing import Clock, SystemClock
 
 
@@ -181,20 +183,110 @@ class _KernelThreadStore:
             session_id=thread_id,
         )
 
-    def create_thread_receipt(self, *, input_id, agent_key, cwd=None, metadata=None, context=None):
+    def _thread_creation(self, thread_id: str) -> dict[str, Any]:
+        try:
+            page = self.kernel.store.read(thread_id, limit=1)
+        except Conflict as exc:
+            raise KeyError(thread_id) from exc
+        if not page.records or page.records[0].record.kind != "session_created":
+            raise SubmissionConflict("submission_conflict")
+        creation = hydrate_record_payload(page.records[0], self._hydration(thread_id))
+        if not isinstance(creation.get("attributes"), dict):
+            raise SubmissionConflict("submission_conflict")
+        return creation
+
+    def _encoded_thread_principal(self, thread_id: str) -> dict[str, Any]:
+        page = self.kernel.store.read(thread_id, limit=1)
+        principal = page.records[0].record.payload.get("principal")
+        if not isinstance(principal, dict):
+            raise SubmissionConflict("submission_conflict")
+        return principal
+
+    def _thread_creation_matches(
+        self,
+        creation: dict[str, Any],
+        *,
+        thread_id: str,
+        agent_key: str,
+        cwd: str | None,
+        metadata: dict[str, Any] | None,
+        principal: PrincipalInput | None,
+    ) -> bool:
+        expected_principal = (
+            {
+                "tenant_id": self.kernel.tenant_id,
+                "subject_id": "app-server",
+                "subject_kind": "service",
+                "attributes": {"role": "app-server"},
+            }
+            if principal is None
+            else _principal_payload(principal)
+        )
+        app_server = creation["attributes"].get("app_server")
+        principal_matches = (
+            creation.get("principal") == expected_principal or self._encoded_thread_principal(thread_id) == expected_principal
+        )
+        return principal_matches and app_server == {
+            "agent_key": agent_key,
+            "cwd": cwd,
+            "metadata": metadata or {},
+        }
+
+    def _thread_receipt(self, thread_id: str, *, agent_key: str, cwd: str | None, replayed: bool):
+        state, _, _ = self.kernel.store.read_state(thread_id)
+        return {
+            "threadId": thread_id,
+            "agentKey": agent_key,
+            "cwd": cwd,
+            "status": project_thread_status(state, now_ms=self.clock.now_ms()).value,
+            "accepted": True,
+            "replayed": replayed,
+        }
+
+    def create_thread_receipt(
+        self,
+        *,
+        input_id,
+        agent_key,
+        cwd=None,
+        metadata=None,
+        context=None,
+        principal: PrincipalInput | None = None,
+    ):
         attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
         values = attributes | ({"app_server_context": context} if context is not None else {})
+        try:
+            existing = self._thread_creation(input_id)
+        except KeyError:
+            existing = None
+        if existing is not None:
+            if not self._thread_creation_matches(
+                existing,
+                thread_id=input_id,
+                agent_key=agent_key,
+                cwd=cwd,
+                metadata=metadata,
+                principal=principal,
+            ):
+                raise SubmissionConflict("submission_conflict")
+            return self._thread_receipt(input_id, agent_key=agent_key, cwd=cwd, replayed=True)
         try:
             with self.kernel.store.atomic() as tx:
                 writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
 
                 def session_spec(content: SessionContentWriter) -> SessionSpec:
-                    principal, _ = content.service_principal("app-server")
+                    bound_principal = self.kernel._bound_principal(principal, subject_id="app-server", writer=content)
+                    created = publish_session_created_content(
+                        content,
+                        principal=bound_principal,
+                        workspace=cwd or ".",
+                        attributes=values,
+                    )
                     return SessionSpec(
                         input_id,
-                        principal,
-                        content.put_json(cwd or ".").to_dict(),
-                        attributes=content.put_json(values).to_dict(),
+                        created.principal,
+                        created.workspace.to_dict(),
+                        attributes=created.attributes.to_dict(),
                     )
 
                 receipt = writer.create_session(
@@ -202,30 +294,22 @@ class _KernelThreadStore:
                     consumers=("events", "app_server", "traces"),
                 )
             replayed = receipt.replayed
-        except Conflict:
-            # Retry with the winning node's frozen context; tx.create owns replay.
-            creation = self.kernel.store.read(input_id, limit=1).records[0].record._payload
-            with self.kernel.store.atomic() as tx:
-                writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
-                receipt = writer.create_session(
-                    lambda _content: SessionSpec(
-                        input_id,
-                        creation["principal"],
-                        creation["workspace"],
-                        attributes=creation["attributes"],
-                    ),
-                    consumers=("events", "app_server", "traces"),
-                )
-            replayed = receipt.replayed
-        state, _, _ = self.kernel.store.read_state(input_id)
-        return {
-            "threadId": input_id,
-            "agentKey": agent_key,
-            "cwd": cwd,
-            "status": project_thread_status(state, now_ms=self.clock.now_ms()).value,
-            "accepted": True,
-            "replayed": replayed,
-        }
+        except Conflict as create_error:
+            try:
+                existing = self._thread_creation(input_id)
+            except KeyError:
+                raise
+            if not self._thread_creation_matches(
+                existing,
+                thread_id=input_id,
+                agent_key=agent_key,
+                cwd=cwd,
+                metadata=metadata,
+                principal=principal,
+            ):
+                raise SubmissionConflict("submission_conflict") from create_error
+            replayed = True
+        return self._thread_receipt(input_id, agent_key=agent_key, cwd=cwd, replayed=replayed)
 
     def _thread_metadata(self, thread_id, state, records):
         creation = hydrate_record_payload(records[0], self._hydration(thread_id))
@@ -359,10 +443,10 @@ class _KernelThreadStore:
             threads.append(self._thread_metadata(sid, state, records))
         return threads
 
-    def archive_thread(self, thread_id):
+    def archive_thread(self, thread_id, *, actor: PrincipalInput | None = None):
         self.read_thread(thread_id)
         runtime = self.runtimes.get(thread_id)
-        self.kernel.control(thread_id, "archive", "app_server/archive", runtime=runtime)
+        self.kernel.control(thread_id, "archive", "app_server/archive", runtime=runtime, actor=actor)
 
     def append_item(self, item, *, run_event_id=None):
         del run_event_id
@@ -637,7 +721,18 @@ class _KernelRunAdapter(RunAdapter):
             replace(config, shared_state=shared_state, initial_messages=None, metadata=config.metadata | metadata),
         )
 
-    def submit_input(self, *, connection_id, thread_id, input_id, expected_turn_id, kind, input, metadata=None):
+    def submit_input(
+        self,
+        *,
+        connection_id,
+        thread_id,
+        input_id,
+        expected_turn_id,
+        kind,
+        input,
+        metadata=None,
+        actor: PrincipalInput | None = None,
+    ):
         content = _content(self, input, metadata or {}, kind, expected_turn_id)
         try:
             while True:
@@ -680,6 +775,7 @@ class _KernelRunAdapter(RunAdapter):
                         tx,
                         thread_id,
                         item,
+                        actor=actor,
                         actor_subject_id="app-server",
                     )
                     break
@@ -696,7 +792,18 @@ class _KernelRunAdapter(RunAdapter):
         }
         return payload, content
 
-    def start_turn(self, *, connection_id, thread_id, input, input_id, expected_turn_id, metadata=None, request_id=None):
+    def start_turn(
+        self,
+        *,
+        connection_id,
+        thread_id,
+        input,
+        input_id,
+        expected_turn_id,
+        metadata=None,
+        request_id=None,
+        actor: PrincipalInput | None = None,
+    ):
         payload, _content = self.submit_input(
             connection_id=connection_id,
             thread_id=thread_id,
@@ -705,18 +812,36 @@ class _KernelRunAdapter(RunAdapter):
             kind="start",
             input=input,
             metadata=metadata,
+            actor=actor,
         )
+        self.subscribe(thread_id, connection_id)
         if request_id is not None:
             self._router.send_response(connection_id, request_id, payload)
         self.recover(connection_id, thread_id)
         return payload
 
-    def _start(self, connection_id, thread_id, content, *, input_id=None, request_id=None, lease_retry=True):
+    def _start(
+        self,
+        connection_id,
+        thread_id,
+        content,
+        *,
+        input_id=None,
+        request_id=None,
+        lease_retry=True,
+        actor: PrincipalInput | None = None,
+    ):
         with self._state_manager.turn_lock(thread_id):
             active = self._state_manager.active_turn(thread_id)
             if active is None:
                 return self._start_locked(
-                    connection_id, thread_id, content, input_id=input_id, request_id=request_id, lease_retry=lease_retry
+                    connection_id,
+                    thread_id,
+                    content,
+                    input_id=input_id,
+                    request_id=request_id,
+                    lease_retry=lease_retry,
+                    actor=actor,
                 )
             if request_id is not None:
                 self._router.send_response(
@@ -726,7 +851,17 @@ class _KernelRunAdapter(RunAdapter):
                 )
             return None
 
-    def _start_locked(self, connection_id, thread_id, content, *, input_id=None, request_id=None, lease_retry=True):
+    def _start_locked(
+        self,
+        connection_id,
+        thread_id,
+        content,
+        *,
+        input_id=None,
+        request_id=None,
+        lease_retry=True,
+        actor: PrincipalInput | None = None,
+    ):
         if connection_id is not None and self._router.is_registered(connection_id):
             self.subscribe(thread_id, connection_id)
         else:
@@ -763,6 +898,7 @@ class _KernelRunAdapter(RunAdapter):
                 input_id=input_id,
                 consumer="app_server",
                 autostart=False,
+                actor=actor,
                 actor_subject_id="app-server",
             )
             handle._wait_for_lease = False
@@ -862,15 +998,72 @@ class _KernelRunAdapter(RunAdapter):
     def public_thread_status(self, thread_id):
         return thread_status(self.kernel, thread_id, clock=self.clock)
 
-    def fork_thread(self, params):
+    def _fork_principal_matches(self, thread_id: str, principal: PrincipalInput | None) -> bool:
+        creation = self._store._thread_creation(thread_id)
+        expected = (
+            {
+                "tenant_id": self.kernel.tenant_id,
+                "subject_id": "app-server",
+                "subject_kind": "service",
+                "attributes": {"role": "app-server"},
+            }
+            if principal is None
+            else _principal_payload(principal)
+        )
+        return creation.get("principal") == expected or self._store._encoded_thread_principal(thread_id) == expected
+
+    def _normalize_fork_principal(
+        self,
+        source_thread_id: str,
+        principal: PrincipalInput | None,
+    ) -> PrincipalInput | None:
+        if principal is None:
+            return None
+        payload = _principal_payload(principal)
+        attributes = payload["attributes"]
+        if not isinstance(attributes, ContentRef):
+            return payload
+        source_principal = self._store._encoded_thread_principal(source_thread_id)
+        if attributes.to_dict() != source_principal.get("attributes"):
+            raise PermissionError("persisted fork principal does not reference the source session principal")
+        payload["attributes"] = self.kernel.read_record_content(
+            source_thread_id,
+            1,
+            attributes,
+            slot=SESSION_PRINCIPAL_ATTRIBUTES,
+        )
+        return payload
+
+    def fork_thread(self, params, *, principal: PrincipalInput | None = None):
         from .fork import fork_thread
 
-        return fork_thread(self.kernel, self._host, params)
+        principal = self._normalize_fork_principal(params["threadId"], principal)
+        destination_id = "fork/" + digest([params["threadId"], params["forkId"]])
+        try:
+            self._store._thread_creation(destination_id)
+        except KeyError:
+            pass
+        else:
+            if not self._fork_principal_matches(destination_id, principal):
+                raise SubmissionConflict("submission_conflict")
+
+        result = fork_thread(self.kernel, self._host, params, principal=principal)
+        if result.get("replayed") and not self._fork_principal_matches(destination_id, principal):
+            raise SubmissionConflict("submission_conflict")
+        return result
 
     def read_context(self, thread_id):
         return context_view(self.kernel.store, thread_id)
 
-    def compact_thread(self, *, thread_id, action_id, expected_context_version=None, connection_id=None):
+    def compact_thread(
+        self,
+        *,
+        thread_id,
+        action_id,
+        expected_context_version=None,
+        connection_id=None,
+        actor: PrincipalInput | None = None,
+    ):
         params = {"threadId": thread_id, "actionId": action_id}
         if expected_context_version is not None:
             params["expectedContextVersion"] = expected_context_version
@@ -905,6 +1098,7 @@ class _KernelRunAdapter(RunAdapter):
                         tx,
                         thread_id,
                         item,
+                        actor=actor,
                         actor_subject_id="app-server",
                     )
                     break
@@ -924,7 +1118,7 @@ class _KernelRunAdapter(RunAdapter):
             self.recover(connection_id, thread_id)
         return result
 
-    def select_model(self, *, thread_id, input_id, selection):
+    def select_model(self, *, thread_id, input_id, selection, actor: PrincipalInput | None = None):
         self._store.read_thread(thread_id)
         try:
             self.kernel.push(
@@ -934,13 +1128,58 @@ class _KernelRunAdapter(RunAdapter):
                     "model_selection",
                     {"selection": selection},
                 ),
+                actor=actor,
                 actor_subject_id="app-server",
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         return {"threadId": thread_id, "inputId": input_id, "accepted": True}
 
-    def controller_action(self, *, thread_id, turn_id, action_id, action, connection_id):
+    def _controller_actor_payload(self, thread_id: str, actor: PrincipalInput | None) -> dict[str, Any]:
+        if actor is None:
+            principal = self.kernel._session_principal(thread_id)
+            payload = principal.to_dict()
+            payload["attributes"] = self.kernel.read_record_content(
+                thread_id,
+                1,
+                principal.attributes,
+                slot=SESSION_PRINCIPAL_ATTRIBUTES,
+            )
+        else:
+            payload = _principal_payload(actor)
+        if payload["tenant_id"] != self.kernel.tenant_id:
+            raise ValueError("input actor must use the session tenant")
+        return payload
+
+    def _controller_actor_matches(
+        self,
+        thread_id: str,
+        item: InboxItem,
+        actor_payload: dict[str, Any],
+    ) -> bool:
+        retained = item.actor
+        if retained is None or any(retained[key] != actor_payload[key] for key in ("tenant_id", "subject_id", "subject_kind")):
+            return False
+        attributes = actor_payload["attributes"]
+        if attributes == retained["attributes"]:
+            return True
+        return attributes == self.kernel.read_input_content(
+            thread_id,
+            item.input_id,
+            retained["attributes"],
+            slot=INPUT_ACTOR_ATTRIBUTES,
+        )
+
+    def controller_action(
+        self,
+        *,
+        thread_id,
+        turn_id,
+        action_id,
+        action,
+        connection_id,
+        actor: PrincipalInput | None = None,
+    ):
         from vv_agent.app_server.protocol.identity import client_id
 
         for identity, name in ((thread_id, "threadId"), (turn_id, "turnId"), (action_id, "actionId")):
@@ -951,6 +1190,25 @@ class _KernelRunAdapter(RunAdapter):
             raise TurnResumeError(str(exc)) from exc
         self._validate_public_controller_action(action)
         input_id = "controller/" + derive_controller_command_id(thread_id, turn_id, action_id)
+        actor_payload = self._controller_actor_payload(thread_id, actor)
+        previous = self.kernel._retained_reply(thread_id, input_id)
+        if previous:
+            retained = previous[1]
+            if not self._controller_actor_matches(previous[0], retained, actor_payload):
+                raise SubmissionConflict("submission_conflict")
+            retained_content = hydrate_input(retained, self._hydration(previous[0])).payload.get("content")
+            if not isinstance(retained_content, dict):
+                raise SubmissionConflict("submission_conflict")
+            original = (
+                {"kind": "respond", **retained_content["metadata"]["interaction_response"]}
+                if retained.kind == "user"
+                else {"kind": retained.payload["action"]}
+                if retained.kind == "control"
+                else None
+            )
+            if canonical_json_bytes(original) != canonical_json_bytes(action):
+                raise SubmissionConflict("submission_conflict")
+            return {"threadId": thread_id, "turnId": turn_id, "actionId": action_id, "accepted": True, "status": "running"}
         from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 
         from .interactions import InteractionError
@@ -974,22 +1232,6 @@ class _KernelRunAdapter(RunAdapter):
             target_state, _, _ = self.kernel.store.read_state(target.session_id)
             if target.turn_id not in target_state.turns:
                 raise TurnMismatch("Turn does not belong to the target session")
-        previous = self.kernel._retained_reply(thread_id, input_id)
-        if previous:
-            retained = previous[1]
-            retained_content = hydrate_input(retained, self._hydration(previous[0])).payload.get("content")
-            if not isinstance(retained_content, dict):
-                raise SubmissionConflict("submission_conflict")
-            original = (
-                {"kind": "respond", **retained_content["metadata"]["interaction_response"]}
-                if retained.kind == "user"
-                else {"kind": retained.payload["action"]}
-                if retained.kind == "control"
-                else None
-            )
-            if canonical_json_bytes(original) != canonical_json_bytes(action):
-                raise SubmissionConflict("submission_conflict")
-            return {"threadId": thread_id, "turnId": turn_id, "actionId": action_id, "accepted": True, "status": "running"}
         state, _, _ = self.kernel.store.read_state(thread_id)
         if turn_id not in state.turns:
             raise TurnMismatch("Turn does not belong to the requested thread")
@@ -1007,6 +1249,7 @@ class _KernelRunAdapter(RunAdapter):
                     target,
                     InteractionAnswer.from_dict(action["answer"]),
                     input_id,
+                    actor=actor_payload,
                 )
             else:
                 receipt = self.kernel.push(
@@ -1018,6 +1261,7 @@ class _KernelRunAdapter(RunAdapter):
                         turn_id,
                         state.turns[turn_id].start._payload["generation"],
                     ),
+                    actor=actor_payload,
                     actor_subject_id="app-server",
                 )
         except Conflict as exc:
@@ -1031,7 +1275,16 @@ class _KernelRunAdapter(RunAdapter):
             self.recover(connection_id, thread_id)
         return {"threadId": thread_id, "turnId": turn_id, "actionId": action_id, "accepted": True, "status": "running"}
 
-    def resolve_approval(self, *, connection_id, thread_id, turn_id, request_id, decision):
+    def resolve_approval(
+        self,
+        *,
+        connection_id,
+        thread_id,
+        turn_id,
+        request_id,
+        decision,
+        actor: PrincipalInput | None = None,
+    ):
         from vv_agent.approval import ApprovalDecision
 
         state, _, _ = self.kernel.store.read_state(thread_id)
@@ -1047,7 +1300,7 @@ class _KernelRunAdapter(RunAdapter):
                 request_id,
                 ApprovalDecision(**decision),
                 f"approval/{request_id}/answer",
-                actor=None,
+                actor=actor,
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc

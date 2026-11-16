@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from hashlib import sha256
 from threading import RLock
 
 from vv_agent.kernel._lease_scope import Clock
@@ -13,6 +15,9 @@ from vv_agent.kernel._sql import SQLStore
 
 SCHEMA_VERSION = 4
 STORAGE_MAJOR = "S1"
+SCHEMA_FINGERPRINT_VERSION = "S1-sqlite-schema-v2"
+# Update this digest with intentional DDL changes and contract review.
+SCHEMA_FINGERPRINT = "0bd580cfc9c3e59787f7700963be03094b8289522592c7d734bd00fa7539ecd2"
 SCHEMA_TABLES = frozenset(
     {
         "sk_settings",
@@ -64,8 +69,8 @@ CREATE TABLE sk_record (
     tenant_id TEXT NOT NULL, session_id TEXT NOT NULL,
     seq INTEGER NOT NULL CHECK (seq > 0), record_id TEXT NOT NULL,
     schema_version TEXT NOT NULL CHECK (schema_version = 'S1'),
-    kind TEXT NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
-        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
+    kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 64 AND kind GLOB '[a-z]*'
+        AND kind NOT GLOB '*[^a-z0-9_]*'),
     turn_id TEXT, operation_id TEXT, attempt INTEGER CHECK (attempt > 0), body BLOB NOT NULL,
     digest TEXT NOT NULL CHECK (length(digest)=64 AND digest NOT GLOB '*[^0-9a-f]*'),
     chain_digest TEXT NOT NULL CHECK (length(chain_digest)=64 AND chain_digest NOT GLOB '*[^0-9a-f]*'),
@@ -82,8 +87,8 @@ CREATE INDEX sk_record_turn ON sk_record(tenant_id,session_id,turn_id,seq);
 CREATE TABLE sk_inbox (
     tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, input_id TEXT NOT NULL,
     input_seq INTEGER NOT NULL CHECK (input_seq > 0),
-    kind TEXT NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
-        'control','provider_evidence','model_selection')),
+    kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 64 AND kind GLOB '[a-z]*'
+        AND kind NOT GLOB '*[^a-z0-9_]*'),
     body BLOB NOT NULL, digest TEXT NOT NULL CHECK (length(digest)=64 AND digest NOT GLOB '*[^0-9a-f]*'),
     admission_key_id TEXT, admission_signature BLOB,
     admission_signed_ms INTEGER CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
@@ -177,6 +182,41 @@ def _schema_tables(connection: sqlite3.Connection) -> set[str]:
     }
 
 
+def _schema_objects(connection: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+    """Return a deterministic, stored-text schema manifest for fingerprinting."""
+
+    return connection.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE (name LIKE 'sk\\_%' ESCAPE '\\' OR tbl_name LIKE 'sk\\_%' ESCAPE '\\') "
+        "AND type IN ('table','index','trigger','view') AND (type IN ('table','view') OR sql IS NOT NULL) "
+        "ORDER BY type,name"
+    ).fetchall()
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> str:
+    material = {"version": SCHEMA_FINGERPRINT_VERSION, "objects": _schema_objects(connection)}
+    encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _schema_is_current(connection: sqlite3.Connection) -> bool:
+    if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        return False
+    if _schema_tables(connection) != SCHEMA_TABLES or _schema_fingerprint(connection) != SCHEMA_FINGERPRINT:
+        return False
+    try:
+        settings = connection.execute("SELECT singleton,storage_major,write_level FROM sk_settings").fetchall()
+    except sqlite3.Error:
+        return False
+    return (
+        len(settings) == 1
+        and settings[0][0] == 1
+        and settings[0][1] == STORAGE_MAJOR
+        and type(settings[0][2]) is int
+        and settings[0][2] >= 1
+    )
+
+
 class SQLiteStore(SQLStore):
     """A serialized connection per instance; BEGIN IMMEDIATE fences local writers."""
 
@@ -186,7 +226,9 @@ class SQLiteStore(SQLStore):
         return nullcontext(self) if self.path == ":memory:" else self._heartbeat_connection()
 
     def _heartbeat_connection(self):
-        return SQLiteStore.standalone(self.path, fold_factory=self.fold_factory, clock=self.clock)
+        return self._inherit_runtime_configuration(
+            SQLiteStore.standalone(self.path, fold_factory=self.fold_factory, clock=self.clock)
+        )
 
     def __init__(self, path: str, *, fold_factory: Callable[[], Fold], clock: Clock):
         super().__init__(fold_factory=fold_factory)
@@ -194,14 +236,8 @@ class SQLiteStore(SQLStore):
         self.path = path
         self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        tables = _schema_tables(self.connection)
-        settings = (
-            self.connection.execute("SELECT storage_major,write_level FROM sk_settings WHERE singleton=1").fetchone()
-            if "sk_settings" in tables
-            else None
-        )
-        valid_s1 = version == SCHEMA_VERSION and tables == SCHEMA_TABLES and settings == (STORAGE_MAJOR, 1)
-        if not valid_s1 and (version != 0 or tables):
+        objects = _schema_objects(self.connection)
+        if not _schema_is_current(self.connection) and (version != 0 or objects):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -266,20 +302,14 @@ class SQLiteStore(SQLStore):
     def install_schema(self) -> None:
         with self._transaction():
             version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == SCHEMA_VERSION:
-                tables = _schema_tables(self.connection)
-                settings = (
-                    self.connection.execute("SELECT storage_major,write_level FROM sk_settings WHERE singleton=1").fetchone()
-                    if "sk_settings" in tables
-                    else None
-                )
-                if tables == SCHEMA_TABLES and settings == (STORAGE_MAJOR, 1):
-                    return
-                raise ValueError("unsupported session SQLite schema version")
-            if version != 0 or _schema_tables(self.connection):
+            if _schema_is_current(self.connection):
+                return
+            if version != 0 or _schema_objects(self.connection):
                 raise ValueError("unsupported session SQLite schema version")
             for statement in DDL.split(";"):
                 if statement.strip():
                     self.connection.execute(statement)
             self.connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
             self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if not _schema_is_current(self.connection):
+                raise ValueError("session SQLite schema fingerprint does not match this runtime")

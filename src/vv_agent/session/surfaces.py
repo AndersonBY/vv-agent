@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -12,12 +14,20 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
-from vv_agent.kernel._content import ContentRef, KeyProvider
+from vv_agent.kernel._content import (
+    INPUT_ACTOR_ATTRIBUTES,
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    ContentRef,
+    ContentUnavailable,
+    KeyProvider,
+    Principal,
+)
 from vv_agent.kernel._content_publication import (
     declare_input_content,
     link_declared_input_content,
     publish_session_created_content,
 )
+from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID
 from vv_agent.memory import MemoryManager
@@ -56,6 +66,66 @@ from .store import Conflict, SessionStore
 
 _DRIVERS: WeakValueDictionary[tuple[str, str], SessionDriver] = WeakValueDictionary()
 _STORE_CLOSERS: WeakKeyDictionary[SessionStore, list[Any]] = WeakKeyDictionary()
+PrincipalInput = Principal | Mapping[str, Any]
+
+
+class _PersistedPrincipalPayload(dict[str, Any]):
+    """Keep persisted Principal identity distinct while crossing mapping-only assembly layers."""
+
+
+class _IngressAttributes(dict[str, Any]):
+    """Mark host ingress attributes as plaintext across mapping-only assembly layers."""
+
+
+def _principal_identity(payload: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    if set(payload) != {"tenant_id", "subject_id", "subject_kind", "attributes"}:
+        raise ValueError("principal must contain tenant_id, subject_id, subject_kind and attributes")
+    if not isinstance(payload["tenant_id"], str) or not payload["tenant_id"]:
+        raise ValueError("tenant_id must be a non-empty string")
+    if payload["tenant_id"] != tenant_id:
+        raise ValueError("principal must use the session tenant")
+    if not isinstance(payload["subject_id"], str) or not payload["subject_id"]:
+        raise ValueError("subject_id must be a non-empty string")
+    if payload["subject_kind"] not in {"user", "service", "agent"}:
+        raise ValueError("subject_kind must be user, service or agent")
+    return payload
+
+
+def _principal_payload(value: PrincipalInput) -> dict[str, Any]:
+    if isinstance(value, Principal):
+        return _PersistedPrincipalPayload(value.to_dict())
+    if isinstance(value, _PersistedPrincipalPayload):
+        return value
+    payload = dict(value)
+    _principal_identity(payload, tenant_id=payload.get("tenant_id"))
+    if not isinstance(payload["attributes"], Mapping) or isinstance(payload["attributes"], ContentRef):
+        raise ValueError("host ingress principal attributes must be a plaintext mapping")
+    payload["attributes"] = _IngressAttributes(payload["attributes"])
+    return payload
+
+
+def _ingress_principal(value: Mapping[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    """Validate a host ingress identity whose attributes are plaintext JSON."""
+
+    if isinstance(value, (Principal, _PersistedPrincipalPayload)):
+        raise ValueError("persisted Principal requires a target-session owner proof")
+    payload = dict(value)
+    _principal_identity(payload, tenant_id=tenant_id)
+    attributes = payload["attributes"]
+    if isinstance(attributes, ContentRef):
+        raise ValueError("host ingress principal attributes must be a plaintext mapping")
+    if not isinstance(attributes, Mapping):
+        raise ValueError("host ingress principal attributes must be a plaintext mapping")
+    payload["attributes"] = dict(attributes)
+    return payload
+
+
+def _persisted_principal(value: PrincipalInput) -> Principal | None:
+    if isinstance(value, Principal):
+        return value
+    if isinstance(value, _PersistedPrincipalPayload):
+        return Principal.from_dict(dict(value))
+    return None
 
 
 class SessionDriver:
@@ -71,6 +141,18 @@ class SessionDriver:
         self.model_resolver = model_resolver
         self._owns_store = store is None
         self._root_store = store if store is not None else SQLiteStore(str(path))
+        concrete_store = self._root_store
+        seen: set[int] = set()
+        while id(concrete_store) not in seen:
+            seen.add(id(concrete_store))
+            parent = getattr(concrete_store, "_root_store", None) or getattr(concrete_store, "_root", None)
+            if parent is None or parent is concrete_store:
+                break
+            concrete_store = parent
+        if isinstance(concrete_store, CorePostgresStore) and not hasattr(concrete_store, "credential_isolation"):
+            raise ValueError(
+                "raw kernel PostgreSQL stores cannot be used as a runtime entry point; use session.postgres.PostgresStore"
+            )
         bound_tenant = getattr(self._root_store, "tenant_id", None)
         if tenant_id is None:
             if store is None:
@@ -81,7 +163,13 @@ class SessionDriver:
                 raise ValueError("tenant_id is required for a session store without a tenant binding")
         if not isinstance(tenant_id, str) or not tenant_id:
             raise ValueError("tenant_id must be a non-empty string")
+        credential_tenant = getattr(self._root_store, "credential_tenant_id", None)
+        if credential_tenant is not None and credential_tenant != tenant_id:
+            raise ValueError("session tenant must match the verified PostgreSQL tenant login")
         self.tenant_id = tenant_id
+        self.credential_isolation = bool(
+            getattr(self._root_store, "credential_isolation", False) and credential_tenant == tenant_id
+        )
         self.store = self._root_store if bound_tenant == self.tenant_id else self._root_store.for_tenant(self.tenant_id)
         bound_provider = content_key_provider_for(self._root_store)
         self.uses_development_content_key_provider = content_key_provider is None and bound_provider is None
@@ -127,36 +215,91 @@ class SessionDriver:
         self._close_callbacks.append(callback)
         _STORE_CLOSERS.setdefault(self._root_store, []).append(callback)
 
-    def _bound_actor(
+    def _bound_principal(
         self,
-        actor: dict[str, Any] | None,
+        principal: PrincipalInput | None,
         *,
         subject_id: str,
         writer: SessionContentWriter,
     ) -> dict[str, Any]:
+        if principal is None:
+            bound, _ = writer.service_principal(subject_id)
+            return bound
+        if not isinstance(principal, Mapping):
+            raise ValueError("session creation requires a host ingress principal mapping")
+        return _ingress_principal(principal, tenant_id=self.tenant_id)
+
+    def _persisted_actor(
+        self,
+        actor: Principal | Mapping[str, Any],
+        *,
+        writer: SessionContentWriter,
+        input_id: str | None,
+    ) -> tuple[dict[str, Any], ContentRef]:
+        payload = actor.to_dict() if isinstance(actor, Principal) else Principal.from_dict(actor).to_dict()
+        _principal_identity(payload, tenant_id=self.tenant_id)
+        ref = ContentRef.from_dict(payload["attributes"])
+        verified: ContentRef | None = None
+        if input_id is not None:
+            with suppress(ContentUnavailable):
+                verified = writer.assert_input(input_id, ref, INPUT_ACTOR_ATTRIBUTES)
+        if verified is None:
+            try:
+                verified = writer.assert_record(1, ref, SESSION_PRINCIPAL_ATTRIBUTES)
+            except ContentUnavailable as exc:
+                raise ValueError("persisted actor attributes require a target-session owner link") from exc
+        copied = writer.copy_json_from(writer, verified)
+        return payload | {"attributes": copied.to_dict()}, copied
+
+    def _bound_actor(
+        self,
+        actor: PrincipalInput | None,
+        *,
+        subject_id: str,
+        writer: SessionContentWriter,
+        input_id: str | None = None,
+        persisted: bool = False,
+    ) -> tuple[dict[str, Any], ContentRef]:
         if actor is None:
-            principal, _ = writer.service_principal(subject_id)
-            return principal
-        if not isinstance(actor, dict) or actor.get("tenant_id") != self.tenant_id:
-            raise ValueError("input actor must use the session tenant")
-        attributes = actor.get("attributes")
-        if not isinstance(attributes, dict):
-            raise ValueError("input actor attributes require a ContentRef")
-        ContentRef.from_dict(attributes)
-        return actor
+            principal, attributes = writer.service_principal(subject_id)
+            return principal, attributes
+        persisted_actor = _persisted_principal(actor)
+        if persisted or persisted_actor is not None:
+            return self._persisted_actor(persisted_actor or actor, writer=writer, input_id=input_id)
+        if not isinstance(actor, Mapping):
+            raise TypeError("input actor must be a Principal or plaintext ingress mapping")
+        principal = _ingress_principal(actor, tenant_id=self.tenant_id)
+        ref = writer.put_json(principal["attributes"])
+        return principal | {"attributes": ref.to_dict()}, ref
 
     def _prepare_item(self, sid: str, item: InboxItem, writer: SessionContentWriter) -> InboxItem:
         return declare_input_content(writer, item).item
 
-    def create(self, sid: str, workspace: str, attributes: dict[str, Any] | None = None) -> None:
+    def _session_principal(self, sid: str) -> Principal:
+        page = self.store.read(sid, limit=1)
+        if not page.records:
+            raise Conflict("session principal is unavailable")
+        principal = Principal.from_dict(page.records[0].record.payload["principal"])
+        if principal.tenant_id != self.tenant_id:
+            raise Conflict("session principal belongs to another tenant")
+        return principal
+
+    def create(
+        self,
+        sid: str,
+        workspace: str,
+        attributes: dict[str, Any] | None = None,
+        *,
+        principal: PrincipalInput | None = None,
+    ) -> None:
         with self.store.atomic() as tx:
             writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
 
             def session_spec(content: SessionContentWriter) -> SessionSpec:
-                principal, _ = content.service_principal("local")
+                bound_principal = self._bound_principal(principal, subject_id="local", writer=content)
                 created = publish_session_created_content(
                     content,
-                    principal=principal,
+                    principal=bound_principal,
                     workspace=str(workspace),
                     attributes=attributes or {},
                 )
@@ -236,7 +379,7 @@ class SessionDriver:
         task: AgentTask | None = None,
         consumer: str = "events",
         autostart: bool = True,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ) -> RunHandle:
         state, _, _ = self.store.read_state(sid)
@@ -292,7 +435,7 @@ class SessionDriver:
         sid: str,
         item: InboxItem,
         *,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ):
         with self.store.atomic() as tx:
@@ -310,15 +453,29 @@ class SessionDriver:
         sid: str,
         item: InboxItem,
         *,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ):
         writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
         item = self._prepare_item(sid, item, writer)
-        bound_actor = self._bound_actor(actor or item.actor, subject_id=actor_subject_id, writer=writer)
+        persisted = False
+        actor = actor if actor is not None else item.actor
+        if actor is None:
+            actor = self._session_principal(sid)
+            persisted = True
+        elif actor is item.actor:
+            persisted = True
+        bound_actor, actor_attributes = self._bound_actor(
+            actor,
+            subject_id=actor_subject_id,
+            writer=writer,
+            input_id=item.input_id,
+            persisted=persisted,
+        )
         item = replace(item, actor=bound_actor)
         receipt = tx.push(sid, item)
         link_declared_input_content(writer, item)
+        writer.link_input_actor(item.input_id, actor_attributes)
         return receipt
 
     def read_input_content(
@@ -362,7 +519,7 @@ class SessionDriver:
         input_id: str,
         *,
         runtime: Runtime | None = None,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
     ):
         state, _, _ = self.store.read_state(sid)
         tid = None if action in {"archive", "close"} else state.active_turn_id
@@ -467,7 +624,7 @@ class SessionDriver:
         answer,
         input_id: str,
         *,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
     ):
         from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 
@@ -532,7 +689,7 @@ class SessionDriver:
         decision: ApprovalDecision | str,
         input_id: str,
         *,
-        actor: dict[str, Any] | None = None,
+        actor: PrincipalInput | None = None,
     ):
         if isinstance(decision, str):
             decision = ApprovalDecision.from_input(decision)

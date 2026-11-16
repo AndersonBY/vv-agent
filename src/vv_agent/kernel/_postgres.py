@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,11 +20,16 @@ if TYPE_CHECKING:
 
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
+SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v1"
+# Update this digest with intentional DDL changes and contract review.
+SCHEMA_FINGERPRINT = "f75229408d171de21a92b0ccc24d6806d5651af74084f5ae0b30141085c8c472"
 RLS_ISOLATION = "explicit-tenant-credentials"
 RLS_INSTALL_REASON = "The base DDL is unisolated. Runtime tenant access requires install_tenant_rls() and tenant_standalone()."
 RLS_SHARED_GATEWAY_REASON = (
     "Shared gateway context prevents accidental query leakage but does not provide tenant credential isolation."
 )
+# The schema accepts stable ASCII identifier kinds so newer S1 feature-level producers can coexist with
+# older workers. The active codec and producer remain strictly closed to their current PAYLOADS.
 
 # The owned-table set is also the schema-completeness boundary for initialization.
 SCHEMA_TABLES = frozenset(
@@ -54,6 +60,32 @@ class RLSInstallation:
     role: str
     tenant_id: str | None
     credential_isolation: bool
+
+
+RuntimeMode = Literal["tenant", "worker", "shared-gateway", "unbound-internal"]
+
+
+@dataclass(frozen=True)
+class RuntimeBinding:
+    """The credential and trust mode attached to one PostgreSQL store."""
+
+    mode: RuntimeMode
+    tenant_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"tenant", "worker", "shared-gateway", "unbound-internal"}:
+            raise ValueError("runtime binding mode is invalid")
+        if self.mode == "tenant":
+            _validate_name(self.tenant_id or "", "tenant_id")
+        elif self.tenant_id is not None:
+            raise ValueError("only tenant runtime bindings may carry a tenant_id")
+
+    @property
+    def credential_isolation(self) -> bool:
+        return self.mode == "tenant"
+
+
+UNBOUND_INTERNAL_BINDING = RuntimeBinding("unbound-internal")
 
 
 # Tenant RLS is deliberately absent here: safe installation requires generated per-tenant LOGIN
@@ -92,8 +124,8 @@ CREATE INDEX sk_session_deletion ON sk_session(tenant_id,deletion_state,session_
 CREATE TABLE sk_record (
     tenant_id text NOT NULL, session_id text NOT NULL, seq bigint NOT NULL CHECK (seq > 0),
     record_id text NOT NULL, schema_version text NOT NULL CHECK (schema_version = 'S1'),
-    kind text NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
-        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
+    kind text NOT NULL CHECK (char_length(kind) BETWEEN 1 AND 64
+        AND kind ~ '^[a-z]' AND kind !~ '[^a-z0-9_]'),
     turn_id text, operation_id text, attempt integer CHECK (attempt > 0), body bytea NOT NULL,
     digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
     chain_digest text NOT NULL CHECK (chain_digest ~ '^[0-9a-f]{64}$'), commit_id text NOT NULL,
@@ -109,8 +141,8 @@ CREATE INDEX sk_record_turn ON sk_record(tenant_id,session_id,turn_id,seq);
 CREATE TABLE sk_inbox (
     tenant_id text NOT NULL, session_id text NOT NULL, input_id text NOT NULL,
     input_seq bigint NOT NULL CHECK (input_seq > 0),
-    kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
-        'control','provider_evidence','model_selection')),
+    kind text NOT NULL CHECK (char_length(kind) BETWEEN 1 AND 64
+        AND kind ~ '^[a-z]' AND kind !~ '[^a-z0-9_]'),
     body bytea NOT NULL, digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
     admission_key_id text, admission_signature bytea,
     admission_signed_ms bigint CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
@@ -231,6 +263,325 @@ def _query_rows(
         return cursor.fetchall() if cursor.description is not None else []
 
 
+@contextmanager
+def _read_only_probe(connection: Connection[Any]) -> Iterator[None]:
+    """Run catalog probes without leaking a transaction on a caller-owned connection."""
+
+    from psycopg.pq import TransactionStatus
+
+    status = connection.info.transaction_status
+    if status == TransactionStatus.INTRANS:
+        yield
+        return
+    if status != TransactionStatus.IDLE:
+        raise RuntimeError(f"PostgreSQL connection is not available for a read-only probe: {status.name}")
+    if connection.autocommit:
+        yield
+        return
+    with connection.transaction():
+        yield
+
+
+def _probe_rows(
+    connection: Connection[Any], query: str, params: tuple[Any, ...] = (), *, binary: bool = False
+) -> list[tuple[Any, ...]]:
+    with _read_only_probe(connection):
+        return _query_rows(connection, query, params, binary=binary)
+
+
+def _schema_tables(connection: Connection[Any]) -> set[str]:
+    with _read_only_probe(connection):
+        return {
+            row[0]
+            for row in _probe_rows(
+                connection,
+                "SELECT c.relname FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f') "
+                "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'",
+            )
+        }
+
+
+def _rls_is_enabled(connection: Connection[Any]) -> bool:
+    with _read_only_probe(connection):
+        rows = _probe_rows(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' "
+            "AND (c.relrowsecurity OR c.relforcerowsecurity)) "
+            "OR EXISTS(SELECT 1 FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\')",
+        )
+        return bool(rows[0][0])
+
+
+def _catalog_manifest(connection: Connection[Any]) -> dict[str, list[tuple[Any, ...]]]:
+    """Return normalized catalog rows without OIDs, database names or scan order."""
+
+    with _read_only_probe(connection):
+        tables = _probe_rows(
+            connection,
+            "SELECT c.relname,c.relkind,c.relpersistence FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' ORDER BY c.relname",
+        )
+        columns = _probe_rows(
+            connection,
+            "SELECT c.relname,a.attnum,a.attname,format_type(a.atttypid,a.atttypmod),"
+            "a.attnotnull,pg_get_expr(d.adbin,d.adrelid,true),a.attidentity,a.attgenerated "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped "
+            "LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' ORDER BY c.relname,a.attnum",
+        )
+        constraints = _probe_rows(
+            connection,
+            "SELECT c.relname,con.conname,con.contype,pg_get_constraintdef(con.oid,true),"
+            "con.condeferrable,con.condeferred,con.convalidated "
+            "FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' "
+            "ORDER BY c.relname,con.conname",
+        )
+        indexes = _probe_rows(
+            connection,
+            "SELECT tbl.relname,idx.relname,i.indisunique,i.indisprimary,i.indisvalid,i.indisready,"
+            "i.indnkeyatts,i.indnatts,am.amname,pos,pg_get_indexdef(i.indexrelid,pos,true),"
+            "pg_get_expr(i.indpred,i.indrelid,true) "
+            "FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid "
+            "JOIN pg_class tbl ON tbl.oid=i.indrelid JOIN pg_namespace n ON n.oid=tbl.relnamespace "
+            "JOIN pg_am am ON am.oid=idx.relam "
+            "CROSS JOIN LATERAL generate_series(1,i.indnatts) pos "
+            "WHERE n.nspname=current_schema() AND tbl.relname LIKE 'sk\\_%%' ESCAPE '\\' "
+            "ORDER BY tbl.relname,idx.relname,pos",
+        )
+        triggers = _probe_rows(
+            connection,
+            "SELECT tbl.relname,t.tgname,t.tgenabled,t.tgtype,pg_get_triggerdef(t.oid,true),"
+            "pn.nspname,p.proname FROM pg_trigger t JOIN pg_class tbl ON tbl.oid=t.tgrelid "
+            "JOIN pg_namespace n ON n.oid=tbl.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid "
+            "JOIN pg_namespace pn ON pn.oid=p.pronamespace "
+            "WHERE n.nspname=current_schema() AND tbl.relname LIKE 'sk\\_%%' ESCAPE '\\' "
+            "AND NOT t.tgisinternal ORDER BY tbl.relname,t.tgname",
+        )
+        return {
+            "tables": tables,
+            "columns": columns,
+            "constraints": constraints,
+            "indexes": indexes,
+            "triggers": triggers,
+        }
+
+
+def _schema_fingerprint(connection: Connection[Any]) -> str:
+    with _read_only_probe(connection):
+        material = {"version": SCHEMA_FINGERPRINT_VERSION, "catalog": _catalog_manifest(connection)}
+        encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+
+def _role_binding(marker: str | None) -> RuntimeBinding | None:
+    if marker is None or not marker.startswith(_RLS_ROLE_MARKER_PREFIX + ":"):
+        return None
+    payload = marker.removeprefix(_RLS_ROLE_MARKER_PREFIX + ":")
+    mode, separator, encoded_tenant = payload.partition(":")
+    if mode == "tenant" and separator and encoded_tenant:
+        try:
+            tenant_id = base64.urlsafe_b64decode(encoded_tenant.encode("ascii")).decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if _role_marker("tenant", tenant_id) == marker:
+            return RuntimeBinding("tenant", tenant_id)
+    if mode in {"worker", "shared-gateway"} and not separator:
+        return RuntimeBinding(cast(RuntimeMode, mode))
+    return None
+
+
+def _runtime_role_state(connection: Connection[Any], role: str) -> tuple[Any, ...] | None:
+    with _read_only_probe(connection):
+        rows = _probe_rows(
+            connection,
+            "SELECT r.rolcanlogin,r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,"
+            "r.rolreplication,r.rolinherit,shobj_description(r.oid,'pg_authid'),"
+            "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid),"
+            "EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid AND c.relname=ANY(%s)),"
+            "EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspowner=r.oid AND n.nspname=current_schema()),"
+            "EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND d.datdba=r.oid),"
+            "has_schema_privilege(r.oid,current_schema(),'CREATE') "
+            "FROM pg_roles r WHERE r.rolname=%s",
+            (sorted(SCHEMA_TABLES), role),
+        )
+        return rows[0] if len(rows) == 1 else None
+
+
+def _verified_role_binding(connection: Connection[Any], expected: RuntimeBinding) -> RuntimeBinding:
+    with _read_only_probe(connection):
+        identity = _probe_rows(connection, "SELECT session_user,current_user")
+        if len(identity) != 1 or identity[0][0] != identity[0][1]:
+            raise ValueError("runtime requires session_user and current_user to match")
+        role = identity[0][0]
+        row = _runtime_role_state(connection, role)
+        if row is None:
+            raise ValueError("runtime role is unavailable")
+        if not row[0] or any(row[1:7]) or row[8] or row[9] or row[10] or row[11] or row[12]:
+            raise ValueError("runtime role must be a dedicated login without elevated memberships or DDL rights")
+        actual = _role_binding(row[7])
+        if actual is None or actual != expected:
+            raise ValueError(f"runtime role does not carry the expected {expected.mode} binding")
+        return actual
+
+
+def _read_runtime_binding(connection: Connection[Any], *, allow_unbound_internal: bool = True) -> RuntimeBinding:
+    with _read_only_probe(connection):
+        rows = _probe_rows(
+            connection,
+            "SELECT shobj_description(r.oid,'pg_authid') FROM pg_roles r WHERE r.rolname=current_user",
+        )
+        marker = rows[0][0] if len(rows) == 1 else None
+        if marker is not None and (marker == _RLS_ROLE_MARKER_PREFIX or marker.startswith(_RLS_ROLE_MARKER_PREFIX + ":")):
+            binding = _role_binding(marker)
+            if binding is None:
+                raise ValueError("runtime role has an unrecognized vv-agent RLS marker")
+            return _verified_role_binding(connection, binding)
+        if not allow_unbound_internal and _rls_is_enabled(connection):
+            raise ValueError("unbound PostgreSQL roles cannot open an RLS-enabled runtime")
+        return UNBOUND_INTERNAL_BINDING
+
+
+def _strip_pg_casts(expression: str) -> str:
+    """Remove PostgreSQL's display-only casts while preserving quoted literals."""
+
+    result: list[str] = []
+    index = 0
+    quoted = False
+    while index < len(expression):
+        char = expression[index]
+        if char == "'":
+            result.append(char)
+            if quoted and index + 1 < len(expression) and expression[index + 1] == "'":
+                result.append("'")
+                index += 2
+                continue
+            quoted = not quoted
+            index += 1
+            continue
+        if not quoted and expression.startswith("::", index):
+            index += 2
+            while index < len(expression) and (expression[index].isalnum() or expression[index] in {"_", '"'}):
+                index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _expected_policy_predicate(connection: Connection[Any], binding: RuntimeBinding, role: str) -> str:
+    from psycopg import sql
+
+    role_literal = sql.Literal(role).as_string(connection)
+    if binding.mode == "tenant":
+        assert binding.tenant_id is not None
+        tenant_literal = sql.Literal(binding.tenant_id).as_string(connection)
+        return (
+            f"SESSION_USER = {role_literal} AND tenant_id = {tenant_literal} "
+            f"AND current_setting('vv.tenant_id', true) = {tenant_literal}"
+        )
+    if binding.mode == "worker":
+        return f"SESSION_USER = {role_literal}"
+    if binding.mode == "shared-gateway":
+        return (
+            f"SESSION_USER = {role_literal} AND current_setting('vv.tenant_id', true) IS NOT NULL "
+            "AND tenant_id = current_setting('vv.tenant_id', true)"
+        )
+    raise ValueError("unbound internal stores do not install or verify RLS policies")
+
+
+def _rls_state_is_current(connection: Connection[Any]) -> bool:
+    with _read_only_probe(connection):
+        state = _probe_rows(
+            connection,
+            "SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' ORDER BY c.relname",
+        )
+        by_table = {row[0]: (bool(row[1]), bool(row[2])) for row in state}
+        settings_state = by_table.pop("sk_settings", None)
+        if settings_state != (False, False) or set(by_table) != SESSION_TABLES:
+            return False
+        flags = set(by_table.values())
+        if flags == {(False, False)}:
+            policies = _probe_rows(
+                connection,
+                "SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=current_schema() AND c.relname=ANY(%s)",
+                (sorted(SESSION_TABLES),),
+            )
+            return policies == [(0,)]
+        if flags != {(True, True)}:
+            return False
+
+        rows = _probe_rows(
+            connection,
+            "SELECT c.relname,p.polname,p.polcmd,p.polpermissive,"
+            "pg_get_expr(p.polqual,p.polrelid,true),pg_get_expr(p.polwithcheck,p.polrelid,true),"
+            "ARRAY(SELECT r.rolname FROM pg_roles r WHERE r.oid=ANY(p.polroles) ORDER BY r.rolname) "
+            "FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) ORDER BY c.relname,p.polname",
+            (sorted(SESSION_TABLES),),
+        )
+        if not rows:
+            return False
+        policy_roles = {role for row in rows for role in row[6]}
+        markers = dict(
+            _probe_rows(
+                connection,
+                "SELECT rolname,shobj_description(oid,'pg_authid') FROM pg_roles WHERE rolname=ANY(%s)",
+                (sorted(policy_roles),),
+            )
+        )
+        by_table_policies: dict[str, list[tuple[str, RuntimeBinding, str, str]]] = {table: [] for table in SESSION_TABLES}
+        for table, name, command, permissive, using, check, roles in rows:
+            if command != "*" or not permissive or not isinstance(roles, list) or len(roles) != 1:
+                return False
+            role = roles[0]
+            binding = _role_binding(markers.get(role))
+            if binding is None or name != _policy_name(role) or using is None or check is None:
+                return False
+            expected = _expected_policy_predicate(connection, binding, role)
+            if _strip_pg_casts(using) != expected or _strip_pg_casts(check) != expected:
+                return False
+            by_table_policies[table].append((role, binding, using, check))
+        expected_roles = {policy[0] for policy in by_table_policies[next(iter(SESSION_TABLES))]}
+        return bool(expected_roles) and all(
+            {policy[0] for policy in policies} == expected_roles for policies in by_table_policies.values()
+        )
+
+
+def _schema_is_current(connection: Connection[Any]) -> bool:
+    with _read_only_probe(connection):
+        if _schema_tables(connection) != SCHEMA_TABLES:
+            return False
+        if _schema_fingerprint(connection) != SCHEMA_FINGERPRINT:
+            return False
+        rows = _probe_rows(connection, "SELECT singleton,storage_major,write_level FROM sk_settings")
+        return (
+            len(rows) == 1
+            and rows[0][0] == 1
+            and rows[0][1] == STORAGE_MAJOR
+            and type(rows[0][2]) is int
+            and rows[0][2] >= 1
+            and _rls_state_is_current(connection)
+        )
+
+
 class PostgresStore(SQLStore):
     """A serialized connection; atomic() nests as a savepoint in host transactions."""
 
@@ -239,10 +590,36 @@ class PostgresStore(SQLStore):
     lock_clause = " FOR NO KEY UPDATE"
     clock_sql = CLOCK
 
-    def __init__(self, connection: Connection[Any], *, fold_factory: Callable[[], Fold]):
+    def __init__(
+        self,
+        connection: Connection[Any],
+        *,
+        fold_factory: Callable[[], Fold],
+        runtime_binding: RuntimeBinding | None = None,
+    ):
         super().__init__(fold_factory=fold_factory)
         self.connection = connection
         self._connection_lock = RLock()
+        binding = runtime_binding or _read_runtime_binding(connection)
+        if binding.mode == "tenant":
+            assert binding.tenant_id is not None
+            self.verify_tenant_connection(connection, binding.tenant_id)
+            self._tenant_id = binding.tenant_id
+        elif binding.mode in {"worker", "shared-gateway"}:
+            _verified_role_binding(connection, binding)
+            self._verify_bound_policy(connection, binding)
+        self._runtime_binding = binding
+        existing = _schema_tables(connection)
+        if existing and not _schema_is_current(connection):
+            raise ValueError("unsupported PostgreSQL session schema version")
+
+    @property
+    def runtime_binding(self) -> RuntimeBinding:
+        return getattr(self, "_runtime_binding", UNBOUND_INTERNAL_BINDING)
+
+    @property
+    def runtime_mode(self) -> RuntimeMode:
+        return self.runtime_binding.mode
 
     def heartbeat_store(self):
         from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -258,7 +635,17 @@ class PostgresStore(SQLStore):
         )
 
     def _heartbeat_connection(self, conninfo: str):
-        return PostgresStore.standalone(conninfo, fold_factory=self.fold_factory)
+        binding = self.runtime_binding
+        if binding.mode == "tenant":
+            assert binding.tenant_id is not None
+            manager = PostgresStore.tenant_standalone(conninfo, tenant_id=binding.tenant_id, fold_factory=self.fold_factory)
+        elif binding.mode == "worker":
+            manager = PostgresStore.worker_standalone(conninfo, fold_factory=self.fold_factory)
+        elif binding.mode == "shared-gateway":
+            manager = PostgresStore.shared_gateway_standalone(conninfo, fold_factory=self.fold_factory)
+        else:
+            manager = PostgresStore.standalone(conninfo, fold_factory=self.fold_factory)
+        return self._inherit_runtime_configuration(manager)
 
     @contextmanager
     def _bound_append(self, lease: Lease) -> Iterator[None]:
@@ -287,7 +674,32 @@ class PostgresStore(SQLStore):
     @contextmanager
     def standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold]) -> Iterator[PostgresStore]:
         with cls._connect(conninfo) as connection:
-            yield cls(connection, fold_factory=fold_factory)
+            binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+            yield cls(connection, fold_factory=fold_factory, runtime_binding=binding)
+
+    @classmethod
+    @contextmanager
+    def schema_admin_standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold]) -> Iterator[PostgresStore]:
+        """Open a trusted migration/admin connection for schema or runtime-role installation."""
+
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, fold_factory=fold_factory, runtime_binding=UNBOUND_INTERNAL_BINDING)
+
+    @classmethod
+    @contextmanager
+    def worker_standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold]) -> Iterator[PostgresStore]:
+        """Open a dedicated cross-tenant worker login without claiming tenant isolation."""
+
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, fold_factory=fold_factory, runtime_binding=RuntimeBinding("worker"))
+
+    @classmethod
+    @contextmanager
+    def shared_gateway_standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold]) -> Iterator[PostgresStore]:
+        """Open an explicitly weaker shared-gateway login without claiming tenant isolation."""
+
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, fold_factory=fold_factory, runtime_binding=RuntimeBinding("shared-gateway"))
 
     def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         with self._connection_lock:
@@ -315,15 +727,7 @@ class PostgresStore(SQLStore):
         return self._one("SELECT pg_current_xact_id()::text")[0]
 
     def _schema_tables(self) -> set[str]:
-        return {
-            row[0]
-            for row in self._rows(
-                "SELECT c.relname FROM pg_catalog.pg_class c "
-                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
-                "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'"
-            )
-        }
+        return _schema_tables(self.connection)
 
     def _install_runtime_role(
         self,
@@ -343,8 +747,8 @@ class PostgresStore(SQLStore):
         policy = _policy_name(role)
 
         with self._transaction():
-            if self._schema_tables() != SCHEMA_TABLES:
-                raise ValueError("PostgreSQL session schema must be installed before RLS")
+            if not _schema_is_current(self.connection):
+                raise ValueError("PostgreSQL current S1 session schema is required before RLS")
             schema = self._one("SELECT current_schema()")[0]
             if not isinstance(schema, str):
                 raise ValueError("PostgreSQL current schema is unavailable")
@@ -361,21 +765,10 @@ class PostgresStore(SQLStore):
                 )
                 self._execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(role), sql.Literal(marker)))
 
-            role_state = self._rows(
-                "SELECT r.rolcanlogin,r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,"
-                "r.rolreplication,r.rolinherit,"
-                "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid),"
-                "EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid AND c.relname=ANY(%s)),"
-                "EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspowner=r.oid AND n.nspname=current_schema()),"
-                "EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND d.datdba=r.oid),"
-                "has_schema_privilege(r.oid,current_schema(),'CREATE') "
-                "FROM pg_roles r WHERE r.rolname=%s",
-                (sorted(SCHEMA_TABLES), role),
-            )
-            if len(role_state) != 1:
+            row = _runtime_role_state(self.connection, role)
+            if row is None:
                 raise ValueError("runtime role is unavailable")
-            row = role_state[0]
-            if not row[0] or any(row[1:7]) or row[7] or row[8] or row[9] or row[10] or row[11]:
+            if not row[0] or any(row[1:7]) or row[8] or row[9] or row[10] or row[11] or row[12]:
                 raise ValueError("runtime role must be a dedicated login without elevated memberships or DDL rights")
 
             tenant_predicate = None
@@ -457,54 +850,29 @@ class PostgresStore(SQLStore):
         """Reject any runtime login that cannot be trusted for the requested tenant."""
 
         _validate_name(tenant_id, "tenant_id")
-        identity = _query_rows(connection, "SELECT session_user,current_user")
-        if len(identity) != 1 or identity[0][0] != identity[0][1]:
-            raise ValueError("tenant runtime requires session_user and current_user to match")
-        role = identity[0][0]
-        state = _query_rows(
-            connection,
-            "SELECT r.rolcanlogin,r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,"
-            "r.rolreplication,r.rolinherit,shobj_description(r.oid,'pg_authid'),"
-            "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid),"
-            "EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid AND c.relname=ANY(%s)),"
-            "EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspowner=r.oid AND n.nspname=current_schema()),"
-            "EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND d.datdba=r.oid),"
-            "has_schema_privilege(r.oid,current_schema(),'CREATE') "
-            "FROM pg_roles r WHERE r.rolname=%s",
-            (sorted(SCHEMA_TABLES), role),
-        )
-        if len(state) != 1:
-            raise ValueError("tenant runtime role is unavailable")
-        row = state[0]
-        if (
-            not row[0]
-            or any(row[1:7])
-            or row[7] != _role_marker("tenant", tenant_id)
-            or row[8]
-            or row[9]
-            or row[10]
-            or row[11]
-            or row[12]
-        ):
-            raise ValueError("tenant runtime role is not a safe credential-bound login for this tenant")
-        policy = _policy_name(role)
-        policies = _query_rows(
-            connection,
-            "SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
-            "JOIN pg_namespace n ON n.oid=c.relnamespace "
-            "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) AND p.polname=%s "
-            "AND (SELECT oid FROM pg_roles WHERE rolname=session_user)=ANY(p.polroles)",
-            (sorted(SESSION_TABLES), policy),
-        )
-        guarded = _query_rows(
-            connection,
-            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-            "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) "
-            "AND c.relrowsecurity AND c.relforcerowsecurity",
-            (sorted(SESSION_TABLES),),
-        )
-        if policies != [(len(SESSION_TABLES),)] or guarded != [(len(SESSION_TABLES),)]:
-            raise ValueError("tenant runtime policies are not completely forced")
+        binding = RuntimeBinding("tenant", tenant_id)
+        try:
+            _verified_role_binding(connection, binding)
+            if not _schema_is_current(connection):
+                raise ValueError("current S1 schema and RLS policies are incomplete")
+            cls._verify_bound_policy(connection, binding)
+        except ValueError as exc:
+            raise ValueError(f"tenant runtime role is not a safe credential-bound login for this tenant: {exc}") from exc
+
+    @staticmethod
+    def _verify_bound_policy(connection: Connection[Any], binding: RuntimeBinding) -> None:
+        with _read_only_probe(connection):
+            role = _probe_rows(connection, "SELECT current_user")[0][0]
+            rows = _probe_rows(
+                connection,
+                "SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=current_schema() AND c.relname=ANY(%s) AND p.polname=%s "
+                "AND (SELECT oid FROM pg_roles WHERE rolname=session_user)=ANY(p.polroles)",
+                (sorted(SESSION_TABLES), _policy_name(role)),
+            )
+            if rows != [(len(SESSION_TABLES),)]:
+                raise ValueError(f"{binding.mode} runtime policies are not completely forced")
 
     @classmethod
     @contextmanager
@@ -518,20 +886,19 @@ class PostgresStore(SQLStore):
         """Open and verify a dedicated tenant LOGIN; callers still set transaction-local context."""
 
         with cls._connect(conninfo) as connection:
-            cls.verify_tenant_connection(connection, tenant_id)
-            yield cls(connection, fold_factory=fold_factory)
+            yield cls(connection, fold_factory=fold_factory, runtime_binding=RuntimeBinding("tenant", tenant_id))
 
     def install_schema(self) -> None:
         with self._transaction():
-            existing = self._schema_tables()
+            if _schema_is_current(self.connection):
+                return
+            existing = _schema_tables(self.connection)
             if existing:
-                if existing == SCHEMA_TABLES:
-                    settings = self._rows("SELECT singleton,storage_major,write_level FROM sk_settings")
-                    if settings == [(1, STORAGE_MAJOR, 1)]:
-                        return
                 raise ValueError("unsupported PostgreSQL session schema version")
             self._rows(DDL)
             self._rows(
                 "INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,%s,1)",
                 (STORAGE_MAJOR,),
             )
+            if not _schema_is_current(self.connection):
+                raise ValueError("PostgreSQL session schema fingerprint does not match this runtime")

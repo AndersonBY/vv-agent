@@ -24,6 +24,14 @@ Every entry point runs through the session kernel. An ordinary `Runner` run
 uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
 supply their own store.
 
+Durable sessions carry an immutable `Principal` in `session_created` and an
+`actor` on each inbox input. The App Server obtains that identity from the
+trusted `AppServerHost.resolve_principal` hook; wire parameters never supply
+identity. The session driver validates tenant binding and content ownership
+before publishing either value. The hydrated principal is available to
+`ToolContext` and `LlmRequest` as internal metadata for policy, routing and
+audit, and is excluded from prompts and provider request bodies.
+
 `kernel/_drive.py` owns lease acquisition, factory admission, the drive loop and
 idle/release ordering. `session/_drive_phase.py` constructs the SDK runtime,
 heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;

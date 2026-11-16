@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -12,7 +12,11 @@ from vv_agent.kernel._content import (
     CHILD_RESULT,
     INPUT_ACTOR_ATTRIBUTES,
     SESSION_ATTRIBUTES,
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    SESSION_WORKSPACE,
     ContentRef,
+    ContentSessionWriter,
+    ContentUnavailable,
     Principal,
 )
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
@@ -45,6 +49,41 @@ def service_principal(tenant_id: str, subject_id: str, *, attributes: ContentRef
         subject_kind="service",
         attributes=ref,
     ).to_dict()
+
+
+def _bound_actor(
+    writer: ContentSessionWriter,
+    actor: Principal | Mapping[str, Any] | None,
+    *,
+    subject_id: str,
+) -> tuple[dict[str, Any], ContentRef]:
+    if actor is None:
+        return writer.service_principal(subject_id)
+    persisted = isinstance(actor, Principal)
+    payload = actor.to_dict() if persisted else dict(actor)
+    if set(payload) != {"tenant_id", "subject_id", "subject_kind", "attributes"}:
+        raise ValueError("input actor must be a complete Principal")
+    if payload["tenant_id"] != writer.tenant_id:
+        raise ValueError("input actor must use the session tenant")
+    if not isinstance(payload["subject_id"], str) or not payload["subject_id"]:
+        raise ValueError("input actor subject_id must be a non-empty string")
+    if payload["subject_kind"] not in {"user", "service", "agent"}:
+        raise ValueError("input actor subject_kind must be user, service or agent")
+    attributes = payload["attributes"]
+    if persisted:
+        ref = actor.attributes
+        try:
+            verified = writer.assert_record(1, ref, SESSION_PRINCIPAL_ATTRIBUTES)
+        except ContentUnavailable as exc:
+            raise ValueError("persisted child actor attributes require the parent principal owner link") from exc
+        ref = writer.copy_json_from(writer, verified)
+    elif isinstance(attributes, ContentRef):
+        raise ValueError("host ingress actor attributes must be a plaintext mapping")
+    elif isinstance(attributes, Mapping):
+        ref = writer.put_json(dict(attributes))
+    else:
+        raise ValueError("host ingress actor attributes must be a plaintext mapping")
+    return payload | {"attributes": ref.to_dict()}, ref
 
 
 def _store_tenant_id(store: SessionStore) -> str:
@@ -129,6 +168,8 @@ def cancel_children(store: SessionStore, tx: SessionTx, state: ExecutionState, s
 
 
 def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: int) -> dict[str, Any]:
+    if child.spec.parent_session_id not in {None, plan.session_id}:
+        raise ValueError("child spec parent must match the admitting parent")
     handle = {
         "kind": "child",
         "session_id": child.spec.session_id,
@@ -153,15 +194,17 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
     child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=child.spec.session_id)
 
     def child_spec(writer):
-        principal_attributes = parent_writer.get_json(principal.attributes)
-        child_principal_attributes = writer.put_json(principal_attributes)
-        child_principal = service_principal(
-            tenant_id,
-            principal.subject_id,
+        source_principal_attributes = parent_writer.assert_record(1, principal.attributes, SESSION_PRINCIPAL_ATTRIBUTES)
+        child_principal_attributes = writer.copy_json_from(parent_writer, source_principal_attributes)
+        child_principal = Principal(
+            tenant_id=tenant_id,
+            subject_id=principal.subject_id,
+            subject_kind=principal.subject_kind,
             attributes=child_principal_attributes,
-        )
+        ).to_dict()
         if is_content_ref(child.spec.workspace):
-            workspace_ref = writer.copy_json_from(parent_writer, child.spec.workspace)
+            source_workspace = parent_writer.assert_record(1, child.spec.workspace, SESSION_WORKSPACE)
+            workspace_ref = writer.copy_json_from(parent_writer, source_workspace)
         else:
             workspace_ref = writer.put_json(child.spec.workspace)
         return replace(
@@ -224,7 +267,12 @@ def completion_input(
 
 
 def child_delivery(
-    store: SessionStore, tx: SessionTx, session_id: str, *, hook: Callable[[str], None] = lambda _point: None
+    store: SessionStore,
+    tx: SessionTx,
+    session_id: str,
+    *,
+    hook: Callable[[str], None] = lambda _point: None,
+    actor: Principal | Mapping[str, Any] | None = None,
 ) -> int:
     """Push and ack on one transaction; the caller owns commit and optional host writes."""
     batch = tx.consumer_batch(session_id, "child_delivery")
@@ -246,7 +294,7 @@ def child_delivery(
     else:
         attributes = attributes_ref
     handle = attributes["child_handle"]
-    actor, actor_attributes = parent_writer.service_principal("child-delivery")
+    result_actor, actor_attributes = _bound_actor(parent_writer, actor, subject_id="child-delivery")
     for terminal in batch.records:
         if terminal.record.kind == "turn_ended" and terminal.record.turn_id == handle["turn_id"]:
             hook("before_parent_inbox")
@@ -258,7 +306,7 @@ def child_delivery(
                     raise ValueError("child terminal result requires a ContentRef")
                 child_writer.assert_record(terminal.seq, result, "turn_ended_result")
                 result_ref = parent_writer.copy_json_from(child_writer, result)
-            item = completion_input(handle, terminal, actor=actor, result_ref=result_ref)
+            item = completion_input(handle, terminal, actor=result_actor, result_ref=result_ref)
             tx.push(parent_id, item)
             if result_ref is not None:
                 parent_writer.link_child_result(item.input_id, result_ref)
