@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Any, Protocol
 
-from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
 from vv_agent.kernel._content import (
     ContentBindingMismatch,
     ForgetTombstone,
@@ -136,8 +136,10 @@ def _initial_chain_digest(tenant_id: str, session_id: str) -> str:
 
 
 def _digest_bytes(value: str, name: str) -> bytes:
-    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise LedgerIntegrityError(f"{name} must be a lowercase SHA-256 digest")
+    try:
+        validate_sha256(value, name)
+    except ValueError as exc:
+        raise LedgerIntegrityError(f"{name} must be a lowercase SHA-256 digest") from exc
     return bytes.fromhex(value)
 
 
