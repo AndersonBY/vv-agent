@@ -21,6 +21,7 @@ from vv_agent.kernel._content import (
     Classification,
     ContentLabels,
     ContentRef,
+    ContentStoreError,
     ContentUnavailable,
     KeyDestroyStatus,
     Principal,
@@ -181,6 +182,38 @@ def _delete_session_from_other_connection(
             deletion.forget_session(tenant_id, SESSION, actor=actor)
         else:
             deletion.purge_session(tenant_id, SESSION, actor=actor)
+
+
+def _change_session_key_state_from_other_connection(
+    *,
+    path: Path,
+    tenant_id: str,
+    key_id: str,
+) -> None:
+    with SQLiteStore.standalone(str(path)) as mutating_store, mutating_store.atomic():
+        mutating_store._rows(
+            "UPDATE sk_session_key SET state='destroying' WHERE tenant_id=%s AND session_id=%s AND key_id=%s AND state='active'",
+            (tenant_id, SESSION, key_id),
+        )
+
+
+def _change_content_identity_from_other_connection(
+    *,
+    path: Path,
+    tenant_id: str,
+    content_id: str,
+) -> None:
+    with SQLiteStore.standalone(str(path)) as mutating_store, mutating_store.atomic():
+        row = mutating_store._one(
+            "SELECT nonce,size FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (tenant_id, SESSION, content_id),
+        )
+        assert row is not None
+        nonce = bytes(row[0])
+        mutating_store._rows(
+            "UPDATE sk_content SET nonce=%s,mac=%s,size=%s,ciphertext=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+            (nonce[:-1] + bytes([nonce[-1] ^ 1]), "0" * 64, row[1] + 1, b"tampered-ciphertext", tenant_id, SESSION, content_id),
+        )
 
 
 def _track_snapshots(reader: DurableContentReader, provider: CountingProvider, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -605,6 +638,115 @@ def test_get_rechecks_lifecycle_after_decrypt_before_caching_plaintext(
         assert frame._data_key is None
         with pytest.raises(ContentUnavailable):
             frame.get(store.tenant_id, SESSION, ref)
+
+
+@pytest.mark.sqlite_file
+def test_direct_get_reads_live_content_before_deletion(content_setup) -> None:
+    store, _wrapped, reader, _provider, _cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "direct-live"}})["request.messages[0]"]
+    durable = reader._store._durable
+    assert isinstance(durable, CoreSQLContentStore)
+
+    assert durable.get(store.tenant_id, SESSION, ref) == b'{"body":"direct-live"}'
+
+
+@pytest.mark.sqlite_file
+@pytest.mark.parametrize("deletion_operation", ("forget", "purge"))
+def test_direct_get_rejects_session_deleted_during_decrypt(
+    content_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deletion_operation: str,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "direct-race"}})["request.messages[0]"]
+    durable = reader._store._durable
+    assert isinstance(durable, CoreSQLContentStore)
+    original_decrypt = cipher.decrypt
+
+    def decrypt_then_delete(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        assert provider.snapshot_depth == 0, "SQL snapshots must not cover decryption"
+        plaintext = original_decrypt(key, nonce, ciphertext, aad)
+        _delete_session_from_other_connection(
+            path=tmp_path / "session.sqlite",
+            tenant_id=store.tenant_id,
+            provider=provider,
+            cipher=cipher,
+            ref=ref,
+            operation=deletion_operation,
+        )
+        return plaintext
+
+    monkeypatch.setattr(cipher, "decrypt", decrypt_then_delete)
+    _track_snapshots(reader, provider, monkeypatch)
+    try:
+        plaintext = durable.get(store.tenant_id, SESSION, ref)
+    except ContentUnavailable:
+        pass
+    else:
+        pytest.fail(f"direct get returned plaintext after {deletion_operation} during decrypt: {plaintext!r}")
+
+    assert not hasattr(durable, "_plaintext")
+    assert not hasattr(durable, "_data_key")
+    with pytest.raises(ContentUnavailable):
+        durable.get(store.tenant_id, SESSION, ref)
+
+
+@pytest.mark.sqlite_file
+def test_direct_get_rejects_key_destroy_during_decrypt(
+    content_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "direct-key"}})["request.messages[0]"]
+    durable = reader._store._durable
+    assert isinstance(durable, CoreSQLContentStore)
+    original_decrypt = cipher.decrypt
+
+    def decrypt_then_destroy_key(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        assert provider.snapshot_depth == 0, "SQL snapshots must not cover decryption"
+        plaintext = original_decrypt(key, nonce, ciphertext, aad)
+        assert provider.destroy(store.tenant_id, ref.key_id).accepted
+        _change_session_key_state_from_other_connection(
+            path=tmp_path / "session.sqlite",
+            tenant_id=store.tenant_id,
+            key_id=ref.key_id,
+        )
+        return plaintext
+
+    monkeypatch.setattr(cipher, "decrypt", decrypt_then_destroy_key)
+    _track_snapshots(reader, provider, monkeypatch)
+    with pytest.raises(BackendKeyUnavailable):
+        durable.get(store.tenant_id, SESSION, ref)
+
+
+@pytest.mark.sqlite_file
+def test_direct_get_rejects_content_change_during_decrypt(
+    content_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "direct-content"}})["request.messages[0]"]
+    durable = reader._store._durable
+    assert isinstance(durable, CoreSQLContentStore)
+    original_decrypt = cipher.decrypt
+
+    def decrypt_then_change_content(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        assert provider.snapshot_depth == 0, "SQL snapshots must not cover decryption"
+        plaintext = original_decrypt(key, nonce, ciphertext, aad)
+        _change_content_identity_from_other_connection(
+            path=tmp_path / "session.sqlite",
+            tenant_id=store.tenant_id,
+            content_id=ref.content_id,
+        )
+        return plaintext
+
+    monkeypatch.setattr(cipher, "decrypt", decrypt_then_change_content)
+    _track_snapshots(reader, provider, monkeypatch)
+    with pytest.raises(ContentStoreError):
+        durable.get(store.tenant_id, SESSION, ref)
 
 
 def test_frame_and_direct_read_agree_empty_ciphertext_is_integrity_failure(content_setup, store_backend: str) -> None:

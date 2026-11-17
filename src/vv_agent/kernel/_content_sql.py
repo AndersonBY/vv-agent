@@ -526,6 +526,31 @@ class CoreSQLContentStore:
             raise KeyUnavailable("session data key has an invalid size")
         return data_key
 
+    def _bound_content(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+    ) -> tuple[SessionKeyRecord, tuple[Any, ...], ContentRef, ContentState, bytes, bytes]:
+        self._require_live(tenant_id, session_id)
+        key = self._active_session_key(tenant_id, session_id)
+        row = self._backend.fetchone(
+            f"SELECT {_CONTENT_COLUMNS} FROM sk_content WHERE tenant_id={{p}} AND session_id={{p}} AND content_id={{p}}",
+            (tenant_id, session_id, ref.content_id),
+        )
+        if row is None:
+            raise ContentUnavailable("content is unavailable")
+        stored, state, nonce, ciphertext, locator = _content_from_row(row)
+        if stored.key_id != key.key_id or ref.key_id != key.key_id:
+            raise ContentBindingMismatch("content key does not belong to the session binding")
+        if stored != ref:
+            raise ContentIntegrityError("content metadata does not match its reference")
+        if state is ContentState.GC_PENDING or locator is not None or ciphertext is None:
+            raise ContentUnavailable("content ciphertext is unavailable")
+        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
+            raise ContentIntegrityError("content metadata or ciphertext is malformed")
+        return key, row, stored, state, nonce, ciphertext
+
     @contextmanager
     def _read_frame(
         self,
@@ -786,23 +811,15 @@ class CoreSQLContentStore:
         session_id = _text(session_id, "session_id")
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
-        self._require_live(tenant_id, session_id)
-        key = self._active_session_key(tenant_id, session_id)
-        row = self._backend.fetchone(
-            f"SELECT {_CONTENT_COLUMNS} FROM sk_content WHERE tenant_id={{p}} AND session_id={{p}} AND content_id={{p}}",
-            (tenant_id, session_id, ref.content_id),
-        )
-        if row is None:
-            raise ContentUnavailable("content is unavailable")
-        stored, state, nonce, ciphertext, locator = _content_from_row(row)
-        if stored.key_id != key.key_id or ref.key_id != key.key_id:
-            raise ContentBindingMismatch("content key does not belong to the session binding")
-        if stored != ref:
-            raise ContentIntegrityError("content metadata does not match its reference")
-        if state is ContentState.GC_PENDING or locator is not None or ciphertext is None:
-            raise ContentUnavailable("content ciphertext is unavailable")
-        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
-            raise ContentIntegrityError("content metadata or ciphertext is malformed")
+        read_snapshot = getattr(self._backend, "read_snapshot", None)
+        if not callable(read_snapshot):
+            read_snapshot = getattr(getattr(self._backend, "_backend", None), "read_snapshot", None)
+        if not callable(read_snapshot):
+            raise RuntimeError("content backend does not provide a read snapshot")
+
+        with read_snapshot():
+            binding = self._bound_content(tenant_id, session_id, ref)
+            key, _row, stored, _state, nonce, ciphertext = binding
 
         data_key = self._unwrap(tenant_id, session_id, key)
         plaintext = self._cipher.decrypt(
@@ -824,6 +841,10 @@ class CoreSQLContentStore:
         actual_mac = _content_mac(data_key, tenant_id, session_id, plaintext)
         if not hmac.compare_digest(actual_mac, ref.mac):
             raise ContentIntegrityError("content failed HMAC authentication")
+        with read_snapshot():
+            current = self._bound_content(tenant_id, session_id, ref)
+            if current != binding:
+                raise ContentIntegrityError("content changed during decryption")
         return plaintext
 
     def export_content_lines(

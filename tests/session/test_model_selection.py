@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from vv_agent import Agent
 from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import publish_session_created_content
@@ -20,6 +21,7 @@ from vv_agent.session.kernel import _Driver, _Scope, drive
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
 from vv_agent.session.records import InboxItem, RecordError, SessionSpec
 from vv_agent.session.result import project_result
+from vv_agent.session.runtime import static_model_selection_requirements, static_session_requirements
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
@@ -1032,3 +1034,117 @@ def test_level_one_selection_does_not_inherit_level_two_bootstrap_capabilities(s
     routing = routing_requirements(store)
     assert routing.handler_version == "handler/h1"
     assert routing.capabilities == ("tool:user",)
+
+
+@pytest.mark.capability("model-selection")
+def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store, tmp_path):
+    from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
+    from vv_agent.model import resolve_model_selection
+    from vv_agent.run_config import RunConfig
+
+    calls = []
+    resolved_requests = []
+    default_provider = ScriptedModelProvider.from_callback(
+        "default-backend",
+        "default",
+        lambda request: calls.append(request.model) or LLMResponse("default client"),
+    )
+    selected_provider = ScriptedModelProvider.from_callback(
+        "selected-backend",
+        "selected",
+        lambda request: calls.append(request.model) or LLMResponse("selected client"),
+    )
+    selection = {"model": "selected", "route": {"backend_type": "selected-backend"}}
+
+    class RoutedHost(DefaultAppServerHost):
+        def resolve_model(self, request):
+            resolved_requests.append(request)
+            if request["model"] == "default" and request.get("route", {}) == {}:
+                resolved = default_provider.resolve(ModelRef.named("default"))
+                return default_provider.client(resolved), resolved
+            if request["model"] == "selected" and request.get("route") == selection["route"]:
+                resolved = selected_provider.resolve(ModelRef.named("selected"))
+                return selected_provider.client(resolved), resolved
+            raise ValueError("unknown model or route")
+
+    agent = Agent("test", "Answer.", model="default")
+    config = RunConfig(model_provider=default_provider, workspace=tmp_path)
+    host = RoutedHost(agent=agent, run_config=config)
+    bootstrap = static_session_requirements(agent, config, level=2, handler_version="1")
+    expected = static_model_selection_requirements(
+        selection,
+        resolve_model=host.resolve_model,
+        handler_version="1",
+    )
+    default_selection = static_model_selection_requirements(
+        {"model": "selected", "route": {}},
+        resolve_model=lambda request: resolve_model_selection(default_provider, request),
+        handler_version="1",
+    )
+    assert expected.capabilities != default_selection.capabilities
+    capabilities = tuple(sorted(set(bootstrap.capabilities) | set(expected.capabilities)))
+    store.configure_worker(
+        level=2,
+        handler_versions=("1",),
+        capabilities=capabilities,
+    )
+
+    transport = ChannelTransport(connection_id="test", outbound_capacity=10_000)
+    server = AppServer(transport=transport, store=store, host=host)
+
+    def send(identity, method, params):
+        server.processor.process_message("test", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params})
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    try:
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        server.kernel._next_session_requirements = bootstrap
+        server.kernel.create(
+            "thread",
+            str(tmp_path),
+            {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}},
+        )
+        server.kernel._ensure_static_worker_support(level=2, capabilities=capabilities)
+        assert "result" in send(0, "initialize", {"clientInfo": {"name": "test"}})
+        first = send(
+            1,
+            "turn/start",
+            {"threadId": "thread", "inputId": "first", "expectedTurnId": None, "input": [{"type": "text", "text": "first"}]},
+        )
+        assert "result" in first
+        server.run_adapter.join()
+
+        with pytest.raises(ValueError, match="empty route"):
+            resolve_model_selection(default_provider, selection)
+        selected = send(
+            2,
+            "thread/model/select",
+            {"threadId": "thread", "inputId": "select", "selection": selection},
+        )
+        assert "result" in selected, selected
+        stored = store.read_input("thread", "select")
+        assert stored is not None
+        assert stored.item.feature_level == 2
+        assert stored.item.requirements == expected.to_dict()
+
+        second = send(
+            3,
+            "turn/start",
+            {
+                "threadId": "thread",
+                "inputId": "second",
+                "expectedTurnId": first["result"]["turnId"],
+                "input": [{"type": "text", "text": "second"}],
+            },
+        )
+        assert "result" in second
+        server.run_adapter.join()
+        thread = server.store.read_thread("thread")
+        assert thread.turns[-1].result.get("finalOutput") == "selected client", thread.turns[-1].result
+        assert calls == ["default", "selected"]
+        assert any(request["model"] == "selected" and request.get("route") == selection["route"] for request in resolved_requests)
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()

@@ -2377,12 +2377,18 @@ class SessionDriver:
                     capabilities=(),
                 )
             else:
-                provider = registration.config.model_provider
-                if provider is None:
-                    raise Conflict("model selection requires the trusted session model provider")
+                resolve_model = self.model_resolver
+                if resolve_model is None:
+                    provider = registration.config.model_provider
+                    if provider is None:
+                        raise Conflict("model selection requires the trusted session model provider")
+
+                    def resolve_model(value):
+                        return resolve_model_selection(provider, value)
+
                 requirements = static_model_selection_requirements(
                     selection,
-                    resolve_model=lambda value: resolve_model_selection(provider, value),
+                    resolve_model=resolve_model,
                     handler_version=session_requirements.handler_version or registration.handler_version,
                 )
         else:
