@@ -10,6 +10,8 @@ import pytest
 from support.s1_fixture_values import append_fixture_records, clear_fixture_state_cache, read_fixture_state
 
 from vv_agent.events import DiagnosticEvent
+from vv_agent.kernel._content_runtime import bind_content_runtime
+from vv_agent.kernel._content_runtime import wrap_session_content_store as wrap_bound_content_store
 from vv_agent.session.context import project_context
 from vv_agent.session.projection import project_records
 from vv_agent.session.records import Record, digest
@@ -25,7 +27,18 @@ from .fold_history import (
     parse_logical_record,
     persist_history,
 )
-from .helpers import create_fixture_session, wrap_fixture_store
+from .helpers import create_fixture_session, fixture_key_provider, wrap_fixture_store
+from .test_content_read_frame import CountingCipher
+
+
+class RecordingCipher(CountingCipher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ciphertexts: list[bytes] = []
+
+    def decrypt(self, key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        self.ciphertexts.append(ciphertext)
+        return super().decrypt(key, nonce, ciphertext, aad)
 
 
 @pytest.fixture
@@ -57,7 +70,7 @@ def test_cold_snapshot_matches_030_field_by_field(store, steps):
         object.__setattr__(record, "_digest", sha256(body).hexdigest())
         if record.kind == "turn_started":
             definition = record.payload["definition"]
-            object.__setattr__(record, "_task", lambda definition=definition: AgentTask.from_dict(definition["task"]))
+            object.__setattr__(record, "_task_value", AgentTask.from_dict(definition["task"]))
     fold = Fold()
     fold.extend(saved, bodies=bodies)
     state = fold.state
@@ -132,9 +145,36 @@ def test_projected_events_remain_detached_from_records(store, enabled):
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monkeypatch, enabled):
-    persist_history(store, 40, initial_bytes=256, enabled=enabled)
-    clear_fixture_state_cache(store)
     root = store._root
+    provider = fixture_key_provider()
+    cipher = RecordingCipher()
+    bind_content_runtime(root, key_provider=provider, cipher=cipher)
+    trusted_store = wrap_bound_content_store(root)
+    persist_history(trusted_store, 40, initial_bytes=256, enabled=enabled)
+    clear_fixture_state_cache(trusted_store)
+
+    raw_before = tuple(
+        (row.seq, row.record.record_id, row.record.digest, row.record.encode()) for row in trusted_store.read("s").records
+    )
+    message_links = root._rows(
+        "SELECT r.seq,l.content_id FROM sk_record r JOIN sk_content_link l "
+        "ON l.tenant_id=r.tenant_id AND l.session_id=r.session_id AND l.record_seq=r.seq "
+        "WHERE r.tenant_id=%s AND r.session_id=%s AND r.kind='op_planned' "
+        "AND l.slot='request.messages[1]' ORDER BY r.seq",
+        (root.tenant_id, "s"),
+    )
+    assert len(message_links) == 40
+    assert len({content_id for _, content_id in message_links}) == 1, message_links
+    content_id = message_links[0][1]
+    ciphertext_rows = root._rows(
+        "SELECT ciphertext FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+        (root.tenant_id, "s", content_id),
+    )
+    assert len(ciphertext_rows) == 1
+    message_ciphertext = bytes(ciphertext_rows[0][0])
+
+    cipher.decrypt_calls = 0
+    cipher.ciphertexts.clear()
     fetch = root._rows
     sizes = []
 
@@ -146,13 +186,23 @@ def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monk
         return rows
 
     monkeypatch.setattr(root, "_rows", counted)
-    _, rows, _ = read_fixture_state(store, "s")
+    _, rows, _ = read_fixture_state(trusted_store, "s")
     assert sizes
     assert max(sizes) <= 256, sizes
     plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record._payload["op_kind"] == "model"]
-    assert plans[0]._payload["request"]["messages"][1] is plans[-1]._payload["request"]["messages"][1]
-    plans[-1].payload["request"]["messages"][1]["content"] = "changed"
+    assert plans[0]._payload["request"]["messages"][1] == plans[-1]._payload["request"]["messages"][1]
+    assert cipher.ciphertexts.count(message_ciphertext) == 1
+    assert len(cipher.ciphertexts) == len(set(cipher.ciphertexts))
+
+    public_request = plans[-1].payload["request"]
+    public_request["messages"][1]["content"] = "changed"
     assert plans[0].payload["request"]["messages"][1]["content"] == "x" * 256
+    assert plans[0]._payload["request"]["messages"][1]["content"] == "x" * 256
+
+    raw_after = tuple(
+        (row.seq, row.record.record_id, row.record.digest, row.record.encode()) for row in trusted_store.read("s").records
+    )
+    assert raw_after == raw_before
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -170,7 +220,8 @@ def test_cold_prefix_rejects_a_gap_across_fetch_pages(store, enabled):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_result_projection_does_not_scan_all_tools_for_each_model(store, enabled):
     persist_history(store, 24, initial_bytes=256, enabled=enabled)
-    state, rows, watermark = read_fixture_state(store, "s")
+    state, _, watermark = read_fixture_state(store, "s")
+    rows = store.read_state("s")[1]
     visits = []
 
     class CountedOperations(dict):
@@ -227,7 +278,7 @@ def test_fold_does_not_visit_or_copy_the_obsolete_record_prefix(enabled):
 def test_parse_does_not_retain_a_mutable_input_buffer():
     body = logical_session_record(actor="p", workspace="w").encode()
     buffer = bytearray(body)
-    parsed = parse_logical_record(buffer)
+    parsed = parse_logical_record(bytes(buffer))
     buffer[:] = b"changed"
     assert parsed.encode() == body
     assert parsed.payload["principal"] == "p"
@@ -395,7 +446,8 @@ def test_completed_result_does_not_compare_entire_record_payloads(store, monkeyp
         (logical_record("turn_ended", result={}, budget=BudgetUsageSnapshot().to_dict()),),
         commit_id="end",
     )
-    snapshot = read_fixture_state(store, "s")
+    state, _, watermark = read_fixture_state(store, "s")
+    snapshot = (state, store.read_state("s")[1], watermark)
 
     def unexpected(*args):
         raise AssertionError("terminal is a retained record identity, not a payload comparison")

@@ -53,24 +53,7 @@ class DefinitionCache:
         return copy_json(self._definition(task, bindings, catalog))
 
     def definition_digest(self, task: AgentTask | Record, bindings: DefinitionBindings, catalog: ToolCatalog) -> str:
-        current = self._definition(task, bindings, catalog)
-        if isinstance(task, Record) and "endpoints" in task._payload["definition"]["model_binding"]:
-            # Reproduce stored bytes without treating their historical routes as identity.
-            current = copy_json(current)
-            retained = task._payload["definition"]["model_binding"]
-            for binding, old in [
-                (current["model_binding"], retained),
-                *[
-                    (value, retained.get("internal", {}).get(purpose, {}))
-                    for purpose, value in current["model_binding"].get("internal", {}).items()
-                ],
-            ]:
-                if "endpoints" in old:
-                    binding["endpoints"] = old["endpoints"]
-                    for limit in ("context_length", "max_output_tokens"):
-                        if limit not in old:
-                            binding.pop(limit, None)
-            return sha256(canonical_json_bytes(current)).hexdigest()
+        self._definition(task, bindings, catalog)
         return self._definition_digest
 
     def _definition(self, task: AgentTask | Record, bindings: DefinitionBindings, catalog: ToolCatalog) -> dict[str, Any]:

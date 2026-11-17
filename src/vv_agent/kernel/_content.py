@@ -260,6 +260,9 @@ class ContentRef:
 class ContentSessionWriter(Protocol):
     """Kernel-visible content operations already bound to one session transaction."""
 
+    tenant_id: str
+    session_id: str
+
     def put_json(self, value: Any, *, labels: ContentLabels = ...) -> ContentRef: ...
 
     def get_json(self, ref: ContentRef | Mapping[str, Any]) -> Any: ...
@@ -276,6 +279,8 @@ class ContentSessionWriter(Protocol):
         *,
         attributes: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], ContentRef]: ...
+
+    def link_input(self, input_id: str, ref: ContentRef, slot: str) -> None: ...
 
     def link_input_actor(self, input_id: str, ref: ContentRef) -> None: ...
 
@@ -1198,7 +1203,7 @@ class ExportDocument:
         refs_by_slot_id: dict[tuple[str, str], ContentRef] = {}
         nested_by_slot_ref: dict[tuple[str, ContentRef], tuple[Any, ...]] = {}
 
-        def add_refs(refs: tuple[_ContentSlotRef, ...]) -> None:
+        def add_refs(refs: Sequence[_ContentSlotRef]) -> None:
             for declared in refs:
                 previous = refs_by_slot_id.get((declared.slot, declared.ref.content_id))
                 if previous is not None and previous != declared.ref:

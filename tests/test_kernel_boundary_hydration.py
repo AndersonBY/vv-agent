@@ -15,6 +15,7 @@ from vv_agent.kernel._boundary_hydration import (
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, SourceKind
 from vv_agent.kernel._content_publication import _payload_slots, publish_record_content
+from vv_agent.kernel._content_runtime import SessionContentWriter as ContentSessionWriter
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._hydration import MissingContentLink, ReferenceDigestMismatch, reference_digest
 from vv_agent.kernel._record_codec import RecordError
@@ -41,7 +42,7 @@ class _Reader:
             raise MissingContentLink("owner/slot/ref link is absent") from exc
 
 
-class _Writer:
+class _Writer(ContentSessionWriter):
     def __init__(self, prefix: str) -> None:
         self.prefix = prefix
         self.values: list[Any] = []

@@ -34,7 +34,7 @@ from ._content import (
 from ._execution_values import AgentTask
 from ._message_values import Message
 from ._record_codec import RecordError, validate
-from ._record_schema import CHILD_ADMISSION, MODEL_BINDING, SEED
+from ._record_schema import CHILD_ADMISSION, DEFINITION_MODEL_BINDING, SEED
 
 
 class HydrationError(RuntimeError):
@@ -239,7 +239,7 @@ def _parse_definition(value: Any) -> DefinitionContent:
     tools = data["tools"]
     if type(tools) is not list or not all(type(item) is dict for item in tools):
         raise TypedSchemaFailure("definition.tools must be an array of objects")
-    _validate_shared(data["model_binding"], MODEL_BINDING, "definition.model_binding")
+    _validate_shared(data["model_binding"], DEFINITION_MODEL_BINDING, "definition.model_binding")
     return DefinitionContent(
         agent_name=agent_name,
         memory_settings=data["memory_settings"],

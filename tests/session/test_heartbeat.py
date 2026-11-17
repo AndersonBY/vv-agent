@@ -10,8 +10,10 @@ from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.kernel import _Driver, _Scope
 from vv_agent.session.postgres import PostgresStore
+from vv_agent.session.runtime import static_worker_supports
 from vv_agent.session.store import Lease, LeaseLost, LeaseRetryExhausted
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse
@@ -35,30 +37,14 @@ def test_connection_conninfo_preserves_password(password, monkeypatch):
     psycopg.connect.assert_not_called()
 
 
-@pytest.fixture
-def explicit_postgres_dsn():
-    import os
-
-    psycopg = pytest.importorskip("psycopg")
-    dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("real connection tests require an explicit temporary PostgreSQL DSN")
-    try:
-        with psycopg.connect(dsn, autocommit=True, connect_timeout=3):
-            pass
-    except psycopg.OperationalError:
-        pytest.skip("explicit temporary PostgreSQL is unavailable")
-    return dsn
-
-
 @pytest.mark.postgres
-def test_real_connection_conninfo_preserves_password(explicit_postgres_dsn):
+def test_real_connection_conninfo_preserves_password(password_postgres_dsn):
     import psycopg
     from psycopg.conninfo import conninfo_to_dict
 
     from vv_agent.session.postgres import _connection_conninfo
 
-    with psycopg.connect(explicit_postgres_dsn, connect_timeout=3) as connection:
+    with psycopg.connect(password_postgres_dsn, connect_timeout=3) as connection:
         assert conninfo_to_dict(_connection_conninfo(connection)) == conninfo_to_dict(connection.info.dsn) | (
             {"password": connection.info.password} if connection.info.password else {}
         )
@@ -68,6 +54,7 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
     error = ConnectionError("heartbeat connection refused")
     driver = SessionDriver()
     load_state = _Driver.load_state
+    build_runtime = driver._build_runtime_for_claim
 
     @contextmanager
     def unavailable():
@@ -75,12 +62,18 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
         yield
 
     def after_heartbeat_failure(self):
-        self.scope.thread.join(timeout=5)
-        assert not self.scope.thread.is_alive()
+        assert self.scope.ready.wait(5)
+        assert self.scope.lost
+        assert not self.scope.lease_keeper.is_alive(self.scope)
         load_state(self)
 
+    def runtime_with_unavailable_heartbeat(store, sid):
+        runtime = build_runtime(store, sid)
+        runtime.heartbeat_store = unavailable
+        return runtime
+
     monkeypatch.setattr(_Driver, "load_state", after_heartbeat_failure)
-    monkeypatch.setattr(driver, "_heartbeat_store", unavailable)
+    monkeypatch.setattr(driver, "_build_runtime_for_claim", runtime_with_unavailable_heartbeat)
     monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: driver)
     config = RunConfig(model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("unused")]), RESOLVED), workspace=tmp_path)
     try:
@@ -88,17 +81,25 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
             Runner.run_sync(Agent("heartbeat", "Answer."), "go", run_config=config)
         assert isinstance(caught.value.__cause__, LeaseLost)
         assert caught.value.__cause__.__cause__ is error
-        scope = _Scope(Lease("s", "owner", 1, 0), driver.runtime(Agent("heartbeat", "Answer."), config))
-        scope._heartbeat()
-        with pytest.raises(LeaseLost) as lost:
-            scope.poll(driver.store)
-        assert lost.value.__cause__ is error
+        runtime = driver.runtime(Agent("heartbeat", "Answer."), config)
+        runtime.heartbeat_store = unavailable
+        scope = _Scope(Lease("s", "owner", 1, 0), runtime)
+        scope.start()
+        try:
+            assert scope.ready.wait(5)
+            assert scope.lost
+            with pytest.raises(LeaseLost) as lost, scope.committing():
+                pass
+            assert lost.value.__cause__ is error
+        finally:
+            scope.close()
+        assert not scope.lease_keeper.is_alive(scope)
     finally:
         driver.close()
 
 
 @pytest.fixture
-def password_postgres_dsn(explicit_postgres_dsn, database):
+def password_postgres_dsn(database):
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
@@ -113,7 +114,12 @@ def password_postgres_dsn(explicit_postgres_dsn, database):
         try:
             admin.execute(sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(role)))
             dsn = make_conninfo(
-                database, host="127.0.0.1", hostaddr="127.0.0.1", port=admin.info.port, user=role, password=password
+                database,
+                host="127.0.0.1",
+                hostaddr="127.0.0.1",
+                port=admin.info.port,
+                user=role,
+                password=password,
             )
             try:
                 with psycopg.connect(make_conninfo(dsn, password=uuid4().hex), connect_timeout=3):
@@ -143,6 +149,7 @@ def test_runner_heartbeat_over_password_authenticated_tcp(password_postgres_dsn,
         else:
             store = stack.enter_context(PostgresStore.standalone(password_postgres_dsn))
         store.install_schema()
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         assert store.connection.info.host == "127.0.0.1"
         assert store.connection.info.password
 
@@ -156,14 +163,19 @@ def test_runner_heartbeat_over_password_authenticated_tcp(password_postgres_dsn,
             assert renewed.wait(5), "password-authenticated heartbeat did not renew"
             return LLMResponse("done")
 
-        driver = SessionDriver(store=store)
+        agent = Agent("heartbeat", "Answer.")
+        config = RunConfig(model_provider=FixedModelProvider(ScriptedLLM([response]), RESOLVED), workspace=tmp_path)
+        supports = static_worker_supports(agent, config, resolved=None, extra_capabilities=())
+        driver = SessionDriver(
+            store=store,
+            content_key_provider=LocalKeyProvider(b"h" * 32),
+            worker_level=2,
+            capabilities=supports,
+        )
         monkeypatch.setattr(PostgresStore, "renew", heartbeat_renew)
         monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: driver)
-        provider = FixedModelProvider(ScriptedLLM([response]), RESOLVED)
         try:
-            result = Runner.run_sync(
-                Agent("heartbeat", "Answer."), "go", run_config=RunConfig(model_provider=provider, workspace=tmp_path)
-            )
+            result = Runner.run_sync(agent, "go", run_config=config)
             assert result.final_output == "done"
             assert renewed.is_set()
         finally:

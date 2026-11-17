@@ -11,7 +11,9 @@ or wait.
 
 ```text
 Runner / ConfiguredRunner / InteractiveAgentClient / CLI / AppServer
-  -> SessionDriver and RunHandle
+  -> SessionDriver
+      -> RunHandle: durable cursor and inbox submissions
+      -> LocalWorker: one coordinator and one bounded drive slot
   -> SessionStore: log, inbox, leases and consumer cursors
   -> session.kernel.drive
       -> frozen AgentTask, planned model operations and tool operations
@@ -20,9 +22,30 @@ Runner / ConfiguredRunner / InteractiveAgentClient / CLI / AppServer
   -> RunResult, RunEvent, tracing and App Server projections
 ```
 
-Every entry point runs through the session kernel. An ordinary `Runner` run
-uses an in-memory SQLite store (`:memory:`). Hosts that need durable sessions
-supply their own store.
+Every entry point runs through the session kernel. A driver-owned local run uses
+a temporary SQLite file in WAL mode and removes it when the driver closes.
+`SQLiteStore` rejects `:memory:`. Hosts that need a persistent session store
+supply one to `SessionDriver` or to a direct claimed `drive`.
+
+`RunHandle` is a client cursor over one durable turn. It submits input through
+the inbox, wakes the `SessionDriver`, and reads fresh client-store snapshots. It
+does not own a drive thread, a drive store or worker-visible execution state.
+The `SessionDriver` owns a `LocalWorker`: one coordinator thread scans,
+projects, observes and accepts wake hints, while a single-slot executor opens a
+fresh drive store and runs at most one claimed drive at a time.
+
+Runner/RunHandle, Interactive and App Server use the same declared-wait path as
+other W4 workers. A provider acceptance or foreground child wait declared with
+`yield_on_steer=True` can yield to a steer only when every remaining observation
+is eligible. Missing declarations remain non-yieldable, and yielding does not
+stop or cancel the underlying work. See
+[yielding an observation](session-kernel.md#yielding-an-observation-to-steering).
+
+Host-bound runtimes are rebuilt against the exact claimed drive store, either
+through the `SessionDriver` runtime factory or a direct `drive` closure. Callback
+code must use that drive store and must not capture another connection. See
+[runtime factory](host-integration.md#runtime-factory) for host integration and
+the direct-dispatch form.
 
 Durable sessions carry an immutable `Principal` in `session_created` and an
 `actor` on each inbox input. The App Server obtains that identity from the
@@ -43,18 +66,26 @@ establishes structural hash consistency. An independent `expected_head` supplied
 to read, append, verify or export is the completeness anchor for deleted-tail
 and rollback detection. A head read from the same database is not that anchor.
 
-`kernel/_drive.py` owns lease acquisition, factory admission, the drive loop and
-idle/release ordering. `session/_drive_phase.py` constructs the SDK runtime,
-heartbeat, scope and driver. `kernel/_lease_scope.py` owns lease rules;
-`session/_driver_scope.py` supplies synchronization primitives,
-heartbeat scheduling and the shared invocation boundary. Public
-`HeartbeatStopped` resolves to the same core exception class.
+`kernel/_drive.py` owns factory admission, the lease-fenced drive loop and
+idle/release ordering. `session/_drive_phase.py` binds the SDK runtime,
+heartbeat, scope and driver to a claim. `session/worker.py` owns the coordinator,
+observation command queue, bounded drive executor and wake hint.
+`kernel/_lease_scope.py` owns lease state and renewal decisions;
+`session/_driver_scope.py` adapts those rules to the runtime clock, independent
+heartbeat store, LeaseKeeper, cancellation control and invocation boundary.
+Public `HeartbeatStopped` resolves to the same core exception class.
 `kernel/_driver_dispatch.py` owns operation execution decisions and tool
 finalization. The core input, planning and recovery modules accept inputs,
 build plans, advance execution and close turns. Their synchronous `session/`
 entry points use the same algorithms. `session/_recovery_phase.py` and
 `session/_driver_dispatch.py` supply SDK observations and effects while those
 phase generators are suspended. One driver owns the retained state.
+
+`ThreadLeaseKeeper` multiplexes heartbeat registrations on one process-wide
+scheduler thread. A registration opens one independent heartbeat connection,
+reuses it for every renewal in that registration, and closes it when the
+registration ends. Lease epoch and expiry checks in the database fence
+append, defer and release operations; the keeper controls renewal liveness.
 
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`
@@ -189,19 +220,20 @@ The ordinary token counter retains its production model dispatch, incremental
 cache, formatting and per-call fallback behavior. CoreFold's synchronous
 convenience entry requires a CPU-only counter; the default SDK drives
 `extend_steps` outside core. Model execution and other SDK effects remain on
-the host side. Public surfaces have not converged on `LocalWorker`; that
-convergence is deferred to P3.
+the host side. Local public surfaces enter the kernel through `SessionDriver`
+and its `LocalWorker`. Worker support tags select sessions a worker is allowed
+to claim; they do not by themselves provide a remote execution environment.
 
-Lease ownership, renewal publication, expiry checks, commit/poll latch ordering,
-heartbeat error-budget decisions and control matching live in
-`kernel/_lease_scope.py`. The SDK uses those actual methods and supplies the
-existing Clock port, synchronization objects and actor identity. Core calls the
-injected clock at the original sampling points; it does not read system time or
-construct threads, events, locks or thread-local state. SDK constructors, keeper
-scheduling, waits/joins, PG timeout setup and the `_invoke` bridge remain in
-`session/_driver_scope.py` / `session/timing.py`. Public HeartbeatStopped bindings
-resolve to the single core exception class. Invocation uses the real provider
-outcomes; no duplicate outcome or cancellation-error type is introduced.
+Lease ownership, renewal confirmation, expiry checks, heartbeat error-budget
+decisions and control matching live in `kernel/_lease_scope.py`. Core uses the
+supplied clock and signals; it does not read system time or construct threads.
+SDK constructors create the stop/ready events and cancellation token, while
+`session/_driver_scope.py` supplies the independent heartbeat store, PostgreSQL
+timeouts and invocation bridge. `session/timing.py` owns keeper scheduling and
+close/join behavior. Database owner, epoch and expiry checks fence writes;
+renewal controls only lease liveness. Public `HeartbeatStopped` bindings resolve
+to the single core exception class, and invocation uses the real provider
+outcomes.
 
 `kernel/_cancellation.py` owns cancellation state, callback ordering and
 parent-child propagation. The SDK supplies its existing Event, Lock and child
@@ -424,7 +456,7 @@ cycle reported that metric.
 | `src/vv_agent/handoffs.py` | `Handoff` definition and the `handoff()` helper. |
 | `src/vv_agent/background_task.py` | Non-blocking background agent task, handle, and snapshot types. |
 | `src/vv_agent/runner.py` | Public synchronous run and stream entry points. |
-| `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for streaming events, cancellation, approvals, and the final result. |
+| `src/vv_agent/run_handle.py` | Durable `Runner.start()` cursor for inbox submissions, retained events, waits and the final result. |
 | `src/vv_agent/run_config.py` | Per-run configuration: model provider, tool policy, workspace, session, and tracing options. |
 | `src/vv_agent/budget.py` | Run budget limits, host cost readings, and budget usage snapshots. |
 | `src/vv_agent/model_settings.py` | Model call parameters and override merging. |
@@ -439,7 +471,7 @@ cycle reported that metric.
 | `src/vv_agent/tracing.py` | Trace spans and the processor protocol. |
 | `src/vv_agent/runtime/compiler.py` | Compiles `Agent + input + RunConfig` into an `AgentTask`. Import this submodule directly to avoid package import cycles. |
 | `src/vv_agent/types.py` | Existing exports of the actual kernel-owned value objects. Execution/task/usage/result definitions live in `src/vv_agent/kernel/_execution_values.py`. |
-| `src/vv_agent/session/` | Session kernel, SQLite and PostgreSQL stores, `SessionDriver`, child sessions, and projections. See [session-kernel.md](session-kernel.md). |
+| `src/vv_agent/session/` | Session kernel, SQLite and PostgreSQL stores, `SessionDriver`, `LocalWorker`, child sessions, and projections. See [session-kernel.md](session-kernel.md). |
 | `src/vv_agent/app_server/` | App Server protocol, transport, and thread mapping. See [app-server.md](app-server.md). |
 | `src/vv_agent/llm/` | Model protocol adapters, scripted test clients, prompt cache behavior, and the `vv-llm` client bridge. |
 | `src/vv_agent/runtime/` | Compiler, hooks, lifecycle, cancellation, tool planning and results, token usage, and process management. |

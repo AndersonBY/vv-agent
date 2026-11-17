@@ -250,11 +250,14 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
         require(attempt.state == "parked" and attempt.wait is not None, "approval has no wait")
         assert attempt.wait is not None
         handle = attempt.wait["handle"]
+        retained_answer_scope = _is_retained(answer["scope"], "approval answer scope contains a malformed ContentRef")
+        retained_wait_scope = _is_retained(handle["scope"], "approval wait scope contains a malformed ContentRef")
+        require(retained_answer_scope == retained_wait_scope, "approval scope mixes retained and hydrated content")
         require(
             handle["kind"] == "approval"
             and handle["request_id"] == answer["request_id"]
             and handle["request_digest"] == answer["request_digest"]
-            and handle["scope"] == answer["scope"],
+            and (retained_answer_scope or handle["scope"] == answer["scope"]),
             "approval identity or scope mismatch",
         )
         require(
@@ -313,21 +316,23 @@ def _plan(state: ExecutionState, record: Record) -> None:
         )
         require(rejection_retry or op.selected_attempt is None, "retry after adopted result")
         previous_payload = logical_payloads.get(previous.plan.record_id, previous.plan._payload)
-        if _is_retained(p["request"], "retry request contains a malformed ContentRef") and not _is_retained(
-            previous_payload["request"], "previous retry request contains a malformed ContentRef"
-        ):
-            p = copy_json(p)
-            for slot in ("request", "tool", "budget_admission"):
-                p[slot] = copy_json(previous_payload[slot])
+        current_retained = _is_retained(p["request"], "retry request contains a malformed ContentRef")
+        previous_retained = _is_retained(previous_payload["request"], "previous retry request contains a malformed ContentRef")
+        require(current_retained == previous_retained, "retry mixes retained and hydrated request")
         previous_operation_id, previous_attempt = previous.plan.operation_id, previous.plan.attempt
         assert previous_operation_id is not None and previous_attempt is not None
         previous_identity = (_LOGICAL_OPERATION_REQUESTS.get() or {}).get((previous_operation_id, previous_attempt))
-        if previous_identity is None:
-            previous_identity = retry_request_identity(previous_payload["request"])
-        require(
-            retry_request_identity(p["request"]) == previous_identity,
-            "retry changed request",
-        )
+        if current_retained:
+            # Raw folds compare immutable structural identities. The provisional
+            # semantic fold below compares the hydrated request after publication.
+            require(p["request_digest"] == previous_payload["request_digest"], "retry changed request")
+        else:
+            if previous_identity is None:
+                previous_identity = retry_request_identity(previous_payload["request"])
+            require(
+                retry_request_identity(p["request"]) == previous_identity,
+                "retry changed request",
+            )
         require(p["provider_binding"] == previous_payload["provider_binding"], "retry changed provider")
         require(p["context_version"] == previous_payload["context_version"], "retry changed context")
         require(p["purpose"] == previous_payload["purpose"], "retry changed purpose")
@@ -458,12 +463,19 @@ def _operation(state: ExecutionState, record: Record) -> None:
         if "interaction_result" in p:
             from vv_agent.kernel._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
 
-            result = ToolExecutionResult.from_dict(p["interaction_result"])
+            retained_result = _is_retained(p["interaction_result"], "interaction result contains a malformed ContentRef")
+            result = None if retained_result else ToolExecutionResult.from_dict(p["interaction_result"])
             require(
                 handle["kind"] == "user"
-                and result.tool_call_id == execution_plan_payload["request"]["id"]
-                and result.directive == ToolDirective.WAIT_USER
-                and result.status_code == ToolResultStatus.WAIT_RESPONSE,
+                and (
+                    retained_result
+                    or (
+                        result is not None
+                        and result.tool_call_id == execution_plan_payload["request"]["id"]
+                        and result.directive == ToolDirective.WAIT_USER
+                        and result.status_code == ToolResultStatus.WAIT_RESPONSE
+                    )
+                ),
                 "invalid interaction result",
             )
         if handle["kind"] == "approval":
@@ -536,6 +548,10 @@ def _operation(state: ExecutionState, record: Record) -> None:
         yielded = p.get("yielded_by")
         if yielded is not None:
             steering = state.applied_inputs.get(yielded)
+            retained_evidence = _is_retained(
+                p["evidence"],
+                "yield evidence contains a malformed ContentRef",
+            )
             require(
                 attempt.state == "parked"
                 and attempt.wait is not None
@@ -544,7 +560,7 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 and steering.turn_id == op.turn_id
                 and steering._payload["disposition"] == "applied"
                 and steering._payload["input"]["kind"] == "steer"
-                and f"steer/{yielded}" in p["evidence"]
+                and (retained_evidence or f"steer/{yielded}" in p["evidence"])
                 and not turn.cancelled
                 and not turn.suspended
                 and not turn.ended,
@@ -1143,21 +1159,29 @@ class Fold:
                 require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "boundary after cancel/suspend")
                 key = (tid, p["stage"], p["boundary_id"])
                 require(key not in state.boundaries, "boundary recorded twice")
+                retained_context = _is_retained(
+                    state.turns[tid].start._payload["definition"],
+                    "turn definition contains a malformed ContentRef",
+                )
                 if p["source_digest"] is not None:
                     context_source = (_LOGICAL_BOUNDARY_SOURCES.get() or {}).get(record.record_id)
-                    if context_source is None:
-                        context_source = (
-                            state._protection.messages
-                            if state._protection is not None
-                            else project_context(history, state, _message_cache=self._messages)
+                    if context_source is None and state._protection is not None:
+                        context_source = state._protection.messages
+                    if context_source is None and not retained_context:
+                        context_source = project_context(history, state, _message_cache=self._messages)
+                    if context_source is not None:
+                        require(
+                            self._messages.source_digest(context_source) == p["source_digest"],
+                            "boundary source mismatch",
                         )
-                    require(self._messages.source_digest(context_source) == p["source_digest"], "boundary source mismatch")
                 oid = p["source_operation_id"]
                 if oid is not None:
                     require(oid in state.operations and state.operations[oid].turn_id == tid, "boundary operation mismatch")
                 if p["stage"] == "before_memory":
                     require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
-                    if state._protection is not None:
+                    if retained_context:
+                        pass
+                    elif state._protection is not None:
                         replacement = [self._messages.parse(m) for m in p["data"]["messages"]]
                         state._protection.replace(filter_empty_assistant_messages(replacement))
                     else:

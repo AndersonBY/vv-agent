@@ -6,7 +6,7 @@ from dataclasses import replace
 from hashlib import sha256
 from typing import Any
 
-from vv_agent.kernel._content import Principal
+from vv_agent.kernel._content import ContentSessionWriter, KeyProvider, Principal
 from vv_agent.kernel._content_publication import (
     declare_input_content,
     link_declared_input_content,
@@ -17,7 +17,7 @@ from vv_agent.kernel._content_publication import (
 )
 from vv_agent.session.content_runtime import (
     SessionContentWriter,
-    bind_content_key_provider,
+    content_key_provider_for,
     durable_content_reader,
     wrap_session_content_store,
 )
@@ -53,10 +53,11 @@ def fixture_key_provider() -> LocalKeyProvider:
     return LocalKeyProvider(_FIXTURE_KEY)
 
 
-def wrap_fixture_store(store, provider: LocalKeyProvider | None = None):
-    provider = provider or fixture_key_provider()
-    bind_content_key_provider(store, provider)
-    return wrap_session_content_store(store, provider)
+def wrap_fixture_store(store, provider: KeyProvider | None = None):
+    selected = provider if provider is not None else content_key_provider_for(store)
+    if selected is None:
+        selected = fixture_key_provider()
+    return wrap_session_content_store(store, selected)
 
 
 def create_fixture_session(
@@ -78,7 +79,7 @@ def create_fixture_session(
             )
         )
 
-        def session_spec(content: SessionContentWriter) -> SessionSpec:
+        def session_spec(content: ContentSessionWriter) -> SessionSpec:
             actor, _ = content.service_principal(subject_id)
             if existing:
                 created = publish_session_created_content(
@@ -103,28 +104,39 @@ def create_fixture_session(
         return writer.create_session(session_spec, consumers=consumers)
 
 
-def push_fixture_input(store, session_id: str, value: InboxItem):
+def push_fixture_input(store, session_id: str, value: InboxItem, *, preserve_actor: bool = False):
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
-        subject_kind = "service" if value.kind in {"provider_evidence", "provider_result", "child_result"} else "user"
-        actor_attributes = writer.put_json({"role": f"fixture/{value.kind}"})
-        actor = Principal(
-            tenant_id=store.tenant_id,
-            subject_id=f"fixture/{value.kind}",
-            subject_kind=subject_kind,
-            attributes=actor_attributes,
-        ).to_dict()
+        if preserve_actor:
+            if value.actor is None:
+                raise ValueError("preserve_actor requires an existing Principal")
+            actor = value.actor
+        else:
+            subject_kind = "service" if value.kind in {"provider_evidence", "provider_result", "child_result"} else "user"
+            actor_attributes = writer.put_json({"role": f"fixture/{value.kind}"})
+            actor = Principal(
+                tenant_id=store.tenant_id,
+                subject_id=f"fixture/{value.kind}",
+                subject_kind=subject_kind,
+                attributes=actor_attributes,
+            ).to_dict()
         published = declare_input_content(writer, replace(value, actor=actor, admission_proof=None))
         receipt = tx.push(session_id, published.item)
         link_declared_input_content(writer, published.item)
         return receipt
 
 
-def append_fixture_records(store, session_id: str, records, *, commit_id: str = "fixture"):
+def append_fixture_records(
+    store,
+    session_id: str,
+    records,
+    *,
+    commit_id: str = "fixture",
+    consume_input_ids: tuple[str, ...] = (),
+):
     """Append logical producer records through the S1 content inventory."""
 
     records = tuple(records)
-    logical_by_id = {record.record_id: record for record in records}
     head = store.read(session_id, limit=1)
     lease = store.acquire(session_id, owner="s1-fixture-append", ttl_ms=60_000)
     if lease is None:
@@ -145,30 +157,19 @@ def append_fixture_records(store, session_id: str, records, *, commit_id: str = 
                     record.encode()
                     published[index] = record
             publication = replace(publication, records=tuple(published))
-            for record in publication.records:
-                original = logical_by_id[record.record_id]
-                body = record.encode()
-                value = record.to_dict()
-                value["payload"] = original.payload
-                object.__setattr__(record, "_body", body)
-                object.__setattr__(record, "_digest", sha256(body).hexdigest())
-                object.__setattr__(record, "_value", value)
-                object.__setattr__(record, "payload", {})
-                if original.kind == "turn_started":
-                    task = original._task()
-                    object.__setattr__(record, "_task", lambda task=task: task)
             receipt = tx.append(
                 session_id,
                 lease=lease,
                 expected_seq=head.head_seq,
                 commit_id=commit_id,
                 records=publication.records,
+                consume_input_ids=consume_input_ids,
             )
             links = resolve_record_content_links(publication.links, receipt.record_sequences)
             link_declared_record_content(writer, links)
-            return receipt
     finally:
         store.release(lease)
+    return receipt
 
 
 def read_fixture_state(store, session_id: str):

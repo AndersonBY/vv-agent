@@ -15,6 +15,7 @@ from vv_agent.kernel._content import (
     ContentIntegrityError,
     ContentLabels,
     ContentRef,
+    ContentSessionWriter,
     ContentUnavailable,
     ExportLineKind,
     KeyDestroyStatus,
@@ -76,7 +77,7 @@ provider.unwrap(sys.argv[3], sys.argv[4], wrapped)
     )
 
 
-def _session_spec(writer: SessionContentWriter, session_id: str = "session-a") -> SessionSpec:
+def _session_spec(writer: ContentSessionWriter, session_id: str = "session-a") -> SessionSpec:
     principal, _ = writer.service_principal("test-host")
     return SessionSpec(
         session_id,

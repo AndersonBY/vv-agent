@@ -25,11 +25,14 @@ from vv_agent.model import ScriptedModelProvider
 from vv_agent.session.projection import project_records
 from vv_agent.session.records import InboxItem, Record, RecordError
 from vv_agent.session.reducer import TransitionError, fold
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import StoredRecord
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
+
+from .helpers import fixture_key_provider, read_fixture_state
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session_kernel_fixtures.py"
 AUTHOR = runpy.run_path(str(SCRIPT))
@@ -480,7 +483,6 @@ def test_generated_output_self_checks_reject_unknown_omission_flag(generated_fix
         validate_outputs(values)
 
 
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
 def test_private_runner_subscribers_and_observer_failure_keep_committed_result():
     entered, released = Event(), Event()
 
@@ -519,7 +521,6 @@ def test_private_runner_subscribers_and_observer_failure_keep_committed_result()
         kernel.close()
 
 
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
 def test_private_shared_state_mutation_does_not_change_the_retained_seed():
     seed = {"nested": {"values": ["seed"]}}
 
@@ -540,7 +541,7 @@ def test_private_shared_state_mutation_does_not_change_the_retained_seed():
                 before_cycle_messages=before_cycle,
             ),
         ).result()
-        state, _, _ = kernel.store.read_state("isolation")
+        state, _, _ = read_fixture_state(kernel.store, "isolation")
         start = next(iter(state.turns.values())).start
         assert seed == start._task().initial_shared_state == {"nested": {"values": ["seed"]}}
         assert result.raw_result.shared_state == {"nested": {"values": ["seed", "local"]}}
@@ -548,8 +549,7 @@ def test_private_shared_state_mutation_does_not_change_the_retained_seed():
         kernel.close()
 
 
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
-def test_private_approval_provider_failure_is_a_retained_terminal():
+def test_private_approval_provider_failure_is_a_retained_terminal(tmp_path):
     effects = []
 
     @function_tool(needs_approval=True)
@@ -566,36 +566,45 @@ def test_private_approval_provider_failure_is_a_retained_terminal():
             del request
             raise RuntimeError("approval unavailable")
 
-    broker, kernel = ApprovalBroker(), SessionDriver()
-    try:
-        result = start_runner(
-            kernel,
-            "approval-failure",
-            Agent("approval", "Use gated.", tools=[gated]),
-            "go",
-            run_config=RunConfig(
-                model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("", [ToolCall("gated", "gated", {})])]),
-                approval_provider=FailingApproval(),
-                approval_broker=broker,
-            ),
-        ).result()
-        assert result.status.value == "failed" and result.raw_result.error is not None
-        assert result.raw_result.error["message"] == "approval unavailable"
-        assert not effects
-        request = next(e for e in result.events if isinstance(e, ApprovalRequestedEvent))
-        assert broker.pending_request(request.request_id) is None
-        state, rows, _ = kernel.store.read_state("approval-failure")
-        assert state.active_turn_id is None and rows[-1].record.kind == "turn_ended"
-        retained = Runner.resume("approval-failure", result.run_id)
-        assert retained.to_dict() == result.to_dict()
-        assert kernel.store.read_state("approval-failure")[1] == rows
-    finally:
-        kernel.close()
+    with SQLiteStore.standalone(str(tmp_path / "approval.sqlite")) as store:
+        broker = ApprovalBroker()
+        kernel = SessionDriver(store=store, content_key_provider=fixture_key_provider())
+        try:
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+            result = start_runner(
+                kernel,
+                "approval-failure",
+                Agent("approval", "Use gated.", tools=[gated]),
+                "go",
+                run_config=RunConfig(
+                    model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("", [ToolCall("gated", "gated", {})])]),
+                    approval_provider=FailingApproval(),
+                    approval_broker=broker,
+                ),
+            ).result()
+            assert result.status.value == "failed" and result.raw_result.error is not None
+            assert result.raw_result.error["message"] == "approval unavailable"
+            assert not effects
+            request = next(e for e in result.events if isinstance(e, ApprovalRequestedEvent))
+            assert broker.pending_request(request.request_id) is None
+            state, rows, _ = kernel.store.read_state("approval-failure")
+            assert state.active_turn_id is None and rows[-1].record.kind == "turn_ended"
+            retained = Runner.resume("approval-failure", result.run_id)
+            assert retained.to_dict() == result.to_dict()
+            assert kernel.store.read_state("approval-failure")[1] == rows
+        finally:
+            kernel.close()
 
 
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
 def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes():
-    kernel = SessionDriver()
+    runtimes = {}
+
+    def runtime_factory(store, agent, config, task, session_id):
+        runtime = kernel.runtime(agent, config, task, session_id=session_id, store=store)
+        runtimes[session_id] = runtime
+        return runtime
+
+    kernel = SessionDriver(runtime_factory=runtime_factory)
     try:
         provider = ScriptedModelProvider.new("test", "m", [LLMResponse("question"), LLMResponse("answer")])
         runner = Runner.configured(RunConfig(model_provider=provider, no_tool_policy="wait_user"))
@@ -606,9 +615,9 @@ def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes
             result = runner.run_sync(Agent("fixture", "Answer."), "go")
         tid = result.raw_result.turn_id
         assert tid is not None and result.status.value == "wait_user"
-        original = kernel.handles[-1]
+        original_runtime = runtimes["resume"]
         kernel.answer(
-            "resume", original.runtime, displayed_target(kernel, "resume"), InteractionAnswer("text", text="reply"), "reply"
+            "resume", original_runtime, displayed_target(kernel, "resume"), InteractionAnswer("text", text="reply"), "reply"
         )
         resumed = runner.resume("resume", tid)
         assert resumed.raw_result.turn_id == tid
@@ -618,7 +627,7 @@ def test_private_configured_resume_reuses_turn_and_rejects_closed_without_writes
         with pytest.raises(ValueError, match="turn_id"):
             runner.resume("resume", "wrong")
         assert kernel.store.read_state("resume")[1] == rows
-        kernel.control("resume", "close", "close", runtime=original.runtime)
+        kernel.control("resume", "close", "close", runtime=original_runtime)
         closed = kernel.store.read_state("resume")[1]
         with pytest.raises(ValueError, match="closed"):
             runner.resume("resume", tid)
@@ -648,7 +657,6 @@ def test_kernel_seed_rejects_invalid_messages_atomically(message):
         kernel.close()
 
 
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
 def test_kernel_context_preserves_reasoning_and_removes_empty_assistant():
     from vv_agent.session.context import project_context
     from vv_agent.types import Message
@@ -659,7 +667,7 @@ def test_kernel_context_preserves_reasoning_and_removes_empty_assistant():
         for case in fixture["cases"]:
             sid = case["name"]
             kernel.create(sid, "/fixture", {"seed": {"messages": [Message(**case["message"]).to_dict()], "shared_state": {}}})
-            state, rows, _ = kernel.store.read_state(sid)
+            state, rows, _ = read_fixture_state(kernel.store, sid)
             messages = project_context(rows, state)
             assert bool(messages) == case["expected"]["retain_in_runtime_history"]
             if messages:
@@ -670,7 +678,6 @@ def test_kernel_context_preserves_reasoning_and_removes_empty_assistant():
 
 
 @pytest.mark.parametrize("purpose", ["compaction", "session_memory"])
-@pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
 def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tmp_path):
     from unittest.mock import patch
 
@@ -721,14 +728,14 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
                 "session_memory_storage_dir": "",
             },
         )
-        rt = kernel.runtime(Agent("route", "Be precise.", model="main-model"), config)
+        rt = kernel.runtime(Agent("route", "Be precise.", model="main-model"), config, session_id="route", store=kernel.store)
         if purpose == "compaction":
             rt.memory_manager = MemoryManager(compact_threshold=1000, keep_recent_messages=1)
         kernel.create("route", "/fixture", {"seed": {"unseen_input_protection": False}} if purpose == "compaction" else None)
         kernel.push("route", InboxItem("initial", "user", {"content": "go"}))
         with patch.object(VvLlmClient, "complete", side_effect=response):
             drive(kernel.store, "route", runtime=rt, _one_turn=True)
-            state, rows, _ = kernel.store.read_state("route")
+            state, rows, _ = read_fixture_state(kernel.store, "route")
             assert state.active_turn_id is None
             internal_plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record.payload["purpose"] == purpose]
             assert len(internal_plans) == len(requests) == 1
@@ -742,7 +749,7 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
             call = next(c for c in result.token_usage.model_calls if c.model == "memory-model")
             assert call.backend == "memory" and call.usage.total_tokens == 5
             drive(kernel.store, "route", runtime=rt, _one_turn=True)
-            assert kernel.store.read_state("route")[1] == rows
+            assert read_fixture_state(kernel.store, "route")[1] == rows
             assert len(requests) == 1
             assert provider.resolved_models == ["main-model", *["memory-model"] * 4, "main-model", "main-model"]
         # Definitions retain logical identity while route preparation uses current endpoints.

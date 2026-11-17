@@ -35,7 +35,7 @@ CASES = (
 )
 
 
-def produce(case: str, *, guardrail_error: Exception | None = None) -> dict[str, Any]:
+def produce(case: str, database, *, guardrail_error: Exception | None = None) -> dict[str, Any]:
     trace = []
 
     def validate(value, context):
@@ -111,7 +111,7 @@ def produce(case: str, *, guardrail_error: Exception | None = None) -> dict[str,
         elif record.kind == "turn_ended":
             trace.append(["terminal", record.payload["status"], record.payload["reason"], record.payload["result"]])
 
-    with SQLiteStore.standalone(":memory:") as store:
+    with SQLiteStore.standalone(str(database)) as store:
         store.install_schema()
         with store.atomic() as tx:
             tx.create(
@@ -155,8 +155,8 @@ def produce(case: str, *, guardrail_error: Exception | None = None) -> dict[str,
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_output_producers_and_terminal_replay(case):
-    observed = produce(case)
+def test_output_producers_and_terminal_replay(case, tmp_path):
+    observed = produce(case, tmp_path / "output.sqlite")
     callbacks = [item[0] for item in observed["trace"] if item[0] in {"model", "guardrail", "validate", "repair"}]
     assert callbacks.count("model") == 1
     assert callbacks.count("repair") <= 1
@@ -390,7 +390,7 @@ def test_core_decisions_replay_real_producer_observations_without_sdk(case, site
     monkeypatch.setattr(output, "postprocess_output", observed_postprocess)
     monkeypatch.setattr(output, "run_output_validator", observed_validate)
     monkeypatch.setattr(output, "output_validation_error", observed_error)
-    data = produce(case)
+    data = produce(case, tmp_path / "output.sqlite")
     data["observations"] = observations
     history = tmp_path / "current-producer.json"
     history.write_text(json.dumps(data))
@@ -416,11 +416,11 @@ BASELINE_SHA256 = {
 
 
 @pytest.mark.parametrize("case", BASELINE_SHA256)
-def test_before_after_traces_and_canonical_output_bytes(case):
+def test_before_after_traces_and_canonical_output_bytes(case, tmp_path):
     import hashlib
     import json
 
-    observed = produce(case)
+    observed = produce(case, tmp_path / "output.sqlite")
     projection = {key: observed[key] for key in ("trace", "result", "output_records")}
     body = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(body).hexdigest() == BASELINE_SHA256[case]
@@ -452,10 +452,10 @@ def test_sdk_and_session_share_the_actual_serializer():
 
 
 @pytest.mark.parametrize("error_type", [LookupError, StopIteration])
-def test_real_sdk_guardrail_exceptions_keep_their_identity_and_cause(error_type):
+def test_real_sdk_guardrail_exceptions_keep_their_identity_and_cause(error_type, tmp_path):
     error = error_type("guardrail failed")
     cause = ValueError("guardrail cause")
     error.__cause__ = cause
     with pytest.raises(error_type) as caught:
-        produce("guardrail_rewrite", guardrail_error=error)
+        produce("guardrail_rewrite", tmp_path / "output.sqlite", guardrail_error=error)
     assert caught.value is error and caught.value.__cause__ is cause

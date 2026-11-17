@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from ._boundary_hydration import hydrate_boundary_data, hydrate_input
 from ._content_publication import declared_content_ref, input_content_slots
 from ._driver import CoreDriver
@@ -23,10 +25,15 @@ def _logical_input(driver: CoreDriver, item: InboxItem) -> InboxItem:
     if driver.content_reader is None:
         return item
     for slot in input_content_slots(item.kind):
-        value = item.payload
+        value: object = item.payload
         try:
             for part in slot.path:
-                value = value[int(part)] if part.isdecimal() else value[part]
+                if isinstance(value, Mapping):
+                    value = value[part]
+                elif isinstance(value, list):
+                    value = value[int(part)]
+                else:
+                    break
         except (IndexError, KeyError):
             continue
         if declared_content_ref(value) is not None:

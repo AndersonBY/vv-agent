@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +17,7 @@ from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, 
 from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._cycle_values import AfterCycleDecision
 from vv_agent.kernel._records import make_record
+from vv_agent.kernel._state import Attempt, ExecutionState, Operation
 from vv_agent.kernel._store import StoredRecord
 from vv_agent.kernel._summary_requests import pending_compaction_requests
 from vv_agent.session import _recovery_phase
@@ -28,7 +29,7 @@ from vv_agent.session.records import InboxItem
 from vv_agent.session.reducer import Fold, fold
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse, NoToolPolicy, ToolCall
 
 from .helpers import content_ref as fixture_content_ref
 from .helpers import record as fixture_record
@@ -42,7 +43,7 @@ def _runtime(
     provider: ScriptedModelProvider,
     *,
     tools=(),
-    no_tool_policy: str = "finish",
+    no_tool_policy: NoToolPolicy = "finish",
     max_cycles: int = 8,
     after_cycle_hooks=(),
 ):
@@ -548,9 +549,8 @@ def test_cold_s1_after_cycle_projection_hydrates_primary_values_and_boundaries(
 
 
 class _RecordReader:
-    binding = ("tenant", "s")
-
-    def __init__(self) -> None:
+    def __init__(self, tenant_id: str = "tenant", session_id: str = "s") -> None:
+        self.binding = (tenant_id, session_id)
         self.links: dict[tuple[str, str, str], bytes] = {}
         self.calls: list[tuple[str, str]] = []
 
@@ -563,7 +563,32 @@ class _RecordReader:
         return self.links[(owner, slot, ref.content_id)]
 
 
-def test_s1_summary_intent_hydrates_only_the_completed_result_owner_slot() -> None:
+@pytest.fixture
+def narrow_summary_driver(tmp_path: Path) -> Iterator[tuple[_Driver, str]]:
+    with SQLiteStore.standalone(str(tmp_path / "summary-intent.sqlite")) as store:
+        sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
+        sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
+        runtime = _runtime(
+            sessions,
+            ScriptedModelProvider.new("scripted", "scripted", []),
+        )
+        lease = sessions.store.acquire("s", owner="summary-intent", ttl_ms=15_000)
+        assert lease is not None
+        driver = _Driver(
+            sessions.store,
+            "s",
+            runtime,
+            _Scope(lease, runtime, now_ms=store._now()),
+        )
+        try:
+            yield driver, store.tenant_id
+        finally:
+            assert sessions.store.release(lease)
+
+
+def test_s1_summary_intent_hydrates_only_the_completed_result_owner_slot(
+    narrow_summary_driver: tuple[_Driver, str],
+) -> None:
     result = {"status_code": "SUCCESS", "metadata": {"request_compaction": True}}
     body = canonical_json_bytes(result)
     result_ref = ContentRef(
@@ -580,27 +605,23 @@ def test_s1_summary_intent_hydrates_only_the_completed_result_owner_slot() -> No
     )
     stored = StoredRecord(raw, 1, "commit/1", 1, 1)
     logical = replace(raw, payload=raw._payload | {"result": result})
-    attempt = SimpleNamespace(context="normal", result=logical, prepared=None)
-    operation = SimpleNamespace(
-        kind="tool",
+    attempt = Attempt(plan=raw, context="normal", result=logical)
+    operation = Operation(
         turn_id="t",
+        kind="tool",
         selected_attempt=1,
         attempts={1: attempt},
     )
 
-    reader = _RecordReader()
+    driver, tenant_id = narrow_summary_driver
+    reader = _RecordReader(tenant_id, driver.sid)
     reader.add("record:1", "result", result_ref, result)
-    driver = object.__new__(_Driver)
-    driver.sid = "s"
-    driver.store = SimpleNamespace(tenant_id="tenant")
     driver.content_reader = reader
     driver._hydrators = {}
     driver.records = (stored,)
     driver._stored_by_id = {raw.record_id: stored}
-    driver.state = SimpleNamespace(
+    driver.state = ExecutionState(
         active_turn_id="t",
-        boundaries={},
-        applied_inputs={},
         operations={operation_id: operation for operation_id in ("o",)},
     )
 

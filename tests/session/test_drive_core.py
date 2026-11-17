@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from threading import Event, Lock, get_ident, local
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -49,15 +49,9 @@ def fold_factory() -> Fold:
     return Fold(normalize_memory_settings=unused, count_messages=unused)
 
 
-class Keeper:
-    def is_alive(self, heartbeat: object) -> bool:
-        return False
-
-
 class FactoryHeartbeat(LeaseOwnership):
     def __init__(self, lease, heartbeat_store, ttl_ms: int, clock: FixedClock):
         self.heartbeat_store = heartbeat_store
-        self.lease_keeper = Keeper()
         super().__init__(
             lease,
             ttl_ms,
@@ -65,11 +59,6 @@ class FactoryHeartbeat(LeaseOwnership):
             clock=clock,
             stop=Event(),
             ready=Event(),
-            lock=Lock(),
-            poll_lock=Lock(),
-            commit_lock=Lock(),
-            latch_entry=local(),
-            actor_identity=get_ident,
         )
 
     def start(self) -> None:
@@ -94,11 +83,6 @@ class Scope(LeaseOwnership):
             clock=clock,
             stop=Event(),
             ready=Event(),
-            lock=Lock(),
-            poll_lock=Lock(),
-            commit_lock=Lock(),
-            latch_entry=local(),
-            actor_identity=get_ident,
         )
 
     def start(self) -> None:
@@ -200,7 +184,6 @@ def binding(store, session_id: str, events: list[str], clock: FixedClock, *, fac
         make_factory_heartbeat=make_heartbeat if factory else None,
         make_runtime=make_runtime if factory else None,
         factory_retry_after_ms=lambda error: error.retry_after_ms if isinstance(error, RetryReady) else None,
-        heartbeat_alive=lambda heartbeat: cast(Any, heartbeat).lease_keeper.is_alive(heartbeat),
         make_scope=make_scope,
         make_driver=make_driver,
         after_drive=lambda selected: cast(Any, selected).hook("after_drive", None),
@@ -224,18 +207,17 @@ def test_factory_handoff_and_idle_guard_run_on_the_real_store(store, monkeypatch
     clock = FixedClock()
     configured, scopes, drivers = binding(store, "s", events, clock, factory=True)
     defer_idle = store._defer_idle_drive
+    guarded_leases = []
     latched = []
 
     def observe_idle(lease, *, poll_ms, lease_guard):
         def guarded():
-            scope = scopes[0]
             current = lease_guard()
-            assert current == scope.lease
-            assert scope.commit_lock.locked()
+            guarded_leases.append(current)
             return current
 
         result = defer_idle(lease, poll_ms=poll_ms, lease_guard=guarded)
-        latched.append((scopes[0].commit_lock.locked(), poll_ms, result))
+        latched.append((poll_ms, result))
         events.append("defer_idle")
         return result
 
@@ -243,7 +225,8 @@ def test_factory_handoff_and_idle_guard_run_on_the_real_store(store, monkeypatch
 
     assert drive_core(store, "s", make_binding=lambda: configured)
     assert events == ["runtime", "scope", "driver", "phase:append", "phase:idle", "defer_idle", "after_drive"]
-    assert latched == [(True, 37, False)]
+    assert guarded_leases == [scopes[0].lease]
+    assert latched == [(37, False)]
     assert len(scopes) == 1 and scopes[0].close_count == 1
     assert len(drivers) == 1 and drivers[0].calls == 2
     assert store.read("s").records[-1].record.kind == "usage_observed"
@@ -314,7 +297,7 @@ def test_phase_error_closes_releases_hooks_and_does_not_backoff_direct_runtime(t
             drive_core(store, "s", make_binding=lambda: configured)
         assert caught.value is error
         assert events == ["scope", "after_drive"]
-        assert scopes[0].close_count == 2
+        assert scopes[0].close_count == 1
         owner, retry_at = store._one("SELECT lease_owner,drive_retry_at_ms FROM sk_session WHERE session_id='s'")
         assert owner is None and retry_at == 0
 
@@ -360,7 +343,7 @@ def test_drive_core_is_sdk_free_and_runs_factory_transfer_on_real_sqlite(tmp_pat
 import importlib.abc
 import json
 import sys
-from threading import Event, Lock, get_ident, local
+from threading import Event
 sys.path.insert(0, sys.argv[1])
 class CoreOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -378,13 +361,10 @@ class Clock:
     def monotonic(self): return 1000.0
     def monotonic_ns(self): return 1000000000000
     def sleep(self, seconds): raise AssertionError('no wait')
-class Keeper:
-    def is_alive(self, heartbeat): return False
 class Heartbeat(LeaseOwnership):
     def __init__(self, lease, source, ttl_ms, clock):
-        self.source, self.lease_keeper = source, Keeper()
-        super().__init__(lease, ttl_ms, .25, clock=clock, stop=Event(), ready=Event(), lock=Lock(),
-            poll_lock=Lock(), commit_lock=Lock(), latch_entry=local(), actor_identity=get_ident)
+        self.source = source
+        super().__init__(lease, ttl_ms, .25, clock=clock, stop=Event(), ready=Event())
     def start(self):
         with self.source() as store: self.poll(store)
         self.heartbeat_finished(); self.request_stop()
@@ -428,7 +408,6 @@ with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as s
     binding=DriveBinding(clock=clock, ttl_ms=15000, runtime=None,
         make_factory_heartbeat=lambda lease,ttl: Heartbeat(lease, store.heartbeat_store, ttl, clock),
         make_runtime=make_runtime, factory_retry_after_ms=lambda error: None,
-        heartbeat_alive=lambda heartbeat: heartbeat.lease_keeper.is_alive(heartbeat),
         make_scope=make_scope, make_driver=make_driver,
         after_drive=lambda selected: selected.hook('after_drive', None),
         wake_if_runnable=lambda selected: selected.wake('s'))

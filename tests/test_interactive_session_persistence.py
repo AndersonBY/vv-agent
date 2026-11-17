@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from session.fold_history import logical_record
 from session.helpers import fixture_key_provider, wrap_fixture_store
-from session.test_recovery_matrix import runtime
 from support.s1_fixture_values import append_fixture_records, clear_fixture_state_cache
 
 from vv_agent import (
@@ -22,14 +21,13 @@ from vv_agent import (
 from vv_agent.kernel._budget_values import RunBudgetLimits
 from vv_agent.session.records import digest
 from vv_agent.session.store import Conflict
-from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse
 
 
-def client(tmp_path, steps, store=None):
+def client(tmp_path, steps, store=None, *, model_provider=None):
     return InteractiveAgentClient(
         options=AgentSessionOptions(
-            model_provider=ScriptedModelProvider.from_steps("test", "m", steps),
+            model_provider=model_provider or ScriptedModelProvider.from_steps("test", "m", steps),
             workspace=tmp_path,
         ),
         store=store,
@@ -86,18 +84,33 @@ def test_create_session_retries_after_missing_session_lookup(tmp_path: Path, mon
 
 
 def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_path: Path, monkeypatch):
-    provider = fixture_key_provider()
+    class StopBeforeDispatch(Exception):
+        pass
+
+    provider = ScriptedModelProvider.from_steps("test", "m", [LLMResponse("done")])
+    key_provider = fixture_key_provider()
     database = str(tmp_path / "sessions.sqlite")
     raw_store = SQLiteStore(database)
     raw_store.install_schema()
-    store = wrap_fixture_store(raw_store, provider)
-    first_driver = SessionDriver(store=store)
-    first_driver.create("active", str(tmp_path), {"seed": {"messages": [], "shared_state": {}}})
+    store = wrap_fixture_store(raw_store, key_provider)
+    first_client = client(tmp_path, [], store, model_provider=provider)
+    first_client.driver.create("active", str(tmp_path), {"seed": {"messages": [], "shared_state": {}}})
+    agent = InteractiveAgentDefinition(description="desktop agent", model="m")
 
-    task_runtime = runtime(None, [])
-    task = task_runtime.compile("go", "active/turn/input")
-    definition = task_runtime.definition(task)
-    definition["model_binding"]["endpoints"] = []
+    prepared = {}
+
+    def capture_current_definition(session_id, sdk_agent, config, _content, *, task, **_kwargs):
+        prepared["task"] = task
+        runtime = first_client.driver.runtime(sdk_agent, config, task=task, session_id=session_id)
+        prepared["definition"] = runtime.definition(task)
+        raise StopBeforeDispatch
+
+    monkeypatch.setattr(first_client.driver, "start", capture_current_definition)
+    with pytest.raises(StopBeforeDispatch):
+        first_client._execute(prompt="go", agent=agent, workspace=tmp_path, session_id="active")
+    first_task = prepared["task"]
+    definition = prepared["definition"]
+    assert first_task.user_prompt == "go"
     append_fixture_records(
         store,
         "active",
@@ -105,23 +118,21 @@ def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_
             logical_record(
                 "turn_started",
                 sid="active",
-                tid="active/turn/input",
+                tid=first_task.task_id,
                 definition=definition,
                 definition_digest=digest(definition),
                 budget=RunBudgetLimits().to_dict(),
             )
         ],
     )
-    first_driver.close()
+    first_client.driver.close()
     clear_fixture_state_cache(store)
     raw_store.connection.close()
 
     raw_store = SQLiteStore(database)
     raw_store.install_schema()
-    store = wrap_fixture_store(raw_store, provider)
-    owner = client(tmp_path, [LLMResponse("done")], store)
-    agent = InteractiveAgentDefinition(description="desktop agent", model="m")
-    session = owner.create_session(agent=agent, session_id="active")
+    store = wrap_fixture_store(raw_store, key_provider)
+    owner = client(tmp_path, [], store, model_provider=provider)
 
     class StopExecute(Exception):
         pass
@@ -134,8 +145,10 @@ def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_
 
     monkeypatch.setattr(owner.driver, "start", stop_execute)
     with pytest.raises(StopExecute):
-        owner._execute(prompt="continue", agent=agent, workspace=tmp_path, session_id=session.session_id)
-    assert retained["task"].prompt_bundle == task.prompt_bundle
+        owner._execute(prompt="continue", agent=agent, workspace=tmp_path, session_id="active")
+    assert retained["task"] == first_task
+    assert retained["task"].user_prompt == "go"
+    assert retained["task"].prompt_bundle == first_task.prompt_bundle
     owner.driver.close()
     raw_store.connection.close()
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -29,10 +31,77 @@ MASTER_KEY = b"x" * 32
 SESSION = "export-content-integrity"
 
 
-def _create_nested_session(store, provider: LocalKeyProvider) -> dict[str, object]:
+class MessageFixture(TypedDict):
+    role: str
+    content: str
+
+
+class SeedFixture(TypedDict):
+    messages: list[MessageFixture]
+
+
+class InputMessagesFixture(TypedDict):
+    input_messages: list[MessageFixture]
+
+
+class TaskMetadataFixture(TypedDict):
+    vv_session: InputMessagesFixture
+
+
+class TaskFixture(TypedDict):
+    initial_messages: list[MessageFixture]
+    metadata: TaskMetadataFixture
+
+
+class DefinitionFixture(TypedDict):
+    task: TaskFixture
+
+
+class ChildAdmissionFixture(TypedDict):
+    definition: DefinitionFixture
+
+
+class NestedAttributes(TypedDict):
+    seed: SeedFixture
+    child_admission: ChildAdmissionFixture
+
+
+@pytest.fixture
+def key_provider(tmp_path: Path) -> Iterator[LocalKeyProvider]:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "content-keys.sqlite3")
+    try:
+        yield provider
+    finally:
+        provider.close()
+
+
+def _object_mapping(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        assert isinstance(key, str)
+        result[key] = item
+    return result
+
+
+def _object_list(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    assert all(isinstance(item, dict) for item in value)
+    result: list[dict[str, object]] = []
+    for item in value:
+        assert isinstance(item, dict)
+        mapping: dict[str, object] = {}
+        for key, child in item.items():
+            assert isinstance(key, str)
+            mapping[key] = child
+        result.append(mapping)
+    return result
+
+
+def _create_nested_session(store, provider: LocalKeyProvider) -> NestedAttributes:
     store.configure_input_admission(allow_unsigned=True)
     driver = SessionDriver(store=store, content_key_provider=provider)
-    attributes = {
+    attributes: NestedAttributes = {
         "seed": {"messages": [{"role": "user", "content": "nested-export-marker"}]},
         "child_admission": {
             "definition": {
@@ -43,7 +112,7 @@ def _create_nested_session(store, provider: LocalKeyProvider) -> dict[str, objec
             }
         },
     }
-    driver.create(SESSION, "/workspace", attributes)
+    driver.create(SESSION, "/workspace", dict(attributes))
     return attributes
 
 
@@ -66,9 +135,12 @@ def _content_by_slot(document: ExportDocument) -> dict[str, dict[str, object]]:
 
 
 @pytest.mark.persistent_store
-def test_include_content_exports_nested_message_slots_on_each_sql_backend(store, tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "nested-export-keys.sqlite3")
-    attributes = _create_nested_session(store, provider)
+def test_include_content_exports_nested_message_slots_on_each_sql_backend(
+    store,
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
+    attributes = _create_nested_session(store, key_provider)
     delegate = durable_content_store(store)
 
     class TransactionCheckingContent:
@@ -97,18 +169,20 @@ def test_include_content_exports_nested_message_slots_on_each_sql_backend(store,
     }
     assert nested_slots <= set(content)
     assert content["session.attributes.seed.messages[0]"]["decoded_value"] == attributes["seed"]["messages"][0]
-    outer = content["session.attributes"]["decoded_value"]
-    seed_ref = outer["seed"]["messages"][0]
+    outer = _object_mapping(content["session.attributes"]["decoded_value"])
+    seed_ref = _object_list(_object_mapping(outer["seed"])["messages"])[0]
     assert seed_ref["content_id"] == content["session.attributes.seed.messages[0]"]["content_id"]
     document.verify(_head(document))
 
 
-def test_include_content_exports_request_message_slots_from_a_real_record(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "request-export-keys.sqlite3")
+def test_include_content_exports_request_message_slots_from_a_real_record(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
     with SQLiteStore.standalone(str(tmp_path / "request-export.sqlite")) as store:
         store.install_schema()
         store.configure_input_admission(allow_unsigned=True)
-        driver = SessionDriver(store=store, content_key_provider=provider)
+        driver = SessionDriver(store=store, content_key_provider=key_provider)
         driver.create(SESSION, "/workspace", {})
         lease = store.acquire(SESSION, owner="request-export", ttl_ms=10_000)
         assert lease is not None
@@ -164,19 +238,22 @@ def test_include_content_exports_request_message_slots_from_a_real_record(tmp_pa
         content = _content_by_slot(document)
         assert content["request.messages[0]"]["decoded_value"] == messages[0]
         assert content["request.messages[1]"]["decoded_value"] == messages[1]
-        request_value = content["request"]["decoded_value"]
-        assert [message["content_id"] for message in request_value["messages"]] == [
+        request_value = _object_mapping(content["request"]["decoded_value"])
+        request_messages = _object_list(request_value["messages"])
+        assert [message["content_id"] for message in request_messages] == [
             message_refs[0].content_id,
             message_refs[1].content_id,
         ]
         document.verify(_head(document))
 
 
-def test_export_verify_rejects_missing_or_tampered_nested_content(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "nested-tamper-keys.sqlite3")
+def test_export_verify_rejects_missing_or_tampered_nested_content(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
     with SQLiteStore.standalone(str(tmp_path / "nested-tamper.sqlite")) as store:
         store.install_schema()
-        _create_nested_session(store, provider)
+        _create_nested_session(store, key_provider)
         document = export_session(store, SESSION, content_mode=ExportContentMode.INCLUDE_CONTENT)
         exported = document.to_dict()["lines"]
         nested_slot = "session.attributes.seed.messages[0]"
@@ -204,11 +281,13 @@ def test_export_verify_rejects_missing_or_tampered_nested_content(tmp_path: Path
             ExportDocument.from_dict(document.header.to_dict(), noncanonical)
 
 
-def test_include_content_rejects_nested_ref_without_its_owner_slot_link(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "nested-link-keys.sqlite3")
+def test_include_content_rejects_nested_ref_without_its_owner_slot_link(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
     with SQLiteStore.standalone(str(tmp_path / "nested-link.sqlite")) as store:
         store.install_schema()
-        _create_nested_session(store, provider)
+        _create_nested_session(store, key_provider)
         store._rows(
             "UPDATE sk_content_link SET slot=%s WHERE tenant_id=%s AND session_id=%s AND record_seq=1 AND slot=%s",
             (
@@ -223,16 +302,18 @@ def test_include_content_rejects_nested_ref_without_its_owner_slot_link(tmp_path
             export_session(store, SESSION, content_mode=ExportContentMode.INCLUDE_CONTENT)
 
 
-def test_include_content_hydrates_inside_the_ledger_transaction_and_fails_closed(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "snapshot-keys.sqlite3")
+def test_include_content_hydrates_inside_the_ledger_transaction_and_fails_closed(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
     with SQLiteStore.standalone(str(tmp_path / "snapshot.sqlite")) as store:
         store.install_schema()
-        _create_nested_session(store, provider)
+        _create_nested_session(store, key_provider)
 
         class TransactionCheckingContent:
             def __init__(self) -> None:
                 self.called = False
-                self._store = SQLiteContentStore(store, provider)
+                self._store = SQLiteContentStore(store, key_provider)
 
             def export_content_lines(self, *args):
                 self.called = True
@@ -258,26 +339,27 @@ def test_include_content_hydrates_inside_the_ledger_transaction_and_fails_closed
             export_session(store, SESSION, content_mode=ExportContentMode.INCLUDE_CONTENT)
 
 
-def test_include_content_with_unavailable_key_returns_no_document(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "missing-key-state.sqlite3")
+def test_include_content_with_unavailable_key_returns_no_document(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+) -> None:
     with SQLiteStore.standalone(str(tmp_path / "missing-key.sqlite")) as store:
         store.install_schema()
-        _create_nested_session(store, provider)
+        _create_nested_session(store, key_provider)
         key_id = store._one(
             "SELECT key_id FROM sk_session_key WHERE tenant_id=%s AND session_id=%s",
             ("default", SESSION),
         )[0]
-        assert provider.destroy("default", key_id).status.value == "destroyed"
+        assert key_provider.destroy("default", key_id).status.value == "destroyed"
 
         with pytest.raises(KeyUnavailable):
             export_session(store, SESSION, content_mode=ExportContentMode.INCLUDE_CONTENT)
 
 
-def test_skeleton_export_does_not_touch_the_content_store(tmp_path: Path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "skeleton-keys.sqlite3")
+def test_skeleton_export_does_not_touch_the_content_store(tmp_path: Path, key_provider: LocalKeyProvider) -> None:
     with SQLiteStore.standalone(str(tmp_path / "skeleton.sqlite")) as store:
         store.install_schema()
-        _create_nested_session(store, provider)
+        _create_nested_session(store, key_provider)
 
         class ExplodingContentStore:
             def export_content_lines(self, *_args):

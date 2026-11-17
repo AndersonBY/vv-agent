@@ -259,7 +259,9 @@ def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, t
     assert payload["cycles"] == 1
     assert "[run_started]" in captured.err
     assert "run_completed" in captured.err
-    assert surface.path == ":memory:"
+    assert surface.path != ":memory:"
+    assert Path(surface.path).is_file()
+    assert surface.store.connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     assert surface.store.connection.execute("SELECT count(*) FROM sk_session").fetchone()[0] == 1
 
 

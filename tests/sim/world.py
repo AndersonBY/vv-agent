@@ -19,8 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from session.helpers import content_ref, create_fixture_session, fixture_key_provider, push_fixture_input, wrap_fixture_store
-
+from scripts.s1_fixture_values import (
+    content_ref,
+    create_fixture_session,
+    push_fixture_input,
+    wrap_fixture_store,
+)
+from vv_agent.kernel._boundary_hydration import SessionHydration
+from vv_agent.kernel._content_runtime import durable_content_reader
 from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
@@ -28,12 +34,18 @@ from vv_agent.kernel._sql import LedgerIntegrityError, _initial_chain_digest
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolCall
-from vv_agent.session.content_runtime import durable_content_reader
-from vv_agent.session.postgres import PostgresStore as SessionPostgresStore
-from vv_agent.session.projection import SessionHydration
-from vv_agent.session.sqlite import SQLiteStore as SessionSQLiteStore
 
-from .assembly import CoreRuntimeAssembly, SimContentReader, SimRuntimeNotReady, extend_hydrated_fold, fold_factory
+from .assembly import (
+    SIM_HANDLER_VERSION,
+    CoreRuntimeAssembly,
+    SimContentReader,
+    SimRuntimeNotReady,
+    extend_hydrated_fold,
+    fold_factory,
+)
+from .content import SimAESGCMCipher, SimContentKeyProvider
+
+_DEFAULT_FOLD_FACTORY = fold_factory
 
 
 def sqlite_root(store):
@@ -64,9 +76,11 @@ def sqlite_state_version(store, sid):
     return data_version, root.connection.total_changes, *head
 
 
-class SimSQLiteStore(SessionSQLiteStore):
-    def __init__(self, path, *, clock=None):
-        SQLiteStore.__init__(self, path, fold_factory=fold_factory, clock=clock)
+class SimSQLiteStore(SQLiteStore):
+    def __init__(self, path, *, fold_factory=None, clock=None):
+        selected_fold_factory = fold_factory or _DEFAULT_FOLD_FACTORY
+        selected_clock = clock or SimClock()
+        super().__init__(path, fold_factory=selected_fold_factory, clock=selected_clock)
         self._sim_verified_ledger_cache = None
 
     def _verified_records(self, session_id, through, **kwargs):
@@ -104,14 +118,13 @@ class SimSQLiteStore(SessionSQLiteStore):
         return stored_rows, chains
 
 
-class SimPostgresStore(SessionPostgresStore):
-    def __init__(self, connection):
-        PostgresStore.__init__(self, connection, fold_factory=fold_factory)
+class SimPostgresStore(PostgresStore):
+    def __init__(self, connection, *, fold_factory=None, runtime_binding=None):
+        selected_fold_factory = fold_factory or _DEFAULT_FOLD_FACTORY
+        super().__init__(connection, fold_factory=selected_fold_factory, runtime_binding=runtime_binding)
 
 
-PENDING = {
-    "I11": "W4: worker support sets and claim compatibility filtering do not exist at the P1 baseline",
-}
+PENDING = {}
 
 
 class SimLedgerSigner:
@@ -287,6 +300,7 @@ class SimWorld:
         self.stack = ExitStack()
         self.connections, self.workers, self.keepers = {}, {}, {}
         self.events, self.calls, self.admissions = [], [], []
+        self.worker_claims = []
         self.model_receipts = {}
         self.tasks, self.running = {}, set()
         self.folds, self.prefixes, self.runtimes, self.snapshots = {}, {}, {}, {}
@@ -300,7 +314,8 @@ class SimWorld:
         self.covered = set()
         self.memory_settings = {}
         self.postgres_runtime_ready = False
-        self.content_provider = fixture_key_provider()
+        self.content_provider = SimContentKeyProvider(seed)
+        self.content_cipher = SimAESGCMCipher(seed)
 
     def __enter__(self):
         host = self.connection("host")
@@ -322,10 +337,16 @@ class SimWorld:
     def connection(self, participant):
         if participant not in self.connections:
             if isinstance(self.database, Path):
-                context = SimSQLiteStore.standalone(str(self.database), clock=self.clock)
+                context = SimSQLiteStore.standalone(
+                    str(self.database),
+                    fold_factory=fold_factory,
+                    clock=self.clock,
+                )
             else:
-                context = SimPostgresStore.standalone(self.database)
+                context = SimPostgresStore.standalone(self.database, fold_factory=fold_factory)
             raw_store = self.stack.enter_context(context)
+            raw_store.configure_worker(handler_versions=(SIM_HANDLER_VERSION,))
+            raw_store.configure_reader(level=2)
             raw_store.configure_input_admission(
                 self.ledger_signer,
                 allow_unsigned=self.ledger_signer is None,
@@ -334,9 +355,20 @@ class SimWorld:
                 self._set_postgres_runtime_timeouts(raw_store)
             elif not isinstance(raw_store, SQLiteStore):
                 raw_store._rows("SELECT set_config('lock_timeout','0',false),set_config('statement_timeout','0',false)")
-            store = wrap_fixture_store(raw_store, self.content_provider)
+            store = wrap_fixture_store(raw_store, self.content_provider, cipher=self.content_cipher)
             self.connections[participant] = store
         return self.connections[participant]
+
+    def hydration(self, sid):
+        store = self.connection("observer")
+        return SessionHydration(
+            SimContentReader(
+                durable_content_reader(store, tenant_id=store.tenant_id, session_id=sid),
+                self,
+            ),
+            tenant_id=store.tenant_id,
+            session_id=sid,
+        )
 
     def read_state(self, sid):
         store = self.connection("observer")
@@ -350,14 +382,7 @@ class SimWorld:
         inbox_seq = head[1]
         signature = self.cached_state_signature(store, sid)
         self._content_signatures[sid] = signature
-        hydration = SessionHydration(
-            SimContentReader(
-                durable_content_reader(store, tenant_id=store.tenant_id, session_id=sid),
-                self,
-            ),
-            tenant_id=store.tenant_id,
-            session_id=sid,
-        )
+        hydration = self.hydration(sid)
         prefix = cached.records if cached is not None else ()
         if cached is not None and cached.signature[0] == signature[0][: len(prefix)]:
             fold, _hydrated = extend_hydrated_fold(cached.fold, records[len(prefix) :], hydration, raw_applied_inputs=False)
@@ -491,8 +516,14 @@ class SimWorld:
 
         self.stack.enter_context(patch.object(SQLSessionTx, "_write", write))
 
-    def create(self, sid="s"):
-        create_fixture_session(self.connection("host"), sid, consumers=())
+    def create(self, sid="s", *, feature_level=1, bootstrap=None):
+        create_fixture_session(
+            self.connection("host"),
+            sid,
+            consumers=(),
+            feature_level=feature_level,
+            bootstrap=bootstrap,
+        )
         self.push(sid, InboxItem("initial", "user", {"content": "go"}))
 
     def child_spec(self, parent_session_id, session_id):
@@ -936,6 +967,7 @@ class SimWorld:
             "decisions": self.choices.trace,
             "events": self.events,
             "calls": self.calls,
+            "worker_claims": self.worker_claims,
             "covered": sorted(self.covered),
             "pending": PENDING,
             "backend": "sqlite" if isinstance(self.database, Path) else "postgres",

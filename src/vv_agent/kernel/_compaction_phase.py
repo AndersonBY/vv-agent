@@ -306,6 +306,7 @@ def compact_context(
         selected = primary[-1].selected_attempt
         assert selected is not None
         last_result = primary[-1].attempts[selected].result
+        assert last_result is not None
         last_seq = next(r.seq for r in driver.records if r.record.record_id == last_result.record_id)
         if any(r.seq > last_seq and r.record.kind == "context_compacted" for r in driver.records):
             return False
@@ -538,6 +539,7 @@ def finish_compact(
         return False
     key, start = pending
     start_id = _boundary(driver, "memory_started", key)
+    assert start_id is not None
     start_seq = next(row.seq for row in driver.records if row.record.record_id == start_id.record_id)
     micro = [
         row.record._payload["micro_usage"]

@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from vv_agent.kernel._lease_scope import Clock as Clock
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 
     from .kernel import _LeaseHeartbeat
     from .providers import Outcome
+    from .store import SessionStore
 
 HEARTBEAT_CLOSE_SECONDS = 6.0
 
@@ -45,15 +48,184 @@ class LeaseKeeper(Protocol):
     def is_alive(self, heartbeat: _LeaseHeartbeat) -> bool: ...
 
 
-class ThreadLeaseKeeper:
+@dataclass(slots=True)
+class _LeaseRegistration:
+    heartbeat: _LeaseHeartbeat
+    next_due: float
+    in_flight: bool = False
+    closing: bool = False
+    finished: bool = False
+    store_context: AbstractContextManager[SessionStore] | None = None
+    store: SessionStore | None = None
+    close_error: Exception | None = None
+
+
+class _SharedLeaseKeeper:
+    """Multiplex lease renewals on one process-wide scheduler thread."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition(threading.Lock())
+        self._registrations: dict[int, _LeaseRegistration] = {}
+        self._thread: threading.Thread | None = None
+
     def start(self, heartbeat: _LeaseHeartbeat) -> None:
-        heartbeat.thread.start()
+        key = id(heartbeat)
+        with self._condition:
+            registration = self._registrations.get(key)
+            if registration is not None:
+                return
+            registration = _LeaseRegistration(heartbeat, heartbeat.clock.monotonic())
+            self._registrations[key] = registration
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run,
+                    daemon=True,
+                    name="session-heartbeat",
+                )
+                self._thread.start()
+            if heartbeat.stop.is_set():
+                registration.closing = True
+            self._condition.notify_all()
 
     def close(self, heartbeat: _LeaseHeartbeat) -> None:
-        heartbeat.thread.join(timeout=HEARTBEAT_CLOSE_SECONDS)
+        key = id(heartbeat)
+        reentrant = threading.current_thread() is self._thread
+        registration: _LeaseRegistration | None
+        with self._condition:
+            registration = self._registrations.get(key)
+            if registration is None:
+                return
+            registration.closing = True
+            registration.next_due = float("inf")
+            self._condition.notify_all()
+        if reentrant:
+            return
+        deadline = time.monotonic() + HEARTBEAT_CLOSE_SECONDS
+        with self._condition:
+            while not registration.finished:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._condition.wait(remaining)
+        if registration.close_error is not None:
+            raise registration.close_error
 
     def is_alive(self, heartbeat: _LeaseHeartbeat) -> bool:
-        return heartbeat.thread.is_alive()
+        with self._condition:
+            registration = self._registrations.get(id(heartbeat))
+            return registration is not None and (registration.in_flight or registration.closing)
+
+    def _run(self) -> None:
+        while True:
+            finish: _LeaseRegistration | None = None
+            with self._condition:
+                closing = next(
+                    (
+                        registration
+                        for registration in self._registrations.values()
+                        if registration.closing and not registration.in_flight
+                    ),
+                    None,
+                )
+                if closing is not None:
+                    registration = closing
+                    registration.in_flight = True
+                    finish = registration
+                else:
+                    active = [registration for registration in self._registrations.values() if not registration.closing]
+                    if not active:
+                        self._thread = None
+                        self._condition.notify_all()
+                        return
+                    registration = min(active, key=lambda item: item.next_due)
+                    now = registration.heartbeat.clock.monotonic()
+                    if registration.heartbeat.stop.is_set():
+                        registration.closing = True
+                        registration.in_flight = True
+                        finish = registration
+                    else:
+                        wait = registration.next_due - now
+                        if wait > 0:
+                            self._condition.wait(wait)
+                            continue
+                        registration.in_flight = True
+            if finish is not None:
+                self._finish(finish, notify_finished=True)
+                continue
+            self._renew(registration)
+
+    def _renew(self, registration: _LeaseRegistration) -> None:
+        heartbeat = registration.heartbeat
+        error: Exception | None = None
+        try:
+            store = registration.store
+            if store is None:
+                store_context = heartbeat.heartbeat_store()
+                store = store_context.__enter__()
+                registration.store_context = store_context
+                registration.store = store
+            heartbeat.heartbeat_once(store)
+        except Exception as exc:
+            error = exc
+        with self._condition:
+            if registration.closing or heartbeat.stop.is_set() or heartbeat.lost or error is not None:
+                registration.closing = True
+        if error is not None:
+            heartbeat.heartbeat_failed(error)
+        heartbeat.heartbeat_finished()
+        finish = False
+        with self._condition:
+            if registration.closing:
+                finish = True
+            elif self._registrations.get(id(heartbeat)) is registration:
+                registration.next_due = heartbeat.clock.monotonic() + heartbeat.heartbeat_seconds
+                registration.in_flight = False
+            self._condition.notify_all()
+        if finish:
+            self._finish(registration, notify_finished=False)
+
+    def _finish(self, registration: _LeaseRegistration, *, notify_finished: bool) -> None:
+        store_context = registration.store_context
+        registration.store_context = None
+        registration.store = None
+        error: Exception | None = None
+        if store_context is not None:
+            try:
+                store_context.__exit__(None, None, None)
+            except Exception as exc:
+                error = exc
+        try:
+            if error is not None:
+                registration.heartbeat.heartbeat_failed(error)
+            if notify_finished:
+                registration.heartbeat.heartbeat_finished()
+        finally:
+            with self._condition:
+                registration.close_error = error
+                registration.in_flight = False
+                registration.finished = True
+                if self._registrations.get(id(registration.heartbeat)) is registration:
+                    self._registrations.pop(id(registration.heartbeat), None)
+                self._condition.notify_all()
+
+
+_PROCESS_LEASE_KEEPER = _SharedLeaseKeeper()
+
+
+class ThreadLeaseKeeper:
+    """Share one daemon scheduler across every default runtime in this process."""
+
+    def __init__(self) -> None:
+        self._shared = _PROCESS_LEASE_KEEPER
+
+    def start(self, heartbeat: _LeaseHeartbeat) -> None:
+        self._shared.start(heartbeat)
+
+    def close(self, heartbeat: _LeaseHeartbeat) -> None:
+        self._shared.close(heartbeat)
+
+    def is_alive(self, heartbeat: _LeaseHeartbeat) -> bool:
+        return self._shared.is_alive(heartbeat)
 
 
 class Invoker(Protocol):

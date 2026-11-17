@@ -28,9 +28,11 @@ from vv_agent.session.reducer import _fold_factory_for
 from vv_agent.session.result import project_result
 
 from .helpers import (
+    content_ref,
     create_fixture_session,
     fixture_child_spec,
     fixture_content_reader,
+    principal,
     push_fixture_input,
     wrap_fixture_store,
 )
@@ -226,7 +228,7 @@ def run_completion_case(store, database, case, declared, *, create=True):
     if case == "eof":
         assert len(unknown_rows) == 2 and not results
         assert terminal["reason"] == "model_outcome_unknown"
-        assert all("ModelStreamInterrupted" in reason for reason in unknown_reasons)
+        assert all(isinstance(reason, str) and "ModelStreamInterrupted" in reason for reason in unknown_reasons)
         assert len(calls) == 2
         if logical_state._protection is not None:
             assert protected_start(rows, logical_state) == 1
@@ -238,6 +240,7 @@ def run_completion_case(store, database, case, declared, *, create=True):
         assert failure["outcome"] == "definitive" and failure["metadata"]["model_rejection"]["status_code"] == 200
         assert "HTTP 200" in next(event for event in events if event["type"] == "run_failed")["error"]
         result = results[0]
+        assert isinstance(result, dict)
         assert result["rejection"] == {
             "status_code": 200,
             "provider_code": "refusal" if case.startswith("anthropic") else "content_filter",
@@ -266,7 +269,9 @@ def run_completion_case(store, database, case, declared, *, create=True):
         assert len(results) == 1 and not unknown_rows and len(calls) == 1
         assert terminal["reason"] != "model_request_rejected"
         result = results[0]
+        assert isinstance(result, dict)
         evidence = result["raw"]["completion_metadata"]
+        assert isinstance(evidence, dict)
         if case.startswith("refusal"):
             assert result["content"] == REFUSAL and evidence["refusal"] == REFUSAL
             assert any(m.role == "assistant" and m.content == REFUSAL for m in projected_context)
@@ -360,7 +365,12 @@ def test_response_policy_is_boolean(value):
     from vv_agent.session.records import RecordError
 
     with pytest.raises(RecordError):
-        SessionSpec("invalid", "test", "/tmp", attributes={"seed": {"response_rejection": value}}).record()
+        SessionSpec(
+            "invalid",
+            principal(),
+            content_ref("workspace"),
+            attributes={"seed": {"response_rejection": value}},
+        ).record()
 
 
 @pytest.mark.persistent_store
@@ -498,7 +508,7 @@ def test_children_from_undeclared_source_freeze_false(store, database):
     }
 
 
-def test_fork_from_undeclared_source_freezes_false(store):
+def test_fork_from_undeclared_source_freezes_false(store, tmp_path):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider
     from vv_agent.app_server import DefaultAppServerHost
     from vv_agent.types import LLMResponse
@@ -510,7 +520,7 @@ def test_fork_from_undeclared_source_freezes_false(store):
         agent=Agent("test", "test", model="test"),
         run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "test", [LLMResponse("done")])),
     )
-    server = server_for(store, host)
+    server = server_for(store, host, tmp_path / "fork-keys.sqlite3")
 
     try:
         create_fixture_session(
@@ -589,7 +599,15 @@ def test_0333_store_read_rejects_response_policy(store, database, enabled):
         },
     )
     with patch.object(SessionSpec, "record", return_value=creation), store.atomic() as tx:
-        tx.create(SessionSpec("declared", "test", "/tmp"), consumers=("events",))
+        tx.create(
+            SessionSpec(
+                "declared",
+                principal(),
+                content_ref("workspace"),
+                attributes=content_ref("attributes"),
+            ),
+            consumers=("events",),
+        )
     script = """
 import sys
 from importlib.metadata import version

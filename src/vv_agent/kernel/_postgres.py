@@ -5,15 +5,18 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 
+from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._content_sql import CoreSQLContentStore
+from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLStore
-from vv_agent.kernel._store import Lease
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _TenantSQLStore
+from vv_agent.kernel._store import Lease, SessionStore
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -287,6 +290,20 @@ def _probe_rows(
 ) -> list[tuple[Any, ...]]:
     with _read_only_probe(connection):
         return _query_rows(connection, query, params, binary=binary)
+
+
+def _bind_tenant_context(connection: Connection[Any], tenant_id: str | None) -> None:
+    """Fill an unbound tenant GUC on this transaction without replacing caller state."""
+
+    if tenant_id is None:
+        return
+    from psycopg.pq import TransactionStatus
+
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("tenant context binding requires an open transaction")
+    current = _query_rows(connection, "SELECT current_setting('vv.tenant_id',true)")
+    if current == [(None,)] or current == [("",)]:
+        connection.execute("SELECT set_config('vv.tenant_id',%s,true)", (tenant_id,))
 
 
 def _schema_tables(connection: Connection[Any]) -> set[str]:
@@ -592,6 +609,14 @@ class PostgresStore(SQLStore):
     # Session keys never change. This still serializes writers while allowing
     # child inserts to retain their parent foreign-key KEY SHARE locks.
     lock_clause = " FOR NO KEY UPDATE"
+    _worker_handler_filter_sql = (
+        "(s.handler_version IS NULL OR s.handler_version IN (SELECT jsonb_array_elements_text(%s::jsonb)))"
+    )
+    _worker_capability_filter_sql = (
+        "NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text("
+        "convert_from(s.required_capabilities,'UTF8')::jsonb) AS required(value) "
+        "WHERE required.value NOT IN (SELECT jsonb_array_elements_text(%s::jsonb)))"
+    )
     clock_sql = CLOCK
 
     def __init__(
@@ -625,18 +650,133 @@ class PostgresStore(SQLStore):
     def runtime_mode(self) -> RuntimeMode:
         return self.runtime_binding.mode
 
+    @property
+    def credential_isolation(self) -> bool:
+        """Whether this store is backed by a verified per-tenant login."""
+
+        return self.runtime_binding.credential_isolation
+
+    @property
+    def credential_tenant_id(self) -> str | None:
+        """The tenant authenticated by the login, if this is a tenant binding."""
+
+        return self.runtime_binding.tenant_id if self.credential_isolation else None
+
+    @property
+    def tenant_context_id(self) -> str | None:
+        """The tenant bound by this exact runtime view for transaction-local RLS."""
+
+        credential_tenant = self.credential_tenant_id
+        if credential_tenant is not None:
+            return credential_tenant
+        if self._root_store is not None and self.runtime_mode in {"worker", "shared-gateway"}:
+            return self.tenant_id
+        return None
+
+    @property
+    def claims_all_tenants(self) -> bool:
+        return self._root_store is None and (self.runtime_mode == "worker" or self._all_tenants)
+
+    def _runnable_lock_clause(self) -> str:
+        return " FOR NO KEY UPDATE OF s SKIP LOCKED" if self.runtime_mode == "worker" else ""
+
+    def _require_claim_capable(self) -> None:
+        # Trusted unbound-internal connections retain local schema/admin test
+        # compatibility; production tenant and shared-gateway bindings cannot claim.
+        if self.runtime_mode not in {"worker", "unbound-internal"}:
+            raise PermissionError("PostgreSQL drive leases can only be claimed by a worker binding")
+
     def heartbeat_store(self):
+        return self.heartbeat_store_factory()()
+
+    def drive_store_factory(self) -> Callable[[], AbstractContextManager[SessionStore]]:
+        """Capture a normal independent drive connection opener for this store."""
+
+        conninfo = _connection_conninfo(self.connection)
+        binding = self.runtime_binding
+        tenant_id = self.tenant_id
+        fold_factory = self.fold_factory
+        clock_sql = self.clock_sql
+        supports = self.worker_supports
+        all_tenants = self.claims_all_tenants
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        store_type = type(self)
+
+        @contextmanager
+        def open_store() -> Iterator[SessionStore]:
+            if binding.mode == "tenant":
+                assert binding.tenant_id is not None
+                manager = store_type.tenant_standalone(
+                    conninfo,
+                    tenant_id=binding.tenant_id,
+                    fold_factory=fold_factory,
+                )
+            elif binding.mode == "worker":
+                manager = store_type.worker_standalone(conninfo, fold_factory=fold_factory)
+            elif binding.mode == "shared-gateway":
+                manager = store_type.shared_gateway_standalone(conninfo, fold_factory=fold_factory)
+            else:
+                manager = store_type.standalone(conninfo, fold_factory=fold_factory)
+            with manager as store:
+                store.clock_sql = clock_sql
+                store.configure_worker(
+                    level=supports.max_level,
+                    handler_versions=supports.handler_versions,
+                    capabilities=supports.capabilities,
+                    all_tenants=all_tenants,
+                )
+                if configured:
+                    store.configure_input_admission(signer, allow_unsigned=allow_unsigned)
+                yield store if all_tenants else store.for_tenant(tenant_id)
+
+        return open_store
+
+    def heartbeat_store_factory(self) -> Callable[[], AbstractContextManager[SessionStore]]:
+        """Capture connection-independent renewal configuration on the caller thread."""
+
         from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
         conninfo = _connection_conninfo(self.connection)
         options = conninfo_to_dict(conninfo).get("options", "")
-        return self._heartbeat_connection(
-            make_conninfo(
-                conninfo,
-                connect_timeout=3,
-                options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
-            )
+        heartbeat_conninfo = make_conninfo(
+            conninfo,
+            connect_timeout=3,
+            options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
         )
+        binding = self.runtime_binding
+        fold_factory = self.fold_factory
+        clock_sql = self.clock_sql
+        supports = self.worker_supports
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        store_type = type(self)
+
+        @contextmanager
+        def open_store() -> Iterator[SessionStore]:
+            if binding.mode == "tenant":
+                assert binding.tenant_id is not None
+                manager = store_type.tenant_standalone(
+                    heartbeat_conninfo,
+                    tenant_id=binding.tenant_id,
+                    fold_factory=fold_factory,
+                )
+            elif binding.mode == "worker":
+                manager = store_type.worker_standalone(heartbeat_conninfo, fold_factory=fold_factory)
+            elif binding.mode == "shared-gateway":
+                manager = store_type.shared_gateway_standalone(heartbeat_conninfo, fold_factory=fold_factory)
+            else:
+                manager = store_type.standalone(heartbeat_conninfo, fold_factory=fold_factory)
+            with manager as store:
+                store.clock_sql = clock_sql
+                store.configure_worker(
+                    level=supports.max_level,
+                    handler_versions=supports.handler_versions,
+                    capabilities=supports.capabilities,
+                )
+                if configured:
+                    store.configure_input_admission(signer, allow_unsigned=allow_unsigned)
+                yield cast(SessionStore, store)
+
+        return open_store
 
     def _heartbeat_connection(self, conninfo: str):
         binding = self.runtime_binding
@@ -707,6 +847,22 @@ class PostgresStore(SQLStore):
 
     def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         with self._connection_lock:
+            context_tenant = self.tenant_context_id
+            if context_tenant is not None:
+                from psycopg.pq import TransactionStatus
+
+                status = self.connection.info.transaction_status
+                if status == TransactionStatus.IDLE:
+                    with self.connection.transaction():
+                        _bind_tenant_context(self.connection, context_tenant)
+                        return _query_rows(
+                            self.connection,
+                            query,
+                            params,
+                            binary=query.lstrip().startswith("SELECT"),
+                        )
+                if status == TransactionStatus.INTRANS:
+                    _bind_tenant_context(self.connection, context_tenant)
             return _query_rows(self.connection, query, params, binary=query.lstrip().startswith("SELECT"))
 
     def _execute(self, query: Any) -> None:
@@ -715,9 +871,15 @@ class PostgresStore(SQLStore):
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
+        from psycopg.pq import TransactionStatus
+
         try:
-            with self._connection_lock, self.connection.transaction():
-                yield
+            with self._connection_lock:
+                context_tenant = self.tenant_context_id
+                with self.connection.transaction():
+                    if self.connection.info.transaction_status == TransactionStatus.INTRANS:
+                        _bind_tenant_context(self.connection, context_tenant)
+                    yield
         except BaseException:
             self._fold_cache = None
             self._previous_prefix = None
@@ -729,6 +891,11 @@ class PostgresStore(SQLStore):
         if self.connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("SessionTx requires an open transaction")
         return self._one("SELECT pg_current_xact_id()::text")[0]
+
+    def _transaction_in_progress(self) -> bool:
+        from psycopg.pq import TransactionStatus
+
+        return self.connection.info.transaction_status != TransactionStatus.IDLE
 
     def _schema_tables(self) -> set[str]:
         return _schema_tables(self.connection)
@@ -887,7 +1054,7 @@ class PostgresStore(SQLStore):
         tenant_id: str,
         fold_factory: Callable[[], Fold],
     ) -> Iterator[PostgresStore]:
-        """Open and verify a dedicated tenant LOGIN; callers still set transaction-local context."""
+        """Open a dedicated tenant LOGIN whose transactions bind its tenant context."""
 
         with cls._connect(conninfo) as connection:
             yield cls(connection, fold_factory=fold_factory, runtime_binding=RuntimeBinding("tenant", tenant_id))
@@ -906,3 +1073,145 @@ class PostgresStore(SQLStore):
             )
             if not _schema_is_current(self.connection):
                 raise ValueError("PostgreSQL session schema fingerprint does not match this runtime")
+
+
+class _PostgresContentBackend:
+    lock_clause = " FOR UPDATE"
+
+    def __init__(
+        self,
+        connection: Connection[Any],
+        connection_lock: RLock | None,
+        *,
+        credential_tenant_id: str | None = None,
+        tenant_context_id: str | None = None,
+    ) -> None:
+        self.connection = connection
+        self.connection_lock = connection_lock
+        self.credential_tenant_id = credential_tenant_id
+        self.tenant_context_id = tenant_context_id
+
+    @contextmanager
+    def _serialized(self) -> Iterator[None]:
+        if self.connection_lock is None:
+            yield
+            return
+        with self.connection_lock:
+            yield
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Join a caller transaction or open one short repeatable read."""
+
+        from psycopg.pq import TransactionStatus
+
+        with self._serialized():
+            status = self.connection.info.transaction_status
+            if status == TransactionStatus.INTRANS:
+                _bind_tenant_context(self.connection, self.tenant_context_id)
+                yield
+                return
+            if status != TransactionStatus.IDLE:
+                raise RuntimeError(f"PostgreSQL content snapshot cannot join transaction status {status.name}")
+            self.connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            try:
+                _bind_tenant_context(self.connection, self.tenant_context_id)
+                yield
+            except BaseException:
+                with suppress(BaseException):
+                    self.connection.rollback()
+                raise
+            try:
+                self.connection.commit()
+            except BaseException:
+                with suppress(BaseException):
+                    self.connection.rollback()
+                raise
+
+    @staticmethod
+    def _query(query: str) -> LiteralString:
+        return cast(LiteralString, query.replace("{p}", "%s"))
+
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+        from psycopg.rows import tuple_row
+
+        with self._serialized(), self.connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(self._query(query), params)
+            row = cursor.fetchone()
+            return None if row is None else tuple(row)
+
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        from psycopg.rows import tuple_row
+
+        with self._serialized(), self.connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(self._query(query), params)
+            return [tuple(row) for row in cursor.fetchall()]
+
+    def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        with self._serialized(), self.connection.cursor() as cursor:
+            cursor.execute(self._query(query), params)
+            return cursor.rowcount
+
+    def require_transaction(self) -> None:
+        from psycopg.pq import TransactionStatus
+
+        with self._serialized():
+            if self.connection.info.transaction_status != TransactionStatus.INTRANS:
+                raise RuntimeError("durable content writes require the caller's outer session transaction")
+
+    def now_ms(self) -> int:
+        row = self.fetchone(f"SELECT {CLOCK}")
+        if row is None:
+            raise RuntimeError("PostgreSQL content clock is unavailable")
+        return row[0]
+
+
+class CorePostgresContentStore(CoreSQLContentStore):
+    """PostgreSQL content adapter over a caller-owned connection or transaction."""
+
+    def __init__(
+        self,
+        source: PostgresStore | _TenantSQLStore | SQLSessionTx | Connection[Any],
+        key_provider: KeyProvider,
+        cipher: ContentCipher,
+        *,
+        provider_id: str | None = None,
+    ) -> None:
+        connection: Any
+        connection_lock: RLock | None = None
+        credential_tenant_id: str | None = None
+        tenant_context_id: str | None = None
+        if isinstance(source, SQLSessionTx):
+            if not isinstance(source.store, PostgresStore):
+                raise TypeError("PostgresContentStore transaction must belong to PostgresStore")
+            connection = cast(Any, source.store.connection)
+            connection_lock = source.store._connection_lock
+            credential_tenant_id = source.store.credential_tenant_id
+            tenant_context_id = source.store.tenant_context_id
+        elif isinstance(source, _TenantSQLStore):
+            bound = source._bound
+            if not isinstance(bound, PostgresStore):
+                raise TypeError("PostgresContentStore tenant view must belong to PostgresStore")
+            connection = cast(Any, bound.connection)
+            connection_lock = bound._connection_lock
+            credential_tenant_id = bound.credential_tenant_id
+            tenant_context_id = bound.tenant_context_id
+        else:
+            if isinstance(source, PostgresStore):
+                connection = cast(Any, source.connection)
+                connection_lock = source._connection_lock
+                credential_tenant_id = source.credential_tenant_id
+                tenant_context_id = source.tenant_context_id
+            else:
+                connection = cast(Any, source)
+        super().__init__(
+            _PostgresContentBackend(
+                connection,
+                connection_lock,
+                credential_tenant_id=credential_tenant_id,
+                tenant_context_id=tenant_context_id,
+            ),
+            key_provider,
+            cipher,
+            provider_id=provider_id,
+        )

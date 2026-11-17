@@ -92,7 +92,7 @@ class _DispatchHost:
         elif request is core.DispatchRead.HANDLER_VERSION:
             return driver.runtime.handler_version
         elif request is core.DispatchRead.POLL_LEASE:
-            return driver.scope.poll(driver.store)
+            return driver.scope.confirmed_poll()
         elif request is core.DispatchRead.CANCELLED:
             return driver.scope.token.cancelled
         elif isinstance(request, core.BeforeTool):

@@ -25,6 +25,11 @@ from ._provider_outcomes import (
     validate_reference_provider_handle,
 )
 from ._records import InboxItem, Record, _RetainedTools, copy_json, digest
+from ._requirements import (
+    definition_requirements,
+    model_capability_tags,
+    normalize_requirements,
+)
 from ._sql import stored_input_proof
 from ._state import Attempt
 from ._store import Conflict
@@ -59,6 +64,7 @@ class PublishTurnStarted:
     handler_version: str
     generation: int
     admission_definition_digest: str | None = None
+    requirements: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +157,45 @@ def _hydrated_provider_wait(self: CoreDriver, attempt: Attempt) -> dict[str, Any
     return attempt.wait
 
 
+def _retained_reply_state(self: CoreDriver):
+    """Hydrate only the waits read by inbox reply validation."""
+
+    logical_state = getattr(self, "_logical_state", None)
+    if callable(logical_state):
+        return logical_state()
+    if self.content_reader is None or not getattr(self, "records", None):
+        return self.state
+
+    state = self.state
+    tid = state.active_turn_id
+    turns = state.turns
+    if tid is not None:
+        turn = state.turns[tid]
+        wait = turn.wait
+        if wait is not None:
+            turns = turns | {tid: replace(turn, wait=hydrate_record(self, wait))}
+    operations = state.operations
+    if tid is not None:
+        hydrated_operations = {}
+        for operation_id, operation in state.operations.items():
+            attempts = operation.attempts
+            if operation.turn_id == tid and any(
+                attempt.wait and attempt.wait.get("handle", {}).get("kind") == "user" for attempt in operation.attempts.values()
+            ):
+                attempts = {
+                    number: replace(
+                        attempt,
+                        wait=self.hydrate_parked_wait(operation_id, number, attempt.wait),
+                    )
+                    if attempt.wait and attempt.wait.get("handle", {}).get("kind") == "user"
+                    else attempt
+                    for number, attempt in operation.attempts.items()
+                }
+            hydrated_operations[operation_id] = replace(operation, attempts=attempts)
+        operations = hydrated_operations
+    return replace(state, operations=operations, turns=turns)
+
+
 def _check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) -> None:
     assert plan.operation_id is not None and plan.attempt is not None
     attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
@@ -166,24 +211,32 @@ def _check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) 
 def _hydratable_definition(value: Any) -> Any:
     if declared_content_ref(value) is not None or type(value) is not dict:
         return value
-    definition = copy_json(value)
-    binding = definition.get("model_binding")
-    if type(binding) is dict:
-        binding.setdefault("endpoints", [])
-    return definition
+    return copy_json(value)
 
 
-def _yieldable_batch(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, list[Attempt]]:
+def _pending_batch_in_state(state) -> bool:
+    return any(
+        op.turn_id == state.active_turn_id
+        and (
+            attempt.state in {"planned", "started", "parked"}
+            or (attempt.state == "unknown" and attempt.unknown is not None and attempt.unknown._payload["retry"] == "retry")
+        )
+        for op in state.operations.values()
+        for attempt in [op.attempts[max(op.attempts)]]
+    )
+
+
+def _yieldable_batch_in_state(state, *, one_turn: bool, cancelled: bool) -> list[Attempt]:
     """Return the whole remaining batch only when every observation can yield."""
-    tid = self.state.active_turn_id
-    # shortcut: local drivers keep normal waits; enable yielding with local scheduling.
+
+    tid = state.active_turn_id
     if one_turn or tid is None:
         return []
-    turn = self.state.turns[tid]
-    if turn.cancelled or turn.suspended or turn.wait or (yield InputSetting.CANCELLED):
+    turn = state.turns[tid]
+    if turn.cancelled or turn.suspended or turn.wait or cancelled:
         return []
     pending = []
-    for op in self.state.operations.values():
+    for op in state.operations.values():
         a = op.attempts[max(op.attempts)]
         if op.turn_id != tid or a.state == "completed":
             continue
@@ -192,7 +245,7 @@ def _yieldable_batch(self: CoreDriver, *, one_turn: bool) -> Generator[object, A
         if a.state != "parked" or not a.wait or not a.wait.get("yield_on_steer"):
             return []
         if a.child_handle:
-            completed = self.state.child_completions or {}
+            completed = state.child_completions or {}
             if any(
                 h["session_id"] not in a.wait["yieldable_children"]
                 and (a.plan.operation_id, a.plan.attempt, h["session_id"]) not in completed
@@ -203,20 +256,64 @@ def _yieldable_batch(self: CoreDriver, *, one_turn: bool) -> Generator[object, A
     return pending
 
 
+def _declared_wait_in_state(state) -> bool:
+    return any(
+        op.turn_id == state.active_turn_id
+        and (attempt := op.attempts[max(op.attempts)]).state == "parked"
+        and attempt.wait
+        and attempt.wait.get("yield_on_steer")
+        for op in state.operations.values()
+    )
+
+
+def _steer_yield_plan_in_state(
+    state,
+    item: InboxItem,
+    *,
+    one_turn: bool,
+    cancelled: bool = False,
+) -> list[Attempt] | None:
+    """Return the core yield plan: None retains, [] applies, non-empty yields."""
+
+    if item.kind != "steer":
+        return []
+    tid = state.active_turn_id
+    if tid is None:
+        return None
+    target_tid = item.target_turn_id
+    declared_wait = not one_turn and _declared_wait_in_state(state)
+    target_matches = target_tid == tid or (declared_wait and target_tid is None)
+    if not _pending_batch_in_state(state) or not target_matches:
+        return []
+    current_generation = state.turns[tid].start._payload["generation"]
+    if item.generation not in {None, current_generation}:
+        return None
+    yielding = _yieldable_batch_in_state(state, one_turn=one_turn, cancelled=cancelled)
+    return yielding or None
+
+
+def _steer_held_in_state(
+    state,
+    item: InboxItem,
+    *,
+    one_turn: bool,
+    cancelled: bool = False,
+) -> bool:
+    return (
+        _steer_yield_plan_in_state(
+            state,
+            item,
+            one_turn=one_turn,
+            cancelled=cancelled,
+        )
+        is None
+    )
+
+
 def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
     inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark)
     # At one captured watermark, authenticated child terminals win over steering.
-    declared_wait = (
-        not one_turn
-        and bool(inputs)
-        and any(
-            op.turn_id == self.state.active_turn_id
-            and (a := op.attempts[max(op.attempts)]).state == "parked"
-            and a.wait
-            and a.wait.get("yield_on_steer")
-            for op in self.state.operations.values()
-        )
-    )
+    declared_wait = not one_turn and bool(inputs) and _declared_wait_in_state(self.state)
     if declared_wait:
         if len(inputs) == 256 and self.watermark > 256:
             inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark, limit=self.watermark)
@@ -257,23 +354,26 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
         if logical_item.kind == "model_selection" and self.pending_batch():
             continue
         yielding = []
-        if (
-            logical_item.kind == "steer"
-            and tid is not None
-            and (target_tid == tid or (declared_wait and target_tid is None))
-            and logical_item.generation in {None, self.state.turns[tid].start._payload["generation"]}
-        ):
-            yielding = yield from _yieldable_batch(self, one_turn=one_turn)
-        if logical_item.kind == "steer" and (
-            tid is None
-            or (self.pending_batch() and (target_tid == tid or (declared_wait and target_tid is None)) and not yielding)
-        ):
-            continue
+        if logical_item.kind == "steer":
+            cancelled = yield InputSetting.CANCELLED
+            yield_plan = _steer_yield_plan_in_state(
+                self.state,
+                logical_item,
+                one_turn=one_turn,
+                cancelled=cancelled,
+            )
+            if yield_plan is None:
+                continue
+            yielding = yield_plan
         if compaction_request(logical_item) is not None:
             if self.state.closed:
                 disposition, reason = "rejected", "session closed"
             else:
-                disposition = "applied" if tid else "queued"
+                # Compaction is work selected by the existing compaction phase, not a
+                # reply to a parked user wait. Keep one queued disposition in both idle
+                # and active states so the raw SQL fold can use the retained record
+                # without hydrating its content-only reason.
+                disposition = "queued"
                 reason = "host compaction request"
         elif logical_item.kind == "child_result":
             # Completion identity and dedupe bind the retained inbox bytes; projections stay logical.
@@ -407,6 +507,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
             )
             if (
                 previous is not None
+                and previous_item is not None
                 and op is not None
                 and target_tid == op.turn_id
                 and logical_item.payload == previous_item.payload
@@ -470,25 +571,30 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                 from ._interactions import InteractionError, validate_inbox_reply
 
                 try:
-                    validation_state = getattr(self, "_logical_state", lambda: self.state)()
+                    validation_state = _retained_reply_state(self)
                     reply_target, answer = validate_inbox_reply(validation_state, self.sid, logical_item)
                 except InteractionError as exc:
                     disposition, reason = "rejected", exc.reason
                 else:
                     target, wait = reply_target.operation_id, reply_target.interaction_id
                     if target is not None:
-                        plan = self.state.operations[target].attempts[reply_target.attempt].execution_plan
-                        yield PrepareToolContext(plan, include_store=True)
+                        retained_plan = self.state.operations[target].attempts[reply_target.attempt].execution_plan
+                        logical_plan = (
+                            self.hydrate_plan(retained_plan)
+                            if self.content_reader is not None and getattr(self, "records", None)
+                            else retained_plan
+                        )
+                        yield PrepareToolContext(logical_plan, include_store=True)
                         outcome = yield FinalizeTool(
-                            plan,
+                            retained_plan,
                             Definitive(
                                 ToolExecutionResult(
-                                    tool_call_id=plan._payload["request"]["id"], content=answer.model_text()
+                                    tool_call_id=logical_plan._payload["request"]["id"], content=answer.model_text()
                                 ).to_dict(),
                                 (),
                             ),
                         )
-                        extra = yield CompleteResult(plan, outcome)
+                        extra = yield CompleteResult(retained_plan, outcome)
             elif tid and logical_item.kind == "user":
                 disposition, reason = "rejected", "reply must identify the parked interaction"
             else:
@@ -501,6 +607,20 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                     selection_binding = yield ResolveModelSelection(logical_item.payload["selection"])
                 except Exception:
                     disposition, reason = "rejected", "model_selection_unresolvable"
+            if logical_item.feature_level == 2 and disposition == "applied":
+                assert logical_item.requirements is not None
+                requirements = normalize_requirements(logical_item.requirements)
+                current_handler = (
+                    self.state.turns[self.state.active_turn_id].start._payload["handler_version"]
+                    if self.state.active_turn_id is not None
+                    else (yield InputSetting.HANDLER_VERSION)
+                )
+                if requirements.handler_version != current_handler:
+                    disposition, reason = "rejected", "model_selection_handler_mismatch"
+                elif logical_item.payload["selection"] is not None and set(requirements.capabilities) != set(
+                    model_capability_tags(selection_binding)
+                ):
+                    disposition, reason = "rejected", "model_selection_requirements_mismatch"
         elif logical_item.kind == "control":
             if logical_item.payload["action"] not in {"archive", "close"} and (tid is None or target_tid != tid):
                 disposition, reason = "rejected", "control requires active target"
@@ -529,15 +649,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
         )
         if logical_item.kind == "model_selection" and disposition == "applied" and logical_item.payload["selection"] is not None:
             applied = replace(applied, payload=applied._payload | {"model_binding": selection_binding})
-        if logical_item.kind == "approval_answer" and disposition == "applied":
-            from ._reducer import logical_inputs
-
-            # The raw inbox proof still binds the submitted refs. The reducer must
-            # compare this exact validated answer with the hydrated parked wait.
-            with logical_inputs({applied.record_id: logical_item}):
-                yield CommitInput([applied, *extra], item.input_id)
-        else:
-            yield CommitInput([applied, *extra], item.input_id)
+        yield CommitInput([applied, *extra], item.input_id)
         return True
     return False
 
@@ -592,6 +704,19 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
     return target, (yield CompleteResult(a.execution_plan, outcome)), "applied", None
 
 
+def _validate_actual_requirements(bound, actual) -> None:
+    if actual.level < bound.level:
+        raise ValueError("unsatisfiable pre-admission requirements: actual level is lower than the bound")
+    if bound.handler_version is not None and actual.handler_version != bound.handler_version:
+        raise ValueError("unsatisfiable pre-admission requirements: handler version changed")
+    exceeds = set(actual.capabilities) - set(bound.capabilities)
+    if exceeds:
+        raise ValueError(
+            "unsatisfiable pre-admission requirements: compiled definition exceeds the trusted bound: "
+            + ", ".join(sorted(exceeds))
+        )
+
+
 def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
     inputs = sorted(self.state.applied_inputs.items(), key=lambda pair: pair[1]._payload["input"]["kind"] == "follow_up")
     attributes = self.session_attributes()
@@ -607,6 +732,11 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             else retained_content
         )
         logical_item = replace(InboxItem(**item), payload=item["payload"] | {"content": content})
+        bound = normalize_requirements(item["requirements"]) if item["feature_level"] == 2 else None
+        if bound is None:
+            created = self.records[0].record
+            if created.feature_level == 2:
+                bound = normalize_requirements(created._payload["bootstrap"])
         control = compaction_request(logical_item) is not None
         seed_attributes = attributes.get("seed")
         task = yield CompileTurn(
@@ -661,6 +791,10 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             ):
                 raise Conflict("child admission definition digest mismatch")
             stored_definition = _hydratable_definition(admitted_definition)
+        actual_requirements = None
+        if bound is not None:
+            actual_requirements = definition_requirements(stored_definition, handler_version=handler_version)
+            _validate_actual_requirements(bound, actual_requirements)
         yield PublishTurnStarted(
             input_id=input_id,
             tid=tid,
@@ -669,6 +803,7 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             handler_version=handler_version,
             generation=item["generation"] or 0,
             admission_definition_digest=admission_digest,
+            requirements=actual_requirements.to_dict() if actual_requirements is not None else None,
         )
         yield InputSetting.RESET_TOKEN
         return True

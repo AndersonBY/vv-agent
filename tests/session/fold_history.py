@@ -66,7 +66,7 @@ def parse_logical_record(source: bytes | str, *, cache=None) -> Record:
 def attach_logical_task(record: Record) -> Record:
     if record.kind == "turn_started":
         definition = record.payload["definition"]
-        object.__setattr__(record, "_task", lambda definition=definition: AgentTask.from_dict(definition["task"]))
+        object.__setattr__(record, "_task_value", AgentTask.from_dict(definition["task"]))
     return record
 
 
@@ -185,7 +185,6 @@ def growing_history(steps: int, *, initial_bytes: int = 128 * 1024, steer: bool 
     rt = runtime(None, [])
     task = rt.compile("x" * initial_bytes, "t")
     definition = rt.definition(task)
-    definition["model_binding"]["endpoints"] = []
     rows = [
         logical_record(
             "turn_started",

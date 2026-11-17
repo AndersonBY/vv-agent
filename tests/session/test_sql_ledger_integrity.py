@@ -26,6 +26,7 @@ class Signer:
         self.key_id = "ledger-key"
         self.fail = False
         self.reject_signed_messages = False
+        self.reject_input_messages = False
 
     def bind_key(self):
         signer = self
@@ -42,7 +43,11 @@ class Signer:
         return Bound()
 
     def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
-        if self.reject_signed_messages or key_id != self.key_id:
+        if (
+            self.reject_signed_messages
+            or (self.reject_input_messages and b'"domain":"vv-agent/S1/input"' in message)
+            or key_id != self.key_id
+        ):
             return False
         try:
             self.key.public_key().verify(signature, message)
@@ -90,6 +95,71 @@ def test_chain_vector_uses_binary_length_framing_and_sequence(tmp_path):
         assert manifest["records"] == [{"record_id": record("turn_started").record_id, "digest": next_digest}]
         assert commit[0] == canonical_json_bytes(manifest)
         assert commit[1] == sha256(commit[0]).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("record_id", "forged-record"),
+        ("schema_version", "S2"),
+        ("kind", "usage_observed"),
+        ("turn_id", "forged-turn"),
+        ("operation_id", "forged-operation"),
+        ("attempt", 1),
+    ],
+)
+def test_cached_record_body_requires_matching_fresh_sql_identity(tmp_path, column, value):
+    with SQLiteStore.standalone(str(tmp_path / f"identity-{column}.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
+        create(store)
+        lease = store.acquire("s", owner="worker", ttl_ms=10_000)
+        assert lease is not None
+        with store.atomic() as tx:
+            tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started", sid="s"),))
+        assert store.read("s").head_seq == 2
+
+        if column == "schema_version":
+            store.connection.execute("PRAGMA ignore_check_constraints=ON")
+            try:
+                store.connection.execute(f"UPDATE sk_record SET {column}=? WHERE seq=2", (value,))
+            finally:
+                store.connection.execute("PRAGMA ignore_check_constraints=OFF")
+        else:
+            store.connection.execute(f"UPDATE sk_record SET {column}=? WHERE seq=2", (value,))
+        with pytest.raises(LedgerIntegrityError, match="SQL identity does not match its body at seq 2"):
+            store.read("s")
+
+
+@pytest.mark.parametrize(
+    "target,message",
+    [
+        ("chain", "chain digest mismatch at seq 2"),
+        ("checkpoint", "checkpoint signature is invalid at seq 2"),
+        ("commit", "commit body digest mismatch"),
+    ],
+)
+def test_warm_record_bytes_still_revalidate_chain_checkpoints_and_commits(tmp_path, target, message):
+    signer = Signer()
+    with SQLiteStore.standalone(str(tmp_path / f"warm-{target}.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(signer)
+        create(store)
+        lease = store.acquire("s", owner="worker", ttl_ms=10_000)
+        assert lease is not None
+        with store.atomic() as tx:
+            tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started", sid="s"),))
+        assert store.read("s").head_seq == 2
+
+        if target == "chain":
+            store.connection.execute("UPDATE sk_record SET chain_digest=? WHERE seq=2", ("0" * 64,))
+        elif target == "checkpoint":
+            store.connection.execute("UPDATE sk_checkpoint SET signature=? WHERE seq=2", (b"forged",))
+        else:
+            store.connection.execute("UPDATE sk_commit SET body=? WHERE commit_id='turn'", (b"{}",))
+
+        with pytest.raises(LedgerIntegrityError, match=message):
+            store.read("s")
 
 
 def test_signed_checkpoint_rejects_recomputed_keyless_chain(tmp_path):
@@ -173,7 +243,7 @@ def test_signer_key_binding_is_verified_before_checkpoint_or_input_commit(tmp_pa
 
         signer.reject_signed_messages = False
         create(store)
-        signer.reject_signed_messages = True
+        signer.reject_input_messages = True
         with pytest.raises(InputAdmissionProofError, match=r"key binding.*input_seq 1"), store.atomic() as tx:
             tx.push("s", item("input"))
         assert store._one("SELECT count(*) FROM sk_inbox")[0] == 0
@@ -279,7 +349,9 @@ def test_expected_head_detects_deleted_signed_tail_without_a_db_derived_anchor(t
             2,
             store._one("SELECT chain_digest FROM sk_record WHERE seq=2")[0],
         )
-        assert store.release(lease)
+        # Renewal must prove the intact source before it grants a lease. Keep this
+        # earlier lease valid while simulating a deleted persisted tail.
+        assert lease.expires_at_ms > store._now()
         store.connection.execute("DELETE FROM sk_checkpoint WHERE seq=2")
         store.connection.execute("DELETE FROM sk_record WHERE seq=2")
         store.connection.execute("DELETE FROM sk_commit WHERE commit_id='tail'")
@@ -290,8 +362,6 @@ def test_expected_head_detects_deleted_signed_tail_without_a_db_derived_anchor(t
         assert reopened.verify_ledger("s") == (1, reopened._one("SELECT chain_digest FROM sk_record WHERE seq=1")[0])
         with pytest.raises(ContentBindingMismatch, match=r"expected_head.*seq 1"):
             reopened.read("s", expected_head=trusted_head)
-        lease = reopened.acquire("s", owner="worker", ttl_ms=10_000)
-        assert lease is not None
         with pytest.raises(ContentBindingMismatch, match=r"expected_head.*seq 1"), reopened.atomic() as tx:
             tx.append(
                 "s",
@@ -365,16 +435,8 @@ def test_existing_hash_only_history_cannot_be_retroactively_signed(tmp_path):
         store.configure_input_admission(allow_unsigned=True)
         create(store)
         store.configure_input_admission(signer)
-        lease = store.acquire("s", owner="worker", ttl_ms=10_000)
-        assert lease is not None
-        with pytest.raises(LedgerIntegrityError, match="checkpoint is missing at seq 1"), store.atomic() as tx:
-            tx.append(
-                "s",
-                lease=lease,
-                expected_seq=1,
-                commit_id="must-not-sign-old-history",
-                records=(record("turn_started", sid="s"),),
-            )
+        with pytest.raises(LedgerIntegrityError, match="checkpoint is missing at seq 1"):
+            store.acquire("s", owner="worker", ttl_ms=10_000)
         assert store._head("s")[0] == 1
         assert store._one("SELECT count(*) FROM sk_record")[0] == 1
         assert store._one("SELECT count(*) FROM sk_checkpoint")[0] == 0
@@ -388,8 +450,12 @@ def test_tampered_signed_input_blocks_recovery_before_any_append_or_content_use(
         create(store)
         with store.atomic() as tx:
             tx.push("s", item("input", actor=principal("attacker", "user")))
+        assert store.read("s").head_seq == 1
+        lease = store.acquire("s", owner="worker", ttl_ms=10_000)
+        assert lease is not None
         body, checksum = store._one("SELECT body,digest FROM sk_inbox WHERE input_id='input'")
         original = InboxItem.parse(body)
+        assert original.actor is not None
         forged = replace(original, actor=original.actor | {"subject_id": "forged"})
         forged_body = forged.encode()
         store.connection.execute(
@@ -403,8 +469,6 @@ def test_tampered_signed_input_blocks_recovery_before_any_append_or_content_use(
         monkeypatch.setattr(SQLiteContentStore, "get", forbidden_content_read)
         with pytest.raises(InputAdmissionProofError, match="input_seq 1"):
             store.read("s")
-        lease = store.acquire("s", owner="worker", ttl_ms=10_000)
-        assert lease is not None
         with pytest.raises(InputAdmissionProofError, match="input_seq 1"), store.atomic() as tx:
             tx.append(
                 "s",
@@ -417,3 +481,4 @@ def test_tampered_signed_input_blocks_recovery_before_any_append_or_content_use(
         assert store._one("SELECT count(*) FROM sk_record")[0] == 1
         assert store._one("SELECT count(*) FROM sk_checkpoint")[0] == 1
         assert checksum != sha256(forged_body).hexdigest()
+        assert store.release(lease)

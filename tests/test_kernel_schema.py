@@ -140,11 +140,11 @@ def test_record_schemas_and_checks_have_one_owner():
     ):
         assert getattr(records, name) is getattr(_record_schema, name), name
     assert _record_schema._CHECKS.keys() == {id(s) for s in _record_schema._SCHEMAS}
-    assert _record_schema.PAYLOADS["input_applied"]["properties"]["input"] is _record_schema.INPUT_SCHEMA
+    assert _record_schema.PAYLOADS["input_applied"]["properties"]["input"] is _record_schema.INBOX_ITEM_SCHEMA
     assert _record_schema.INPUT_PAYLOADS["provider_evidence"]["properties"]["handle"] is _record_schema.PROVIDER_HANDLE
 
 
-def test_contract_40_logical_schema_has_closed_s1_shapes():
+def test_contract_41_logical_schema_has_closed_s1_shapes():
     assert set(_record_schema.RECORD_SCHEMA["properties"]) == {
         "schema_version",
         "feature_level",
@@ -174,6 +174,32 @@ def test_contract_40_logical_schema_has_closed_s1_shapes():
     assert _record_schema.INPUT_SCHEMA["properties"]["schema_version"] == {"const": "S1"}
     assert _record_schema.INPUT_SCHEMA["properties"]["actor"] is _record_schema.PRINCIPAL
     assert _record_schema.INPUT_SCHEMA["properties"]["admission_proof"] is _record_schema.ADMISSION_PROOF
+    assert set(_record_schema.INPUT_SCHEMA_LEVEL_2["properties"]) == {
+        "schema_version",
+        "feature_level",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "requirements",
+        "payload",
+    }
+    assert _record_schema.INPUT_SCHEMA_LEVEL_2["properties"]["feature_level"] == {"const": 2, "type": "integer"}
+    assert _record_schema.INPUT_SCHEMA_LEVEL_2["properties"]["requirements"] is _record_schema.REQUIREMENTS
+    assert _record_schema.INBOX_ITEM_SCHEMA["oneOf"] == [
+        _record_schema.INPUT_SCHEMA,
+        _record_schema.INPUT_SCHEMA_LEVEL_2,
+    ]
+    assert _record_schema.RECORD_ITEM_SCHEMA["oneOf"] == [
+        _record_schema.RECORD_SCHEMA,
+        _record_schema.RECORD_SCHEMA_LEVEL_2,
+    ]
+    assert _record_schema.RECORD_SCHEMA_LEVEL_2["properties"]["kind"] == {"type": "string", "enum": ["session_created"]}
+    assert _record_schema.SESSION_CREATED_LEVEL_2["properties"]["bootstrap"] is _record_schema.REQUIREMENTS
+    assert "bootstrap" not in _record_schema.PAYLOADS["session_created"]["properties"]
     assert _record_schema.PRINCIPAL["properties"]["subject_kind"]["enum"] == ["user", "service", "agent"]
     assert set(_record_schema.CONTENT_REF["properties"]) == {"content_id", "mac", "size", "key_id", "labels"}
     for kind in ("op_planned", "op_prepared", "op_completed"):
@@ -184,6 +210,24 @@ def test_contract_40_logical_schema_has_closed_s1_shapes():
     assert environment["operational_policy"]["anyOf"][1] == {"type": "null"}
     assert _record_schema.PAYLOADS["turn_started"]["properties"]["tokenizer_binding"] is _record_schema.TOKENIZER_BINDING
     assert set(_record_schema.USAGE_COUNTS["properties"]) == {"tokens", "budget"}
+    assert set(_record_schema.MODEL_CAPABILITY["properties"]) == {
+        "backend",
+        "model",
+        "context_length",
+        "max_output_tokens",
+    }
+    assert set(_record_schema.DEFINITION_MODEL_BINDING["properties"]) == {
+        "backend",
+        "model",
+        "context_length",
+        "max_output_tokens",
+        "internal",
+    }
+    assert "internal" not in _record_schema.DEFINITION_MODEL_BINDING["required"]
+    assert (
+        _record_schema.DEFINITION_MODEL_BINDING["properties"]["internal"]["additionalProperties"]
+        is _record_schema.MODEL_CAPABILITY
+    )
 
 
 @pytest.mark.parametrize("value,expected", [(0, True), (1, True), (-1, False), (True, False), (1.0, False), ("1", False)])

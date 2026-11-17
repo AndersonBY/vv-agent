@@ -10,13 +10,17 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import SimpleNamespace
+from typing import Any
 
+from scripts.s1_fixture_values import deterministic_content_producer, fixture_key_provider_for_store
 from vv_agent import Accepted, Agent, Definitive, RunConfig, ScriptedModelProvider, Unknown, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import InboxItem, Record
 from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.tools.metadata import ToolMetadata
+from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata, ToolSideEffect
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult, ToolResultStatus
 
@@ -58,7 +62,8 @@ class BusinessDB:
         with closing(self.connect()) as db:
             row = db.execute("SELECT plan, done FROM jobs WHERE key=?", (key,)).fetchone()
         assert row is not None
-        return Record.parse(row[0].encode()), row[1]
+        value = json.loads(row[0])
+        return SimpleNamespace(**value), row[1]
 
 
 class JobsProvider:
@@ -83,10 +88,10 @@ class JobsProvider:
         key = context.idempotency_key or f"{plan.session_id}/{plan.operation_id}"
         with closing(self.business.connect()) as db, db:
             if db.execute("SELECT 1 FROM jobs WHERE key=?", (key,)).fetchone() is None:
-                db.execute("INSERT INTO jobs VALUES (?, ?, 0)", (key, plan.encode().decode()))
+                db.execute("INSERT INTO jobs VALUES (?, ?, 0)", (key, canonical_json_bytes(plan.to_dict()).decode()))
                 db.execute("INSERT INTO calls VALUES ('effect')")
             else:
-                db.execute("UPDATE jobs SET plan=? WHERE key=?", (plan.encode().decode(), key))
+                db.execute("UPDATE jobs SET plan=? WHERE key=?", (canonical_json_bytes(plan.to_dict()).decode(), key))
         if self.business.setting("pause_after_accept"):
             self.business.setting("accepted", True)
             Event().wait(60)
@@ -178,7 +183,10 @@ class JobsProvider:
 def business_tool(business, *, supported=True, needs_approval=False):
     @function_tool(
         needs_approval=needs_approval,
-        tool_metadata=ToolMetadata(side_effect="external", idempotency="supported" if supported else "unsupported"),
+        tool_metadata=ToolMetadata(
+            side_effect=ToolSideEffect.EXTERNAL,
+            idempotency=ToolIdempotency.SUPPORTED if supported else ToolIdempotency.UNSUPPORTED,
+        ),
     )
     def work(value: int = 1):
         business.call("sync")
@@ -225,7 +233,13 @@ class Server:
     def __init__(self, store, business, **host_options):
         self.host = JobsHost(business, **host_options)
         self.transport = ChannelTransport(connection_id="owner", outbound_capacity=10000)
-        self.server = AppServer(transport=self.transport, store=store, host=self.host)
+        self.content_key_provider = fixture_key_provider_for_store(store)
+        self.server = AppServer(
+            transport=self.transport,
+            store=store,
+            host=self.host,
+            content_key_provider=self.content_key_provider,
+        )
         self.messages = []
         self.identity = 0
         self.connect("owner")
@@ -295,8 +309,10 @@ class Server:
         self.join()
         self.server.run_adapter.close()
         self.server.kernel.close()
+        self.content_key_provider.close()
 
 
+@deterministic_content_producer
 def produce():
     with TemporaryDirectory(prefix="gap2-producer-") as tmp:
         root = Path(tmp)
@@ -324,10 +340,15 @@ def produce():
             second.resume()
             attempt = second.attempt()
             assert attempt.result is not None
-            completion = attempt.result.payload
+            _, second_records, _ = second.server.kernel.store.read_state(THREAD)
+            result_row = next(row for row in second_records if row.record.record_id == attempt.result.record_id)
+            completion = hydrate_record_payload(
+                result_row,
+                hydration_for_session_store(second.server.kernel.store, THREAD),
+            )
             assert completion["result"]["tool_call_id"] == "business-call"
             assert business.count("effect") == 1 and business.count("submit") == 1 and business.count("sync") == 0
-            value = {
+            value: dict[str, Any] = {
                 "schema_version": 1,
                 "protocol_version": "v5",
                 "receipt": {k: v for k, v in receipt.items() if k != "status"},
@@ -347,7 +368,7 @@ def produce():
         value["strict_results"] = []
         for invalid in ("call", "status", "evidence", "empty_evidence", "ambiguous", "fields"):
             business = BusinessDB(root / f"invalid-{invalid}.sqlite")
-            with SQLiteStore.standalone(":memory:") as store:
+            with SQLiteStore.standalone(str(root / f"invalid-session-{invalid}.sqlite")) as store:
                 store.install_schema()
                 server = Server(store, business)
                 try:
@@ -382,7 +403,7 @@ def produce():
             business.setting("cancel", "confirmed" if mode == "invalid" else mode)
             if mode == "invalid":
                 business.setting("invalid", "evidence")
-            with SQLiteStore.standalone(":memory:") as store:
+            with SQLiteStore.standalone(str(root / f"cancel-session-{mode}.sqlite")) as store:
                 store.install_schema()
                 server = Server(store, business)
                 try:

@@ -112,9 +112,12 @@ with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as store:
     assert store.release(replacement)
 with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as cold:
     assert cold.read('s').head_seq == 2 and cold.fold_factory is factory
-with SQLiteStore.standalone(':memory:', clock=clock, fold_factory=factory) as memory:
-    with memory.heartbeat_store() as heartbeat:
-        assert heartbeat is memory
+try:
+    SQLiteStore(':memory:', clock=clock, fold_factory=factory)
+except ValueError as error:
+    assert "requires a file path" in str(error) and "':memory:' is not supported" in str(error)
+else:
+    raise AssertionError('in-memory session store was accepted')
 assert all(n in {'vv_agent','vv_agent.kernel'} or n.startswith('vv_agent.kernel.')
            for n in sys.modules if n.startswith('vv_agent'))
 """
@@ -150,3 +153,5 @@ def test_sdk_storage_defaults_and_actual_sql_inheritance(tmp_path):
     assert SQLiteStore._transaction is CoreSQLiteStore._transaction
     assert PostgresStore._transaction is CorePostgresStore._transaction
     assert PostgresStore._bound_append is CorePostgresStore._bound_append
+    with pytest.raises(ValueError, match=r"requires a file path.*:memory:.*not supported"):
+        SQLiteStore(":memory:")

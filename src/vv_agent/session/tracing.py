@@ -104,9 +104,17 @@ def project_spans(
 
 def deliver_spans(store: SessionStore, session_id: str, processors: list[TraceProcessor], *, consumer: str = "traces") -> int:
     # Telemetry is at-most-once: the cursor must commit before nontransactional processors.
-    if isinstance(store, SQLStore):
+    transaction_store = store
+    seen: set[int] = set()
+    while id(transaction_store) not in seen:
+        seen.add(id(transaction_store))
+        parent = getattr(transaction_store, "_root_store", None) or getattr(transaction_store, "_root", None)
+        if parent is None or parent is transaction_store:
+            break
+        transaction_store = parent
+    if isinstance(transaction_store, SQLStore):
         try:
-            store._transaction_id()
+            transaction_store._transaction_id()
         except RuntimeError:
             pass
         else:

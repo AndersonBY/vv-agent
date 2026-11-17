@@ -141,7 +141,7 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
         commits = target._rows("SELECT commit_id FROM sk_commit WHERE session_id=%s ORDER BY commit_id", ("s",))
         return bodies, commits
 
-    with SQLiteStore.standalone(":memory:") as old, monkeypatch.context() as patch:
+    with SQLiteStore.standalone(str(tmp_path / "legacy-steps.sqlite")) as old, monkeypatch.context() as patch:
         old.install_schema()
         for module in (token_utils, memory_manager, compaction, reducer):
             patch.setattr(module, "count_messages_tokens", legacy_count)
@@ -258,7 +258,7 @@ def test_tool_completion_does_not_copy_frozen_history_for_a_read_only_policy(sto
     assert len(copied) == 1
 
 
-def test_recorded_steps_tokenize_only_the_new_model_and_tool_messages(store, database, monkeypatch):
+def test_recorded_steps_tokenize_only_the_new_model_and_tool_messages(store, database, monkeypatch, tmp_path):
     from deepseek_tokenizer import deepseek_tokenizer
     from vv_llm.chat_clients import utils
     from vv_llm.types.enums import BackendType

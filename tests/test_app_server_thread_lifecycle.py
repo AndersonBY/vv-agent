@@ -95,6 +95,21 @@ def test_thread_archive_hides_thread_and_emits_notification(surface) -> None:
     assert archived_list_response["result"]["threads"][0]["status"] == "archived"
 
 
+def test_thread_archive_returns_not_found_for_missing_thread(surface) -> None:
+    processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/archive", "params": {"threadId": "missing"}}
+    )
+
+    assert transport.receive_outbound(timeout=1) == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": AppServerErrorCode.THREAD_NOT_FOUND, "message": "Thread not found"},
+    }
+    with pytest.raises(queue.Empty):
+        transport.receive_outbound(timeout=0.01)
+
+
 def test_turn_start_rejects_archived_thread(surface) -> None:
     processor, transport, _router, _state_manager = _initialized_processor(store=surface.store)
     processor.process_message(

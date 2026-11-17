@@ -1,4 +1,5 @@
 import pytest
+from session.app_server_s1_helpers import bind_development_content
 
 from vv_agent.app_server.protocol.thread import ThreadModelSelectParams
 from vv_agent.app_server.server import AppServer
@@ -32,9 +33,10 @@ def test_model_select_parser_returns_request_dto_without_actor():
         )
 
 
-def test_app_server_writers_use_trusted_ingress_principal(monkeypatch):
-    root_store = SQLiteStore(":memory:")
+def test_app_server_writers_use_trusted_ingress_principal(monkeypatch, tmp_path):
+    root_store = SQLiteStore(str(tmp_path / "app-server.sqlite"))
     root_store.install_schema()
+    bind_development_content(root_store)
     store = root_store.for_tenant("tenant-a")
     server = AppServer(store=store)
     principal = {
@@ -78,26 +80,30 @@ def test_app_server_writers_use_trusted_ingress_principal(monkeypatch):
         prompt = items["prompt"]
         owner_selection = items["owner-select"]
         selection_actor = selection.actor
+        prompt_actor = prompt.actor
+        owner_selection_actor = owner_selection.actor
 
         assert selection_actor is not None
+        assert prompt_actor is not None
+        assert owner_selection_actor is not None
         assert {key: selection_actor[key] for key in ("tenant_id", "subject_kind", "subject_id")} == {
             "tenant_id": "tenant-a",
             "subject_kind": "user",
             "subject_id": "ingress-user",
         }
-        assert {key: prompt.actor[key] for key in ("tenant_id", "subject_kind", "subject_id")} == {
+        assert {key: prompt_actor[key] for key in ("tenant_id", "subject_kind", "subject_id")} == {
             "tenant_id": "tenant-a",
             "subject_kind": "user",
             "subject_id": "ingress-user",
         }
-        assert owner_selection.actor["subject_id"] == "ingress-user"
-        assert owner_selection.actor["subject_kind"] == "user"
+        assert owner_selection_actor["subject_id"] == "ingress-user"
+        assert owner_selection_actor["subject_kind"] == "user"
         assert "content_id" in selection.payload["selection"]
         assert "content_id" in prompt.payload["content"]
         assert server.kernel.read_input_content(
             "thread", "select", selection_actor["attributes"], slot=INPUT_ACTOR_ATTRIBUTES
         ) == {"role": "operator"}
-        assert server.kernel.read_input_content("thread", "prompt", prompt.actor["attributes"], slot=INPUT_ACTOR_ATTRIBUTES) == {
+        assert server.kernel.read_input_content("thread", "prompt", prompt_actor["attributes"], slot=INPUT_ACTOR_ATTRIBUTES) == {
             "role": "operator"
         }
 

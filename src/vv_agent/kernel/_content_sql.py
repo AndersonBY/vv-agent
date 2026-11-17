@@ -12,8 +12,8 @@ import base64
 import hashlib
 import hmac
 import json
-from collections.abc import Callable, Iterable
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -46,6 +46,7 @@ _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
 _STAGING_PIN_MS = 5 * 60 * 1000
 _CONTENT_COLUMNS = "content_id,key_id,mac,size,labels,state,nonce,ciphertext,object_locator"
+_READ_FRAME_OWNER_BATCH = 256
 
 ObjectLocatorCleaner = Callable[[str, str, bytes], None]
 
@@ -223,6 +224,167 @@ def _link_slot(value: object) -> str:
     return slot
 
 
+class _ContentReadFrame:
+    """One disposable content snapshot with lazy local key and plaintext use."""
+
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        live_row: tuple[Any, ...] | None,
+        key_row: tuple[Any, ...] | None,
+        link_rows: Iterable[tuple[Any, ...]],
+        content_rows: Iterable[tuple[Any, ...]],
+        key_provider: KeyProvider,
+        cipher: ContentCipher,
+        provider_id: str,
+    ) -> None:
+        self.tenant_id = _text(tenant_id, "tenant_id")
+        self.session_id = _text(session_id, "session_id")
+        self._live_row = live_row
+        self._key_row = key_row
+        self._links: dict[tuple[str, int | str, str], str] = {}
+        self._content: dict[str, tuple[Any, ...]] = {}
+        for row in link_rows:
+            record_seq, input_id, slot = row[:3]
+            if (record_seq is None) == (input_id is None):
+                raise ContentIntegrityError("content link has an invalid owner")
+            owner_kind = "record_seq" if record_seq is not None else "input_id"
+            owner_value = record_seq if record_seq is not None else input_id
+            self._links[(owner_kind, owner_value, slot)] = row[3]
+        for content in content_rows:
+            self._content[content[0]] = content
+        self._key_provider = key_provider
+        self._cipher = cipher
+        self._provider_id = provider_id
+        self._session_key: SessionKeyRecord | None = None
+        self._parsed_content: dict[str, tuple[ContentRef, ContentState, bytes, bytes | None, bytes | None]] = {}
+        self._data_key: bytes | None = None
+        self._plaintext: dict[ContentRef, bytes] = {}
+
+    def _require_binding(self, tenant_id: str, session_id: str) -> None:
+        if (tenant_id, session_id) != (self.tenant_id, self.session_id):
+            raise ContentBindingMismatch("content frame binding does not match")
+
+    def _require_live(self) -> None:
+        if self._live_row is None:
+            raise ContentUnavailable("content session is unavailable")
+        if self._live_row[0] != "live":
+            raise ContentUnavailable("content session is fenced for deletion")
+
+    def _active_session_key(self) -> SessionKeyRecord:
+        key = self._session_key
+        if key is None:
+            if self._key_row is None:
+                raise ContentUnavailable("content session is unavailable")
+            key = _key_from_row(self.tenant_id, self.session_id, self._key_row)
+            self._session_key = key
+        if key.provider_id != self._provider_id:
+            raise KeyUnavailable("session data key provider does not match")
+        if key.state is not SessionKeyState.ACTIVE:
+            raise KeyUnavailable("session data key is not active")
+        return key
+
+    def _validated_content(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+    ) -> tuple[SessionKeyRecord, ContentState, bytes, bytes | None, bytes | None]:
+        self._require_binding(tenant_id, session_id)
+        if not isinstance(ref, ContentRef):
+            raise TypeError("ref must be ContentRef")
+        self._require_live()
+        key = self._active_session_key()
+        parsed = self._parsed_content.get(ref.content_id)
+        if parsed is None:
+            row = self._content.get(ref.content_id)
+            if row is None:
+                raise ContentUnavailable("content is unavailable")
+            parsed = _content_from_row(row)
+            self._parsed_content[ref.content_id] = parsed
+            del self._content[ref.content_id]
+        stored, state, nonce, ciphertext, locator = parsed
+        if stored.key_id != key.key_id or ref.key_id != key.key_id:
+            raise ContentBindingMismatch("content key does not belong to the session binding")
+        if stored != ref:
+            raise ContentIntegrityError("content metadata does not match its reference")
+        if state is ContentState.GC_PENDING:
+            raise ContentUnavailable("content is unavailable")
+        if state is ContentState.STAGED:
+            raise ContentUnavailable("content staging pin is expired")
+        return key, state, nonce, ciphertext, locator
+
+    def assert_link(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+        slot: str,
+        *,
+        record_seq: int | None = None,
+        input_id: str | None = None,
+    ) -> ContentRef:
+        self._require_binding(tenant_id, session_id)
+        slot = _link_slot(slot)
+        owner_column, owner = _owner_identity(record_seq=record_seq, input_id=input_id)
+        self._validated_content(tenant_id, session_id, ref)
+        if self._links.get((owner_column, owner, slot)) != ref.content_id:
+            raise ContentUnavailable("content link is unavailable")
+        return ref
+
+    def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes:
+        key, _state, nonce, ciphertext, locator = self._validated_content(tenant_id, session_id, ref)
+        if locator is not None or ciphertext is None:
+            raise ContentUnavailable("content ciphertext is unavailable")
+        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
+            raise ContentIntegrityError("content metadata or ciphertext is malformed")
+        cached = self._plaintext.get(ref)
+        if cached is not None:
+            return cached
+        if self._data_key is None:
+            data_key = self._key_provider.unwrap(
+                tenant_id,
+                session_id,
+                WrappedDataKey(key.tenant_id, key.session_id, key.key_id, key.wrapped_key),
+            )
+            if not isinstance(data_key, bytes) or len(data_key) != _DATA_KEY_BYTES:
+                raise KeyUnavailable("session data key has an invalid size")
+            self._data_key = data_key
+        plaintext = self._cipher.decrypt(
+            self._data_key,
+            nonce,
+            ciphertext,
+            _content_aad(
+                tenant_id,
+                session_id,
+                ref.content_id,
+                ref.key_id,
+                ref.mac,
+                ref.size,
+                ref.labels,
+            ),
+        )
+        if len(plaintext) != ref.size:
+            raise ContentIntegrityError("content size does not match its reference")
+        actual_mac = _content_mac(self._data_key, tenant_id, session_id, plaintext)
+        if not hmac.compare_digest(actual_mac, ref.mac):
+            raise ContentIntegrityError("content failed HMAC authentication")
+        self._plaintext[ref] = plaintext
+        return plaintext
+
+    def close(self) -> None:
+        self._session_key = None
+        self._parsed_content.clear()
+        self._data_key = None
+        self._plaintext.clear()
+        self._links.clear()
+        self._content.clear()
+        self._live_row = None
+        self._key_row = None
+
+
 class CoreSQLContentStore:
     """Shared durable content implementation over a caller-owned SQL backend.
 
@@ -299,11 +461,87 @@ class CoreSQLContentStore:
 
     def _unwrap(self, tenant_id: str, session_id: str, key: SessionKeyRecord) -> bytes:
         wrapped = self._wrapped_key(key)
-        self._restore_key(key)
         data_key = self._key_provider.unwrap(tenant_id, session_id, wrapped)
         if len(data_key) != _DATA_KEY_BYTES:
             raise KeyUnavailable("session data key has an invalid size")
         return data_key
+
+    @contextmanager
+    def _read_frame(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+    ) -> Iterator[_ContentReadFrame]:
+        """Capture requested owners, then release the SQL snapshot before KMS work."""
+
+        tenant_id = _text(tenant_id, "tenant_id")
+        session_id = _text(session_id, "session_id")
+        records = tuple(sorted({_owner_identity(record_seq=value, input_id=None)[1] for value in record_seqs}))
+        inputs = tuple(sorted({_owner_identity(record_seq=None, input_id=value)[1] for value in input_ids}))
+        read_snapshot = getattr(self._backend, "read_snapshot", None)
+        if not callable(read_snapshot):
+            raise RuntimeError("content backend does not provide a read snapshot")
+
+        link_rows: list[tuple[Any, ...]] = []
+        content_rows: list[tuple[Any, ...]] = []
+        with read_snapshot():
+            live_row = self._backend.fetchone(
+                "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}",
+                (tenant_id, session_id),
+            )
+            key_row = self._key_row(tenant_id, session_id)
+            for start in range(0, len(records), _READ_FRAME_OWNER_BATCH):
+                chunk = records[start : start + _READ_FRAME_OWNER_BATCH]
+                placeholders = ",".join("{p}" for _ in chunk)
+                link_rows.extend(
+                    self._backend.fetchall(
+                        "SELECT record_seq,input_id,slot,content_id FROM sk_content_link "
+                        f"WHERE tenant_id={{p}} AND session_id={{p}} AND record_seq IN ({placeholders}) "
+                        "ORDER BY record_seq,slot",
+                        (tenant_id, session_id, *chunk),
+                    )
+                )
+            for start in range(0, len(inputs), _READ_FRAME_OWNER_BATCH):
+                chunk = inputs[start : start + _READ_FRAME_OWNER_BATCH]
+                placeholders = ",".join("{p}" for _ in chunk)
+                link_rows.extend(
+                    self._backend.fetchall(
+                        "SELECT record_seq,input_id,slot,content_id FROM sk_content_link "
+                        f"WHERE tenant_id={{p}} AND session_id={{p}} AND input_id IN ({placeholders}) "
+                        "ORDER BY input_id,slot",
+                        (tenant_id, session_id, *chunk),
+                    )
+                )
+            content_ids = sorted({row[3] for row in link_rows})
+            for start in range(0, len(content_ids), _READ_FRAME_OWNER_BATCH):
+                chunk = content_ids[start : start + _READ_FRAME_OWNER_BATCH]
+                placeholders = ",".join("{p}" for _ in chunk)
+                content_rows.extend(
+                    self._backend.fetchall(
+                        f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
+                        f"WHERE tenant_id={{p}} AND session_id={{p}} AND content_id IN ({placeholders})",
+                        (tenant_id, session_id, *chunk),
+                    )
+                )
+
+        frame = _ContentReadFrame(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            live_row=live_row,
+            key_row=key_row,
+            link_rows=link_rows,
+            content_rows=content_rows,
+            key_provider=self._key_provider,
+            cipher=self._cipher,
+            provider_id=self._provider_id,
+        )
+        try:
+            yield frame
+        finally:
+            frame.close()
 
     def create_session_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
         tenant_id = _text(tenant_id, "tenant_id")

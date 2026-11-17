@@ -11,9 +11,9 @@ from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.types import LLMResponse, ToolCall
 
 
-@pytest.fixture(params=["memory", "file"])
-def server(request, tmp_path):
-    with SQLiteStore.standalone(":memory:" if request.param == "memory" else str(tmp_path / "threads.sqlite")) as store:
+@pytest.fixture
+def server(tmp_path):
+    with SQLiteStore.standalone(str(tmp_path / "threads.sqlite")) as store:
         store.install_schema()
         bind_development_content(store)
         value = AppServer(

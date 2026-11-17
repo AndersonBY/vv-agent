@@ -167,7 +167,13 @@ def run_model_turn(*, llm, tool_registry, task, messages, memory_manager, ctx=No
     )
     seed = list(messages)
     content = seed.pop().content if seed and seed[-1].role == "user" else task.user_prompt
-    driver = SessionDriver()
+
+    def runtime_factory(store, agent, config, frozen_task, session_id):
+        runtime = driver.runtime(agent, config, frozen_task, session_id=session_id, store=store)
+        runtime.memory_manager = memory_manager
+        return runtime
+
+    driver = SessionDriver(runtime_factory=runtime_factory)
     try:
         driver.create(
             task.task_id,
@@ -177,7 +183,6 @@ def run_model_turn(*, llm, tool_registry, task, messages, memory_manager, ctx=No
         handle = driver.start(
             task.task_id, Agent("test", task.prompt_bundle, model=task.model), config, content, task=task, autostart=False
         )
-        handle.runtime.memory_manager = memory_manager
         handle.start()
         result = handle.result().raw_result
         return result

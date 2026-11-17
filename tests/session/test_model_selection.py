@@ -1,5 +1,6 @@
 """Session-scoped selections use retained plans across connections and recovery."""
 
+from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -9,11 +10,14 @@ import pytest
 
 from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content_publication import publish_session_created_content
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.compaction import manager_for
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import _Driver, _Scope, drive
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
-from vv_agent.session.records import InboxItem, RecordError
+from vv_agent.session.records import InboxItem, RecordError, SessionSpec
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict
 from vv_agent.tools.function import function_tool
@@ -62,19 +66,119 @@ def store(store):
     return wrap_fixture_store(store)
 
 
-def start(store, sid="s"):
+def push_user(store, runtime, input_id, content, sid="s"):
+    item = InboxItem(
+        input_id,
+        "user",
+        {"content": content},
+        feature_level=2,
+        requirements=runtime.requirements_bound().to_dict(),
+    )
+    return push_fixture_input(store, sid, item)
+
+
+def create_level_two(store, requirements, sid="s"):
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    with store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=sid)
+
+        def session_spec(content):
+            actor, _ = content.service_principal("fixture/host")
+            created = publish_session_created_content(
+                content,
+                principal=actor,
+                workspace="/tmp",
+                attributes={"seed": {"messages": [], "shared_state": {}}},
+            )
+            return SessionSpec(
+                sid,
+                created.principal,
+                created.workspace.to_dict(),
+                attributes=created.attributes.to_dict(),
+                feature_level=2,
+                bootstrap=requirements,
+            )
+
+        writer.create_session(session_spec, consumers=("events",))
+
+
+def start(store, runtime, sid="s"):
+    requirements = runtime.requirements_bound()
+    create_level_two(store, requirements, sid)
+    push_user(store, runtime, "initial", "go", sid)
+
+
+def start_level_one(store, sid="s"):
+    store._rows("UPDATE sk_settings SET write_level=1 WHERE singleton=1")
     create_fixture_session(store, sid)
     push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
 
 
-def switch(store, selection=SELECTION, input_id="select", sid="s"):
-    item = InboxItem(input_id, "model_selection", {"selection": selection})
+def _model_selection_requirements(runtime, selection):
+    if selection is None:
+        selection = {
+            "model": runtime.resolved.requested_model or runtime.resolved.model_id,
+            "route": {},
+        }
+    return runtime.model_selection_requirements(selection)
+
+
+def _worker_capabilities(runtime, selections):
+    capabilities = set(runtime.requirements_bound().capabilities)
+    for selection in selections:
+        capabilities.update(_model_selection_requirements(runtime, selection).capabilities)
+    return tuple(sorted(capabilities))
+
+
+def _configure_worker_capabilities(store, runtime, capabilities):
+    store.configure_worker(
+        level=2,
+        handler_versions=(runtime.handler_version,),
+        capabilities=capabilities,
+    )
+
+
+def configure_worker(store, runtime, selections):
+    capabilities = _worker_capabilities(runtime, selections)
+    if store.worker_supports.accepts(
+        level=2,
+        handler_version=runtime.handler_version,
+        capabilities=capabilities,
+    ):
+        return
+    _configure_worker_capabilities(store, runtime, capabilities)
+
+
+def configure_runtime(store, database, runtime, selections):
+    capabilities = _worker_capabilities(runtime, selections)
+    _configure_worker_capabilities(store, runtime, capabilities)
+
+    @contextmanager
+    def heartbeat_store():
+        with open_store(database) as heartbeat:
+            _configure_worker_capabilities(heartbeat, runtime, capabilities)
+            yield heartbeat
+
+    runtime.heartbeat_store = heartbeat_store
+
+
+def switch(store, runtime, selection=SELECTION, input_id="select", sid="s"):
+    requirements = _model_selection_requirements(runtime, selection)
+    configure_worker(store, runtime, (selection,))
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    item = InboxItem(
+        input_id,
+        "model_selection",
+        {"selection": selection},
+        feature_level=2,
+        requirements=requirements.to_dict(),
+    )
     return push_fixture_input(store, sid, item)
 
 
-def routed(database, steps_a, steps_b=(), *, store, sid="s", **kwargs):
+def routed(database, steps_a, steps_b=(), *, store, sid="s", tools=(echo,), worker_selections=(SELECTION,), **kwargs):
     kwargs.setdefault("content_reader", fixture_content_reader(store, sid))
-    rt = runtime(database, steps_a, [echo], **kwargs)
+    rt = runtime(database, steps_a, list(tools), **kwargs)
     b = ScriptedLLM(list(steps_b))
 
     def resolver(request):
@@ -93,6 +197,7 @@ def routed(database, steps_a, steps_b=(), *, store, sid="s", **kwargs):
         )
 
     rt.model_resolver = resolver
+    configure_runtime(store, database, rt, worker_selections)
     return rt, b
 
 
@@ -113,10 +218,19 @@ def plans(store, sid="s"):
     ]
 
 
+def routing_requirements(store, sid="s"):
+    row = store._one(
+        "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,"
+        "deletion_state,handler_version,required_capabilities,active_turn_id "
+        "FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+        (store.tenant_id, sid),
+    )
+    return store._routing_cache_from_row(row).requirements
+
+
 @pytest.mark.capability("model-selection")
-@pytest.mark.parametrize("output_cap,request_max,expected_reserve", [(2048, 1024, 1024), (0, None, 0)])
+@pytest.mark.parametrize("output_cap,request_max,expected_reserve", [(2048, 1024, 1024), (None, None, 16_000)])
 def test_inflight_switch_cross_backend_usage_and_capacity(store, database, output_cap, request_max, expected_reserve):
-    start(store)
     entered, release = Event(), Event()
     errors = []
 
@@ -126,8 +240,13 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
         assert release.wait(10)
         return LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})
 
-    b_usage = {"prompt_tokens": 200, "completion_tokens": 50 if output_cap else 0, "prompt_tokens_details": {"cached_tokens": 0}}
+    b_usage = {
+        "prompt_tokens": 200,
+        "completion_tokens": 50 if output_cap is not None else 0,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
     rt, b = routed(database, [first], [LLMResponse("done", raw={"usage": b_usage})], store=store)
+    start(store, rt)
     resolve = rt.model_resolver
     assert resolve is not None
 
@@ -139,6 +258,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     choice = SELECTION | {"model_settings": dict(SELECTION["model_settings"])}
     if request_max is None:
         choice["model_settings"].pop("max_tokens")
+    configure_runtime(store, database, rt, (choice,))
 
     def run():
         try:
@@ -151,7 +271,7 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
     try:
         assert entered.wait(10)
         with open_store(database) as other:
-            switch(wrap_fixture_store(other), choice)
+            switch(wrap_fixture_store(other), rt, choice)
     finally:
         release.set()
         thread.join(15)
@@ -187,29 +307,56 @@ def test_inflight_switch_cross_backend_usage_and_capacity(store, database, outpu
 
 @pytest.mark.capability("model-selection")
 def test_persistent_latest_wins_clear_reject_and_idempotency(store, database):
-    start(store)
     rt, b = routed(database, [LLMResponse("A")], [LLMResponse("B1"), LLMResponse("B2")], store=store)
-    switch(store, {"model": "bad", "route": {}}, "bad-first")
-    switch(store)
-    assert switch(store).replayed
+    start(store, rt)
+    _state, rows_before, watermark_before = store.read_state("s")
+    inbox_before = len(store.peek_inbox("s"))
+    with pytest.raises(ValueError, match="unknown model or route"):
+        switch(store, rt, {"model": "bad", "route": {}}, "bad-first")
+    _state, rows_after, watermark_after = store.read_state("s")
+    assert (watermark_after, len(rows_after), len(store.peek_inbox("s"))) == (
+        watermark_before,
+        len(rows_before),
+        inbox_before,
+    )
+    assert store.read_input("s", "bad-first") is None
+
+    switch(store, rt)
+    assert switch(store, rt).replayed
     with pytest.raises(Conflict):
-        switch(store, None)
+        switch(store, rt, None)
     drive(store, "s", runtime=rt)
     assert plans(store)[0].payload["request"]["model"] == "B"
-    # A later unresolvable selection cannot replace the accepted B selection.
-    switch(store, {"model": "B", "route": {"backend_type": "denied"}}, "bad-route")
-    push_fixture_input(store, "s", InboxItem("turn2", "user", {"content": "next"}))
+
+    state_before_route, rows_before, watermark_before = store.read_state("s")
+    inbox_before = len(store.peek_inbox("s"))
+    accepted = state_before_route.model_selection
+    assert accepted is not None
+    with pytest.raises(ValueError, match="unknown model or route"):
+        switch(store, rt, {"model": "B", "route": {"backend_type": "denied"}}, "bad-route")
+    state_after_route, rows_after, watermark_after = store.read_state("s")
+    assert (watermark_after, len(rows_after), len(store.peek_inbox("s"))) == (
+        watermark_before,
+        len(rows_before),
+        inbox_before,
+    )
+    assert store.read_input("s", "bad-route") is None
+    assert state_after_route.model_selection is not None
+    assert state_after_route.model_selection.encode() == accepted.encode()
+
+    push_user(store, rt, "turn2", "next")
     drive(store, "s", runtime=rt)
     assert plans(store)[1].payload["request"]["model"] == "B"
-    switch(store, SELECTION, "again")
-    switch(store, None, "clear")
-    push_fixture_input(store, "s", InboxItem("turn3", "user", {"content": "next"}))
+    switch(store, rt, SELECTION, "again")
+    switch(store, rt, None, "clear")
+    push_user(store, rt, "turn3", "next")
     drive(store, "s", runtime=rt)
     assert plans(store)[2].payload["request"]["model"] == "scripted"
     assert not b.steps
     state, _, _ = store.read_state("s")
     assert state.model_selection is None
-    assert [state.applied_inputs[k].payload["disposition"] for k in ("bad-first", "bad-route")] == ["rejected", "rejected"]
+    assert "bad-first" not in state.applied_inputs
+    assert "bad-route" not in state.applied_inputs
 
 
 class WorkerDeath(BaseException):
@@ -221,9 +368,9 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
     from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
     from vv_agent.output_validation import OutputValidationResult
 
-    start(store)
     calls = []
     repairs = []
+    current_runtime = None
 
     def repair(request):
         repairs.append(request.invalid_output)
@@ -237,7 +384,8 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
         calls.append((request.model, endpoint))
         if endpoint == "a" and calls.count(("scripted", "a")) == 1:
             with open_store(database) as writer:
-                switch(wrap_fixture_store(writer))
+                assert current_runtime is not None
+                switch(wrap_fixture_store(writer), current_runtime)
             return LLMResponse("", [ToolCall("a-tool", "echo", {})], raw={"usage": MODEL_USAGE})
         if endpoint == "b1":
             raise TimeoutError("receipt lost")
@@ -248,6 +396,7 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
     monkeypatch.setattr(VvLlmClient, "complete", complete)
 
     def build(**kwargs):
+        nonlocal current_runtime
         rt = runtime(database, [], [echo], content_reader=fixture_content_reader(store, "s"), **kwargs)
         rt.agent.output_validation_enabled = True
         rt.agent.output_validator = lambda value, ctx: (
@@ -278,17 +427,23 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
             )
 
         rt.model_resolver = resolve
+        configure_runtime(store, database, rt, (SELECTION,))
+        current_runtime = rt
         return rt
 
     def die(point, record):
         if point == "after_commit" and record.kind == "op_unknown":
             raise WorkerDeath
 
+    initial_runtime = build()
+    initial_runtime.hook = die
+    start(store, initial_runtime)
     with pytest.raises(WorkerDeath):
-        drive(store, "s", runtime=build(hook=die))
+        drive(store, "s", runtime=initial_runtime)
+    recovery_runtime = build()
     with open_store(database) as writer:
-        switch(wrap_fixture_store(writer), None, "clear-after-b-plan")
-    drive(store, "s", runtime=build())
+        switch(wrap_fixture_store(writer), recovery_runtime, None, "clear-after-b-plan")
+    drive(store, "s", runtime=recovery_runtime)
     assert calls == [("scripted", "a"), ("B", "b1"), ("B", "b2"), ("scripted", "a")]
     a, b1, b2, cleared = plans(store)
     assert b1.payload["request"] == b2.payload["request"]
@@ -312,7 +467,6 @@ def test_selected_endpoints_and_retries_survive_runtime_reconstruction(store, da
 @pytest.mark.capability("model-selection")
 @pytest.mark.parametrize("cut", ["after_commit", "before_external_call", "after_external_call"])
 def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
-    start(store)
     retained = []
     provider = ModelSelectionReceiptProvider({"content": "", "tool_calls": [ToolCall("echo", "echo", {}).to_dict()]}, MODEL_USAGE)
 
@@ -330,10 +484,11 @@ def test_recovery_keeps_planned_model_and_late_usage(store, database, cut):
         store=store,
         hook=die,
     )
+    start(store, rt)
     with pytest.raises(WorkerDeath):
         drive(store, "s", runtime=rt)
     original = plans(store)[0]
-    switch(store)
+    switch(store, rt)
     fresh, b = routed(
         database,
         [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
@@ -415,7 +570,13 @@ def test_process_kill_recovery_uses_original_plan(store, database, cut):
 
     from .test_recovery_matrix import kill, receive
 
-    start(store)
+    rt, b = routed(
+        database,
+        [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
+        [LLMResponse("B", raw={"usage": MODEL_USAGE})],
+        store=store,
+    )
+    start(store, rt)
     ctx = multiprocessing.get_context("spawn")
     parent, child = ctx.Pipe()
     proc = ctx.Process(target=selection_worker, args=(database, child, cut))
@@ -425,14 +586,8 @@ def test_process_kill_recovery_uses_original_plan(store, database, cut):
         original = receive(parent, "barrier")
         # Different connection, no lease: this must survive the holder's death.
         with open_store(database) as writer:
-            switch(wrap_fixture_store(writer))
+            switch(wrap_fixture_store(writer), rt)
         kill(proc, parent, database)
-        rt, b = routed(
-            database,
-            [LLMResponse("", [ToolCall("echo", "echo", {})], raw={"usage": MODEL_USAGE})],
-            [LLMResponse("B", raw={"usage": MODEL_USAGE})],
-            store=store,
-        )
         drive(store, "s", runtime=rt)
         retained = plans(store)
         if cut == "after_commit":
@@ -453,14 +608,18 @@ def test_process_kill_recovery_uses_original_plan(store, database, cut):
 
 @pytest.mark.capability("model-selection")
 def test_selection_is_local_to_one_session_and_default_rejects(store, database):
-    start(store)
-    start(store, "child")
-    switch(store)
-    drive(store, "s", runtime=runtime(database, [LLMResponse("A")], content_reader=fixture_content_reader(store, "s")))
+    producer_rt, _ = routed(database, [LLMResponse("A")], store=store)
+    start(store, producer_rt)
+    start(store, producer_rt, "child")
+    switch(store, producer_rt)
+    resolver = producer_rt.model_resolver
+    producer_rt.model_resolver = None
+    drive(store, "s", runtime=producer_rt)
+    producer_rt.model_resolver = resolver
     assert store.read_state("s")[0].applied_inputs["select"].payload["disposition"] == "rejected"
     rt, _ = routed(database, [], [LLMResponse("B")], store=store)
-    switch(store, input_id="valid")
-    push_fixture_input(store, "s", InboxItem("turn2", "user", {"content": "next"}))
+    switch(store, rt, input_id="valid")
+    push_user(store, rt, "turn2", "next")
     drive(store, "s", runtime=rt)
     child_rt, _ = routed(database, [LLMResponse("child A")], store=store, sid="child")
     drive(store, "child", runtime=child_rt)
@@ -471,7 +630,6 @@ def test_selection_is_local_to_one_session_and_default_rejects(store, database):
 def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, database):
     from .test_compaction import SUMMARY, history
 
-    start(store)
     requests = []
 
     def too_long(request):
@@ -483,6 +641,7 @@ def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, da
         return LLMResponse("B", raw={"usage": MODEL_USAGE})
 
     rt, _ = routed(database, [LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})], [too_long, answer], store=store)
+    start(store, rt)
     resolve = rt.model_resolver
     assert resolve is not None
 
@@ -493,7 +652,8 @@ def test_prompt_too_long_with_selection_keeps_cycle_and_single_billing(store, da
     rt.model_resolver = large_context
     rt.config = replace(rt.config, initial_messages=history(), max_cycles=1)
     rt.memory_manager.compact_threshold = 999999
-    switch(store)
+    configure_runtime(store, database, rt, (SELECTION,))
+    switch(store, rt)
     drive(store, "s", runtime=rt)
     result = project_result(store, "s", "s/turn/initial", runtime=rt)
     assert result.final_output == "B"
@@ -510,23 +670,36 @@ def test_parent_selection_does_not_propagate_to_real_child(store, database):
 
     from .test_children import child_task
 
-    start(store)
     rt, b = routed(
         database,
         [],
         [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent B")],
         store=store,
+        tools=(echo, child_task),
     )
-    rt.agent.tools = [child_task]
-    rt.children = {"child_task": lambda plan: ChildSession(fixture_child_spec(store, "s", "child"), "child work")}
-    switch(store)
+    start(store, rt)
+    child_requirements = rt.requirements_bound()
+    rt.children = {
+        "child_task": lambda plan: ChildSession(
+            replace(
+                fixture_child_spec(store, "s", "child"),
+                feature_level=2,
+                bootstrap=child_requirements,
+            ),
+            "child work",
+        )
+    }
+    switch(store, rt)
     drive(store, "s", runtime=rt)
     assert store.read_state("s")[0].phase == "parked"
-    drive(
-        store,
-        "child",
-        runtime=runtime(database, [LLMResponse("child A")], content_reader=fixture_content_reader(store, "child")),
+    child_runtime, _ = routed(
+        database,
+        [LLMResponse("child A")],
+        store=store,
+        sid="child",
+        tools=(echo, child_task),
     )
+    drive(store, "child", runtime=child_runtime)
     with store.atomic() as tx:
         assert child_delivery(store, tx, "child")
     drive(store, "s", runtime=rt)
@@ -535,3 +708,164 @@ def test_parent_selection_does_not_propagate_to_real_child(store, database):
     assert plans(store, "child")[0].payload["request"]["model"] == "scripted"
     assert all(p.payload["request"]["model"] == "B" for p in plans(store))
     assert not b.steps
+
+
+@pytest.mark.capability("model-selection")
+def test_level_one_selection_is_admitted_during_active_cycle(store, database):
+    errors = []
+
+    def select_during_call(request):
+        try:
+            push_fixture_input(store, "s", InboxItem("active-select", "model_selection", {"selection": SELECTION}))
+        except BaseException as exc:
+            errors.append(exc)
+        return LLMResponse("", [ToolCall("echo-call", "echo", {})])
+
+    rt, _ = routed(
+        database,
+        [select_during_call, LLMResponse("A")],
+        [LLMResponse("B")],
+        store=store,
+    )
+    start_level_one(store)
+    drive(store, "s", runtime=rt)
+    assert not errors
+    state, _, _ = store.read_state("s")
+    assert state.applied_inputs["active-select"].payload["disposition"] == "applied"
+    assert [plan.payload["request"]["model"] for plan in plans(store)] == ["scripted", "B"]
+
+
+@pytest.mark.capability("model-selection")
+def test_level_one_idle_selection_and_null_are_inherited_by_next_turn(store, database):
+    rt, _ = routed(database, [LLMResponse("A"), LLMResponse("default")], [LLMResponse("B")], store=store)
+    start_level_one(store)
+    drive(store, "s", runtime=rt)
+    push_fixture_input(store, "s", InboxItem("idle-select", "model_selection", {"selection": SELECTION}))
+    push_fixture_input(store, "s", InboxItem("next", "user", {"content": "next"}))
+    drive(store, "s", runtime=rt)
+    push_fixture_input(store, "s", InboxItem("clear", "model_selection", {"selection": None}))
+    push_fixture_input(store, "s", InboxItem("after-clear", "user", {"content": "after clear"}))
+    drive(store, "s", runtime=rt)
+    state, _, _ = store.read_state("s")
+    assert state.applied_inputs["idle-select"].payload["disposition"] == "applied"
+    assert state.applied_inputs["clear"].payload["disposition"] == "applied"
+    assert state.model_selection is None
+    assert [plan.payload["request"]["model"] for plan in plans(store)] == ["scripted", "B", "scripted"]
+
+
+@pytest.mark.capability("model-selection")
+def test_level_one_unresolvable_selection_keeps_later_valid_input_admissible(store, database):
+    rt, _ = routed(database, [LLMResponse("A")], [LLMResponse("B")], store=store)
+    start_level_one(store)
+    drive(store, "s", runtime=rt)
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem("unknown", "model_selection", {"selection": {"model": "unknown", "route": {}}}),
+    )
+    push_fixture_input(store, "s", InboxItem("valid", "model_selection", {"selection": SELECTION}))
+    push_fixture_input(store, "s", InboxItem("next", "user", {"content": "next"}))
+    drive(store, "s", runtime=rt)
+    state, records, _ = store.read_state("s")
+    rejected = state.applied_inputs["unknown"].payload
+    assert rejected["disposition"] == "rejected"
+    rejected_record = next(
+        row for row in records if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "unknown"
+    )
+    hydrated = hydrate_record_payload(rejected_record, hydration_for_session_store(store, "s"))
+    assert hydrated["reason"] == "model_selection_unresolvable"
+    assert state.applied_inputs["valid"].payload["disposition"] == "applied"
+    assert [plan.payload["request"]["model"] for plan in plans(store)] == ["scripted", "B"]
+
+
+@pytest.mark.capability("model-selection")
+def test_level_two_wrong_handler_selection_writes_nothing(store, database):
+    rt, _ = routed(database, [LLMResponse("A")], store=store)
+    start(store, rt)
+    requirements = replace(rt.model_selection_requirements(SELECTION), handler_version="handler/mismatched")
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    item = InboxItem(
+        "wrong-handler",
+        "model_selection",
+        {"selection": SELECTION},
+        feature_level=2,
+        requirements=requirements.to_dict(),
+    )
+    _, records_before, watermark_before = store.read_state("s")
+    inbox_before = len(store.peek_inbox("s"))
+    content_before = store._rows("SELECT COUNT(*) FROM sk_content WHERE tenant_id='default' AND session_id='s'")[0][0]
+    links_before = store._rows("SELECT COUNT(*) FROM sk_content_link WHERE tenant_id='default' AND session_id='s'")[0][0]
+    with pytest.raises(Conflict, match="handler does not match"):
+        push_fixture_input(store, "s", item)
+    _, records_after, watermark_after = store.read_state("s")
+    assert (watermark_after, len(records_after), len(store.peek_inbox("s")), store.read_input("s", "wrong-handler")) == (
+        watermark_before,
+        len(records_before),
+        inbox_before,
+        None,
+    )
+    assert store._rows("SELECT COUNT(*) FROM sk_content WHERE tenant_id='default' AND session_id='s'")[0][0] == content_before
+    assert store._rows("SELECT COUNT(*) FROM sk_content_link WHERE tenant_id='default' AND session_id='s'")[0][0] == links_before
+
+
+@pytest.mark.capability("model-selection")
+def test_level_two_null_idle_handler_rejects_typed_selection(store, database):
+    rt, _ = routed(database, [LLMResponse("A")], store=store)
+    create_level_two(store, replace(rt.requirements_bound(), handler_version=None))
+    requirements = rt.model_selection_requirements(SELECTION)
+    item = InboxItem(
+        "null-handler",
+        "model_selection",
+        {"selection": SELECTION},
+        feature_level=2,
+        requirements=requirements.to_dict(),
+    )
+    inbox_before = len(store.peek_inbox("s"))
+    with pytest.raises(Conflict, match="handler does not match"):
+        push_fixture_input(store, "s", item)
+    assert len(store.peek_inbox("s")) == inbox_before
+    assert store.read_input("s", "null-handler") is None
+
+
+@pytest.mark.capability("model-selection")
+def test_level_two_pending_user_sets_idle_route_for_selection_capabilities(store, database):
+    rt, _ = routed(database, [LLMResponse("A")], [LLMResponse("B")], store=store)
+    create_level_two(store, replace(rt.requirements_bound(), handler_version=None))
+    push_user(store, rt, "next", "next")
+    selection_requirements = rt.model_selection_requirements(SELECTION)
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "select",
+            "model_selection",
+            {"selection": SELECTION},
+            feature_level=2,
+            requirements=selection_requirements.to_dict(),
+        ),
+    )
+    routing = routing_requirements(store)
+    assert routing.handler_version == rt.handler_version
+    assert set(selection_requirements.capabilities) <= set(routing.capabilities)
+
+
+@pytest.mark.capability("model-selection")
+def test_level_one_selection_does_not_inherit_level_two_bootstrap_capabilities(store, database):
+    bootstrap = SessionRequirements(2, "handler/h1", ("family:bootstrap",))
+    create_level_two(store, bootstrap)
+    user_requirements = SessionRequirements(2, "handler/h1", ("tool:user",))
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "next",
+            "user",
+            {"content": "next"},
+            feature_level=2,
+            requirements=user_requirements.to_dict(),
+        ),
+    )
+    push_fixture_input(store, "s", InboxItem("select", "model_selection", {"selection": SELECTION}))
+    routing = routing_requirements(store)
+    assert routing.handler_version == "handler/h1"
+    assert routing.capabilities == ("tool:user",)

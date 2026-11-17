@@ -6,12 +6,12 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from support.contract import fixture_root
 
 from vv_agent.kernel import _content as content
+from vv_agent.kernel._records import Record, record_identity
 
 
 def _lifecycle() -> dict:
@@ -26,6 +26,19 @@ def _head(case: dict) -> content.SessionHead:
         final_seq=header["head_seq"],
         chain_digest=header["chain_digest"],
         key_id=_lifecycle()["key_capability"]["key_id"],
+    )
+
+
+def _record(kind: str, payload: dict[str, object]) -> Record:
+    turn_id = None if kind == "session_created" else "turn"
+    return Record(
+        record_identity(kind, "session", turn_id, None, None, payload),
+        kind,
+        "session",
+        turn_id,
+        None,
+        None,
+        payload,
     )
 
 
@@ -224,10 +237,11 @@ def test_export_content_refs_ignore_reference_shaped_opaque_json() -> None:
         "key/foreign-owner",
         content.ContentLabels(),
     ).to_dict()
-    record = SimpleNamespace(
-        kind="boundary_recorded",
-        _payload={
+    record = _record(
+        "boundary_recorded",
+        {
             "stage": "before_memory",
+            "boundary_id": "before_memory",
             "data": {
                 "messages": [],
                 "shared_state": None,
@@ -241,9 +255,9 @@ def test_export_content_refs_ignore_reference_shaped_opaque_json() -> None:
 
 
 def test_export_tenant_validation_reads_only_closed_principal_fields() -> None:
-    record = SimpleNamespace(
-        kind="session_created",
-        _payload={"principal": {"tenant_id": "other"}, "attributes": {"tenant_id": "other"}},
+    record = _record(
+        "session_created",
+        {"principal": {"tenant_id": "other"}, "attributes": {"tenant_id": "other"}},
     )
     with pytest.raises(content.ContentBindingMismatch, match="record tenant does not match"):
         content._verify_record_tenant(record, "default")

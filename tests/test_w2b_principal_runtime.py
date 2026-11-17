@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +9,8 @@ from vv_agent.kernel._content import ContentLabels, ContentRef, Principal
 from vv_agent.llm.base import LlmRequest
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.session._dispatch_context import _session_principal
+from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.store import ReadPage
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse, ToolCall
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -111,7 +112,7 @@ def test_trusted_session_principal_reaches_tools_and_model_outside_prompt(tmp_pa
         model_requests[0].principal = None
 
 
-def test_principal_defaults_to_unavailable_and_rejects_mutable_values(tmp_path) -> None:
+def test_principal_defaults_to_unavailable_and_rejects_mutable_values(tmp_path, monkeypatch) -> None:
     context = ToolContext(
         workspace=tmp_path,
         shared_state={},
@@ -122,15 +123,14 @@ def test_principal_defaults_to_unavailable_and_rejects_mutable_values(tmp_path) 
 
     assert context.principal is None
     assert request.principal is None
-    empty_store = SimpleNamespace(read=lambda *_args, **_kwargs: SimpleNamespace(records=()))
-    assert _session_principal(empty_store, "legacy-session") is None
-    with pytest.raises(TypeError, match="Principal or None"):
-        ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=0,
-            workspace_backend=MemoryWorkspaceBackend(),
-            principal=_principal().to_dict(),
-        )
-    with pytest.raises(TypeError, match="Principal or None"):
-        LlmRequest(model="w2b", messages=[], principal=_principal().to_dict())
+    with SQLiteStore.standalone(str(tmp_path / "empty-principal.sqlite")) as empty_store:
+        empty_store.install_schema()
+        monkeypatch.setattr(empty_store, "read", lambda *_args, **_kwargs: ReadPage(0, 0, ()))
+        assert _session_principal(empty_store, "legacy-session") is None
+        mutable_principal: object = _principal().to_dict()
+        object.__setattr__(context, "principal", mutable_principal)
+        with pytest.raises(TypeError, match="Principal or None"):
+            context.__post_init__()
+        object.__setattr__(request, "principal", mutable_principal)
+        with pytest.raises(TypeError, match="Principal or None"):
+            request.__post_init__()

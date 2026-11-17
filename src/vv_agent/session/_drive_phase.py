@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import cast
 
@@ -10,18 +11,33 @@ from vv_agent.kernel._drive import (
     FACTORY_HEARTBEAT_SECONDS,
     FACTORY_LEASE_TTL_MS,
     DriveBinding,
-    DriveHeartbeat,
     DriveLeaseScope,
     DriveRuntime,
     DriveStep,
     drive_core,
 )
-from vv_agent.kernel._sql import SQLStore
 
 from ._driver_scope import _LeaseHeartbeat, _Scope
 from .runtime import Runtime, RuntimeNotReady
-from .store import Lease, SessionStore
+from .store import Lease, LeaseLost, SessionStore
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
+
+
+def _lease_anchor_now_ms(store: SessionStore, session_id: str, lease: Lease, clock: Clock) -> int:
+    """Return an inferred database now whose local deadline charges the status read."""
+
+    started = clock.monotonic()
+    _head, epoch, remaining_ms = store.lease_status(session_id)
+    finished = clock.monotonic()
+    if epoch != lease.epoch:
+        raise LeaseLost("lease epoch changed while anchoring heartbeat budget")
+    remaining_ms -= max(0, math.ceil((finished - started) * 1000))
+    if remaining_ms <= 0:
+        raise LeaseLost("lease budget expired while anchoring heartbeat")
+    # LeaseOwnership converts database-now into its local monotonic domain. Using
+    # the DB remaining budget, reduced by the measured anchor round trip, keeps
+    # transient failures fail-closed without granting another full TTL.
+    return lease.expires_at_ms - remaining_ms
 
 
 def drive_with_runtime(
@@ -33,6 +49,8 @@ def drive_with_runtime(
     expected_head: SessionHead | tuple[int, str] | None = None,
     one_turn: bool = False,
     wait_for_lease: bool = False,
+    lease: Lease | None = None,
+    initial_polled: set[tuple[str, int]] | None = None,
     clock: Clock | None = None,
     lease_keeper: LeaseKeeper | None = None,
 ) -> bool:
@@ -45,39 +63,41 @@ def drive_with_runtime(
 
         def make_factory_heartbeat(lease: Lease, ttl_ms: int) -> _LeaseHeartbeat:
             # Resolve store setup on the driving thread (host connections can be thread-bound).
-            heartbeat = store.heartbeat_store()
+            heartbeat_factory = store.heartbeat_store_factory()
+            now_ms = _lease_anchor_now_ms(store, session_id, lease, selected_clock)
             return _LeaseHeartbeat(
                 lease,
-                lambda: heartbeat,
+                heartbeat_factory,
                 ttl_ms,
                 FACTORY_HEARTBEAT_SECONDS,
                 clock=selected_clock,
                 lease_keeper=selected_keeper,
-                now_ms=store._now() if isinstance(store, SQLStore) else None,
+                now_ms=now_ms,
             )
 
         def make_scope(lease: Lease, selected: DriveRuntime) -> _Scope:
-            return _Scope(lease, cast(Runtime, selected), now_ms=store._now() if isinstance(store, SQLStore) else None)
+            selected_runtime = cast(Runtime, selected)
+            return _Scope(
+                lease,
+                selected_runtime,
+                now_ms=(_lease_anchor_now_ms(store, session_id, lease, selected_runtime.clock) if direct else None),
+            )
 
         def make_driver(
             selected_store: SessionStore, selected_session_id: str, selected: DriveRuntime, scope: DriveLeaseScope
         ) -> DriveStep:
             from .kernel import _Driver
 
-            return cast(
-                DriveStep,
-                _Driver(
-                    selected_store,
-                    selected_session_id,
-                    cast(Runtime, selected),
-                    cast(_Scope, scope),
-                    one_turn=one_turn,
-                    expected_head=expected_head,
-                ),
+            driver = _Driver(
+                selected_store,
+                selected_session_id,
+                cast(Runtime, selected),
+                cast(_Scope, scope),
+                one_turn=one_turn,
+                expected_head=expected_head,
             )
-
-        def heartbeat_alive(heartbeat: DriveHeartbeat) -> bool:
-            return selected_keeper.is_alive(cast(_LeaseHeartbeat, heartbeat))
+            driver.polled.update(initial_polled or ())
+            return cast(DriveStep, driver)
 
         def after_drive(selected: DriveRuntime) -> None:
             cast(Runtime, selected).hook("after_drive", None)
@@ -95,7 +115,6 @@ def drive_with_runtime(
             make_factory_heartbeat=None if direct else make_factory_heartbeat,
             make_runtime=None if direct else lambda: runtime(session_id),
             factory_retry_after_ms=factory_retry_after_ms,
-            heartbeat_alive=heartbeat_alive,
             make_scope=make_scope,
             make_driver=make_driver,
             after_drive=after_drive,
@@ -108,5 +127,6 @@ def drive_with_runtime(
         failure_backoff_ms=failure_backoff_ms,
         one_turn=one_turn,
         wait_for_lease=wait_for_lease,
+        lease=lease,
         make_binding=make_binding,
     )

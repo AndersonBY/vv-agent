@@ -16,7 +16,7 @@ from vv_agent.session.records import SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
-from .helpers import base, record
+from .helpers import base, content_ref, fixture_content_reader, principal, read_fixture_state, record, wrap_fixture_store
 from .test_compaction import SUMMARY
 from .test_recovery_matrix import runtime, start
 
@@ -42,11 +42,27 @@ from vv_agent.kernel._records import SessionSpec
 from vv_agent.kernel._context import project_context
 from vv_agent.kernel._sql import SQLStore
 
+def fixture_ref(label):
+    return {
+        "content_id": "content/test/" + label,
+        "mac": "0" * 64,
+        "size": 1,
+        "key_id": "key/test",
+        "labels": {"source": [], "classification": "internal"},
+    }
+fixture_principal = {
+    "tenant_id": "default",
+    "subject_id": "p",
+    "subject_kind": "user",
+    "attributes": fixture_ref("principal/p"),
+}
+
 def unexpected(*args, **kwargs):
     raise AssertionError('creation must not normalize settings or count')
 fold = Fold(normalize_memory_settings=unexpected, count_messages=unexpected)
-state = fold.extend([SessionSpec('s', 'p', 'w').record()])
-assert state.session_id == 's' and state._protection is not None
+spec = SessionSpec('s', fixture_principal, fixture_ref('workspace'), attributes=fixture_ref('attributes'))
+state = fold.extend([spec.record()])
+assert state.session_id == 's' and state._protection is None
 assert project_context(fold.history, state) == []
 assert fold.fork()._count_messages is unexpected
 store = SQLStore(fold_factory=lambda: fold.fork())
@@ -96,7 +112,24 @@ def test_actual_value_exports_and_single_transition_implementation():
     assert reducer.Fold.fork is _reducer.Fold.fork
     receipt = store.CommitReceipt("c", (), 1)
     assert receipt == store.CommitReceipt(
-        "c", (), 1, records=(store.StoredRecord(SessionSpec("s", "p", "w").record(), 1, "c", 1, 0),), inbox_seq=9
+        "c",
+        (),
+        1,
+        records=(
+            store.StoredRecord(
+                SessionSpec(
+                    "s",
+                    principal(),
+                    content_ref("workspace"),
+                    attributes=content_ref("attributes"),
+                ).record(),
+                1,
+                "c",
+                1,
+                0,
+            ),
+        ),
+        inbox_seq=9,
     )
     assert "records=" not in repr(receipt)
     with pytest.raises(FrozenInstanceError):
@@ -141,9 +174,10 @@ def _binding():
     return factory, calls, folds, normalize, count
 
 
-def test_sql_driver_and_historical_rebuild_share_nondefault_ports():
+def test_sql_driver_and_historical_rebuild_share_nondefault_ports(tmp_path):
     factory, calls, folds, normalize, count = _binding()
-    with SQLiteStore.standalone(":memory:") as database:
+    path = tmp_path / "fold.sqlite"
+    with SQLiteStore.standalone(str(path)) as database:
         assert database.fold_factory is reducer.Fold  # A class default must not bind self.
         database.fold_factory = factory
         database.install_schema()
@@ -152,13 +186,20 @@ def test_sql_driver_and_historical_rebuild_share_nondefault_ports():
         def too_long(request):
             raise RuntimeError("maximum context length exceeded")
 
-        rt = runtime(database, [LLMResponse("seen facts " * 4000), too_long, LLMResponse(SUMMARY), LLMResponse("done")])
+        content_store = wrap_fixture_store(database)
+        rt = runtime(
+            path,
+            [LLMResponse("seen facts " * 4000), too_long, LLMResponse(SUMMARY), LLMResponse("done")],
+            content_reader=fixture_content_reader(content_store, "s"),
+        )
         rt.config = replace(rt.config, no_tool_policy="continue", max_cycles=2)
         rt.memory_manager = MemoryManager(compact_threshold=100000, keep_recent_messages=1)
-        drive(database, "s", runtime=rt)
+        drive(content_store, "s", runtime=rt)
         state, rows, _ = database.read_state("s")
-        assert state._protection is not None
-        assert calls and any(call[0] == "count" for call in calls)
+        assert state._protection is None
+        assert calls and any(call[0] == "count" for call in calls), "explicit fold factory was not used by drive"
+        logical_state, hydrated_rows, _ = read_fixture_state(database, "s")
+        assert logical_state._protection is not None
         assert all(f._normalize_memory_settings is normalize and f._count_messages is count for f in folds)
         lease = database.acquire("s", owner="probe", ttl_ms=15000)
         assert lease is not None
@@ -171,28 +212,36 @@ def test_sql_driver_and_historical_rebuild_share_nondefault_ports():
         assert cached.reducer.fork()._count_messages is count
         end = next(i + 1 for i, row in enumerate(rows) if row.record.kind == "context_compacted")
         prefix = rows[:end]
-        assert prefix[-1].seq < state._protection.prefix_seq
+        assert prefix[-1].seq < logical_state._protection.prefix_seq
         before = len(calls)
-        historical = project_context(prefix, state, _fold_factory=factory)
+        historical = project_context(
+            hydrated_rows[:end],
+            logical_state,
+            _fold_factory=factory,
+            _record_bodies=[row.record.encode() for row in prefix],
+        )
         assert any(message.name == "memory_summary" for message in historical)
         assert any(call[0] == "count" for call in calls[before:]), "historical compaction must revalidate with the same counter"
         assert calls[before][0] == "normalize"
         assert folds[-1]._count_messages is count
         # The historical core projection accepts only an aligned state.
         with pytest.raises(AssertionError, match="context prefix is not aligned"):
-            _context.project_context(prefix, state)
+            _context.project_context(prefix, logical_state)
         assert all(row.record.encode() == rows[i].record.encode() for i, row in enumerate(prefix))
 
 
-def test_replacing_sql_factory_discards_both_cached_prefixes():
+def test_replacing_sql_factory_discards_both_cached_prefixes(tmp_path):
     first, _, first_folds, _, _ = _binding()
     second, _, second_folds, normalize, count = _binding()
-    with SQLiteStore.standalone(":memory:") as database:
+    with SQLiteStore.standalone(str(tmp_path / "fold.sqlite")) as database:
         database.install_schema()
         database.fold_factory = first
         with database.atomic() as tx:
             for sid in ("parent", "child"):
-                tx.create(SessionSpec(sid, "p", "w"), consumers=())
+                tx.create(
+                    SessionSpec(sid, principal(), content_ref(f"workspace/{sid}"), attributes=content_ref(f"attributes/{sid}")),
+                    consumers=(),
+                )
         for sid in ("parent", "child"):
             database.read_state(sid)
         assert database._fold_cache is not None and database._previous_prefix is not None
@@ -205,31 +254,31 @@ def test_replacing_sql_factory_discards_both_cached_prefixes():
         assert all(f._count_messages is count and f._normalize_memory_settings is normalize for f in second_folds)
 
 
-def test_factory_selection_recognizes_core_sql_and_keeps_other_store_defaults():
+def test_factory_selection_recognizes_core_sql_and_keeps_other_store_defaults(tmp_path):
     factory, _, _, _, _ = _binding()
     core_store = _sql.SQLStore(fold_factory=factory)
     assert reducer._fold_factory_for(core_store) is factory
-    with SQLiteStore.standalone(":memory:") as sdk_store:
+    with SQLiteStore.standalone(str(tmp_path / "sdk-fold.sqlite")) as sdk_store:
         sdk_store.fold_factory = factory
         assert reducer._fold_factory_for(sdk_store) is factory
     assert reducer._fold_factory_for(object()) is reducer.Fold
 
 
-def test_real_app_server_fork_preserves_explicit_store_factory(monkeypatch):
+def test_real_app_server_fork_preserves_explicit_store_factory(monkeypatch, tmp_path):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider
     from vv_agent.app_server import DefaultAppServerHost
 
     from .test_app_server_fork import run_turn, send, server_for
 
     factory, _, folds, _, _ = _binding()
-    with SQLiteStore.standalone(":memory:") as database:
+    with SQLiteStore.standalone(str(tmp_path / "fork.sqlite")) as database:
         database.install_schema()
         database.fold_factory = factory
         host = DefaultAppServerHost(
             agent=Agent("test", "Answer."),
             run_config=RunConfig(model_provider=ScriptedModelProvider.from_callback("test", "m", lambda _: LLMResponse("done"))),
         )
-        server = server_for(database, host)
+        server = server_for(database, host, tmp_path / "fork-keys.sqlite3")
         try:
             send(server, "create", "thread/start", {"inputId": "source"})
             first = run_turn(server, "source", "first")

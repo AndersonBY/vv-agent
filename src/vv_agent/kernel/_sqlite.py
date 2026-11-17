@@ -5,13 +5,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, suppress
 from hashlib import sha256
 from threading import RLock
+from typing import Any
 
+from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._content_sql import CoreSQLContentStore
+from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLStore
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore
+from vv_agent.kernel._store import SessionStore
 
 SCHEMA_VERSION = 4
 STORAGE_MAJOR = "S1"
@@ -223,7 +228,33 @@ class SQLiteStore(SQLStore):
     clock_sql = "session_now_ms()"
 
     def heartbeat_store(self):
-        return nullcontext(self) if self.path == ":memory:" else self._heartbeat_connection()
+        return self._heartbeat_connection()
+
+    def drive_store_factory(self) -> Callable[[], AbstractContextManager[SessionStore]]:
+        """Capture a normal independent drive connection opener for this store."""
+
+        path = self.path
+        fold_factory = self.fold_factory
+        clock = self.clock
+        tenant_id = self.tenant_id
+        supports = self.worker_supports
+        all_tenants = self.claims_all_tenants
+        configured, allow_unsigned, signer = self._input_admission_policy()
+
+        @contextmanager
+        def open_store() -> Iterator[SessionStore]:
+            with SQLiteStore.standalone(path, fold_factory=fold_factory, clock=clock) as store:
+                store.configure_worker(
+                    level=supports.max_level,
+                    handler_versions=supports.handler_versions,
+                    capabilities=supports.capabilities,
+                    all_tenants=all_tenants,
+                )
+                if configured:
+                    store.configure_input_admission(signer, allow_unsigned=allow_unsigned)
+                yield store if all_tenants else store.for_tenant(tenant_id)
+
+        return open_store
 
     def _heartbeat_connection(self):
         return self._inherit_runtime_configuration(
@@ -231,6 +262,8 @@ class SQLiteStore(SQLStore):
         )
 
     def __init__(self, path: str, *, fold_factory: Callable[[], Fold], clock: Clock):
+        if path == ":memory:":
+            raise ValueError("session SQLiteStore requires a file path; ':memory:' is not supported")
         super().__init__(fold_factory=fold_factory)
         self.clock = clock
         self.path = path
@@ -313,3 +346,102 @@ class SQLiteStore(SQLStore):
             self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if not _schema_is_current(self.connection):
                 raise ValueError("session SQLite schema fingerprint does not match this runtime")
+
+
+class _SQLiteContentBackend:
+    lock_clause = ""
+
+    def __init__(self, connection: sqlite3.Connection, connection_lock: RLock | None) -> None:
+        self.connection = connection
+        self.connection_lock = connection_lock
+
+    @contextmanager
+    def _serialized(self) -> Iterator[None]:
+        if self.connection_lock is None:
+            yield
+            return
+        with self.connection_lock:
+            yield
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Join a caller transaction or hold one short read snapshot."""
+
+        with self._serialized():
+            if self.connection.in_transaction:
+                yield
+                return
+            self.connection.execute("BEGIN DEFERRED")
+            try:
+                yield
+            except BaseException:
+                with suppress(BaseException):
+                    self.connection.execute("ROLLBACK")
+                raise
+            try:
+                self.connection.execute("COMMIT")
+            except BaseException:
+                with suppress(BaseException):
+                    self.connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _query(query: str) -> str:
+        return query.replace("{p}", "?")
+
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+        with self._serialized():
+            row = self.connection.execute(self._query(query), params).fetchone()
+        return None if row is None else tuple(row)
+
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        with self._serialized():
+            rows = self.connection.execute(self._query(query), params).fetchall()
+        return [tuple(row) for row in rows]
+
+    def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        with self._serialized():
+            return self.connection.execute(self._query(query), params).rowcount
+
+    def require_transaction(self) -> None:
+        with self._serialized():
+            if not self.connection.in_transaction:
+                raise RuntimeError("durable content writes require the caller's outer session transaction")
+
+    def now_ms(self) -> int:
+        row = self.fetchone("SELECT session_now_ms()")
+        if row is None:
+            raise RuntimeError("SQLite content clock is unavailable")
+        return row[0]
+
+
+class CoreSQLiteContentStore(CoreSQLContentStore):
+    """SQLite content adapter over a caller-owned connection or transaction."""
+
+    def __init__(
+        self,
+        source: SQLiteStore | SQLSessionTx | sqlite3.Connection,
+        key_provider: KeyProvider,
+        cipher: ContentCipher,
+        *,
+        provider_id: str | None = None,
+    ) -> None:
+        connection: Any
+        connection_lock: RLock | None = None
+        if isinstance(source, SQLSessionTx):
+            if not isinstance(source.store, SQLiteStore):
+                raise TypeError("SQLiteContentStore transaction must belong to SQLiteStore")
+            connection = source.store.connection
+            connection_lock = source.store._connection_lock
+        else:
+            connection = source.connection if isinstance(source, SQLiteStore) else source
+            if isinstance(source, SQLiteStore):
+                connection_lock = source._connection_lock
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("SQLiteContentStore requires a SQLite connection or SQLiteStore")
+        super().__init__(
+            _SQLiteContentBackend(connection, connection_lock),
+            key_provider,
+            cipher,
+            provider_id=provider_id,
+        )

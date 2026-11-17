@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hmac
-import json
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import Any
 
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetExhaustion, BudgetUsageSnapshot
@@ -41,190 +39,25 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.interaction import HostInteractionRequest
-from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
-from vv_agent.kernel._content import (
-    SESSION_ATTRIBUTES,
-    SESSION_PRINCIPAL_ATTRIBUTES,
-    SESSION_WORKSPACE,
-    ContentBindingMismatch,
-    ContentRef,
-    ContentStoreError,
-    ContentUnavailable,
+from vv_agent.kernel._boundary_hydration import (
+    SessionHydration,
+    hydrate_session_input,
+    hydrate_session_input_payload,
+    hydrate_session_record_payload,
+    hydrate_session_records,
+    hydrate_session_stored_record,
 )
-from vv_agent.kernel._content import (
-    ContentIntegrityError as BackendContentIntegrityError,
+from vv_agent.kernel._boundary_hydration import (
+    fold_hydrated_records as fold_hydrated_records,
 )
-from vv_agent.kernel._content import (
-    KeyUnavailable as BackendKeyUnavailable,
-)
-from vv_agent.kernel._content_publication import (
-    _MISSING,
-    _REFERENCE_DIGESTS,
-    NestedContentSlot,
-    _content_slot_specs,
-    _expand_nested_slots,
-    _payload_slots,
-    declared_content_ref,
-    input_content_slots,
-)
-from vv_agent.kernel._execution_values import AgentTask
-from vv_agent.kernel._hydration import (
-    ContentReader,
-    HydrationError,
-    HydrationSlot,
-    IntegrityFailure,
-    KeyUnavailable,
-    MissingContent,
-    MissingContentLink,
-    ReferenceDigestMismatch,
-    SessionHydrator,
-    TypedSchemaFailure,
-    _parse_definition,
-    reference_digest,
-)
-from vv_agent.kernel._reducer import logical_inputs
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .children import child_handles
-from .content_reader import input_owner, record_owner
-from .content_runtime import durable_content_reader
 from .interactions import user_interaction
-from .records import InboxItem, copy_json, digest
+from .records import copy_json, digest
 from .runtime import model_usage
 from .store import StoredRecord
 from .tool_results import project_tool_result
-
-
-@dataclass(frozen=True, slots=True)
-class SessionHydration:
-    """One caller-owned reader bound to a tenant and session."""
-
-    reader: ContentReader = field(repr=False)
-    tenant_id: str
-    session_id: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.tenant_id, str) or not self.tenant_id:
-            raise ValueError("tenant_id must be a non-empty string")
-        if not isinstance(self.session_id, str) or not self.session_id:
-            raise ValueError("session_id must be a non-empty string")
-        if not isinstance(self.reader, ContentReader):
-            raise TypeError("reader must implement ContentReader")
-
-    @classmethod
-    def from_store(cls, store: Any, *, tenant_id: str, session_id: str) -> SessionHydration:
-        return cls(
-            durable_content_reader(store, tenant_id=tenant_id, session_id=session_id),
-            tenant_id=tenant_id,
-            session_id=session_id,
-        )
-
-    def read(
-        self,
-        owner: str,
-        slot: str,
-        ref: ContentRef,
-        *,
-        expected_reference_digest: str | None = None,
-        record_kind: str | None = None,
-        record_payload: dict[str, Any] | None = None,
-    ) -> Any:
-        hydrator = SessionHydrator(
-            self.reader,
-            tenant_id=self.tenant_id,
-            session_id=self.session_id,
-            owner=owner,
-        )
-        try:
-            selected = HydrationSlot(slot)
-        except ValueError:
-            selected = None
-        nested = _nested_content_slots(record_kind, slot, record_payload)
-        if nested:
-            value = self._read_exact_json(
-                hydrator,
-                owner,
-                slot,
-                ref,
-                expected_reference_digest=expected_reference_digest,
-            )
-            for path, nested_slot, nested_value in _expand_nested_slots(value, nested, slot):
-                if nested_value is _MISSING or nested_value is None:
-                    continue
-                nested_ref = declared_content_ref(nested_value)
-                if nested_ref is None:
-                    raise TypedSchemaFailure(f"{nested_slot} requires a ContentRef")
-                _path_set(
-                    value,
-                    path,
-                    self.read(
-                        owner,
-                        nested_slot,
-                        nested_ref,
-                        record_kind=record_kind,
-                        record_payload=record_payload,
-                    ),
-                )
-            if selected is HydrationSlot.DEFINITION:
-                value = _parse_definition(value)
-        elif selected is None:
-            value = self._read_exact_json(
-                hydrator,
-                owner,
-                slot,
-                ref,
-                expected_reference_digest=expected_reference_digest,
-            )
-        else:
-            value = hydrator.hydrate(selected, ref, expected_reference_digest=expected_reference_digest)
-        return _projection_value(slot, value)
-
-    def _read_exact_json(
-        self,
-        hydrator: SessionHydrator,
-        owner: str,
-        slot: str,
-        ref: ContentRef,
-        *,
-        expected_reference_digest: str | None = None,
-    ) -> Any:
-        if hydrator.binding != (self.tenant_id, self.session_id, owner):
-            raise MissingContentLink("content hydrator owner binding does not match")
-        if expected_reference_digest is not None:
-            try:
-                expected_reference_digest = validate_sha256(
-                    expected_reference_digest,
-                    f"{slot} expected reference digest",
-                )
-            except ValueError as exc:
-                raise TypedSchemaFailure(str(exc)) from exc
-            if not hmac.compare_digest(reference_digest(ref), expected_reference_digest):
-                raise ReferenceDigestMismatch(f"{slot} reference digest does not match")
-        try:
-            body = self.reader.read(self.tenant_id, self.session_id, owner, slot, ref)
-        except (HydrationError, MissingContentLink, MissingContent, KeyUnavailable, IntegrityFailure):
-            raise
-        except ContentUnavailable as exc:
-            raise MissingContent("content is unavailable") from exc
-        except BackendKeyUnavailable as exc:
-            raise KeyUnavailable("session content key is unavailable") from exc
-        except BackendContentIntegrityError as exc:
-            raise IntegrityFailure("content failed integrity validation") from exc
-        except ContentBindingMismatch as exc:
-            raise MissingContentLink("content owner link is unavailable") from exc
-        except ContentStoreError as exc:
-            raise HydrationError("content read failed") from exc
-        if type(body) is not bytes:
-            raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
-        if len(body) != ref.size:
-            raise IntegrityFailure(f"{slot} size does not match ContentRef")
-        try:
-            value = json.loads(body)
-            if canonical_json_bytes(value, slot) != body:
-                raise ValueError("content is not canonical JSON")
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise TypedSchemaFailure(f"{slot} is not valid canonical JSON") from exc
-        return value
 
 
 def hydration_for_store(store: Any, *, tenant_id: str, session_id: str) -> SessionHydration:
@@ -238,230 +71,11 @@ def hydration_for_session_store(store: Any, session_id: str) -> SessionHydration
     return hydration_for_store(store, tenant_id=tenant_id, session_id=session_id)
 
 
-class _RetainedInboxItem(InboxItem):
-    """Logical input fields with the committed S1 encoding used for identity checks."""
-
-    def __init__(self, item: InboxItem, body: bytes) -> None:
-        super().__init__(**item.to_dict())
-        object.__setattr__(self, "_retained_body", body)
-
-    def encode(self) -> bytes:
-        return self._retained_body
-
-
-def _projection_value(slot: str, value: Any) -> Any:
-    if slot == HydrationSlot.DEFINITION.value:
-        return {
-            "agent_name": value.agent_name,
-            "memory_settings": copy_json(value.memory_settings),
-            "child_tools": list(value.child_tools),
-            "model_binding": copy_json(value.model_binding),
-            "capabilities": copy_json(value.capabilities),
-            "task": value.task.to_dict(),
-            "tools": copy_json(list(value.tools)),
-        }
-    if slot == HydrationSlot.BUDGET.value:
-        return value.to_dict()
-    if slot == HydrationSlot.TASK.value:
-        return value.to_dict()
-    if slot == HydrationSlot.MESSAGES.value:
-        return [message.to_dict() for message in value]
-    return copy_json(value)
-
-
-def hydrate_input_payload(item: InboxItem, hydration: SessionHydration | None) -> dict[str, Any]:
-    payload = copy_json(item.payload)
-    for content_slot in input_content_slots(item.kind):
-        try:
-            value = _path_get(payload, content_slot.path)
-        except (KeyError, IndexError):
-            continue
-        ref = declared_content_ref(value)
-        if ref is None:
-            continue
-        if hydration is None:
-            raise MissingContentLink(f"input:{item.input_id}/{content_slot.slot} requires a content hydration reader")
-        _path_set(payload, content_slot.path, hydration.read(input_owner(item.input_id), content_slot.slot, ref))
-    return payload
-
-
-def hydrate_input(item: InboxItem, hydration: SessionHydration | None) -> InboxItem:
-    return replace(item, payload=hydrate_input_payload(item, hydration))
-
-
-def hydrate_record_payload(
-    stored: StoredRecord,
-    hydration: SessionHydration | None,
-    *,
-    include_input: bool = True,
-) -> dict[str, Any]:
-    """Hydrate every declared C slot without changing the committed record envelope."""
-
-    record = stored.record
-    source = copy_json(record._payload)
-    payload = copy_json(source)
-    owner = record_owner(stored.seq)
-    declared_slots = list(_payload_slots(record.kind, source))
-    if record.kind == "session_created":
-        declared_slots.extend(
-            (
-                (("principal", "attributes"), SESSION_PRINCIPAL_ATTRIBUTES, None),
-                (("workspace",), SESSION_WORKSPACE, None),
-                (("attributes",), SESSION_ATTRIBUTES, None),
-            )
-        )
-    seen_slots: set[tuple[tuple[str, ...], str]] = set()
-    for path, slot, _value in declared_slots:
-        slot_key = (path, slot)
-        if slot_key in seen_slots:
-            continue
-        seen_slots.add(slot_key)
-        if not include_input and record.kind == "input_applied" and path[:1] == ("input",):
-            continue
-        try:
-            value = _path_get(payload, path)
-        except (KeyError, IndexError):
-            continue
-        if value is None:
-            continue
-        ref = declared_content_ref(value)
-        if ref is None:
-            continue
-        if hydration is None:
-            raise MissingContentLink(f"{owner}/{slot} requires a content hydration reader")
-        if record.session_id != hydration.session_id:
-            raise MissingContentLink("record session does not match the content reader binding")
-        expected = _REFERENCE_DIGESTS.get((record.kind, slot))
-        _path_set(
-            payload,
-            path,
-            hydration.read(
-                owner,
-                slot,
-                ref,
-                expected_reference_digest=payload.get(expected) if expected is not None else None,
-                record_kind=record.kind,
-                record_payload=source,
-            ),
-        )
-    return payload
-
-
-def hydrate_stored_record(
-    stored: StoredRecord,
-    hydration: SessionHydration | None,
-    *,
-    include_input: bool = True,
-) -> StoredRecord:
-    payload = hydrate_record_payload(stored, hydration, include_input=include_input)
-    retained_body = stored.record.encode()
-    record = replace(stored.record, payload=payload)
-    object.__setattr__(record, "_body", retained_body)
-    if record.kind == "turn_started":
-        task_data = copy_json(payload["definition"]["task"])
-        object.__setattr__(record, "_task", lambda: AgentTask.from_dict(copy_json(task_data)))
-    return replace(stored, record=record)
-
-
-def hydrate_records(
-    records: Iterable[StoredRecord],
-    hydration: SessionHydration | None,
-    *,
-    include_input: bool = True,
-) -> tuple[StoredRecord, ...]:
-    return tuple(hydrate_stored_record(stored, hydration, include_input=include_input) for stored in records)
-
-
-def fold_hydrated_records(
-    records: tuple[StoredRecord, ...],
-    source_records: tuple[StoredRecord, ...],
-    fold_factory: Callable[[], Any],
-    hydration: SessionHydration | None,
-) -> Any:
-    """Fold hydrated values while retaining the committed record encoding for dedupe."""
-
-    source_by_identity = {(row.record.record_id, row.seq): row for row in source_records}
-    hydrated_by_identity = {}
-    for row in records:
-        identity = (row.record.record_id, row.seq)
-        source = source_by_identity.get(identity)
-        if source is None:
-            raise MissingContentLink("hydrated record identity does not match source")
-        if identity in hydrated_by_identity:
-            raise MissingContentLink("hydrated record identity is duplicated")
-        hydrated_by_identity[identity] = row
-
-    fold_records = []
-    input_rows = []
-    for source in source_records:
-        identity = (source.record.record_id, source.seq)
-        row = hydrated_by_identity.get(identity)
-        if row is None:
-            row = hydrate_stored_record(source, hydration)
-        elif row.record.encode() != source.record.encode():
-            raise MissingContentLink("hydrated record body does not match source")
-        if source.record.kind == "input_applied":
-            logical_payload = copy_json(row.record._payload)
-            input_rows.append((source, row))
-            fold_payload = copy_json(logical_payload)
-            fold_payload["input"] = copy_json(source.record._payload["input"])
-            fold_record = replace(row.record, payload=fold_payload)
-            object.__setattr__(fold_record, "_body", source.record.encode())
-            object.__setattr__(fold_record, "_business_payload", logical_payload)
-            row = replace(row, record=fold_record)
-        fold_records.append(row)
-
-    logical_items = {}
-    hydrated_inputs = {}
-    for source, row in input_rows:
-        committed = InboxItem(**source.record._payload["input"])
-        logical = InboxItem(**row.record._payload["input"])
-        logical_items[row.record.record_id] = _RetainedInboxItem(logical, committed.encode())
-        hydrated_inputs[row.record.record_id] = row
-    with logical_inputs(logical_items):
-        state = fold_factory().extend(
-            (row.record for row in fold_records),
-            consumed_inputs=logical_items.values(),
-            bodies=(row.record.encode() for row in source_records),
-        )
-    state.applied_inputs = {
-        input_id: hydrated_inputs[record.record_id].record if record.record_id in hydrated_inputs else record
-        for input_id, record in state.applied_inputs.items()
-    }
-    for operation in state.operations.values():
-        for attempt in operation.attempts.values():
-            if attempt.approval_answer is not None:
-                hydrated = hydrated_inputs.get(attempt.approval_answer.record_id)
-                if hydrated is not None:
-                    attempt.approval_answer = hydrated.record
-    return state
-
-
-def _path_part(part: str | int) -> str | int:
-    return int(part) if isinstance(part, str) and part.isdecimal() else part
-
-
-def _nested_content_slots(
-    kind: str | None,
-    slot: str,
-    payload: dict[str, Any] | None,
-) -> tuple[NestedContentSlot, ...]:
-    if kind is None or payload is None:
-        return ()
-    return next((content_slot.nested for content_slot in _content_slot_specs(kind, payload) if content_slot.slot == slot), ())
-
-
-def _path_get(value: Any, path: tuple[str | int, ...]) -> Any:
-    for part in path:
-        value = value[_path_part(part)]
-    return value
-
-
-def _path_set(value: Any, path: tuple[str | int, ...], replacement: Any) -> None:
-    if not path:
-        raise ValueError("content slot path cannot be empty")
-    parent = _path_get(value, path[:-1]) if len(path) > 1 else value
-    parent[_path_part(path[-1])] = replacement
+hydrate_input_payload = hydrate_session_input_payload
+hydrate_input = hydrate_session_input
+hydrate_record_payload = hydrate_session_record_payload
+hydrate_stored_record = hydrate_session_stored_record
+hydrate_records = hydrate_session_records
 
 
 def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydration | None = None) -> list[RunEvent]:

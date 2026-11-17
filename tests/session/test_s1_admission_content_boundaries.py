@@ -16,6 +16,7 @@ from vv_agent.kernel._child_store import ChildSession, create_child
 from vv_agent.kernel._content import (
     ContentLabels,
     ContentRef,
+    ContentSessionWriter,
     ContentUnavailable,
     ExportLineKind,
     Principal,
@@ -23,14 +24,16 @@ from vv_agent.kernel._content import (
 )
 from vv_agent.kernel._driver_inputs import CommitInput
 from vv_agent.kernel._execution_values import AgentTask
+from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._records import InboxItem
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.kernel._sql import InputAdmissionProofError, UnsupportedFeatureLevel
 from vv_agent.session.content_runtime import SESSION_ATTRIBUTES, SessionContentWriter
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
 from vv_agent.session.export import export_session
 from vv_agent.session.fork import fork_thread
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.records import Record, SessionSpec, make_record
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 
@@ -76,14 +79,32 @@ def _signed_driver(tmp_path, mutation: str):
     return store
 
 
-def _start_signed(tmp_path, mutation: str = "input"):
+def _start_signed(tmp_path, mutation: str = "input", *, requirements: SessionRequirements | None = None):
     stack = _signed_driver(tmp_path, mutation)
     store = stack.__enter__()
     store.install_schema()
     signer = _Signer()
+    store.configure_input_admission(signer)
     driver = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
-    driver.store.configure_input_admission(signer)
-    driver.create("session", "/workspace", {"seed": {}})
+    if requirements is None:
+        driver.create("session", "/workspace", {"seed": {}})
+    else:
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="session")
+
+            def session_spec(content: ContentSessionWriter) -> SessionSpec:
+                principal, _ = content.service_principal("local")
+                return SessionSpec(
+                    "session",
+                    principal,
+                    content.put_json("/workspace").to_dict(),
+                    attributes=content.put_json({"seed": {}}).to_dict(),
+                    feature_level=2,
+                    bootstrap=requirements,
+                )
+
+            writer.create_session(session_spec, consumers=("events", "app_server", "traces"))
     return stack, store, driver, signer
 
 
@@ -154,6 +175,7 @@ def test_signed_admission_tampering_fails_before_content_read(tmp_path, monkeypa
         )[0]
         item = InboxItem.parse(body)
         if mutation == "actor":
+            assert item.actor is not None
             item = replace(item, actor=item.actor | {"subject_id": "forged"})
         elif mutation == "control":
             item = replace(item, payload={"action": "cancel"})
@@ -237,12 +259,39 @@ def driver_record(item: InboxItem, *, input_seq: int, received_ms: int):
     return request.records[0]
 
 
+def _child_plan(session_id: str, operation_id: str) -> Record:
+    request = ContentRef(f"request/{operation_id}", "0" * 64, 0, "key", ContentLabels())
+    tool = ContentRef(f"tool/{operation_id}", "0" * 64, 0, "key", ContentLabels())
+    budget = ContentRef(f"budget/{operation_id}", "0" * 64, 0, "key", ContentLabels())
+    return make_record(
+        kind="op_planned",
+        session_id=session_id,
+        turn_id=f"{session_id}/turn/start",
+        operation_id=operation_id,
+        attempt=1,
+        payload={
+            "op_kind": "tool",
+            "purpose": None,
+            "request": request.to_dict(),
+            "request_digest": reference_digest(request),
+            "context_version": "1",
+            "dependencies": [],
+            "tool": tool.to_dict(),
+            "idempotency_key": None,
+            "budget_admission": budget.to_dict(),
+            "not_before_ms": None,
+            "provider_binding": None,
+            "consumed_unknowns": [],
+            "policy_decision": None,
+        },
+    )
+
+
 def test_signed_content_child_uses_sql_admission_level_checkpoint_and_nested_links(tmp_path):
-    stack, store, _driver, signer = _start_signed(tmp_path, "signed-child")
+    requirements = SessionRequirements(2, "1", ())
+    stack, store, _driver, signer = _start_signed(tmp_path, "signed-child", requirements=requirements)
     try:
         parent = store.read("session", limit=1).records[0].record
-        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
-        store._rows("UPDATE sk_session SET level=2 WHERE tenant_id='default' AND session_id='session'")
         admission = {
             "mode": "configured",
             "definition": {
@@ -258,15 +307,12 @@ def test_signed_content_child_uses_sql_admission_level_checkpoint_and_nested_lin
                 parent.payload["principal"],
                 parent.payload["workspace"],
                 attributes={"child_admission": admission},
+                feature_level=2,
+                bootstrap=requirements,
             ),
             "signed child task",
         )
-        plan = SimpleNamespace(
-            session_id="session",
-            turn_id="session/turn/start",
-            operation_id="operation/signed-child",
-            attempt=1,
-        )
+        plan = _child_plan("session", "operation/signed-child")
 
         with _driver.store.atomic() as tx:
             create_child(tx, child, plan, generation=1)
@@ -308,12 +354,7 @@ def test_signed_content_child_uses_sql_admission_level_checkpoint_and_nested_lin
 
         store._rows("UPDATE sk_settings SET write_level=1 WHERE singleton=1")
         rejected = replace(child, spec=replace(child.spec, session_id="rejected-child"))
-        rejected_plan = SimpleNamespace(
-            session_id="session",
-            turn_id="session/turn/start",
-            operation_id="operation/rejected",
-            attempt=1,
-        )
+        rejected_plan = _child_plan("session", "operation/rejected")
         with pytest.raises(UnsupportedFeatureLevel), _driver.store.atomic() as tx:
             create_child(tx, rejected, rejected_plan, generation=1)
         assert not store._rows("SELECT 1 FROM sk_session WHERE session_id='rejected-child'")
@@ -343,33 +384,38 @@ def _fork_attributes() -> dict:
     }
 
 
+def _create_fork_source(driver: SessionDriver):
+    with driver.store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="source")
+
+        def source_spec(content: ContentSessionWriter) -> SessionSpec:
+            principal, _ = content.service_principal("source-host", attributes={"role": "source"})
+            return SessionSpec(
+                "source",
+                principal,
+                content.put_json("/workspace").to_dict(),
+                attributes=content.put_json(_fork_attributes()).to_dict(),
+            )
+
+        writer.create_session(source_spec, consumers=("events", "app_server", "traces"))
+    return driver.store.read("source", limit=1).records[0].record.payload
+
+
 @pytest.mark.parametrize("forgotten", ["source", "destination"])
 def test_fork_reencrypts_session_identity_and_survives_one_side_forget(tmp_path, forgotten):
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(tmp_path / f"fork-{forgotten}.sqlite")) as store:
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=provider)
-        with driver.store.atomic() as tx:
-            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="source")
-
-            def source_spec(content):
-                principal, _ = content.service_principal("source-host", attributes={"role": "source"})
-                return SessionSpec(
-                    "source",
-                    principal,
-                    content.put_json("/workspace").to_dict(),
-                    attributes=content.put_json(_fork_attributes()).to_dict(),
-                )
-
-            writer.create_session(source_spec, consumers=("events", "app_server", "traces"))
-
+        source_created = _create_fork_source(driver)
+        source_identity = Principal.from_dict(source_created["principal"])
         result = fork_thread(
             driver,
             host=SimpleNamespace(),
             params={"threadId": "source", "forkId": "copy"},
+            principal=source_identity,
         )
         destination_id = result["threadId"]
-        source_created = store.read("source", limit=1).records[0].record.payload
         destination_created = store.read(destination_id, limit=1).records[0].record.payload
         for field in ("attributes", "workspace"):
             assert destination_created[field]["key_id"] != source_created[field]["key_id"]
@@ -401,9 +447,43 @@ def test_fork_reencrypts_session_identity_and_survives_one_side_forget(tmp_path,
             attributes = survivor_writer.get_json(survivor_created.record.payload["attributes"])
             workspace = survivor_writer.get_json(survivor_created.record.payload["workspace"])
             principal_attributes = survivor_writer.get_json(survivor_created.record.payload["principal"]["attributes"])
+        survivor_identity = Principal.from_dict(survivor_created.record.payload["principal"])
         assert attributes["seed"]["shared_state"] == {}
         assert workspace == "/workspace"
+        assert (
+            survivor_identity.tenant_id,
+            survivor_identity.subject_id,
+            survivor_identity.subject_kind,
+        ) == ("default", "source-host", "service")
         assert principal_attributes == {"role": "source"}
+
+
+def test_fork_without_principal_uses_new_app_server_service_identity(tmp_path):
+    provider = LocalKeyProvider(MASTER_KEY)
+    with SQLiteStore.standalone(str(tmp_path / "fork-default-principal.sqlite")) as store:
+        store.install_schema()
+        driver = SessionDriver(store=store, content_key_provider=provider)
+        source_created = _create_fork_source(driver)
+        result = fork_thread(
+            driver,
+            host=SimpleNamespace(),
+            params={"threadId": "source", "forkId": "default-principal"},
+        )
+        destination_id = result["threadId"]
+        destination_created = store.read(destination_id, limit=1).records[0].record.payload
+        source_identity = Principal.from_dict(source_created["principal"])
+        destination_identity = Principal.from_dict(destination_created["principal"])
+
+        assert (source_identity.subject_id, source_identity.subject_kind) == ("source-host", "service")
+        assert (destination_identity.tenant_id, destination_identity.subject_id, destination_identity.subject_kind) == (
+            "default",
+            "app-server",
+            "service",
+        )
+        assert destination_identity.attributes != source_identity.attributes
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id=destination_id)
+            assert writer.get_json(destination_identity.attributes) == {"role": "app-server"}
 
 
 @pytest.mark.parametrize("forgotten", ["parent", "child"])

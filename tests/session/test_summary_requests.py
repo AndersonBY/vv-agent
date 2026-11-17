@@ -5,14 +5,61 @@ from dataclasses import replace
 import pytest
 
 from vv_agent import SummaryChildTool
+from vv_agent.kernel._boundary_hydration import hydrate_session_input
 from vv_agent.session.children import ChildSession
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import SessionSpec, digest
+from vv_agent.session.projection import hydration_for_session_store
+from vv_agent.session.records import InboxItem, digest
+from vv_agent.session.store import SessionStore
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
+from .helpers import (
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 from .test_compaction import SUMMARY, history
-from .test_recovery_matrix import MODEL_USAGE, records_of, runtime, start
+from .test_recovery_matrix import MODEL_USAGE, runtime
+
+_FIXTURE_CONTENT_STORES: dict[int, SessionStore] = {}
+
+
+def start(store, sid="s", *, initial=True):
+    _FIXTURE_CONTENT_STORES.clear()
+    content_store = wrap_fixture_store(store)
+    create_fixture_session(
+        content_store,
+        sid,
+        attributes={
+            "seed": {
+                "messages": [message.to_dict() for message in history()] if initial else [],
+                "shared_state": {},
+                "unseen_input_protection": False,
+                "response_rejection": True,
+            }
+        },
+    )
+    push_fixture_input(content_store, sid, InboxItem("initial", "user", {"content": "go"}))
+
+
+def records_of(store, kind):
+    _, hydrated, _ = read_fixture_state(store, "s")
+    return [row.record for row in hydrated if row.record.kind == kind]
+
+
+def hydrated_input_payload(store, session_id):
+    hydration = hydration_for_session_store(store, session_id)
+    stored = store.peek_inbox(session_id)[0]
+    return hydrate_session_input(stored.item, hydration).payload
+
+
+def hydrated_record_payload(store, record):
+    _, hydrated, _ = read_fixture_state(store, record.session_id)
+    return next(row.record.payload for row in hydrated if row.record.record_id == record.record_id)
 
 
 @function_tool
@@ -35,18 +82,35 @@ def wait() -> ToolExecutionResult:
     return ToolExecutionResult("", "question", directive=ToolDirective.WAIT_USER)
 
 
-def configured(database, steps, *, child=False, hook=lambda *_: None, initial=True):
+def configured(store, database, steps, *, child=False, hook=lambda *_: None, initial=True):
     bindings = {}
+    fixture_store = wrap_fixture_store(store)
     if child:
+        child_spec = fixture_child_spec(fixture_store, "s", "child")
         bindings["child_task"] = SummaryChildTool(
             lambda plan: plan.payload["request"]["arguments"].get("include_main_summary", True),
-            lambda plan, summary: ChildSession(SessionSpec("child", "test", "/tmp"), f"child input\n{summary}", background=True),
+            lambda plan, summary: ChildSession(child_spec, f"child input\n{summary}", background=True),
         )
-    rt = runtime(database, steps, [compact, child_task, finish, wait], children=bindings, hook=hook)
+    rt = runtime(
+        database,
+        steps,
+        [compact, child_task, finish, wait],
+        children=bindings,
+        hook=hook,
+        content_reader=fixture_content_reader(fixture_store, "s"),
+    )
     rt.config = replace(rt.config, initial_messages=history() if initial else [])
     rt.memory_manager.compact_threshold = 999999
     rt.memory_manager.keep_recent_messages = 1
+    _FIXTURE_CONTENT_STORES[id(rt)] = fixture_store
     return rt
+
+
+def drive_session(store, runtime):
+    content_store = _FIXTURE_CONTENT_STORES.get(id(runtime))
+    if content_store is None:
+        content_store = wrap_fixture_store(store)
+    return drive(content_store, "s", runtime=runtime)
 
 
 def call(name="compact", args=None):
@@ -59,13 +123,16 @@ def summary_plans(store):
 
 def assert_summary_billed_once(store):
     from vv_agent.events import ModelCallCompletedEvent
-    from vv_agent.session.projection import project_records
+    from vv_agent.session.projection import hydration_for_session_store, project_records
     from vv_agent.session.result import project_result
     from vv_agent.types import ModelCallOperation
 
     events = [
         event
-        for event in project_records(read_state(store, "s")[1])
+        for event in project_records(
+            read_state(store, "s")[1],
+            hydration=hydration_for_session_store(store, "s"),
+        )
         if isinstance(event, ModelCallCompletedEvent) and event.operation == ModelCallOperation.MEMORY_COMPACTION
     ]
     assert len(events) == 1 and events[0].usage.input_tokens == 12000
@@ -88,8 +155,20 @@ def test_manual_compaction_receipt_and_next_primary(store, database):
         return LLMResponse("done")
 
     start(store)
-    drive(store, "s", runtime=configured(database, [call(), summary, answer]))
-    assert len(summary_plans(store)) == len(records_of(store, "context_compacted")) == 1
+    drive_session(store, configured(store, database, [call(), summary, answer]))
+    plans = summary_plans(store)
+    raw_state = store.read_state("s")[0]
+    diagnostics = [
+        (
+            oid,
+            operation.kind,
+            operation.selected_attempt,
+            tuple((number, attempt.state, attempt.context) for number, attempt in operation.attempts.items()),
+        )
+        for oid, operation in raw_state.operations.items()
+        if oid.endswith("/tool/0")
+    ]
+    assert len(plans) == len(records_of(store, "context_compacted")) == 1, diagnostics
     receipt = next(r for r in records_of(store, "op_completed") if r.payload["result"].get("tool_call_id") == "request")
     assert receipt.payload["result"]["metadata"]["compaction_source"]["operation_id"] == receipt.operation_id
     assert len(receipt.payload["result"]["metadata"]["compaction_source"]["context_digest"]) == 64
@@ -111,9 +190,9 @@ def test_manual_noop_or_failure_is_consumed_once(store, database, case):
     if case == "failure":
         steps.extend([unavailable, unavailable])
     steps.append(LLMResponse("done"))
-    start(store)
-    drive(store, "s", runtime=configured(database, steps, initial=case != "empty"))
-    drive(store, "s", runtime=configured(database, [], initial=case != "empty"))
+    start(store, initial=case != "empty")
+    drive_session(store, configured(store, database, steps, initial=case != "empty"))
+    drive_session(store, configured(store, database, [], initial=case != "empty"))
     assert not records_of(store, "context_compacted")
     assert len(summary_plans(store)) == (0 if case == "empty" else 2 if case == "failure" else 1)
     assert records_of(store, "turn_ended")[-1].payload["status"] == "completed"
@@ -123,10 +202,9 @@ def test_manual_noop_or_failure_is_consumed_once(store, database, case):
 @pytest.mark.parametrize("terminal", ["finish", "wait"])
 def test_terminal_batch_does_not_request_summary(store, database, terminal):
     start(store)
-    drive(
+    drive_session(
         store,
-        "s",
-        runtime=configured(database, [LLMResponse("", [ToolCall("request", "compact", {}), ToolCall("end", terminal, {})])]),
+        configured(store, database, [LLMResponse("", [ToolCall("request", "compact", {}), ToolCall("end", terminal, {})])]),
     )
     assert not summary_plans(store)
     assert not records_of(store, "context_compacted")
@@ -139,14 +217,14 @@ def test_terminal_batch_does_not_request_summary(store, database, terminal):
         assert tid is not None
         parked = state.turns[tid].wait
         assert parked is not None
-        with store.atomic() as tx:
-            tx.push(
-                "s",
-                InboxItem(
-                    "reply", "user", {"content": {"interaction_id": parked.payload["interaction_id"], "text": "continue"}}, tid, 0
-                ),
-            )
-        drive(store, "s", runtime=configured(database, [LLMResponse(SUMMARY), LLMResponse("done")]))
+        push_fixture_input(
+            store,
+            "s",
+            InboxItem(
+                "reply", "user", {"content": {"interaction_id": parked.payload["interaction_id"], "text": "continue"}}, tid, 0
+            ),
+        )
+        drive_session(store, configured(store, database, [LLMResponse(SUMMARY), LLMResponse("done")]))
         assert len(summary_plans(store)) == 1
         assert len(records_of(store, "context_compacted")) == 1
 
@@ -160,11 +238,11 @@ def test_two_requests_and_threshold_share_operation(store, database):
         return LLMResponse("", [ToolCall("a", "compact", {}), ToolCall("b", "compact", {})])
 
     start(store)
-    rt = configured(database, [requested, summary, LLMResponse("done")])
+    rt = configured(store, database, [requested, summary, LLMResponse("done")])
     # Initial history is below threshold; this long output makes it exceed the threshold.
     rt.memory_manager.compact_threshold = 12000
     rt.llm.steps[0] = LLMResponse("facts " * 14000, [ToolCall("a", "compact", {}), ToolCall("b", "compact", {})])
-    drive(store, "s", runtime=rt)
+    drive_session(store, rt)
     assert len(summary_plans(store)) == 1
     events = [
         r.payload["data"]["event"] for r in records_of(store, "boundary_recorded") if r.payload["stage"] == "memory_completed"
@@ -186,12 +264,12 @@ def test_child_fresh_summary_is_billed_and_parent_is_unchanged(store, database):
         return LLMResponse("done")
 
     start(store)
-    drive(store, "s", runtime=configured(database, [call("child_task"), summary, answer], child=True))
+    drive_session(store, configured(store, database, [call("child_task"), summary, answer], child=True))
     assert not records_of(store, "context_compacted")
     assert any("old facts" in m.content for m in seen)
     assert not any(m.name == "memory_summary" for m in seen)
     assert len(summary_plans(store)) == 1
-    child_input = store.peek_inbox("child")[0].item.payload["content"]
+    child_input = hydrated_input_payload(store, "child")["content"]
     assert "Compressed Agent Memory" in child_input and "Continue the task" in child_input
     assert_summary_billed_once(store)
     assert len([r for r in records_of(store, "op_completed") if r.payload["usage"].get("prompt_tokens") == 12000]) == 1
@@ -204,7 +282,7 @@ def test_child_summary_rejection_or_opt_out(store, database, flag):
     if flag:
         steps.append(LLMResponse("invalid"))
     steps.append(LLMResponse("done"))
-    drive(store, "s", runtime=configured(database, steps, child=True))
+    drive_session(store, configured(store, database, steps, child=True))
     if flag:
         assert not records_of(store, "op_parked")
         assert any(
@@ -212,7 +290,7 @@ def test_child_summary_rejection_or_opt_out(store, database, flag):
         )
     else:
         assert not summary_plans(store)
-        assert store.peek_inbox("child")[0].item.payload["content"] == "child input\nNone"
+        assert hydrated_input_payload(store, "child")["content"] == "child input\nNone"
 
 
 def test_child_summary_unknown_uses_existing_retries_and_never_admits(store, database):
@@ -223,7 +301,7 @@ def test_child_summary_unknown_uses_existing_retries_and_never_admits(store, dat
         raise TimeoutError("unknown")
 
     start(store)
-    drive(store, "s", runtime=configured(database, [call("child_task"), unknown, unknown, LLMResponse("done")], child=True))
+    drive_session(store, configured(store, database, [call("child_task"), unknown, unknown, LLMResponse("done")], child=True))
     assert len(calls) == 2 and calls[0][0] == calls[1][0] and [v[1] for v in calls] == [1, 2]
     assert len(records_of(store, "op_unknown")) == 2
     assert all(r.payload["duplicate_cost_risk"] and r.payload["measurement_missing"] for r in records_of(store, "op_unknown"))
@@ -253,31 +331,35 @@ def test_crash_commit_cuts_reuse_summary_and_pairing(store, database, child, poi
         is_summary = record.operation_id is not None and (
             "/compaction/" in record.operation_id or record.operation_id.endswith("/summary")
         )
+        logical = None
+        if record.kind == "op_completed" and point in {"intent", "receipt", "admission"}:
+            logical = hydrated_record_payload(store, record)
         match = {
             "memory_start": record.kind == "boundary_recorded" and record.payload["stage"] == "memory_started",
-            "intent": record.kind == "op_completed"
-            and record.payload.get("result", {}).get("metadata", {}).get("request_compaction"),
+            "intent": logical is not None and logical.get("result", {}).get("metadata", {}).get("request_compaction"),
             "plan": record.kind == "op_planned" and is_summary,
             "start": record.kind == "op_started" and is_summary,
-            "receipt": record.kind == "op_completed" and is_summary,
+            "receipt": logical is not None and is_summary,
             "replacement": record.kind == "context_compacted",
             "telemetry": record.kind == "boundary_recorded" and record.payload["stage"] == "memory_completed",
-            "admission": record.kind == "op_completed" and record.payload.get("result", {}).get("tool_call_id") == "request",
+            "admission": logical is not None and logical.get("result", {}).get("tool_call_id") == "request",
         }[point]
         if match:
             crashed.append(record)
             raise Crash
 
     start(store)
-    rt = configured(database, [call("child_task" if child else "compact"), summary, LLMResponse("done")], child=child, hook=hook)
+    rt = configured(
+        store, database, [call("child_task" if child else "compact"), summary, LLMResponse("done")], child=child, hook=hook
+    )
     with pytest.raises(Crash):
-        drive(store, "s", runtime=rt)
+        drive_session(store, rt)
     assert len(crashed) == 1
     plans_before = {r.record_id: digest(r.payload) for r in records_of(store, "op_planned")}
     # An op_started without a receipt is Unknown, and may make one risk-marked retry.
     remaining = [summary, LLMResponse("done")] if point in {"intent", "memory_start", "plan", "start"} else [LLMResponse("done")]
-    drive(store, "s", runtime=configured(database, remaining, child=child))
-    drive(store, "s", runtime=configured(database, [], child=child))
+    drive_session(store, configured(store, database, remaining, child=child))
+    drive_session(store, configured(store, database, [], child=child))
     assert len(calls) == 1
     assert all(
         digest(r.payload) == plans_before[r.record_id] for r in records_of(store, "op_planned") if r.record_id in plans_before
@@ -287,7 +369,7 @@ def test_crash_commit_cuts_reuse_summary_and_pairing(store, database, child, poi
     tools = [r for r in records_of(store, "op_completed") if r.payload["result"].get("tool_call_id") == "request"]
     assert len(tools) == 1
     if child:
-        assert "Compressed Agent Memory" in store.peek_inbox("child")[0].item.payload["content"]
+        assert "Compressed Agent Memory" in hydrated_input_payload(store, "child")["content"]
         assert len(records_of(store, "op_parked")) == 1
     else:
         assert len(records_of(store, "context_compacted")) == 1
@@ -314,14 +396,14 @@ def test_summary_endpoint_attempts_are_owned_by_kernel(store, database, monkeypa
 
     monkeypatch.setattr(VvLlmClient, "complete", complete)
     start(store)
-    rt = configured(database, [], child=child)
+    rt = configured(store, database, [], child=child)
     rt.llm = VvLlmClient(
         [EndpointTarget(e, "unused", "https://example.invalid") for e in ("first", "second")],
         backend="openai",
         randomize_endpoints=False,
     )
     rt.resolved = replace(rt.resolved, backend="openai")
-    drive(store, "s", runtime=rt)
+    drive_session(store, rt)
     assert [(e, n) for p, e, n in calls if p == "compaction"] == [("first", 1), ("second", 2)]
     assert len(records_of(store, "op_unknown")) == 1
     assert records_of(store, "turn_ended")[-1].payload["status"] == "completed"
@@ -335,21 +417,44 @@ def process_summary_worker(database, pipe, child, cut):
             counter.connection.execute("INSERT INTO summary_calls VALUES (1)")
         return LLMResponse(SUMMARY, raw={"usage": MODEL_USAGE})
 
-    def hook(point, record):
-        receipt = record.kind == "op_completed" and record.payload.get("usage", {}).get("prompt_tokens") == 12000
-        admission = child and record.kind == "op_completed" and record.payload.get("result", {}).get("tool_call_id") == "request"
-        replacement = not child and record.kind == "context_compacted"
-        if (cut == "receipt" and point == "after_commit" and receipt) or (
-            cut == "acceptance_rollback" and point == "before_commit" and (admission or replacement)
-        ):
-            pipe.send(("barrier", None))
-            pipe.recv()
-
     with open_store(database) as store:
-        drive(
+
+        def committed_operation_kind(record):
+            operation_id = record.operation_id
+            if operation_id is None:
+                return None
+            planned = next(
+                (
+                    row.record
+                    for row in store.read(record.session_id).records
+                    if row.record.kind == "op_planned"
+                    and row.record.operation_id == operation_id
+                    and (row.record.attempt or 1) == (record.attempt or 1)
+                ),
+                None,
+            )
+            return None if planned is None else planned._payload.get("op_kind")
+
+        def hook(point, record):
+            if record is None:
+                return
+            receipt = False
+            if point == "after_commit" and record.kind == "op_completed":
+                logical = hydrated_record_payload(store, record)
+                receipt = committed_operation_kind(record) == "model" and logical.get("usage", {}).get("prompt_tokens") == 12000
+            # The pending reference-form admission record has no owner links yet.
+            # Its committed plan identifies whether this is a tool child admission.
+            admission = child and record.kind in {"op_parked", "op_completed"} and committed_operation_kind(record) == "tool"
+            replacement = not child and record.kind == "context_compacted"
+            if (cut == "receipt" and point == "after_commit" and receipt) or (
+                cut == "acceptance_rollback" and point == "before_commit" and (admission or replacement)
+            ):
+                pipe.send(("barrier", None))
+                pipe.recv()
+
+        drive_session(
             store,
-            "s",
-            runtime=configured(database, [call("child_task" if child else "compact"), summary], child=child, hook=hook),
+            configured(store, database, [call("child_task" if child else "compact"), summary], child=child, hook=hook),
         )
 
 
@@ -372,14 +477,14 @@ def test_process_kill_reuses_paid_receipt_and_atomic_admission(store, database, 
         receive(pipe, "barrier")
         kill(worker, pipe, database)
         assert not records_of(store, "op_parked")
-        drive(store, "s", runtime=configured(database, [LLMResponse("done")], child=child))
+        drive_session(store, configured(store, database, [LLMResponse("done")], child=child))
         assert store.connection.execute("SELECT count(*) FROM summary_calls").fetchone()[0] == 1
         assert len(summary_plans(store)) == 1
         assert len([r for r in records_of(store, "op_completed") if r.payload["usage"].get("prompt_tokens") == 12000]) == 1
         assert_summary_billed_once(store)
         if child:
             assert len(records_of(store, "op_parked")) == 1
-            assert "Compressed Agent Memory" in store.peek_inbox("child")[0].item.payload["content"]
+            assert "Compressed Agent Memory" in hydrated_input_payload(store, "child")["content"]
         else:
             assert len(records_of(store, "context_compacted")) == 1
     finally:
@@ -441,15 +546,15 @@ def test_provider_compaction_intent_and_callback_replay(store, database, deliver
     provider = Provider()
     start(store)
     steps = [call(), LLMResponse(SUMMARY), LLMResponse("done")] if delivery != "late_callback" else [call(), LLMResponse("done")]
-    rt = configured(database, steps)
+    rt = configured(store, database, steps)
     rt.providers["compact"] = provider
     rt.poll_ms = 1
-    drive(store, "s", runtime=rt)
+    drive_session(store, rt)
     if delivery == "query":
         from threading import Event
 
         Event().wait(0.01)
-        drive(store, "s", runtime=rt)
+        drive_session(store, rt)
         assert len(records_of(store, "context_compacted")) == 1
         receipt = next(r for r in records_of(store, "op_completed") if r.payload["result"].get("tool_call_id") == "request")
         assert "compaction_source" in receipt.payload["result"]["metadata"]
@@ -457,26 +562,26 @@ def test_provider_compaction_intent_and_callback_replay(store, database, deliver
     plan = provider.plan
     assert plan is not None
     for index in range(2):
-        with store.atomic() as tx:
-            tx.push(
-                "s",
-                InboxItem(
-                    f"callback-{index}",
-                    "provider_result",
-                    {
-                        "operation_id": plan.operation_id,
-                        "attempt": plan.attempt,
-                        "request_digest": plan.payload["request_digest"],
-                        "provider_binding": "compact",
-                        "result": result,
-                        "evidence": ["receipt"],
-                        "usage": {},
-                    },
-                    plan.turn_id,
-                    generation=0,
-                ),
-            )
-        drive(store, "s", runtime=rt)
+        push_fixture_input(
+            store,
+            "s",
+            InboxItem(
+                f"callback-{index}",
+                "provider_result",
+                {
+                    "operation_id": plan.operation_id,
+                    "attempt": plan.attempt,
+                    "request_digest": plan.payload["request_digest"],
+                    "provider_binding": "compact",
+                    "result": result,
+                    "evidence": ["receipt"],
+                    "usage": {},
+                },
+                plan.turn_id,
+                generation=0,
+            ),
+        )
+        drive_session(store, rt)
     applied = [r for r in records_of(store, "input_applied") if r.payload["input"]["input_id"].startswith("callback-")]
     assert [r.payload["disposition"] for r in applied] == ["applied", "noop"]
     assert len(records_of(store, "context_compacted")) == (0 if delivery == "late_callback" else 1)
@@ -501,6 +606,7 @@ def test_child_summary_does_not_consume_unknown_outside_its_source(store, databa
 
     start(store)
     rt = configured(
+        store,
         database,
         [
             LLMResponse("", [ToolCall("effect", "effect", {}), ToolCall("request", "child_task", {})]),
@@ -512,7 +618,7 @@ def test_child_summary_does_not_consume_unknown_outside_its_source(store, databa
     )
     rt.agent.tools.append(effect)
     rt.providers["effect"] = EffectProvider()
-    drive(store, "s", runtime=rt)
+    drive_session(store, rt)
     assert observed == [[]]
     primary = [r for r in records_of(store, "op_planned") if r.payload["purpose"] == "primary"]
     assert len(primary[-1].payload["consumed_unknowns"]) == 1

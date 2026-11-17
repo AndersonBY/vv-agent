@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from typing import cast
 
 from vv_agent._memory_settings import normalize_memory_settings as _normalize_memory_settings
 from vv_agent.kernel._message_values import Message
@@ -11,7 +12,6 @@ from vv_agent.kernel._reducer import CountMessages, NormalizeMemorySettings
 from vv_agent.kernel._reducer import Fold as CoreFold
 from vv_agent.kernel._reducer import TransitionError as TransitionError
 from vv_agent.kernel._reducer import require as require
-from vv_agent.kernel._sql import SQLStore as CoreSQLStore
 from vv_agent.kernel._state import Attempt as Attempt
 from vv_agent.kernel._state import ExecutionState as ExecutionState
 from vv_agent.kernel._state import Operation as Operation
@@ -54,5 +54,9 @@ def fold(records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = ()
 
 
 def _fold_factory_for(store: object) -> Callable[[], CoreFold]:
-    # Core SQL stores own explicit bindings; other SessionStore implementations keep SDK defaults.
-    return store.fold_factory if isinstance(store, CoreSQLStore) else Fold
+    """Return a store's explicit fold factory, defaulting only when the capability is absent."""
+
+    factory = getattr(store, "fold_factory", Fold)
+    if not callable(factory):
+        raise TypeError("store fold_factory must be callable")
+    return cast(Callable[[], CoreFold], factory)

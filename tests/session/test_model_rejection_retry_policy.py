@@ -152,8 +152,11 @@ def test_native_retry_policy_is_unchanged(provider, case, status, headers):
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("case,status,headers", RETRY_CASES)
-def test_retry_observation_real_kernel(provider, case, status, headers):
-    with retry_transport(provider, case, status, headers) as evidence, SQLiteStore.standalone(":memory:") as store:
+def test_retry_observation_real_kernel(provider, case, status, headers, tmp_path):
+    with (
+        retry_transport(provider, case, status, headers) as evidence,
+        SQLiteStore.standalone(str(tmp_path / "retry.sqlite")) as store,
+    ):
         store.install_schema()
         start(store)
         rt = runtime(store, [])
@@ -236,7 +239,7 @@ WIRE_CASES = [
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("case,status,headers", WIRE_CASES)
-def test_loopback_native_policy_and_real_kernel(provider, case, status, headers):
+def test_loopback_native_policy_and_real_kernel(provider, case, status, headers, tmp_path):
     results = []
     with wire_server(case, status, headers) as url:
         for observed in (False, True):
@@ -248,7 +251,7 @@ def test_loopback_native_policy_and_real_kernel(provider, case, status, headers)
                     assert error is not None
                     assert (errors.model_request_rejection(error) is not None) is (case == "complete")
         assert results[0] == results[1]
-        with retry_transport(provider, wire_url=url), SQLiteStore.standalone(":memory:") as store:
+        with retry_transport(provider, wire_url=url), SQLiteStore.standalone(str(tmp_path / "loopback.sqlite")) as store:
             store.install_schema()
             start(store)
             rt = runtime(store, [])

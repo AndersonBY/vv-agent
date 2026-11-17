@@ -32,7 +32,7 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     )
 
 
-def test_processor_starts_thread_and_streams_turn_items() -> None:
+def test_processor_starts_thread_and_streams_turn_items(monkeypatch) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -105,6 +105,60 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     model_calls = cast(list[dict[str, object]], token_usage["modelCalls"])
     assert len(model_calls) == 1
     assert model_calls[0]["backend"] == "test"
+    thread_names = {thread.name for thread in threading.enumerate()}
+    assert "app-server-notifications" not in thread_names
+    assert "session-app-server-pump" not in thread_names
+    assert not hasattr(server.store, "runtimes")
+
+    projection = server.kernel.handles[0].runtime
+
+    def reject_execution_wake(_thread_id: str) -> None:
+        raise AssertionError("projection runtime attempted to wake the execution worker")
+
+    monkeypatch.setattr(server.kernel._worker, "wake", reject_execution_wake)
+    projection.wake("thread_1")
+
+
+def test_runtime_factory_runs_after_inbox_commit_on_worker_thread() -> None:
+    server, transport = _server_with_scripted_steps([LLMResponse(content="done")])
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def runtime_factory(store, agent, config, task, session_id):
+        calls.append(
+            (
+                threading.current_thread().name,
+                tuple(entry.item.input_id for entry in store.peek_inbox(session_id)),
+            )
+        )
+        return server.kernel.runtime(agent, config, task, session_id=session_id, store=store)
+
+    server.kernel.runtime_factory = runtime_factory
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
+    assert calls == []
+
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
+        },
+    )
+    _drain_until_turn_completed(transport)
+
+    assert calls == [("session-local-worker", ("turn_1",))]
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:
@@ -543,7 +597,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
     receipt = surface.answer(
         "thread_1",
-        cast(Any, server.store).runtimes["thread_1"],
+        server.kernel._runtime_view("thread_1"),
         target_of(wait),
         InteractionAnswer("text", text="approved child answer"),
         input_id,
@@ -554,7 +608,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     with pytest.raises(Conflict):
         surface.answer(
             "thread_1",
-            cast(Any, server.store).runtimes["thread_1"],
+            server.kernel._runtime_view("thread_1"),
             target_of(wait),
             InteractionAnswer("text", text="different answer"),
             input_id,

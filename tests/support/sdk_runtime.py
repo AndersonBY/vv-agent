@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sim.assembly import ScheduledLeaseKeeper
+from sim.assembly import SIM_HANDLER_VERSION, ScheduledLeaseKeeper
 from sim.world import InvariantViolation, SimWorld
 
 from vv_agent.agent import Agent
@@ -68,6 +68,7 @@ def sdk_runtime(world: SDKWorld, sid: str, participant: str, *, provider=None, c
         heartbeat_store=lambda: world.heartbeat_connection(participant),
         providers={"effect": provider} if provider is not None and not children else {},
         children=children or {},
+        handler_version=SIM_HANDLER_VERSION,
         clock=world.clock,
         lease_keeper=keeper,
         invoker=_SynchronousInvoker(world),
@@ -109,6 +110,9 @@ def sdk_scope(world: SDKWorld, sid="s", *, participant="manual"):
 
 def sdk_driver(world: SDKWorld, sid="s", *, participant="manual"):
     scope = sdk_scope(world, sid, participant=participant)
+    scope.start()
+    assert scope.ready.wait(scope.runtime.ttl_ms / 1000), "runtime heartbeat did not become ready"
+    assert scope.successful_ready and not scope.lost, "runtime heartbeat lost ownership before driving"
     worker = kernel._Driver(world.connection(participant), sid, scope.runtime, scope)
     worker.refresh()
     return worker

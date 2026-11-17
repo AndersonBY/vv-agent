@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from vv_agent.kernel._boundary_hydration import SessionHydration
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import (
     CHILD_RESULT,
@@ -20,6 +21,7 @@ from vv_agent.kernel._content import (
     Principal,
 )
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
+from vv_agent.kernel._requirements import normalize_requirements
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._state import child_handles as child_handles
 from vv_agent.kernel._store import ContentSessionTx, SessionStore, SessionTx, StoredRecord
@@ -188,8 +190,22 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
     principal = Principal.from_dict(child.spec.principal)
     tenant_id = principal.tenant_id
     tx_store = getattr(tx, "store", None)
+    if tx_store is None:
+        tx_store = getattr(getattr(tx, "_tx", None), "store", None)
     if tx_store is not None and _store_tenant_id(tx_store) != tenant_id:
         raise ValueError("child principal must use the parent transaction tenant")
+    if tx_store is not None:
+        parent_page = tx_store.read(plan.session_id, limit=1)
+        if not parent_page.records:
+            raise ValueError("child admission requires a durable parent session")
+        parent_created = parent_page.records[0].record
+        if parent_created.feature_level == 2 and (child.spec.feature_level != 2 or child.spec.bootstrap is None):
+            raise ValueError("child admission in a level-2 parent requires an explicit trusted child bootstrap")
+    requirements = None
+    if child.spec.feature_level == 2:
+        if child.spec.bootstrap is None:
+            raise ValueError("level-2 child admission requires bootstrap requirements")
+        requirements = normalize_requirements(child.spec.bootstrap)
     parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=plan.session_id)
     child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=child.spec.session_id)
 
@@ -228,6 +244,8 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
             {"content": content_ref.to_dict()},
             generation=child.generation,
             actor=actor,
+            feature_level=2 if requirements is not None else 1,
+            requirements=requirements,
         ),
     )
     child_writer.link_input_content(input_id, content_ref)
@@ -388,11 +406,43 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
     return terminal
 
 
-def child_outcome(plan: Record, terminal: StoredRecord) -> ToolExecutionResult:
+_UNHYDRATED_RESULT = object()
+
+
+def _hydrate_terminal_result(store: SessionStore, terminal: StoredRecord) -> Any:
+    """Hydrate only the terminal result through its record-owner content link."""
+
+    result = terminal.record._payload["result"]
+    if not is_content_ref(result):
+        return result
+    ref = ContentRef.from_dict(result)
+    hydration = SessionHydration.from_store(
+        store,
+        tenant_id=_store_tenant_id(store),
+        session_id=terminal.record.session_id,
+    )
+    return hydration.read(
+        f"record:{terminal.seq}",
+        "turn_ended_result",
+        ref,
+        record_kind=terminal.record.kind,
+        record_payload=terminal.record._payload,
+    )
+
+
+def child_outcome(
+    plan: Record,
+    terminal: StoredRecord,
+    *,
+    hydrated_result: Any = _UNHYDRATED_RESULT,
+) -> ToolExecutionResult:
     p = terminal.record.payload
+    result = p["result"] if hydrated_result is _UNHYDRATED_RESULT else hydrated_result
+    if is_content_ref(result):
+        raise ValueError("child turn result requires content hydration")
     return ToolExecutionResult(
         tool_call_id=plan.payload["request"]["id"],
-        content=p["result"] if isinstance(p["result"], str) else str(p["result"]),
+        content=result if isinstance(result, str) else str(result),
         status_code=ToolResultStatus.SUCCESS if p["status"] == "completed" else ToolResultStatus.ERROR,
         error_code=None if p["status"] == "completed" else f"child_{p['status']}",
         metadata={
@@ -416,7 +466,7 @@ def ordinary_result_for_children(
     for i, handle in enumerate(handles):
         snapshot = first if i == 0 else store.read_state(handle["session_id"])
         terminal = next(r for r in snapshot[1] if r.record.kind == "turn_ended" and r.record.turn_id == handle["turn_id"])
-        results.append(child_outcome(plan, terminal))
+        results.append(child_outcome(plan, terminal, hydrated_result=_hydrate_terminal_result(store, terminal)))
     if len(results) == 1:
         return results[0]
     return ToolExecutionResult(

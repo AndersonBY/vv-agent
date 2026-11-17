@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import sys
-import threading
+from contextlib import nullcontext
 from dataclasses import replace
 
 import pytest
@@ -12,7 +12,7 @@ import pytest
 from vv_agent.kernel._child_store import ChildSession
 from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._execution_values import LLMResponse
-from vv_agent.kernel._lease_scope import LeaseOwnership, apply_controls
+from vv_agent.kernel._lease_scope import apply_controls
 from vv_agent.kernel._records import InboxItem
 from vv_agent.kernel._store import LeaseLost
 
@@ -61,20 +61,7 @@ def test_l2_stop_after_committed_renewal_preserves_fencing_and_control(tmp_path,
         control = InboxItem("l2-cancel", "control", {"action": "cancel"}, tid, 0)
         world.push("s", control)
         initial = worker.scope.lease
-        build = LeaseOwnership(
-            initial,
-            15000,
-            0.25,
-            clock=world.clock,
-            stop=threading.Event(),
-            ready=threading.Event(),
-            lock=threading.Lock(),
-            poll_lock=threading.Lock(),
-            commit_lock=threading.Lock(),
-            latch_entry=threading.local(),
-            actor_identity=threading.get_ident,
-            now_ms=world.clock.now_ms(),
-        )
+        build = worker.scope
         heartbeat_store = world.connection("manual/heartbeat")
         renew = heartbeat_store.renew
         returned = []
@@ -93,15 +80,16 @@ def test_l2_stop_after_committed_renewal_preserves_fencing_and_control(tmp_path,
         poll = returned[0]
         assert len(poll.controls) == 1
         assert_control(poll.controls[0], control)
-        assert build.lease == initial and not build.successful_ready
+        assert build.latest_poll is poll
+        assert build.lease is poll.lease and build.successful_ready
         assert heartbeat_store._one("SELECT lease_until_ms FROM sk_session WHERE session_id=%s", ("s",))[0] == (
             poll.lease.expires_at_ms
         )
         world.advance(initial.expires_at_ms - world.clock.now_ms() + 1)
         before = world.connection("observer").read("s").records
-        assert not worker.store.release(build.lease)
+        assert not worker.store.release(initial)
         with pytest.raises(LeaseLost):
-            worker.store.renew(build.lease, ttl_ms=15000)
+            worker.store.renew(initial, ttl_ms=15000)
         # Neither stale cleanup nor a new claimant can erase the committed renewal.
         assert worker.store.acquire("s", owner="too-early", ttl_ms=15000) is None
         assert worker.store.read("s").records == before
@@ -133,7 +121,7 @@ def test_l2_factory_handoff_poll_leaves_controls_for_formal_driver(tmp_path, mon
         tid = worker.state.active_turn_id
         assert worker.store.release(worker.scope.lease)
         control = InboxItem("handoff-cancel", "control", {"action": "cancel"}, tid, 0)
-        factory_store = world.connection("factory-worker")
+        factory_store = world.connection("factory-worker/heartbeat")
         renew, polls = factory_store.renew, []
 
         def observe_handoff(lease, *, ttl_ms):
@@ -161,7 +149,7 @@ def test_l2_factory_handoff_poll_leaves_controls_for_formal_driver(tmp_path, mon
         world.check(quiescent=True, every_prefix=True)
 
 
-def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_path):
+def test_l3_late_control_stays_on_bound_token_and_durable_cancel_reaches_child(tmp_path):
     with SimWorld(tmp_path / "l3.sqlite", seed=L3_SEED) as world:
         world.install_write_observer()
         world.create()
@@ -174,10 +162,10 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
         old_token = worker.scope.token
         world.push("s", InboxItem("l3-cancel", "control", {"action": "cancel"}, old_tid, 0))
         world.push("s", InboxItem("next", "follow_up", {"content": "continue"}))
-        # Pause after the control matched old_tid, before the token attribute is read.
+        # Pause after the control matched old_tid, before the captured binding's token is read.
         # Source lookup locates a scheduling cut; all verdicts below use SQL/driver outcomes.
         source, start_line = inspect.getsourcelines(apply_controls)
-        cut_line = start_line + next(i for i, line in enumerate(source) if "self.token.cancel(item.payload" in line)
+        cut_line = start_line + next(i for i, line in enumerate(source) if "binding.token.cancel(item.payload" in line)
         reached = []
 
         def switch_turn(frame, event, _arg):
@@ -201,8 +189,8 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
         assert world.step()
         assert reached == [old_tid]
         new_token = worker.scope.token
-        assert new_token is not old_token and new_token.cancelled and new_token.reason == "cancel"
-        assert not old_token.cancelled
+        assert new_token is not old_token and not new_token.cancelled
+        assert old_token.cancelled and old_token.reason == "cancel"
         new_tid = worker.state.active_turn_id
         # Durable parent cancellation has already queued the child's targeted control.
         child_controls = [i.item for i in worker.store.peek_inbox("child") if i.item.kind == "control"]
@@ -224,7 +212,7 @@ def test_l3_late_control_hits_new_token_but_durable_cancel_reaches_child(tmp_pat
 
 
 @pytest.mark.parametrize("skew_ms", [-60000, 60000], ids=["wall-behind", "wall-ahead"])
-def test_l4_opaque_wall_deadline_cannot_bypass_real_sql_fence(tmp_path, skew_ms):
+def test_l4_opaque_wall_deadline_cannot_bypass_real_sql_fence(tmp_path, skew_ms, monkeypatch):
     with SimWorld(tmp_path / "l4.sqlite", seed=L4_SEED) as world:
         world.install_write_observer()
         world.create("deadline")
@@ -240,24 +228,24 @@ def test_l4_opaque_wall_deadline_cannot_bypass_real_sql_fence(tmp_path, skew_ms)
                 return getattr(world.clock, name)
 
         worker.runtime.clock = SkewClock()
-        # Omit now_ms to exercise the opaque-store fallback, without a fake store.
-        worker.scope = Scope(lease, worker.runtime)
+        received_at_ms = world.clock.now_ms()
+        worker.scope = Scope(lease, worker.runtime, now_ms=received_at_ms)
+        expected_deadline = world.clock.monotonic() + (lease.expires_at_ms - received_at_ms) / 1000
+        assert worker.scope.expires_deadline == pytest.approx(expected_deadline)
         before = worker.store.read("deadline").records
-        if skew_ms > 0:
-            with pytest.raises(LeaseLost):
-                worker.commit([])
-            assert worker.store.read("deadline").records == before
-            assert worker.store.release(lease)
-        else:
-            world.advance(15000 + world.choices.choose("l4/after-expiry-ms", [1, 2, 3]))
-            replacement = world.connection("competitor").acquire("deadline", owner="replacement", ttl_ms=15000)
-            assert replacement is not None and replacement.epoch == lease.epoch + 1
-            with worker.scope.committing():
-                pass  # The local deadline is wrong and still admits entry.
-            with pytest.raises(LeaseLost):
-                worker.commit([])  # The actual SQLite append must reject it.
-            assert worker.store.read("deadline").records == before
-            assert world.connection("competitor").release(replacement)
+        world.advance(15000 + world.choices.choose("l4/after-expiry-ms", [1, 2, 3]))
+        replacement = world.connection("competitor").acquire("deadline", owner="replacement", ttl_ms=15000)
+        assert replacement is not None and replacement.epoch == lease.epoch + 1
+        with pytest.raises(LeaseLost), worker.scope.committing():
+            pass
+        # The stable local monotonic deadline blocks early. Force the stale
+        # receipt through the kernel boundary to prove SQL owner/epoch/time
+        # fencing still rejects the append when a caller's wall view is wrong.
+        monkeypatch.setattr(worker.scope, "committing", lambda: nullcontext(lease))
+        with pytest.raises(LeaseLost):
+            worker.commit([])
+        assert worker.store.read("deadline").records == before
+        assert world.connection("competitor").release(replacement)
         assert not world.calls
         world.enqueue("l4/recover-with-db-time", lambda: world.drive("deadline", participant="recovery"))
         assert world.step()

@@ -22,7 +22,7 @@ from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.kernel._sqlite import SQLiteStore
-from vv_agent.kernel._store import Conflict
+from vv_agent.kernel._store import Conflict, SessionStore
 from vv_agent.session.surfaces import SessionDriver
 
 TENANT_A = "tenant-a"
@@ -116,7 +116,7 @@ def _usage_record(session_id: str):
     )
 
 
-def _create(store: SQLStore, tenant_id: str, session_id: str, *, consumers: tuple[str, ...] = ("host",)):
+def _create(store: SessionStore, tenant_id: str, session_id: str, *, consumers: tuple[str, ...] = ("host",)):
     with store.atomic() as tx:
         return tx.create(_session(tenant_id, session_id), consumers=consumers)
 

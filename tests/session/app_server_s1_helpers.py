@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from vv_agent.kernel._content import ContentRef, KeyProvider
+from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content_publication import declare_input_content, link_declared_input_content
+from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSessionContentWriter
 from vv_agent.kernel._store import StoredRecord
 from vv_agent.session.content_runtime import (
-    HOST_LABELS,
     SessionContentWriter,
     bind_content_key_provider,
     wrap_session_content_store,
@@ -23,7 +24,7 @@ def development_key_provider() -> LocalKeyProvider:
     return LocalKeyProvider(DEVELOPMENT_MASTER_KEY)
 
 
-def bind_development_content(target: SessionStore | SessionDriver) -> KeyProvider:
+def bind_development_content(target: SessionStore | SessionDriver) -> LocalKeyProvider:
     """Bind deterministic test-only keys before any session content is written."""
 
     provider = development_key_provider()
@@ -53,7 +54,7 @@ def create_s1_session(
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=tenant_id, session_id=session_id)
 
-        def session_spec(content: SessionContentWriter) -> SessionSpec:
+        def session_spec(content: CoreSessionContentWriter) -> SessionSpec:
             principal, _ = content.service_principal("app-server-test")
             return SessionSpec(
                 session_id,
@@ -79,6 +80,9 @@ def push_s1_input(
     content: Any,
     *,
     kind: str = "user",
+    target_turn_id: str | None = None,
+    generation: int | None = None,
+    available_ms: int = 0,
 ) -> None:
     """Push host input with its content and actor capabilities in one transaction."""
 
@@ -87,13 +91,24 @@ def push_s1_input(
         raise ValueError("S1 test session stores must be tenant-bound")
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=tenant_id, session_id=session_id)
-        content_ref = writer.put_json(content, labels=HOST_LABELS)
         actor, actor_ref = writer.service_principal("app-server-test-user")
-        tx.push(
-            session_id,
-            InboxItem(input_id, kind, {"content": content_ref.to_dict()}, actor=actor),
+        payload = {"content": content} if kind in {"user", "steer", "follow_up"} else content
+        if not isinstance(payload, dict):
+            raise TypeError(f"{kind} input payload must be an object")
+        published = declare_input_content(
+            writer,
+            InboxItem(
+                input_id,
+                kind,
+                payload,
+                target_turn_id,
+                generation,
+                available_ms,
+                actor=actor,
+            ),
         )
-        writer.link_input_content(input_id, content_ref)
+        tx.push(session_id, published.item)
+        link_declared_input_content(writer, published.item)
         writer.link_input_actor(input_id, actor_ref)
 
 

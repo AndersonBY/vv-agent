@@ -232,9 +232,16 @@ def test_definition_parses_the_closed_container_and_its_embedded_task() -> None:
         "model_binding": {
             "backend": "scripted",
             "model": "scripted",
-            "endpoints": [],
             "context_length": None,
             "max_output_tokens": None,
+            "internal": {
+                "compaction": {
+                    "backend": "scripted",
+                    "model": "summary",
+                    "context_length": None,
+                    "max_output_tokens": None,
+                }
+            },
         },
         "capabilities": {},
         "task": _task_payload(),
@@ -248,10 +255,30 @@ def test_definition_parses_the_closed_container_and_its_embedded_task() -> None:
     assert definition.agent_name == "kernel"
     assert definition.task.user_prompt == "do the work"
     assert definition.tools == ()
+    assert definition.model_binding == payload["model_binding"]
 
     unknown_ref, unknown_body = _with_body(_ref("definition-invalid"), payload | {"unknown": True})
     with pytest.raises(TypedSchemaFailure):
         _hydrator(FakeReader({("record/turn-start", "definition"): unknown_body})).definition(unknown_ref)
+
+    endpoints_ref, endpoints_body = _with_body(
+        _ref("definition-endpoints"),
+        payload | {"model_binding": payload["model_binding"] | {"endpoints": []}},
+    )
+    with pytest.raises(TypedSchemaFailure):
+        _hydrator(FakeReader({("record/turn-start", "definition"): endpoints_body})).definition(endpoints_ref)
+
+    incomplete_binding = {
+        "backend": "scripted",
+        "model": "summary",
+        "context_length": None,
+    }
+    incomplete_ref, incomplete_body = _with_body(
+        _ref("definition-incomplete-internal"),
+        payload | {"model_binding": payload["model_binding"] | {"internal": {"compaction": incomplete_binding}}},
+    )
+    with pytest.raises(TypedSchemaFailure):
+        _hydrator(FakeReader({("record/turn-start", "definition"): incomplete_body})).definition(incomplete_ref)
 
 
 def test_budget_is_exact_and_returns_run_budget_limits() -> None:

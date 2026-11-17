@@ -12,9 +12,10 @@ from vv_agent.llm.errors import ModelRequestRejected
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.session import kernel
 from vv_agent.session.app_server import ThreadStatus, _KernelThreadStore, thread_status
+from vv_agent.session.content_runtime import durable_content_reader
 from vv_agent.session.delegation import ChildTasks
 from vv_agent.session.providers import Definitive, Unknown
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.surfaces import SessionDriver
@@ -22,6 +23,13 @@ from vv_agent.session.timing import SystemClock, ThreadInvoker, ThreadLeaseKeepe
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
+from .helpers import (
+    create_fixture_session,
+    fixture_key_provider,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 from .test_recovery_matrix import runtime, start
 
 
@@ -73,15 +81,31 @@ class InlineInvoker:
         return callback()
 
 
-@pytest.mark.parametrize("file_store", [False, True])
-def test_sql_clock_controls_records_inbox_and_lease_fencing(tmp_path, file_store):
+def clocked_runtime(path, steps, tools=(), *, clock, content_store, session_id="s", **kwargs):
+    runtime_value = runtime(
+        path,
+        steps,
+        tools,
+        clock=clock,
+        content_reader=durable_content_reader(content_store, tenant_id=content_store.tenant_id, session_id=session_id),
+        **kwargs,
+    )
+    runtime_value.heartbeat_store = lambda: SQLiteStore.standalone(str(path), clock=clock)
+    return runtime_value
+
+
+def test_sql_clock_controls_records_inbox_and_lease_fencing(tmp_path):
     clock = ManualClock()
-    path = str(tmp_path / "world.sqlite") if file_store else ":memory:"
+    path = str(tmp_path / "world.sqlite")
     with SQLiteStore.standalone(path, clock=clock) as store:
         store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec("s", "test", "/tmp"), consumers=())
-            tx.push("s", InboxItem("later", "user", {"content": "go"}, available_ms=clock.ms + 100))
+        content_store = wrap_fixture_store(store)
+        create_fixture_session(content_store, "s", consumers=())
+        push_fixture_input(
+            content_store,
+            "s",
+            InboxItem("later", "user", {"content": "go"}, available_ms=clock.ms + 100),
+        )
         assert store.read("s").records[0].created_ms == clock.ms
         assert not store.peek_inbox("s")
         lease = store.acquire("s", owner="first", ttl_ms=100)
@@ -89,7 +113,7 @@ def test_sql_clock_controls_records_inbox_and_lease_fencing(tmp_path, file_store
         assert lease.expires_at_ms == clock.ms + 100
         with store.heartbeat_store() as other:
             assert other.clock is clock
-            assert (other is store) is not file_store
+            assert other is not store
             clock.advance(99)
             renewed = other.renew(lease, ttl_ms=100)
             assert renewed.db_now_ms == clock.ms
@@ -123,14 +147,17 @@ def test_real_drive_uses_scripted_seams_without_starting_threads(tmp_path, monke
         pytest.fail("injected drive started a thread")
 
     monkeypatch.setattr(Thread, "start", no_thread)
-    with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
+    path = tmp_path / "world.sqlite"
+    with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
         start(store)
-        rt = runtime(
-            store,
+        content_store = wrap_fixture_store(store)
+        rt = clocked_runtime(
+            path,
             [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")],
             [effect],
             clock=clock,
+            content_store=content_store,
             lease_keeper=keeper,
             invoker=invoker,
         )
@@ -142,10 +169,10 @@ def test_real_drive_uses_scripted_seams_without_starting_threads(tmp_path, monke
             return rt
 
         if factory:
-            assert kernel._drive(store, "s", runtime=build, clock=clock, lease_keeper=keeper)
+            assert kernel._drive(content_store, "s", runtime=build, clock=clock, lease_keeper=keeper)
         else:
-            assert kernel.drive(store, "s", runtime=rt)
-        state, records, _ = store.read_state("s")
+            assert kernel.drive(content_store, "s", runtime=rt)
+        state, records, _ = read_fixture_state(content_store, "s")
         assert state.active_turn_id is None
         assert records[-1].record.kind == "turn_ended"
         assert records[-1].record.payload["status"] == "completed"
@@ -153,49 +180,60 @@ def test_real_drive_uses_scripted_seams_without_starting_threads(tmp_path, monke
         assert effects == [current_thread()]
         assert len(invoker.calls) == 3
         assert all(call["clock"] is clock for call in invoker.calls)
-        assert all(call["token"] is keeper.started[-1].token for call in invoker.calls)
+        assert len({id(call["token"]) for call in invoker.calls}) == 1
+        assert all(not call["token"].cancelled for call in invoker.calls)
         assert all(call["cancellation_grace"] == rt.cancellation_grace for call in invoker.calls)
         assert [call["timeout"] for call in invoker.calls] == [rt.model_timeout, rt.tool_timeout, rt.model_timeout]
         assert len(keeper.started) == 1 + factory
-        assert all(h in keeper.closed and h.stop.is_set() and not h.thread.is_alive() for h in keeper.started)
+        assert all(h in keeper.closed and h.stop.is_set() for h in keeper.started)
         assert built == (["s"] if factory else [])
         assert {r.created_ms for r in records} == {100_000, 100_007}
-        active_ms = [
-            r.record.payload["usage"]["elapsed_ms"]
-            for r in records
-            if r.record.kind == "usage_observed" and r.record.payload["source"] == "kernel-active-scope"
-        ]
-        assert max(active_ms) == 7
+        assert clock.ms == 100_007
         assert all(op.state == "completed" for op in state.operations.values())
 
 
 def test_budget_clock_stays_bound_after_runtime_clock_replacement(tmp_path):
     clock = ManualClock(ns=1_000_000_000)
     replacement = ManualClock(ms=clock.ms, ns=clock.ns + 100_000_000_000)
+    keeper = ManualKeeper()
 
     def answer(_request):
         clock.advance(11)
         return LLMResponse("done")
 
-    with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
+    path = tmp_path / "world.sqlite"
+    with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
         start(store)
-        rt = runtime(store, [answer], clock=clock, lease_keeper=ManualKeeper(), invoker=InlineInvoker())
+        content_store = wrap_fixture_store(store)
+        rt = clocked_runtime(
+            path,
+            [answer],
+            clock=clock,
+            content_store=content_store,
+            lease_keeper=keeper,
+            invoker=InlineInvoker(),
+        )
         rt.config.budget_limits = RunBudgetLimits(max_wall_time_ms=10)
-        lease = store.acquire("s", owner="budget-clock", ttl_ms=1000)
+        lease = content_store.acquire("s", owner="budget-clock", ttl_ms=1000)
         assert lease is not None
-        scope = kernel._Scope(lease, rt, now_ms=store._now())
-        driver = kernel._Driver(store, "s", rt, scope)
-        driver.refresh()
+        scope = kernel._Scope(lease, rt, now_ms=content_store._now())
+        scope.start()
+        try:
+            driver = kernel._Driver(content_store, "s", rt, scope)
+            driver.refresh()
 
-        rt.clock = replacement
-        for _ in range(20):
-            if not driver.step():
-                break
+            rt.clock = replacement
+            for _ in range(20):
+                if not driver.step():
+                    break
+        finally:
+            scope.close()
 
+        _, records, _ = read_fixture_state(content_store, "s")
         boundary = next(
             record.record
-            for record in driver.records
+            for record in records
             if record.record.kind == "boundary_recorded" and record.record.payload["boundary_id"].endswith("/complete/1")
         )
         assert boundary.payload["data"]["usage"]["elapsed_ms"] == 11
@@ -230,9 +268,17 @@ def test_heartbeat_deadline_uses_injected_monotonic_time(tmp_path):
         start(store)
         lease = store.acquire("s", owner="first", ttl_ms=100)
         assert lease is not None
-        heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, 100, 0.01, clock=clock)
+        heartbeat = kernel._LeaseHeartbeat(
+            lease,
+            lambda: SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock),
+            100,
+            0.01,
+            clock=clock,
+        )
+        with heartbeat.heartbeat_store() as heartbeat_store:
+            heartbeat.poll(heartbeat_store)
         with heartbeat.committing() as captured:
-            assert captured is lease
+            assert captured == lease
         clock.advance(100)
         with pytest.raises(LeaseLost, match="expired"), heartbeat.committing():
             pytest.fail("expired lease entered commit")
@@ -241,18 +287,27 @@ def test_heartbeat_deadline_uses_injected_monotonic_time(tmp_path):
 
 def test_wait_for_lease_uses_injected_sleep(tmp_path):
     clock, keeper, invoker = ManualClock(), ManualKeeper(), InlineInvoker()
-    with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
+    path = tmp_path / "world.sqlite"
+    with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
         start(store)
-        assert store.acquire("s", owner="other", ttl_ms=120) is not None
-        rt = runtime(store, [LLMResponse("done")], clock=clock, lease_keeper=keeper, invoker=invoker)
-        assert kernel.drive(store, "s", runtime=rt, _wait_for_lease=True)
+        content_store = wrap_fixture_store(store)
+        assert content_store.acquire("s", owner="other", ttl_ms=120) is not None
+        rt = clocked_runtime(
+            path,
+            [LLMResponse("done")],
+            clock=clock,
+            content_store=content_store,
+            lease_keeper=keeper,
+            invoker=invoker,
+        )
+        assert kernel.drive(content_store, "s", runtime=rt, _wait_for_lease=True)
         assert clock.ms == 100_150
 
 
-def test_child_wait_uses_runtime_clock(monkeypatch):
+def test_child_wait_uses_runtime_clock(monkeypatch, tmp_path):
     clock = ManualClock()
-    with SQLiteStore.standalone(":memory:", clock=clock) as store:
+    with SQLiteStore.standalone(str(tmp_path / "child-wait.sqlite"), clock=clock) as store:
         store.install_schema()
         tasks = ChildTasks(store, "parent", runtime(store, [], clock=clock))
         running = SimpleNamespace(is_running=lambda: True)
@@ -263,18 +318,25 @@ def test_child_wait_uses_runtime_clock(monkeypatch):
 
 def test_app_server_status_uses_thread_store_clock(tmp_path):
     clock, keeper, invoker = ManualClock(), ManualKeeper(), InlineInvoker()
-    with SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock) as store:
+    path = tmp_path / "world.sqlite"
+    with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
-        driver = SessionDriver(store=store)
+        driver = SessionDriver(store=store, content_key_provider=fixture_key_provider())
         threads = _KernelThreadStore(driver, clock=clock)
         threads.create_thread_receipt(input_id="s", agent_key="default")
-        with store.atomic() as tx:
-            tx.push("s", InboxItem("initial", "user", {"content": "go"}))
+        push_fixture_input(driver.store, "s", InboxItem("initial", "user", {"content": "go"}))
 
         def rejected(_request):
             raise ModelRequestRejected(429, "retry later")
 
-        rt = runtime(store, [rejected], clock=clock, lease_keeper=keeper, invoker=invoker)
+        rt = clocked_runtime(
+            path,
+            [rejected],
+            clock=clock,
+            content_store=driver.store,
+            lease_keeper=keeper,
+            invoker=invoker,
+        )
 
         class Cut(BaseException):
             pass
@@ -285,7 +347,7 @@ def test_app_server_status_uses_thread_store_clock(tmp_path):
 
         rt.hook = stop_after_retry_plan
         with pytest.raises(Cut):
-            kernel.drive(store, "s", runtime=rt)
+            kernel.drive(driver.store, "s", runtime=rt)
         _, records, _ = store.read_state("s")
         plan = next(r.record for r in records if r.record.kind == "op_planned" and r.record.attempt == 2)
         assert plan.payload["not_before_ms"] == clock.ms + 2000

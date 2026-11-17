@@ -1,13 +1,12 @@
 """Executable reachability gate for the P1 core execution spine and public values.
 
 The fixed execution registry below is the small set of cross-module functions that
-existing SimWorld participants actually invoke.  It is not a scan of private
-helpers.  ``sys.setprofile`` observes exact ``__code__`` identities while seven
+existing SimWorld participants actually invoke. It is not a scan of private
+helpers. ``sys.setprofile`` observes exact ``__code__`` identities while eight
 fixed SQLite scenarios and one real projection failure/retry participant run in a
-fresh process. The scenarios module is imported first under the strict core-only
-W9 guard; the SDK-capable SimWorld host is loaded only after that boundary check.
-New projection evidence is required because SimWorld did not previously have a
-projection participant.
+fresh process. Scenarios, SimWorld, durable content SQL, and their host leaves
+all execute under the strict core-only W9 guard. New projection evidence is
+required because SimWorld did not previously have a projection participant.
 
 The central public API manifest is checked separately in an SDK-enabled process.
 Only explicit core-origin callables are counted: value methods are owned by real
@@ -44,6 +43,7 @@ FIXED_SCENARIOS = (
     "tools",
     "unknown_unsafe",
     "context_compacted",
+    "worker_compatibility",
 )
 
 EXECUTION_ENTRY_FUNCTIONS = (
@@ -71,13 +71,25 @@ EXECUTION_ENTRY_FUNCTIONS = (
     ("vv_agent.kernel._sql", "SQLSessionTx.append"),
     ("vv_agent.kernel._sql", "SQLSessionTx.ack"),
     ("vv_agent.kernel._sql", "SQLStore.acquire"),
+    ("vv_agent.kernel._sql", "SQLStore.claim_runnable"),
     ("vv_agent.kernel._sql", "SQLStore.renew"),
     ("vv_agent.kernel._sql", "SQLStore.release"),
     ("vv_agent.kernel._sql", "SQLStore.defer_drive"),
     ("vv_agent.kernel._sql", "SQLStore.defer_projection"),
     ("vv_agent.kernel._sql", "SQLStore.read_state"),
+    ("vv_agent.kernel._store", "WorkerSupports.accepts"),
 )
+CONTENT_ENTRY_FUNCTIONS = (
+    ("vv_agent.kernel._content_sql", "CoreSQLContentStore.put"),
+    ("vv_agent.kernel._content_sql", "CoreSQLContentStore.get"),
+    ("vv_agent.kernel._content_sql", "CoreSQLContentStore.link_record"),
+    ("vv_agent.kernel._content_sql", "CoreSQLContentStore.link_input"),
+    ("vv_agent.kernel._content_sql", "CoreSQLContentStore.assert_link"),
+    ("vv_agent.kernel._content_runtime", "SessionContentWriter.create_session"),
+)
+EXECUTION_ENTRY_FUNCTIONS += CONTENT_ENTRY_FUNCTIONS
 CORE_EXECUTION_PATHS = tuple(f"{module}.{qualname}" for module, qualname in EXECUTION_ENTRY_FUNCTIONS)
+CONTENT_EXECUTION_PATHS = tuple(f"{module}.{qualname}" for module, qualname in CONTENT_ENTRY_FUNCTIONS)
 
 CHILD_DELIVERY_PATH = "vv_agent.kernel._child_store.child_delivery"
 PROMPT_FLATTEN_PATH = "vv_agent.kernel._prompt_values.PromptBundle.flatten"
@@ -165,17 +177,13 @@ def resolve(module_name, qualname):
     return value
 
 
-from tests.sim.scenarios import run_scenario
+from scripts.s1_fixture_values import create_fixture_session, push_fixture_input
 from vv_agent.kernel._records import InboxItem
+from tests.sim.scenarios import run_scenario
+from tests.sim.world import SimWorld
 
 boundary_modules = sorted(name for name in sys.modules if name.startswith("vv_agent"))
 assert all(name in allowed or name.startswith("vv_agent.kernel.") for name in boundary_modules)
-sys.meta_path.remove(core_only)
-
-# S1 content storage adapters live in the session layer, so actual SimWorld
-# execution is an SDK-capable host path after the core-only import gate.
-from tests.sim.world import SimWorld
-from session.helpers import create_fixture_session, push_fixture_input
 
 functions = {}
 for module_name, qualname in (*entrypoints, *contract_profiles):
@@ -273,6 +281,7 @@ finally:
     sys.setprofile(None)
 
 loaded = {name for name in sys.modules if name.startswith("vv_agent")}
+assert all(name in allowed or name.startswith("vv_agent.kernel.") for name in loaded)
 leaves = sorted(
     name
     for name in loaded
@@ -283,6 +292,7 @@ assert set(leaves) == {
     "vv_agent._memory_settings",
     "vv_agent._token_counting",
 }
+sys.meta_path.remove(core_only)
 
 print(
     json.dumps(
@@ -426,14 +436,19 @@ def test_core_execution_entries_are_naturally_reached_after_core_only_import_gat
     trace = evidence["trace"]
     resolved_core = {path: trace[path] for path in CORE_EXECUTION_PATHS if path in trace}
     _require_exact("resolved execution entries", CORE_EXECUTION_PATHS, resolved_core)
-    _require_executed("29 core execution entries", CORE_EXECUTION_PATHS, trace)
+    _require_executed("core execution entries", CORE_EXECUTION_PATHS, trace)
+    _require_executed("durable SQL content entries", CONTENT_EXECUTION_PATHS, trace)
     _require_executed("contract child_delivery", (CHILD_DELIVERY_PATH,), trace)
     _require_executed("contract PromptBundle.flatten", (PROMPT_FLATTEN_PATH,), trace)
 
     projection_contexts = trace["vv_agent.kernel._sql.SQLStore.defer_projection"]
     assert "projection:failure-then-ack" in projection_contexts, projection_contexts
     assert "scenario:children" in trace[CHILD_DELIVERY_PATH]
+    assert "scenario:worker_compatibility" in trace["vv_agent.kernel._sql.SQLStore.claim_runnable"]
+    assert "scenario:worker_compatibility" in trace["vv_agent.kernel._store.WorkerSupports.accepts"]
     assert any(context.startswith("scenario:") for context in trace[PROMPT_FLATTEN_PATH])
+    for path in CONTENT_EXECUTION_PATHS:
+        assert any(context.startswith("scenario:") for context in trace[path]), (path, trace[path])
 
 
 def test_contract_core_origins_have_explicit_producer_or_execution_ownership(tmp_path):

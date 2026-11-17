@@ -27,7 +27,7 @@ result.
 | Role | Permitted use | RLS behavior |
 | --- | --- | --- |
 | Migration/owner | Schema DDL and role installation only | Never a runtime tenant credential |
-| Tenant login | One tenant, through an explicit transaction context | Rows require the fixed tenant, that `session_user`, and matching `vv.tenant_id` |
+| Tenant login | One tenant, through a tenant-bound store | Rows require the fixed tenant, that `session_user`, and matching `vv.tenant_id` |
 | Worker login | Explicit cross-tenant maintenance and execution | Cross-tenant policy; rejected by tenant startup |
 | Shared gateway login | Explicit weaker application trust mode | Context-scoped rows, but credentials can impersonate served tenants |
 
@@ -53,12 +53,29 @@ Use the tenant startup path rather than an arbitrary pooled connection:
 
 ```python
 with PostgresStore.tenant_standalone(tenant_dsn, tenant_id="tenant-a") as store:
-    with store.connection.transaction():
-        store.connection.execute(
-            "SELECT set_config('vv.tenant_id', %s, true)", ("tenant-a",)
-        )
-        page = store.read("session-id")
+    page = store.read("session-id")
 ```
+
+A verified tenant store sets `vv.tenant_id` with transaction-local scope in each
+transaction it opens. When an operation joins a caller-owned transaction whose
+context is absent, the store fills it before the first query. An existing
+explicit context is left in place so raw SQL callers retain their transaction
+semantics and RLS remains the authority; a tenant A login with a forged tenant
+B context still sees no B rows.
+
+For a shared-gateway connection, create an explicit tenant view before reading
+or writing:
+
+```python
+with PostgresStore.shared_gateway_standalone(gateway_dsn) as store:
+    tenant_store = store.for_tenant("tenant-a")
+    page = tenant_store.read("session-id")
+```
+
+Only that explicit view supplies the transaction-local tenant. A bare
+shared-gateway store does not guess `default` or another served tenant. Tenant
+content snapshots use the same context and finish their read-only SQL
+transaction before a key provider unwraps the session data key.
 
 Startup rejects a connection whose `session_user` differs from `current_user`,
 whose role is a superuser, has `BYPASSRLS`, owns the schema or a session table,
@@ -82,7 +99,7 @@ The real A/B acceptance suite starts a disposable TCP/password PostgreSQL
 cluster:
 
 ```bash
-uv run pytest -q tests/test_s1_postgres_rls.py
+uv run pytest -q tests/test_s1_postgres_rls.py tests/session/test_postgres_observer_context.py
 ```
 
 The test skips only when the PostgreSQL client/server programs or psycopg are

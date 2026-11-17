@@ -137,20 +137,73 @@ class MessageProcessor:
         try:
             message = JsonRpcMessage.from_dict(payload).message
         except (KeyError, TypeError, ValueError):
+            if isinstance(payload, dict) and "method" not in payload and ("result" in payload or "error" in payload):
+                return
             raw_id = payload.get("id")
             request_id = RequestId(raw_id if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else None)
             self._router.send_error(connection_id, request_id, AppServerError.invalid_request())
             return
         if isinstance(message, JsonRpcResponse):
-            self._router.resolve_response(connection_id, message)
+            self._handle_server_response(connection_id, message)
             return
         if isinstance(message, JsonRpcError):
+            if message.id.to_wire() is None:
+                return
             self._router.resolve_error(connection_id, message)
             return
         if isinstance(message, JsonRpcNotification):
             self._handle_notification(connection_id, message)
             return
         self._handle_request(connection_id, message)
+
+    def _handle_server_response(self, connection_id: str, response: JsonRpcResponse) -> None:
+        pending = self._router.get_pending_server_request(response.id)
+        if pending is None or pending.connection_id != connection_id or pending.method != "approval/request":
+            self._router.resolve_response(connection_id, response)
+            return
+
+        params = pending.params
+        if not isinstance(params, dict):
+            return
+        thread_id = self._pending_approval_identity(params.get("threadId"))
+        turn_id = self._pending_approval_identity(params.get("turnId"))
+        request_id = self._pending_approval_identity(params.get("requestId"))
+        if thread_id is None or turn_id is None or request_id is None or request_id != response.id.to_wire():
+            return
+        if not isinstance(response.result, dict):
+            return
+        try:
+            decision = self._approval_decision_payload(
+                response.result,
+                allowed={"decision", "reason", "metadata"},
+            )
+        except ValueError:
+            return
+
+        def resolve() -> None:
+            if not self._host.authorize(connection_id, "approval/resolve", params):
+                return
+            principal = self._trusted_principal(connection_id, "approval/resolve", params)
+            self._run_adapter.resolve_approval(
+                connection_id=connection_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                decision=decision,
+                actor=principal,
+            )
+
+        try:
+            future = self._serialization_queues.enqueue(
+                key=RequestScope.thread(thread_id),
+                access="exclusive",
+                fn=resolve,
+            )
+            future.result()
+        except Exception:
+            # A response has no response. Keep the durable wait recoverable for
+            # an explicit approval/resolve after invalid, stale, or failed input.
+            return
 
     def _handle_notification(self, connection_id: str, notification: JsonRpcNotification) -> None:
         if notification.method == "initialized":
@@ -1059,26 +1112,13 @@ class MessageProcessor:
         approval_request_id = self._required_string_param(connection_id, request, params, "requestId")
         if not approval_request_id:
             return
-        raw_decision = params.get("decision")
-        if not isinstance(raw_decision, str):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("decision must be a string"))
-            return
         try:
-            decision = ApprovalDecision.from_wire(raw_decision)
-        except ValueError:
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Invalid approval decision"))
-            return
-        reason = params.get("reason", "")
-        if not isinstance(reason, str):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("reason must be a string"))
-            return
-        decision_metadata = params.get("metadata", {})
-        if not isinstance(decision_metadata, dict):
-            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("metadata must be an object"))
-            return
-        if not self._closed_params(
-            connection_id, request, params, {"threadId", "turnId", "requestId", "decision", "reason", "metadata"}
-        ):
+            decision = self._approval_decision_payload(
+                params,
+                allowed={"threadId", "turnId", "requestId", "decision", "reason", "metadata"},
+            )
+        except ValueError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
         try:
             self._run_adapter.resolve_approval(
@@ -1086,7 +1126,7 @@ class MessageProcessor:
                 thread_id=thread_id,
                 turn_id=turn_id,
                 request_id=approval_request_id,
-                decision={"action": decision.value, "reason": reason, "metadata": decision_metadata},
+                decision=decision,
                 actor=principal,
             )
         except SubmissionConflict:
@@ -1201,6 +1241,31 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Unknown parameter"))
             return False
         return True
+
+    @staticmethod
+    def _pending_approval_identity(value: object) -> str | None:
+        if isinstance(value, str) and bool(value.strip()) and "\x00" not in value and len(value.encode("utf-8")) <= 512:
+            return value
+        return None
+
+    @staticmethod
+    def _approval_decision_payload(payload: dict[str, Any], *, allowed: set[str]) -> dict[str, Any]:
+        if set(payload) - allowed:
+            raise ValueError("Unknown parameter")
+        raw_decision = payload.get("decision")
+        if not isinstance(raw_decision, str):
+            raise ValueError("decision must be a string")
+        try:
+            decision = ApprovalDecision.from_wire(raw_decision)
+        except ValueError as exc:
+            raise ValueError("Invalid approval decision") from exc
+        reason = payload.get("reason", "")
+        if not isinstance(reason, str):
+            raise ValueError("reason must be a string")
+        metadata = payload.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        return {"action": decision.value, "reason": reason, "metadata": dict(metadata)}
 
     def _required_identity(self, connection_id, request, params, name):
         value = params.get(name)

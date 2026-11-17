@@ -10,7 +10,7 @@ from pathlib import Path
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.kernel import _driver_inputs as inputs
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import ContentRef, ContentSessionWriter
 from vv_agent.kernel._content_publication import publish_turn_started
 from vv_agent.kernel._hydration import reference_digest
 from vv_agent.session import _recovery_phase
@@ -199,7 +199,7 @@ def test_plain_child_admission_is_published_once_in_the_turn_transaction(tmp_pat
         with sessions.store.atomic() as tx:
             writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
 
-            def session_spec(content: SessionContentWriter) -> SessionSpec:
+            def session_spec(content: ContentSessionWriter) -> SessionSpec:
                 principal, _ = content.service_principal("local")
                 return SessionSpec(
                     "s",

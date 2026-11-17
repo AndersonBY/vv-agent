@@ -402,6 +402,7 @@ def callback_snapshots(case, seed):
             and rng.randrange(2) == 0
             and kinds.get(p["target_operation_id"]) in {"tool", "child"}
         ):
+            assert row.turn_id is not None
             messages = reference(rows)[1]
             rows.append(
                 logical_record(

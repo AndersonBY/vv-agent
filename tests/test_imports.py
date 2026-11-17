@@ -20,6 +20,7 @@ def test_storage_and_app_server_imports_do_not_load_model_sdks():
         import importlib.abc
         from hashlib import sha256
         import sys
+        from tempfile import TemporaryDirectory
 
         forbidden = {
             "vv_llm", "openai", "anthropic", "tiktoken",
@@ -57,18 +58,19 @@ def test_storage_and_app_server_imports_do_not_load_model_sdks():
 
         assert "VvLlmClient" in dir(vv_agent)
         assert {"VvLlmClient", "EndpointTarget"} <= set(dir(vv_agent.llm))
-        with SQLiteStore.standalone(":memory:") as store:
-            store.install_schema()
-            with store.atomic() as tx:
-                tx.create(
-                    SessionSpec("thread", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
-                    consumers=("events",),
-                )
-                tx.push(
-                    "thread",
-                    InboxItem("selection", "model_selection", {"selection": None}, actor=principal()),
-                )
-            assert len(store.peek_inbox("thread")) == 1
+        with TemporaryDirectory() as directory:
+            with SQLiteStore.standalone(f"{directory}/sessions.sqlite") as store:
+                store.install_schema()
+                with store.atomic() as tx:
+                    tx.create(
+                        SessionSpec("thread", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                        consumers=("events",),
+                    )
+                    tx.push(
+                        "thread",
+                        InboxItem("selection", "model_selection", {"selection": None}, actor=principal()),
+                    )
+                assert len(store.peek_inbox("thread")) == 1
         driver = SessionDriver()
         try:
             assert driver.store is not None

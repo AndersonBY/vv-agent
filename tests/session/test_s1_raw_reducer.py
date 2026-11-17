@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,11 +10,12 @@ from vv_agent.kernel import _driver_inputs as inputs
 from vv_agent.kernel._budget_values import BudgetUsageSnapshot
 from vv_agent.kernel._content_publication import declared_content_ref, make_record_before_publication
 from vv_agent.kernel._driver_planning import effective_model
-from vv_agent.kernel._hydration import KeyUnavailable
+from vv_agent.kernel._hydration import DefinitionContent, KeyUnavailable
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record
-from vv_agent.kernel._reducer import TransitionError, _operation
+from vv_agent.kernel._reducer import Fold, TransitionError, _operation
 from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn
+from vv_agent.kernel._store import StoredRecord
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.content_store import LocalKeyProvider
@@ -24,9 +24,40 @@ from vv_agent.session.records import InboxItem, digest
 from vv_agent.session.reducer import fold
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
+from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse
 
 from .helpers import content_ref, record
+
+
+class _ModelSelectionView:
+    def __init__(self, state: ExecutionState) -> None:
+        self._state = state
+
+    @property
+    def state(self) -> ExecutionState:
+        return self._state
+
+    @property
+    def records(self) -> tuple[StoredRecord, ...]:
+        return ()
+
+    @property
+    def fold(self) -> Fold:
+        raise AssertionError("model selection must not inspect the fold")
+
+    @property
+    def sid(self) -> str:
+        return "s"
+
+    def hydrated_definition(self, record: Record) -> DefinitionContent:
+        raise AssertionError(f"model selection must not hydrate {record.kind}")
+
+    def hydrate_record_field(self, record: Record, slot: str, ref: object) -> None:
+        raise AssertionError(f"model selection must not hydrate {record.kind}/{slot}")
+
+    def session_attributes(self) -> dict[str, object]:
+        raise AssertionError("model selection must not inspect session attributes")
 
 
 def _prepared_record(payload: dict) -> Record:
@@ -76,17 +107,23 @@ def test_raw_prepared_transition_allows_null_tool_and_rejects_mixed_modes() -> N
 def test_logical_model_selection_objects_are_not_treated_as_raw_refs() -> None:
     selection = {"model": "B", "model_settings": {"max_tokens": 128}, "route": {"backend_type": "anthropic"}}
     binding = {"backend": "anthropic", "model": "B"}
-    state = SimpleNamespace(
-        model_selection=SimpleNamespace(
-            _payload={
+    state = ExecutionState(
+        session_id="s",
+        model_selection=Record(
+            "selection",
+            "input_applied",
+            "s",
+            None,
+            None,
+            None,
+            {
                 "input": {"input_id": "select", "payload": {"selection": selection}},
                 "model_binding": binding,
-            }
+            },
         ),
-        applied_inputs={},
     )
 
-    steps = effective_model(SimpleNamespace(state=state, records=()))
+    steps = effective_model(_ModelSelectionView(state))
     with pytest.raises(StopIteration) as stopped:
         next(steps)
 
@@ -94,18 +131,24 @@ def test_logical_model_selection_objects_are_not_treated_as_raw_refs() -> None:
 
 
 def test_raw_model_selection_requires_logical_hydration() -> None:
-    state = SimpleNamespace(
-        model_selection=SimpleNamespace(
-            _payload={
+    state = ExecutionState(
+        session_id="s",
+        model_selection=Record(
+            "selection",
+            "input_applied",
+            "s",
+            None,
+            None,
+            None,
+            {
                 "input": {"input_id": "select", "payload": {"selection": content_ref("selection")}},
                 "model_binding": content_ref("binding"),
-            }
+            },
         ),
-        applied_inputs={},
     )
 
     with pytest.raises(KeyUnavailable, match="requires hydrated logical state"):
-        next(effective_model(SimpleNamespace(state=state, records=())))
+        next(effective_model(_ModelSelectionView(state)))
 
 
 def test_malformed_content_and_replayed_operation_identity_fail_closed() -> None:
@@ -233,6 +276,11 @@ def test_raw_wait_user_cold_read_defers_retained_definition_to_logical_fold(tmp_
 def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_path: Path) -> None:
     path = tmp_path / "raw-reducer.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
+
+    @function_tool
+    def tool() -> str:
+        return "ok"
+
     with SQLiteStore.standalone(str(path)) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create(
@@ -242,7 +290,7 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
         )
         sessions.push("s", InboxItem("input", "user", {"content": "go"}))
         runtime = sessions.runtime(
-            Agent("raw", "Work.", model="scripted"),
+            Agent("raw", "Work.", model="scripted", tools=[tool]),
             RunConfig(
                 model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
                 workspace="/workspace",
@@ -284,12 +332,16 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
         tool_request = {"id": "call-1", "name": "tool", "arguments": {}}
         tool_plan = _plan_record(driver, "tool", "tool", tool_request, provider_binding="function")
         driver.commit([tool_plan])
+        logical = driver._logical_state()
+        definition = logical.turns[turn_id].start._payload["definition"]
+        assert any(schema["function"]["name"] == "tool" for schema in definition["tools"])
+        tool_capability = definition["capabilities"].get("tool", {})
         prepared = driver.record(
             "op_prepared",
             {
                 "request": tool_request,
                 "request_digest": digest(tool_request),
-                "tool": {"idempotency": "supported"},
+                "tool": tool_capability,
                 "op_kind": "tool",
                 "provider_binding": "function",
                 "idempotency_key": None,
@@ -318,8 +370,10 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
         driver.commit([boundary])
 
         hot = driver.state
-        assert hot.operations["t/model/primary/1"].attempts[1].started
-        assert hot.operations["t/model/primary/1"].attempts[1].dispatch._payload["endpoint_id"] == "a"
+        hot_model_attempt = hot.operations["t/model/primary/1"].attempts[1]
+        assert hot_model_attempt.started
+        assert hot_model_attempt.dispatch is not None
+        assert hot_model_attempt.dispatch._payload["endpoint_id"] == "a"
         assert hot.operations["tool"].attempts[1].prepared is not None
         assert hot.operations["tool"].attempts[1].started
         assert (turn_id, "budget", "raw-usage") in hot.boundaries
@@ -327,8 +381,10 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
 
     with SQLiteStore.standalone(str(path)) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
-        assert raw_state.operations["t/model/primary/1"].attempts[1].started
-        assert raw_state.operations["t/model/primary/1"].attempts[1].dispatch._payload["endpoint_id"] == "a"
+        raw_model_attempt = raw_state.operations["t/model/primary/1"].attempts[1]
+        assert raw_model_attempt.started
+        assert raw_model_attempt.dispatch is not None
+        assert raw_model_attempt.dispatch._payload["endpoint_id"] == "a"
         assert raw_state.operations["tool"].attempts[1].prepared is not None
         assert raw_state.operations["tool"].attempts[1].started
         assert (turn_id, "budget", "raw-usage") in raw_state.boundaries
@@ -803,7 +859,7 @@ def test_commit_rejects_unbound_producer_ref_before_append(tmp_path: Path) -> No
             },
             plan,
         )
-        with pytest.raises(TransitionError, match="requires plaintext producer values"):
+        with pytest.raises(RecordError, match="outside the retained ledger"):
             driver.commit([completed])
         assert driver.state.operations[oid].attempts[1].state == "started"
         assert sessions.store.release(lease)

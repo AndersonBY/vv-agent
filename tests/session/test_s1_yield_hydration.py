@@ -176,7 +176,7 @@ def test_provider_yield_callback_and_receipt_use_owner_bound_values(tmp_path: Pa
         assert declared_content_ref(raw_handle["evidence"]) is not None
         assert declared_content_ref(raw_handle["query_ref"]) is not None
 
-        state = sessions.store.read_state(PROVIDER_SESSION)[0]
+        state = sessions._read_state(PROVIDER_SESSION)[0]
         turn_id = state.active_turn_id
         assert turn_id is not None
         attempt = next(operation for operation in state.operations.values() if operation.kind == "tool").attempts[1]
@@ -253,9 +253,10 @@ def _parent_runtime(
         return LLMResponse("", [ToolCall("child-call", "child_task", {})])
 
     def admit(_plan):
+        workspace_ref = sessions.store.read(CHILD_SESSION, limit=1).records[0].record.payload["workspace"]
         return [
             children.ChildSession(
-                SessionSpec(f"{CHILD_SESSION}/child-{index}", principal, str(workspace), attributes={}),
+                SessionSpec(f"{CHILD_SESSION}/child-{index}", principal, workspace_ref, attributes={}),
                 f"work {index}",
                 yield_on_steer=True,
             )

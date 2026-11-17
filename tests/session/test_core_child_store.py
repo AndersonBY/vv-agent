@@ -1,46 +1,54 @@
 """Shared ordinary child projection on real SQL stores."""
 
-import inspect
 import json
 
 import pytest
 
 from vv_agent.kernel import _child_store as core
+from vv_agent.kernel._boundary_hydration import fold_hydrated_records
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.memory import token_utils
 from vv_agent.session import delegation, reducer
 from vv_agent.session.kernel import drive
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.projection import hydrate_records, hydrate_stored_record, hydration_for_session_store
+from vv_agent.session.records import InboxItem
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
-from .helpers import content_ref, principal
-from .test_children import parent_runtime
-from .test_compaction import SUMMARY, configured, start
-from .test_recovery_matrix import runtime
+from .helpers import create_fixture_session, fixture_child_spec, fixture_content_reader, push_fixture_input, wrap_fixture_store
+from .test_children import fixture_runtime, parent_runtime
+from .test_compaction import SUMMARY, configured
 
-pytestmark = pytest.mark.skip(reason="requires S1 content hydration in the later P2 storage phase")
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+def start(store):
+    create_fixture_session(store, "s", workspace="/tmp/s", consumers=("events",))
+    push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
 
 
 def admitted(store, database, names):
     start(store)
-    rt = parent_runtime(database)
+    rt = parent_runtime(store, database)
     rt.children["child_task"] = lambda _plan: tuple(
         core.ChildSession(
-            SessionSpec(
-                name,
-                principal(f"child/{name}"),
-                content_ref(f"child/{name}/workspace"),
-                attributes=content_ref(f"child/{name}/attributes"),
-            ),
+            fixture_child_spec(store, _plan.session_id, name),
             "work",
         )
         for name in names
     )
     drive(store, "s", runtime=rt)
-    state, rows, _ = store.read_state("s")
+    _state, rows, _ = store.read_state("s")
     park = next(row.record for row in rows if row.record.kind == "op_parked")
-    plan = state.operations[park.operation_id].attempts[park.attempt].execution_plan
+    stored_plan = next(
+        row
+        for row in rows
+        if row.record.kind == "op_planned" and row.record.operation_id == park.operation_id and row.record.attempt == park.attempt
+    )
+    plan = hydrate_stored_record(stored_plan, hydration_for_session_store(store, "s")).record
     return rt, plan, core.child_handles(park.payload["handle"])
 
 
@@ -48,7 +56,7 @@ def admitted(store, database, names):
 def test_sdk_and_core_reuse_first_snapshot_once_and_preserve_result_bytes(store, database, monkeypatch, names):
     rt, plan, handles = admitted(store, database, names)
     for name in names:
-        drive(store, name, runtime=runtime(database, [LLMResponse("雪-" + name)]))
+        drive(store, name, runtime=fixture_runtime(store, database, name, [LLMResponse("雪-" + name)]))
     reads, snapshots, forwarded = [], {}, []
     actual_read = store.read_state
 
@@ -57,19 +65,33 @@ def test_sdk_and_core_reuse_first_snapshot_once_and_preserve_result_bytes(store,
         snapshots[sid] = actual_read(sid)
         return snapshots[sid]
 
-    def ordinary(*args, **kwargs):
-        forwarded.append(kwargs["first_snapshot"])
-        return core.ordinary_result_for_children(*args, **kwargs)
+    def ordinary(selected_store, selected_plan, selected_handles, *, first_snapshot):
+        forwarded.append(first_snapshot)
+        return core.ordinary_result_for_children(
+            selected_store,
+            selected_plan,
+            selected_handles,
+            first_snapshot=first_snapshot,
+        )
 
     monkeypatch.setattr(store, "read_state", read)
+    first = store.read_state(names[0])
+    reads.clear()
+    direct = core.ordinary_result_for_children(store, plan, handles, first_snapshot=first)
+    assert reads == list(names[1:])
+
+    reads.clear()
+    direct_without_first = core.ordinary_result_for_children(store, plan, handles)
+    assert reads == list(names)
+
+    reads.clear()
     monkeypatch.setattr(delegation, "ordinary_result_for_children", ordinary)
     sdk = delegation.result_for_children(store, plan, handles, rt)
     assert reads == list(names)
-    assert forwarded == [snapshots[names[0]]] and forwarded[0] is snapshots[names[0]]
-    reads.clear()
-    direct = core.ordinary_result_for_children(store, plan, handles)
-    assert reads == list(names)
+    assert forwarded == [snapshots[names[0]]]
+
     assert canonical_json_bytes(sdk.to_dict()) == canonical_json_bytes(direct.to_dict())
+    assert canonical_json_bytes(direct_without_first.to_dict()) == canonical_json_bytes(direct.to_dict())
     expected = [
         {
             "tool_call_id": "child-call",
@@ -114,48 +136,50 @@ def test_cold_compacted_child_read_keeps_pure_count_steps_suspended(tmp_path, mo
     from test_token_count_suspension import assert_core_suspended
 
     path = tmp_path / "child.sqlite"
-    with SQLiteStore.standalone(str(path)) as store:
+    with SQLiteStore.standalone(str(path)) as raw_store:
+        store = wrap_fixture_store(raw_store)
         store.install_schema()
         rt, plan, handles = admitted(store, path, ("child",))
-        drive(store, "child", runtime=configured(path, [LLMResponse(SUMMARY), LLMResponse("child done")]))
+        drive(
+            store,
+            "child",
+            runtime=configured(
+                path,
+                [LLMResponse(SUMMARY), LLMResponse("child done")],
+                content_reader=fixture_content_reader(store, "child"),
+            ),
+        )
         snapshot = store.read_state("child")
         assert any(row.record.kind == "context_compacted" for row in snapshot[1])
         expected = delegation.result_for_children(store, plan, handles, rt)
         parent = store.read_state("s")[0]
         assert parent.active_turn_id is not None
-        baseline, calls, chains, storage_frames = [], [], set(), set()
+        raw_calls, logical_calls, chains = [], [], set()
 
-        def baseline_count(messages, *, model):
+        def raw_count(messages, *, model):
             assert_core_suspended()
-            baseline.append((model, messages))
+            raw_calls.append((model, messages))
             return token_utils.count_messages_tokens(messages, model=model)
 
-        monkeypatch.setattr(reducer, "count_messages_tokens", baseline_count)
+        monkeypatch.setattr(reducer, "count_messages_tokens", raw_count)
         store._fold_cache = store._previous_prefix = None
         store.read_state("child")
-        assert len(baseline) == 2
+        assert raw_calls == [], "raw SQL folding must not invoke logical token counting"
 
         def count(messages, *, model):
-            frame = inspect.currentframe()
-            assert frame is not None
-            frame = frame.f_back
-            while frame is not None:
-                module = frame.f_globals.get("__name__", "")
-                if module.startswith("vv_agent.kernel.") and module != "vv_agent.kernel._sql":
-                    # Only this real storage caller may remain active; pure core
-                    # validation/planning frames are still forbidden.
-                    assert (module, frame.f_code.co_name) == ("vv_agent.kernel._child_store", entry)
-                    storage_frames.add(frame.f_code.co_name)
-                steps = frame.f_locals.get("steps")
-                while inspect.isgenerator(steps):
-                    assert inspect.getgeneratorstate(steps) == inspect.GEN_SUSPENDED
-                    chains.add(steps.gi_code.co_name)
-                    steps = steps.gi_yieldfrom
-                frame = frame.f_back
-            calls.append((model, messages))
+            chains.update(assert_core_suspended())
+            logical_calls.append((model, messages))
             return token_utils.count_messages_tokens(messages, model=model)
 
         monkeypatch.setattr(reducer, "count_messages_tokens", count)
+        hydration = hydration_for_session_store(store, "child")
+        source_rows = snapshot[1]
+        hydrated_rows = hydrate_records(source_rows, hydration)
+        fold_hydrated_records(hydrated_rows, source_rows, reducer.Fold, hydration)
+        assert len(logical_calls) == 2
+        assert {"extend_steps", "_compacted", "accept_summary"} <= chains
+
+        logical_baseline = len(logical_calls)
         store._fold_cache = store._previous_prefix = None
         if entry == "ordinary_result_for_children":
             actual = core.ordinary_result_for_children(store, plan, handles)
@@ -164,6 +188,4 @@ def test_cold_compacted_child_read_keeps_pure_count_steps_suspended(tmp_path, mo
             with store.atomic() as tx:
                 assert core.cancel_children(store, tx, parent, "s", parent.active_turn_id) == []
             assert not store.peek_inbox("child"), "completed child must not receive a new cancellation"
-        assert calls == baseline
-        assert storage_frames == {entry}
-        assert {"extend_steps", "_compacted", "accept_summary"} <= chains
+        assert len(logical_calls) == logical_baseline

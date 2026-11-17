@@ -121,6 +121,7 @@ def test_session_driver_uses_explicit_ingress_principal_and_owns_actor_attribute
         )
 
         stored = driver.store.peek_inbox("session")[0].item
+        assert stored.actor is not None
         assert stored.actor["tenant_id"] == "default"
         assert stored.actor["subject_id"] == "ingress-user"
         assert stored.actor["subject_kind"] == "user"
@@ -136,6 +137,7 @@ def test_session_driver_uses_explicit_ingress_principal_and_owns_actor_attribute
         assert "ingress-user" not in str(stored.payload["content"])
         assert all("ingress-user" not in message.content for message in driver.messages("session"))
         owned = next(item.item for item in driver.store.peek_inbox("session") if item.item.input_id == "owned-input")
+        assert owned.actor is not None
         assert owned.actor["subject_id"] == "ingress-user"
         assert owned.actor["subject_kind"] == "user"
 
@@ -153,7 +155,10 @@ def test_session_driver_uses_explicit_ingress_principal_and_owns_actor_attribute
             replace(_item("user", {"content": "from-principal"}, input_id="principal-object"), actor=None),
             actor=persisted,
         )
-        principal_object_actor = driver.store.read_input("session", "principal-object").item.actor
+        principal_object_input = driver.store.read_input("session", "principal-object")
+        assert principal_object_input is not None
+        principal_object_actor = principal_object_input.item.actor
+        assert principal_object_actor is not None
         assert (
             driver.read_input_content(
                 "session",

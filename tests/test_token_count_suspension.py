@@ -12,11 +12,22 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from session.helpers import (
+    content_ref,
+    create_fixture_session,
+    fixture_content_reader,
+    principal,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 from session.test_cold_fold import snapshot_value
-from session.test_compaction import SUMMARY, configured, start, tool_history
+from session.test_compaction import SUMMARY, configured, history, tool_history
 from test_microcompact import _tool_turn
 
+from vv_agent.kernel._boundary_hydration import hydrate_and_fold_records
 from vv_agent.kernel._compaction_text import build_compacted_tool_content
+from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._microcompaction import estimate_tool_artifact_path
 from vv_agent.kernel._reducer import Fold as CoreFold
@@ -24,10 +35,11 @@ from vv_agent.memory import MemoryManager, token_utils
 from vv_agent.memory import manager as manager_module
 from vv_agent.memory.microcompact import plan_microcompact
 from vv_agent.microcompaction import MicrocompactionPolicy
-from vv_agent.session import reducer
+from vv_agent.session import compaction, reducer
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.context import project_context
-from vv_agent.session.kernel import drive
+from vv_agent.session.kernel import _Driver, drive
+from vv_agent.session.projection import hydration_for_session_store
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, Message
@@ -82,49 +94,106 @@ def test_core_suspension_probe_rejects_a_running_compaction_generator():
         next(probe())
 
 
-def test_cold_core_driver_core_fold_replay_keeps_generators_suspended(produced_session):
+def test_cold_core_driver_core_fold_replay_keeps_generators_suspended(produced_session, monkeypatch):
     store, *_ = produced_session
-    observed: set[str] = set()
+    content_store = wrap_fixture_store(store)
+    messages = history()
+    create_fixture_session(
+        content_store,
+        "cold",
+        attributes={
+            "seed": {
+                "messages": [message.to_dict() for message in messages],
+                "shared_state": {},
+                "unseen_input_protection": False,
+                "response_rejection": True,
+            }
+        },
+    )
+    push_fixture_input(content_store, "cold", InboxItem("initial", "user", {"content": "go"}))
+
+    runtime = configured(Path(store.path), [LLMResponse(SUMMARY), LLMResponse("done")])
+    runtime.content_reader = fixture_content_reader(content_store, "cold")
+    observed: list[set[str]] = []
+    calls: list[tuple[str, list[dict[str, object]]]] = []
+    folds: list[CoreFold] = []
 
     def count(messages, *, model):
-        observed.update(assert_core_suspended())
+        observed.append(assert_core_suspended())
+        calls.append((model, messages))
         return token_utils.count_messages_tokens(messages, model=model)
 
     def fold_factory():
-        return CoreFold(
+        fold = CoreFold(
             normalize_memory_settings=reducer._normalize_memory_settings,
             count_messages=count,
         )
+        folds.append(fold)
+        return fold
 
-    store._fold_cache = store._previous_prefix = None
-    store.fold_factory = fold_factory
-    lease = store.acquire("s", owner="cold-replay", ttl_ms=15_000)
+    store.fold_factory = content_store.fold_factory = fold_factory
+    monkeypatch.setattr(compaction, "count_messages_tokens", count)
+    lease = content_store.acquire("cold", owner="cold-core-driver", ttl_ms=15_000)
     assert lease is not None
-    runtime = configured(store, [])
     scope = _Scope(lease, runtime, now_ms=store._now())
+    scope.start()
     try:
-        CoreDriver(
-            store,
-            "s",
-            scope,
-            fold_factory=fold_factory,
-            clock=store.clock,
-            observe_cost=lambda: None,
-            hook=lambda _point, _record: None,
-            emit_phase=lambda _duration, _payload: None,
-        )
+        assert scope.ready.wait(runtime.ttl_ms / 1000)
+        assert scope.successful_ready
+        assert content_store._root is store
+        store._fold_cache = store._previous_prefix = None
+        assert store._fold_cache is None and store._previous_prefix is None
+        driver = _Driver(content_store, "cold", runtime, scope)
+        assert isinstance(driver, CoreDriver)
+        assert driver.fold._count_messages is count
+        assert not calls
+        for _ in range(20):
+            driver.step()
+            if any(row.record.kind == "context_compacted" for row in driver.records):
+                break
+        else:
+            raise AssertionError("cold CoreDriver did not complete compaction")
     finally:
-        assert store.release(lease)
-    assert observed
+        try:
+            scope.close()
+        finally:
+            assert content_store.release(lease)
+
+    assert calls
+    assert any("compact_context" in chains for chains in observed)
+    assert any("_compacted" in chains for chains in observed)
+    assert folds and all(fold._count_messages is count for fold in folds)
+    raw_compaction = next(row.record for row in store.read("cold").records if row.record.kind == "context_compacted")
+    assert raw_compaction._payload["replacement"]
+    assert all(declared_content_ref(value) is not None for value in raw_compaction._payload["replacement"])
 
 
 @pytest.fixture(params=["summary", "micro"])
 def produced_session(request, tmp_path):
     mode = request.param
-    with SQLiteStore.standalone(str(tmp_path / "current.sqlite")) as store:
+    database = tmp_path / "current.sqlite"
+    with SQLiteStore.standalone(str(database)) as store:
         store.install_schema()
-        start(store)
-        runtime = configured(store, [LLMResponse(SUMMARY), LLMResponse("done")] if mode == "summary" else [LLMResponse("done")])
+        content_store = wrap_fixture_store(store)
+        messages = tool_history() if mode == "micro" else history()
+        create_fixture_session(
+            content_store,
+            "s",
+            attributes={
+                "seed": {
+                    "messages": [message.to_dict() for message in messages],
+                    "shared_state": {},
+                    "unseen_input_protection": False,
+                    "response_rejection": True,
+                }
+            },
+        )
+        push_fixture_input(content_store, "s", InboxItem("initial", "user", {"content": "go"}))
+        runtime = configured(
+            database,
+            [LLMResponse(SUMMARY), LLMResponse("done")] if mode == "summary" else [LLMResponse("done")],
+        )
+        runtime.content_reader = fixture_content_reader(content_store, "s")
         if mode == "micro":
             runtime.config = replace(runtime.config, initial_messages=tool_history(), workspace_backend=MemoryWorkspaceBackend())
             runtime.memory_manager = MemoryManager(
@@ -132,15 +201,20 @@ def produced_session(request, tmp_path):
                 keep_recent_messages=1,
                 microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=1),
             )
-        drive(store, "s", runtime=runtime)
-        state, rows, _ = store.read_state("s")
-        records = [row.record for row in rows]
+        drive(content_store, "s", runtime=runtime)
+        raw_rows = store.read("s").records
+        raw_compaction = next(row.record for row in raw_rows if row.record.kind == "context_compacted")
+        assert raw_compaction._payload["replacement"]
+        assert all(declared_content_ref(value) is not None for value in raw_compaction._payload["replacement"])
+        assert declared_content_ref(raw_compaction._payload["evidence_manifest"]) is not None
+        state, hydrated, _ = read_fixture_state(store, "s")
+        records = [row.record for row in hydrated]
         compactions = [r for r in records if r.kind == "context_compacted"]
         assert len(compactions) == 1 and compactions[0]._payload["mode"] == mode
-        inputs = [InboxItem(**r._payload["input"]) for r in records if r.kind == "input_applied"]
-        prefix = reducer.Fold()
-        prefix.extend(records[: records.index(compactions[0])], consumed_inputs=inputs)
-        source = project_context(prefix.history, prefix.state)
+        inputs = [InboxItem(**r.record._payload["input"]) for r in raw_rows if r.record.kind == "input_applied"]
+        raw_index = next(index for index, row in enumerate(raw_rows) if row.record.kind == "context_compacted")
+        prefix = hydrate_and_fold_records(raw_rows[:raw_index], reducer.Fold, hydration_for_session_store(store, "s"))
+        source = project_context(prefix.fold.history, prefix.state)
         definition = next(r for r in records if r.kind == "turn_started")._payload["definition"]
         settings = reducer._normalize_memory_settings(definition["memory_settings"], None)
         if mode == "summary":
@@ -161,11 +235,12 @@ def produced_session(request, tmp_path):
             )
             expected = [source, [old], [marker]]
         counts = [(settings["model"], [m.to_openai_message() for m in messages]) for messages in expected]
+        assert [row.record.encode() for row in raw_rows] == [record.encode() for record in records]
         yield store, records, inputs, snapshot_value(state), counts
 
 
 def test_default_fold_and_cold_sql_count_once_at_each_original_point(produced_session, monkeypatch):
-    store, records, inputs, expected_state, expected_counts = produced_session
+    store, records, _, expected_state, expected_counts = produced_session
     calls, chains, visited, encoded = [], set(), [], []
 
     def count(messages, *, model):
@@ -180,11 +255,19 @@ def test_default_fold_and_cold_sql_count_once_at_each_original_point(produced_se
             visits.append(value)
             yield value
 
-    bodies = [record.encode() for record in records]
+    rows = store.read("s").records
+    hydration = hydration_for_session_store(store, "s")
+    bodies = [row.record.encode() for row in rows]
     fold = reducer.Fold()
-    state = fold.extend(once(records, visited), consumed_inputs=inputs, bodies=once(bodies, encoded))
+    result = hydrate_and_fold_records(
+        once(rows, visited),
+        lambda: fold,
+        hydration,
+        record_bodies=once(bodies, encoded),
+    )
+    state = result.state
     assert snapshot_value(state) == expected_state
-    assert visited == records and encoded == bodies
+    assert visited == list(rows) and encoded == bodies
     assert [record.encode() for record in records] == bodies
     assert calls == expected_counts
     assert fold.fork()._count_messages is count
@@ -197,11 +280,13 @@ def test_default_fold_and_cold_sql_count_once_at_each_original_point(produced_se
     for _ in range(2):
         calls.clear()
         store._fold_cache = store._previous_prefix = None
-        cold_state, cold_rows, _ = store.read_state("s")
+        _, cold_rows, _ = store.read_state("s")
+        cold_result = hydrate_and_fold_records(cold_rows, reducer.Fold, hydration)
+        cold_state = cold_result.state
         assert snapshot_value(cold_state) == expected_state
         assert [row.record.encode() for row in cold_rows] == bodies
         assert calls == expected_counts
-        assert store._fold_cache is not None and store._fold_cache.reducer.fork()._count_messages is count
+        assert cold_result.fold.fork()._count_messages is count
 
 
 @pytest.mark.parametrize("size", [1, 8, 64])
@@ -328,14 +413,22 @@ def test_micro_callbacks_keep_the_actual_exception_object(kind, driver, point, m
 @pytest.mark.parametrize("kind", ["stop", "nested", "runtime"])
 @pytest.mark.parametrize("point", ["normalize", "count", "core-normalize"])
 def test_fold_ports_keep_the_actual_exception_object(produced_session, kind, point):
-    _, records, inputs, _, _ = produced_session
+    store, _, _, _, _ = produced_session
     observed = []
     callback = raising_callback(kind, observed, suspended=point == "count")
     normalize = reducer._normalize_memory_settings if point == "count" else callback
     count = callback if point == "count" else token_utils.count_messages_tokens
-    fold = (CoreFold if point == "core-normalize" else reducer.Fold)(normalize_memory_settings=normalize, count_messages=count)
+    fold_type = CoreFold if point == "core-normalize" else reducer.Fold
+
+    def fold_factory():
+        return fold_type(normalize_memory_settings=normalize, count_messages=count)
+
     with pytest.raises(StopIteration if kind == "stop" else RuntimeError) as caught:
-        fold.extend(records, consumed_inputs=inputs)
+        hydrate_and_fold_records(
+            store.read("s").records,
+            fold_factory,
+            hydration_for_session_store(store, "s"),
+        )
     assert len(observed) == 1 and caught.value is observed[0]
     assert isinstance(caught.value.__cause__, StopIteration) if kind != "stop" else caught.value.__cause__ is None
 
@@ -347,7 +440,10 @@ def test_short_body_iterator_preserves_stop_iteration(fold_type):
 
     fold = fold_type(normalize_memory_settings=unused, count_messages=unused)
     with pytest.raises(StopIteration) as caught:
-        fold.extend([SessionSpec("s", "p", "w").record()], bodies=[])
+        fold.extend(
+            [SessionSpec("s", principal("p"), content_ref("w"), attributes=content_ref("a")).record()],
+            bodies=[],
+        )
     assert caught.value.__cause__ is None and not fold.history
 
 
@@ -366,7 +462,7 @@ def audit(event, args):
         if name == "local_settings.py" or name.startswith(".env") or name == "credentials":
             raise ForbiddenIO(name)
 sys.addaudithook(audit)
-sys.path[:0] = [sys.argv[1] + "/src", sys.argv[1] + "/tests"]
+sys.path[:0] = [sys.argv[1] + "/src", sys.argv[1] + "/tests", sys.argv[1]]
 runpy.run_path(sys.argv[2])["exercise_cold_counter"](sys.argv[3])
 """
     result = subprocess.run(

@@ -104,8 +104,11 @@ def local_response_transport(case, status=413):
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("case", ["pre_raw", "flush", "mid_body", "closed_unread"])
-def test_incomplete_vendor_413_stays_unknown(provider, case):
-    with local_response_transport(case) as (responses, bodies, clients), SQLiteStore.standalone(":memory:") as store:
+def test_incomplete_vendor_413_stays_unknown(provider, case, tmp_path):
+    with (
+        local_response_transport(case) as (responses, bodies, clients),
+        SQLiteStore.standalone(str(tmp_path / "incomplete.sqlite")) as store,
+    ):
         store.install_schema()
         start(store)
         rt = runtime(store, [])
@@ -127,8 +130,11 @@ def test_incomplete_vendor_413_stays_unknown(provider, case):
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("status", [400, 429])
-def test_complete_streamed_vendor_errors_still_settle(provider, status):
-    with local_response_transport("gzip_complete", status) as (responses, bodies, _), SQLiteStore.standalone(":memory:") as store:
+def test_complete_streamed_vendor_errors_still_settle(provider, status, tmp_path):
+    with (
+        local_response_transport("gzip_complete", status) as (responses, bodies, _),
+        SQLiteStore.standalone(str(tmp_path / "streamed.sqlite")) as store,
+    ):
         store.install_schema()
         start(store)
         rt = runtime(store, [])
@@ -144,10 +150,10 @@ def test_complete_streamed_vendor_errors_still_settle(provider, status):
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
-def test_successful_vendor_stream_still_completes(provider):
+def test_successful_vendor_stream_still_completes(provider, tmp_path):
     with (
         local_response_transport(f"success_{provider}", 200) as (responses, bodies, _),
-        SQLiteStore.standalone(":memory:") as store,
+        SQLiteStore.standalone(str(tmp_path / "successful.sqlite")) as store,
     ):
         store.install_schema()
         start(store)

@@ -1,6 +1,7 @@
 """Installed vendor network types veto both rejection and compaction in the kernel."""
 
 from importlib import import_module
+from tempfile import TemporaryDirectory
 
 import httpx2
 import pytest
@@ -20,7 +21,7 @@ def native_error(provider, name):
 def assert_unknown(error):
     assert model_request_rejection(error) is None
     assert not is_prompt_too_long_error(error)
-    with SQLiteStore.standalone(":memory:") as store:
+    with TemporaryDirectory() as directory, SQLiteStore.standalone(f"{directory}/session.sqlite") as store:
         store.install_schema()
         start(store)
         calls = []

@@ -644,7 +644,7 @@ def test_input_applied_provider_copy_uses_record_owner_slots(tmp_path) -> None:
         skeleton = published.payload["input"]
         assert set(skeleton["actor"]["attributes"]) == {"content_id", "mac", "size", "key_id", "labels"}
         assert set(skeleton["payload"]["result"]) == {"content_id", "mac", "size", "key_id", "labels"}
-        hydrated = hydrate_stored_payload(_boundary_driver(store), stored)
+        hydrated = hydrate_stored_payload(_boundary_driver(store), stored, include_actor_attributes=True)
         assert hydrated["input"]["payload"]["result"] == expected_result
         assert hydrated["input"]["payload"]["usage"] == expected_usage
         assert hydrated["input"]["actor"]["attributes"] == {"role": "local"}

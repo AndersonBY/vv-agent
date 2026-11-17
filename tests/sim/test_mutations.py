@@ -3,19 +3,27 @@
 import __future__
 
 import inspect
+import json
 import textwrap
 import threading
 
 import pytest
-from session.helpers import content_ref
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from scripts.s1_fixture_values import content_ref, create_fixture_session, push_fixture_input
 from vv_agent.kernel import _driver_outcomes, _driver_recovery
+from vv_agent.kernel._content import ContentIntegrityError, ContentRef, WrappedDataKey
+from vv_agent.kernel._content_runtime import durable_content_store
+from vv_agent.kernel._content_sql import _content_aad
 from vv_agent.kernel._lease_scope import LeaseOwnership
-from vv_agent.kernel._records import make_record
-from vv_agent.kernel._sql import SQLSessionTx
+from vv_agent.kernel._records import InboxItem, make_record
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore
+from vv_agent.kernel._store import WorkerSupports
 
+from .content import SimAESGCMCipher
 from .scenarios import run_scenario
-from .world import InvariantViolation, SimWorld, require
+from .world import Choices, InvariantViolation, SimWorld, require
 
 INPUT_DEDUPE_MUTATION = "push+dropped-input-identity-constraint"
 
@@ -177,6 +185,15 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
             run_scenario(world, scenario)
 
 
+def test_worker_filter_mutation_is_killed(sim_database, monkeypatch):
+    monkeypatch.setattr(WorkerSupports, "accepts", lambda self, **kwargs: True)
+    monkeypatch.setattr(SQLStore, "worker_level", property(lambda self: 99))
+    monkeypatch.setattr(SQLStore, "_worker_handler_filter_sql", "(%s IS NOT NULL)")
+    monkeypatch.setattr(SQLStore, "_worker_capability_filter_sql", "(%s IS NOT NULL)")
+    with SimWorld(sim_database, seed=17) as world, pytest.raises(InvariantViolation, match="I11"):
+        run_scenario(world, "worker_compatibility")
+
+
 def lock_order_probe(world):
     """Check that production poll leaves commit_lock free at its renewal call.
 
@@ -190,6 +207,7 @@ def lock_order_probe(world):
     driving = world.connection("driver")
     renewal = world.connection("renewal")
     lease = driving.acquire("s", owner="lock-probe", ttl_ms=15000)
+    commit_lock = threading.Lock()
     heartbeat = LeaseOwnership(
         lease,
         15000,
@@ -197,18 +215,14 @@ def lock_order_probe(world):
         clock=world.clock,
         stop=threading.Event(),
         ready=threading.Event(),
-        lock=threading.Lock(),
-        poll_lock=threading.Lock(),
-        commit_lock=threading.Lock(),
-        latch_entry=threading.local(),
-        actor_identity=threading.get_ident,
     )
+    heartbeat.__dict__["commit_lock"] = commit_lock
     original = renewal.renew
     committed = []
 
     def append_then_renew(current, *, ttl_ms):
         require(
-            heartbeat.commit_lock.acquire(blocking=False),
+            commit_lock.acquire(blocking=False),
             "L1",
             "LeaseOwnership.poll held commit_lock across its renewal boundary",
         )
@@ -228,7 +242,7 @@ def lock_order_probe(world):
                 receipt = tx.append("s", lease=current, expected_seq=1, commit_id="lock-probe", records=(rec,))
             committed.append(receipt)
         finally:
-            heartbeat.commit_lock.release()
+            commit_lock.release()
         return original(current, ttl_ms=ttl_ms)
 
     renewal.renew = append_then_renew
@@ -307,3 +321,93 @@ def test_sqlite_failure_replay_minimization(tmp_path, monkeypatch, record_proper
     reduced, attempts = minimize(report["decisions"], reproduces, budget=2)
     assert attempts == 2 and len(reduced) < len(report["decisions"])
     assert reproduces(reduced)
+
+
+def test_sqlite_real_content_cipher_tamper_and_aad_failures(tmp_path):
+    marker = b"sim-content-plaintext-marker-7e31c9d2"
+    session_id = "s"
+    with SimWorld(tmp_path / "content.sqlite", seed=17) as world:
+        store = world.connection("host")
+        create_fixture_session(store, session_id, consumers=())
+        push_fixture_input(store, session_id, InboxItem("secret", "user", {"content": marker.decode("ascii")}))
+
+        row = store._one(
+            "SELECT c.content_id,c.key_id,c.mac,c.size,c.labels,c.state,c.nonce,c.ciphertext,c.object_locator "
+            "FROM sk_content c JOIN sk_content_link l ON l.tenant_id=c.tenant_id AND l.session_id=c.session_id "
+            "AND l.content_id=c.content_id WHERE c.tenant_id=%s AND c.session_id=%s "
+            "AND l.input_id=%s AND l.slot=%s LIMIT 1",
+            (store.tenant_id, session_id, "secret", "input.content"),
+        )
+        assert row is not None
+        ref = ContentRef.from_dict(
+            {
+                "content_id": row[0],
+                "mac": row[2],
+                "size": row[3],
+                "key_id": row[1],
+                "labels": json.loads(row[4]),
+            }
+        )
+        nonce = bytes(row[6])
+        ciphertext = bytes(row[7])
+        stored_blobs = store._rows(
+            "SELECT nonce,ciphertext FROM sk_content WHERE tenant_id=%s AND session_id=%s",
+            (store.tenant_id, session_id),
+        )
+        assert all(
+            marker not in bytes(stored_nonce) and marker not in bytes(stored_ciphertext)
+            for stored_nonce, stored_ciphertext in stored_blobs
+        )
+
+        key_id, _provider_id, wrapped_key, _state = store._one(
+            "SELECT key_id,provider_id,wrapped_key,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s",
+            (store.tenant_id, session_id),
+        )
+        data_key = world.content_provider.unwrap(
+            store.tenant_id,
+            session_id,
+            WrappedDataKey(store.tenant_id, session_id, key_id, bytes(wrapped_key)),
+        )
+        aad = _content_aad(
+            store.tenant_id,
+            session_id,
+            ref.content_id,
+            ref.key_id,
+            ref.mac,
+            ref.size,
+            ref.labels,
+        )
+        content_store = durable_content_store(store)
+        plaintext = content_store.get(store.tenant_id, session_id, ref)
+        assert marker in plaintext
+
+        tampered = bytes([ciphertext[0] ^ 1]) + ciphertext[1:]
+        with pytest.raises(ContentIntegrityError, match="content failed AEAD authentication") as caught:
+            world.content_cipher.decrypt(data_key, nonce, tampered, aad)
+        assert isinstance(caught.value.__cause__, InvalidTag)
+
+        with store.atomic():
+            store._rows(
+                "UPDATE sk_content SET ciphertext=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+                (tampered, store.tenant_id, session_id, ref.content_id),
+            )
+        with pytest.raises(ContentIntegrityError, match="content failed AEAD authentication"):
+            content_store.get(store.tenant_id, session_id, ref)
+        wrong_aad_ciphertext = AESGCM(data_key).encrypt(nonce, plaintext, aad + b"/wrong-tenant")
+        with store.atomic():
+            store._rows(
+                "UPDATE sk_content SET ciphertext=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+                (wrong_aad_ciphertext, store.tenant_id, session_id, ref.content_id),
+            )
+        with pytest.raises(ContentIntegrityError, match="content failed AEAD authentication"):
+            content_store.get(store.tenant_id, session_id, ref)
+
+
+def test_sim_content_randomness_is_independent_of_scheduler_choices():
+    seed = 17
+    unperturbed = SimAESGCMCipher(seed)
+    perturbed = SimAESGCMCipher(seed)
+    choices = Choices(seed)
+    for _ in range(32):
+        choices.choose("independent/content-stream", ("renew", "drive", "project"))
+    assert perturbed.random_bytes(96) == unperturbed.random_bytes(96)

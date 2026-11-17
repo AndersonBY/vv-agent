@@ -6,35 +6,77 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from kernel_definition_probe import inputs
 from test_run_definition_producer import FIXTURE, produce
 
+from vv_agent.budget import RunBudgetLimits
 from vv_agent.kernel import _definition as owner
+from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_stored_record
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, ContentSessionWriter, SourceKind
+from vv_agent.kernel._content_publication import make_record_before_publication, publish_record_content
 from vv_agent.kernel._definition import DefinitionCache, model_identity
 from vv_agent.kernel._execution_values import AgentTask
-from vv_agent.kernel._records import copy_json, digest, make_record
+from vv_agent.kernel._records import copy_json, digest
+from vv_agent.kernel._store import StoredRecord
 from vv_agent.kernel._tool_metadata import ToolResultRetention
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _MemoryContentPort(ContentSessionWriter):
+    tenant_id = "tenant"
+    session_id = "s"
+
+    def __init__(self) -> None:
+        self._bodies: dict[ContentRef, bytes] = {}
+        self._next_id = 0
+
+    def put_json(self, value: Any, *, labels: Any = ...) -> ContentRef:
+        self._next_id += 1
+        body = canonical_json_bytes(value)
+        ref = ContentRef(
+            content_id=f"content/retained/{self._next_id}",
+            mac=digest(value),
+            size=len(body),
+            key_id="key/session",
+            labels=ContentLabels((SourceKind.INTERNAL,), Classification.INTERNAL),
+        )
+        self._bodies[ref] = body
+        return ref
+
+    def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
+        assert (tenant_id, session_id, owner) == ("tenant", "s", "record:1")
+        return self._bodies[ref]
+
+
 def retained(value):
-    return make_record(
+    contents = _MemoryContentPort()
+    source = make_record_before_publication(
         "turn_started",
         session_id="s",
         turn_id="t",
         payload={
             "input_ids": [],
             "definition": value,
-            "definition_digest": digest(value),
             "handler_version": "1",
-            "budget": {},
+            "budget": RunBudgetLimits().to_dict(),
             "binding": "task",
             "generation": 1,
         },
     )
+    published = publish_record_content(contents, (source,)).records[0]
+    published.encode()
+    stored = StoredRecord(published, 1, "commit/1", 1, 1)
+    hydrated = hydrate_session_stored_record(
+        stored,
+        SessionHydration(contents, tenant_id="tenant", session_id="s"),
+    )
+    assert hydrated.record._task_value is not None
+    return hydrated.record
 
 
 @pytest.mark.parametrize("site_flags", [[], ["-S"]], ids=["normal", "no-site"])
@@ -143,22 +185,6 @@ def test_retention_preserve_wins_and_input_settings_remain_unmodified():
         value = DefinitionCache().definition(task, bindings, catalog)
         assert value["memory_settings"]["tool_result_retentions"][name] == "preserve"
         assert bindings.memory_settings == original
-
-
-def test_historic_endpoint_digest_preserves_old_routes_and_missing_limits():
-    task, bindings, catalog = inputs(FIXTURE["golden_cases"][0]["definition"])
-    bindings.model_binding["internal"] = {"compaction": {"backend": "scripted", "model": "summary", "context_length": 8192}}
-    cache = DefinitionCache()
-    historical = cache.definition(task, bindings, catalog)
-    for binding in [historical["model_binding"], historical["model_binding"]["internal"]["compaction"]]:
-        binding["endpoints"] = ["retired"]
-        binding.pop("context_length", None)
-        binding.pop("max_output_tokens", None)
-    frozen = retained(historical)
-    bindings.model_binding["endpoints"] = ["current"]
-    assert cache.definition_digest(frozen, bindings, catalog) == digest(historical)
-    assert "endpoints" not in cache.definition(task, bindings, catalog)["model_binding"]
-    assert model_identity(bindings.model_binding) == {k: v for k, v in bindings.model_binding.items() if k != "endpoints"}
 
 
 def test_planner_facade_and_workspace_names_share_the_core_objects():

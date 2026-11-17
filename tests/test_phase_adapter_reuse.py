@@ -62,8 +62,8 @@ def test_recovery_bridge_composes_ledger_requests_before_the_host(monkeypatch, t
     assert result.final_answer == "done"
 
 
-def test_historical_facades_use_the_real_sqlite_driver_bridge():
-    with SQLiteStore.standalone(":memory:") as store:
+def test_historical_facades_use_the_real_sqlite_driver_bridge(tmp_path):
+    with SQLiteStore.standalone(str(tmp_path / "phase-adapter.sqlite")) as store:
         store.install_schema()
         with store.atomic() as tx:
             tx.create(

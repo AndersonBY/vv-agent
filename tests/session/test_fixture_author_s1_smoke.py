@@ -1,0 +1,173 @@
+"""Smoke the current S1 fixture-author base harness through real producers."""
+
+from __future__ import annotations
+
+import runpy
+from pathlib import Path
+
+from vv_agent.events import ModelCallCompletedEvent
+from vv_agent.kernel._content import (
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    SESSION_ATTRIBUTES,
+    SESSION_PRINCIPAL_ATTRIBUTES,
+    SESSION_WORKSPACE,
+)
+from vv_agent.kernel._content_publication import declared_content_ref
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
+from vv_agent.types import AgentStatus, CompletionReason
+
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session_kernel_fixtures.py"
+AUTHOR = runpy.run_path(str(SCRIPT))
+
+
+def test_fixture_author_native_finish_uses_real_s1_store_and_wire() -> None:
+    fixtures = AUTHOR["Fixtures"]()
+    session_id = "fixture-author-native-finish"
+    answer = "fixture-author-finished"
+    try:
+        fixtures.admit(
+            session_id,
+            [AUTHOR["LLMResponse"](answer, raw={"usage": AUTHOR["USAGE"]})],
+        )
+        fixtures.run(session_id)
+        streams = fixtures.collect()
+        state = fixtures.state(session_id)
+        result = fixtures.result(session_id)
+
+        assert len(streams) == 1
+        collected_session_id, rows = streams[0]
+        assert collected_session_id == session_id
+        assert [row.record.kind for row in rows] == [
+            "session_created",
+            "input_applied",
+            "turn_started",
+            "usage_observed",
+            "op_planned",
+            "usage_observed",
+            "op_started",
+            "usage_observed",
+            "op_completed",
+            "usage_observed",
+            "turn_ended",
+        ]
+        assert state.active_turn_id is None
+        assert result.status is AgentStatus.COMPLETED
+        assert result.completion_reason is CompletionReason.NO_TOOL_FINISH
+        assert result.final_output == answer
+        assert result.token_usage.total_tokens == 15
+
+        raw_store = fixtures.kernel._root_store
+        assert raw_store._one("SELECT storage_major,write_level FROM sk_settings") == ("S1", 1)
+        assert raw_store._rows("SELECT DISTINCT schema_version FROM sk_session") == [("S1",)]
+        assert raw_store._one(
+            "SELECT provider_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s",
+            ("default", session_id),
+        ) == ("local-development-v1", "active")
+        assert (
+            raw_store._one(
+                "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id=%s "
+                "AND state='live' AND ciphertext IS NOT NULL",
+                ("default", session_id),
+            )[0]
+            > 0
+        )
+
+        bodies = [
+            body
+            for (body,) in raw_store._rows(
+                "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                ("default", session_id),
+            )
+        ]
+        assert [row.record.encode() for row in rows] == bodies
+        assert answer.encode() not in b"".join(bodies)
+        assert b"kernel-active-scope" not in b"".join(bodies)
+
+        item = fixtures.inbox[(session_id, "initial")]
+        assert declared_content_ref(item.payload["content"]) is not None
+        assert item.actor is not None and item.actor["attributes"]["content_id"]
+        inbox_body = raw_store._one(
+            "SELECT body FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            ("default", session_id, item.input_id),
+        )[0]
+        assert item.encode() == inbox_body
+
+        hydration = hydration_for_session_store(fixtures.kernel.store, session_id)
+        usage_rows = [row for row in rows if row.record.kind == "usage_observed"]
+        usage_payloads = [hydrate_record_payload(row, hydration) for row in usage_rows]
+        assert [payload["observation"] for payload in usage_payloads] == [1, 2, 3, 4]
+        assert all(payload["source"] == "kernel-active-scope" for payload in usage_payloads)
+
+        links = raw_store._rows(
+            "SELECT record_seq,input_id,slot,content_id FROM sk_content_link WHERE tenant_id=%s AND session_id=%s",
+            ("default", session_id),
+        )
+        input_slots = {slot for _seq, input_id, slot, _content_id in links if input_id == "initial"}
+        assert input_slots == {INPUT_ACTOR_ATTRIBUTES, INPUT_CONTENT}
+        created_slots = {slot for seq, _input_id, slot, _content_id in links if seq == 1}
+        assert created_slots == {SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE}
+        links_by_record: dict[int, set[str]] = {}
+        for seq, input_id, slot, _content_id in links:
+            if input_id is None and seq is not None:
+                links_by_record.setdefault(seq, set()).add(slot)
+        for usage in usage_rows:
+            assert {"usage", "usage_source"} <= links_by_record[usage.seq]
+    finally:
+        fixtures.kernel.close()
+
+
+def test_fixture_author_provider_usage_hydrates_raw_s1_once() -> None:
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        fixtures.provider_usage()
+        assert [(case["case"], case["context"]) for case in fixtures.semantics] == [
+            ("late_usage_normal", "normal"),
+            ("late_usage_audit", "audit"),
+        ]
+        streams = dict(fixtures.collect())
+        raw_store = fixtures.kernel._root_store
+        usage = AUTHOR["USAGE"]
+        for session_id, expected_output, expected_context in (
+            ("late_usage_normal", "first", "normal"),
+            ("late_usage_audit", "second", "audit"),
+        ):
+            snapshot = fixtures.kernel._read_state(session_id)
+            state, rows, _ = snapshot
+            result = fixtures.result(session_id)
+            assert result.final_output == expected_output
+            assert state.applied_inputs["replay"].payload["disposition"] == "noop"
+
+            completions = [row for row in rows if row.record.kind == "op_completed" and row.record.attempt == 1]
+            assert len(completions) == 1
+            raw_completion_row = completions[0]
+            raw_completion = raw_completion_row.record
+            assert declared_content_ref(raw_completion.payload["usage"]) is not None
+            assert b"prompt_tokens" not in raw_completion.encode()
+
+            hydration = hydration_for_session_store(fixtures.kernel.store, session_id)
+            completion = hydrate_record_payload(raw_completion_row, hydration)
+            assert completion["context"] == expected_context
+            assert completion["usage"] == usage
+            assert AUTHOR["independent_bytes"]([completion["usage"]])[0] == AUTHOR["independent_bytes"]([usage])[0]
+            events = [
+                event
+                for event in project_records(rows, hydration=hydration)
+                if isinstance(event, ModelCallCompletedEvent) and event.attempt == 1
+            ]
+            attempt_one_calls = [call for call in result.token_usage.model_calls if call.attempt == 1]
+            assert len(events) == len(attempt_one_calls) == 1
+            assert events[0].usage == attempt_one_calls[0].usage
+            assert attempt_one_calls[0].usage.usage_source.value == "provider_reported"
+
+            db_bodies = [
+                body
+                for (body,) in raw_store._rows(
+                    "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                    ("default", session_id),
+                )
+            ]
+            assert [row.record.encode() for row in streams.pop(session_id)] == db_bodies
+        assert not streams
+    finally:
+        fixtures.kernel.close()

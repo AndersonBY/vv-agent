@@ -71,7 +71,7 @@ an external stopwatch includes interpreter startup and exit.
 No warmup seed is excluded or counted as a campaign seed.
 
 `test_import_boundary.py` starts a fresh `-I -S` process, installs its meta-path
-guard before simulation imports, and runs all 21 directed scenarios. Only the
+guard before simulation imports, and runs all 22 directed scenarios. Only the
 kernel package, `_jsonschema`, `_memory_settings`, `_token_counting` and their
 real external dependencies are permitted. The test then inspects `sys.modules`
 to reject session, Agent, Runtime and tool-registry imports. This is process
@@ -108,7 +108,7 @@ Keep the guard intact.
 | I8 | Cold record-prefix replay equals a long-lived incremental Fold and the store cache. Directed recovery tests check every prefix; smoke checks scheduler-step prefixes. |
 | I9 | Every regular SQLite/PostgreSQL world check recomputes record digests, the SQL chain and commit claims through the real store. Signed worlds additionally require and verify every checkpoint and input-admission proof; explicit hash-only worlds reject stray signed evidence. Missing proofs stop the check before another record or input can be trusted. |
 | I10 | Unsafe unknown does not authorize resend; recovery stays ambiguous until a durable provider receipt or actual child terminal evidence settles it. |
-| I11 | Pending W4; compatibility support sets and claim filtering do not exist in the baseline. |
+| I11 | Real SQL claims cover heterogeneous level, handler, tool-schema, tool-metadata and model support sets; extra tool support remains compatible, incompatible workers do not advance lease epochs, no-match work stays pending, and root claims page/fence two tenants with the same session ID. Signed cache verification and claim-time no-content-read are checked. The exact compatible claim runs the real L2 session in core through `runtime.drive(..., lease=...)`; assembly preserves the claim and typed turn requirements. |
 
 `covered` records the bounded evidence exercised by that scenario. In particular,
 I4 needs positive scanner recovery and I5 needs attempt-accounting assertions;
@@ -120,7 +120,7 @@ reply, accepted handles, acceptance before ledger commit, authenticated late
 results/redelivery, child delivery, cancellation, `RuntimeNotReady`, competing
 claims, scheduled actual renewal, expiry/takeover at three driver cuts, frozen
 runtime-definition mismatch, rolled-back model results and metered tool receipts.
-The original 17 cases remain, with four additional participant cases:
+The original 17 cases remain, with five additional participant cases:
 
 - `approval_reply`: wrong request ID, request digest, scope, target turn and
   generation are rejected without dispatch. A valid reply authorizes exactly
@@ -134,7 +134,12 @@ The original 17 cases remain, with four additional participant cases:
   actual normalizer, token counter and real summary operation. Two bounded tool
   cycles create a reducible prefix; the accepted `context_compacted` record binds
   its adopted summary receipt, source digest, prefix/tail identities and
-  replacement. I9 is active for every world; I11 remains deferred.
+  replacement. I9 is active for every world.
+- `worker_compatibility`: independent worker connections make real
+  `claim_runnable` calls with typed support sets. A compatible worker receives a
+  lease that is passed directly to the assembly/core drive path for the real L2
+  session. Incompatible support sets and the all-unmatched case are checked on
+  independent SQL connections.
 
 Negative checks remove the actual SQL readiness filter, suppress the actual core
 child-to-grandchild cancellation helper, and submit a false child terminal
@@ -144,8 +149,7 @@ back without consuming the child-result input.
 Child receipt verification uses the driver's literal `child/<seq>/<digest>`
 format and checks it against the session and turn in the retained child handle.
 
-Still uncovered: mixed incompatible workers (I11/W4), arbitrary worker
-pause/resume during an in-flight external call, generated long lease/heartbeat
+Still uncovered: arbitrary worker pause/resume during an in-flight external call, generated long lease/heartbeat
 interleavings beyond the three directed cuts, approval denial/expiry variants,
 wider/deeper descendant trees, model late-result races, and remote process start/query
 (W3). Transport reordering currently has one parent session and cannot establish
@@ -157,7 +161,9 @@ multi-session ordering coverage. L2-L4 evidence belongs to
 The mutation tests recompile and patch the actual shared-core functions in memory:
 `SQLSessionTx` append fences and input replay/dedupe, `_driver_recovery.step`'s
 retry key, `_driver_outcomes.unknown_steps`' retry decision, and
-`LeaseOwnership.poll`'s lock ordering. They retain real SQL and reducer constraints.
+`LeaseOwnership.poll`'s lock ordering. A worker-filter mutation disables the SQL
+support predicates and the typed `WorkerSupports.accepts` check, proving I11
+rejects an incompatible claim. They retain real SQL and reducer constraints.
 The input mutation removes the application replay branch and, only in its
 disposable database schema, the `(session_id,input_id)` identity constraint.
 The `(session_id,input_seq)` uniqueness remains, so a second push writes a real
@@ -222,9 +228,9 @@ cases; those 17-scenario results do not establish expanded-code acceptance.
 The large-campaign requirements are 1,000,000 SQLite seeds and at least 10,000
 PostgreSQL seeds. Acceptance status belongs in the fixed-snapshot evidence and
 release notes.
-These results do not establish large-campaign reliability. I11/W4 remains a
-later-phase requirement; I9/W2c is now exercised by every world check rather
-than only by directed tests.
+These results do not establish large-campaign reliability. The directed I11
+worker-compatibility path is now covered; I9/W2c is exercised by every world
+check rather than only by directed tests.
 
 
 The expanded participant slice passed all 20 SQLite directed recovery cases

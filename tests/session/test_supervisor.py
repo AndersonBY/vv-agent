@@ -3,20 +3,21 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event, current_thread
+from threading import Event
 from time import monotonic
 
 import pytest
 
-from vv_agent.session.kernel import _Driver, drive, read_state
+from vv_agent.session.kernel import _Driver, _Scope, drive
 from vv_agent.session.runtime import RuntimeNotReady
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.supervisor import tick
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
-from .helpers import item, principal
-from .test_recovery_matrix import runtime, start
+from .helpers import fixture_content_reader, item, principal, read_fixture_state, wrap_fixture_store
+from .test_recovery_matrix import runtime as base_runtime
+from .test_recovery_matrix import start
 
 CONTRACT = json.loads((Path(__file__).parents[1] / "fixtures/parity/session_supervision.json").read_text())
 
@@ -24,15 +25,26 @@ CONTRACT = json.loads((Path(__file__).parents[1] / "fixtures/parity/session_supe
 @pytest.fixture
 def clock(store, monkeypatch):
     now = 1_000_000
-    monkeypatch.setattr(type(store), "clock_sql", str(now))
+    root = store._root
+    monkeypatch.setattr(type(root), "clock_sql", str(now))
 
     def advance(ms):
         nonlocal now
         now += ms
-        monkeypatch.setattr(type(store), "clock_sql", str(now))
+        monkeypatch.setattr(type(root), "clock_sql", str(now))
         return now
 
     return advance
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+def runtime(store, database, steps, tools=(), *, sid="s", **kwargs):
+    kwargs.setdefault("content_reader", fixture_content_reader(store, sid))
+    return base_runtime(database, steps, tools, **kwargs)
 
 
 def project(store, sid, consumer):
@@ -43,7 +55,7 @@ def project(store, sid, consumer):
 
 
 def finished(store, sid):
-    return any(r.record.kind == "turn_ended" for r in read_state(store, sid)[1])
+    return any(r.record.kind == "turn_ended" for r in read_fixture_state(store, sid)[1])
 
 
 @pytest.mark.parametrize("failure", ["factory", "drive", "project", "dispatch"])
@@ -54,7 +66,14 @@ def test_scan_isolates_failures_across_pages_and_bounds_retries(store, database,
     dispatched = []
     for sid in ("a", "b", "c", "d", "e"):
         start(store, sid)
-        runtimes[sid] = runtime(database, [LLMResponse(sid)])
+        runtimes[sid] = runtime(store, database, [LLMResponse(sid)], sid=sid)
+    initial_schedule = {
+        sid: store._one(
+            "SELECT lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms FROM sk_session WHERE session_id=%s",
+            (sid,),
+        )
+        for sid in ("a", "b", "c", "d", "e")
+    }
     step = _Driver.step
 
     def factory(sid):
@@ -90,8 +109,22 @@ def test_scan_isolates_failures_across_pages_and_bounds_retries(store, database,
     assert attempts == ["b", "d"]
     if failure == "dispatch":
         assert dispatched == ["a", "c", "e"]
-    else:
-        assert all(finished(store, sid) for sid in ("a", "c", "e"))
+        # Legacy dispatch is only a hint. It neither owns nor updates a drive
+        # lease, so failures remain immediately retryable and never write backoff.
+        for _ in range(3):
+            with pytest.raises(ExceptionGroup):
+                tick(store, project=projection, page_size=page_size, dispatch=dispatch_callback, runtime=factory)
+        assert attempts == ["b", "d"] * 4
+        assert dispatched == ["a", "c", "e"] * 4
+        assert {
+            sid: store._one(
+                "SELECT lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms FROM sk_session WHERE session_id=%s",
+                (sid,),
+            )
+            for sid in ("a", "b", "c", "d", "e")
+        } == initial_schedule
+        return
+    assert all(finished(store, sid) for sid in ("a", "c", "e"))
     for _ in range(3):
         tick(store, project=projection, page_size=page_size, dispatch=dispatch_callback, runtime=factory)
     assert attempts == ["b", "d"]
@@ -107,15 +140,15 @@ def test_scan_isolates_failures_across_pages_and_bounds_retries(store, database,
 def test_runtime_not_ready_preserves_input_and_existing_turn_then_succeeds(store, database, clock):
     start(store)
     called = []
-    rt = runtime(database, [LLMResponse("done")])
+    rt = runtime(store, database, [LLMResponse("done")])
 
     def not_ready(sid):
         called.append(sid)
         raise RuntimeNotReady(CONTRACT["retry_after_ms"])
 
-    before = store.read("s")
+    before = read_fixture_state(store, "s")[1]
     tick(store, runtime=not_ready, project=lambda sid, c: project(store, sid, c))
-    assert store.read("s").records == before.records
+    assert read_fixture_state(store, "s")[1] == before
     assert store.peek_inbox("s")[0].consumed_seq is None
     assert not store.is_runnable("s")
     drive(store, "s", runtime=not_ready)  # Duplicate wake cannot bypass backoff.
@@ -131,9 +164,9 @@ def test_runtime_not_ready_preserves_input_and_existing_turn_then_succeeds(store
     rt.hook = stop
     with pytest.raises(RuntimeError, match="pause existing turn"):
         drive(store, "s", runtime=rt)
-    tid = read_state(store, "s")[0].active_turn_id
+    tid = read_fixture_state(store, "s")[0].active_turn_id
     drive(store, "s", runtime=not_ready)
-    assert read_state(store, "s")[0].active_turn_id == tid
+    assert read_fixture_state(store, "s")[0].active_turn_id == tid
     assert not finished(store, "s")
     clock(CONTRACT["retry_after_ms"])
     rt.hook = lambda *_: None
@@ -146,9 +179,9 @@ def test_runtime_not_ready_preserves_input_and_existing_turn_then_succeeds(store
 @pytest.mark.parametrize("takeover", [False, True])
 def test_lost_lease_backoff_preserves_original_outcome_and_new_owner(store, database, clock, monkeypatch, failure, takeover):
     start(store)
-    before = store.read("s")
+    before = read_fixture_state(store, "s")[1]
     error = RuntimeNotReady(250) if failure == "not_ready" else ValueError(f"original {failure} error")
-    rt = runtime(database, [])
+    rt = runtime(store, database, [])
     rows = []
 
     def fail(*_args):
@@ -174,17 +207,22 @@ def test_lost_lease_backoff_preserves_original_outcome_and_new_owner(store, data
             drive(store, "s", runtime=factory)
         assert caught.value is error
     assert store._one("SELECT * FROM sk_session WHERE session_id=%s", ("s",)) == rows[0]
-    assert store.read("s").records == before.records
+    assert read_fixture_state(store, "s")[1] == before
     assert store.peek_inbox("s")[0].consumed_seq is None
 
 
-@pytest.mark.parametrize("failure", ["factory", "not_ready", "renew", "drive"])
-def test_drive_backoff_database_failure_is_chained_to_original(store, database, clock, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["factory", "not_ready", "runtime_handoff", "drive"])
+def test_core_owner_backoff_database_failure_is_chained_to_original(store, database, clock, monkeypatch, failure):
     start(store)
+    before = read_fixture_state(store, "s")[1]
+    claimed = store.claim_runnable(owner="preclaimed", ttl_ms=10_000, limit=1)
+    assert len(claimed) == 1 and claimed[0].lease is not None
+    lease = claimed[0].lease
     error = RuntimeNotReady(250) if failure == "not_ready" else ValueError(f"original {failure} error")
-    rt = runtime(database, [])
+    rt = runtime(store, database, [])
     backoff_errors = []
-    query_rows = store._rows
+    backend = store._root
+    query_rows = backend._rows
 
     def broken_write(query, params=()):
         if query.startswith("UPDATE sk_session SET drive_retry_at_ms"):
@@ -203,56 +241,72 @@ def test_drive_backoff_database_failure_is_chained_to_original(store, database, 
             fail()
         return rt
 
-    monkeypatch.setattr(store, "_rows", broken_write)
+    monkeypatch.setattr(backend, "_rows", broken_write)
     if failure == "drive":
         monkeypatch.setattr(_Driver, "step", fail)
-    elif failure == "renew":
-        # Exercise the main-thread TTL handoff, after factory renewal has started.
-        renew = store.renew
-        caller = current_thread()
-
-        def fail_handoff(*args, **kwargs):
-            if current_thread() is caller:
-                fail()
-            return renew(*args, **kwargs)
-
-        monkeypatch.setattr(store, "renew", fail_handoff)
+    elif failure == "runtime_handoff":
+        # The factory renewal and close complete before ownership is transferred
+        # into the runtime scope; the Core owner still controls fencing/defer.
+        monkeypatch.setattr(_Scope, "adopt_confirmed", fail)
     with pytest.raises(type(error)) as caught:
-        drive(store, "s", runtime=factory)
+        drive(store, "s", runtime=factory, _lease=lease)
     assert caught.value is error
     assert len(backoff_errors) == 1 and error.__cause__ is backoff_errors[0]
     assert "missing_backoff_table" in str(error.__cause__)
+    assert store._one("SELECT lease_owner,lease_until_ms,drive_retry_at_ms FROM sk_session WHERE session_id=%s", ("s",)) == (
+        None,
+        None,
+        0,
+    )
+    assert read_fixture_state(store, "s")[1] == before
     assert store.peek_inbox("s")[0].consumed_seq is None
 
 
-def test_dispatch_backoff_lease_loss_keeps_only_original_failure(store, clock, monkeypatch):
+def test_legacy_dispatch_failure_is_only_surfaced_without_lease_mutation(store, monkeypatch):
     start(store)
     error = ValueError("original dispatch error")
-    defer = store.defer_drive
-    rows = []
-
-    def taken_over(lease, *, retry_after_ms):
-        clock(15000)
-        current = store.acquire("s", owner="new", ttl_ms=30000)
-        assert current is not None
-        defer(current, retry_after_ms=500)
-        rows.append(store._one("SELECT * FROM sk_session WHERE session_id=%s", ("s",)))
-        defer(lease, retry_after_ms=retry_after_ms)
+    before = store._one(
+        "SELECT lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms FROM sk_session WHERE session_id=%s",
+        ("s",),
+    )
 
     def dispatch(_sid):
         raise error
 
-    monkeypatch.setattr(store, "defer_drive", taken_over)
+    monkeypatch.setattr(store, "defer_drive", lambda *_args, **_kwargs: pytest.fail("legacy hint wrote drive backoff"))
+    monkeypatch.setattr(store, "release", lambda *_args, **_kwargs: pytest.fail("legacy hint released a lease"))
     with pytest.raises(ExceptionGroup) as caught:
         tick(store, dispatch=dispatch, project=lambda sid, c: project(store, sid, c))
     assert caught.value.exceptions == (error,)
-    assert store._one("SELECT * FROM sk_session WHERE session_id=%s", ("s",)) == rows[0]
+    assert (
+        store._one(
+            "SELECT lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms FROM sk_session WHERE session_id=%s",
+            ("s",),
+        )
+        == before
+    )
+    assert before[1:3] == (None, None) and before[3] == 0
+    assert store.is_runnable("s")
 
 
-@pytest.mark.parametrize("failure", ["dispatch", "project"])
-def test_tick_backoff_database_failure_is_reported_with_original(store, clock, monkeypatch, failure):
+def test_legacy_dispatch_failure_does_not_call_backoff(store, monkeypatch):
     start(store)
-    error = ValueError(f"original {failure} error")
+    error = ValueError("original dispatch error")
+    backoff_calls = []
+
+    def fail(*_args):
+        raise error
+
+    monkeypatch.setattr(store, "defer_drive", lambda *_args, **_kwargs: backoff_calls.append(True))
+    with pytest.raises(ExceptionGroup) as caught:
+        tick(store, dispatch=fail, project=lambda sid, c: project(store, sid, c))
+    assert caught.value.exceptions == (error,)
+    assert backoff_calls == []
+
+
+def test_projection_backoff_database_failure_is_reported_with_original(store, monkeypatch):
+    start(store)
+    error = ValueError("original project error")
 
     def fail(*_args):
         raise error
@@ -260,12 +314,12 @@ def test_tick_backoff_database_failure_is_reported_with_original(store, clock, m
     def broken_write(*_args, **_kwargs):
         store._rows("SELECT * FROM missing_backoff_table")
 
-    monkeypatch.setattr(store, "defer_drive" if failure == "dispatch" else "defer_projection", broken_write)
+    monkeypatch.setattr(store, "defer_projection", broken_write)
     with pytest.raises(ExceptionGroup) as caught:
         tick(
             store,
-            dispatch=fail if failure == "dispatch" else lambda _sid: None,
-            project=fail if failure == "project" else lambda sid, c: project(store, sid, c),
+            dispatch=lambda _sid: None,
+            project=fail,
         )
     assert len(caught.value.exceptions) == 2
     assert caught.value.exceptions[0] is error
@@ -311,7 +365,10 @@ def test_backoff_fences_expired_and_superseded_lease_preserves_schedule(store, c
 def test_projection_backoff_is_independent_of_drives_and_other_consumers(store, clock):
     start(store)
     with store._transaction():
-        store._rows("INSERT INTO sk_consumer(session_id,consumer) VALUES ('s','other')")
+        store._rows(
+            "INSERT INTO sk_consumer(tenant_id,session_id,consumer) VALUES (%s,%s,%s)",
+            (store.tenant_id, "s", "other"),
+        )
     store.defer_projection("s", "events", retry_after_ms=500)
     work = store.list_runnable()
     assert [(w.kind, w.consumer) for w in work] == [("drive", ""), ("project", "other")]
@@ -331,10 +388,11 @@ def test_dispatch_scan_returns_during_long_drive_without_factory_or_inline_drive
 
     start(store, "a")
     start(store, "b")
-    rt = runtime(database, [slow])
+    rt = runtime(store, database, [slow], sid="a")
 
     def worker():
         with open_store(database) as other:
+            other = wrap_fixture_store(other)
             drive(other, "a", runtime=lambda _: rt)
 
     def forbidden(_sid):
@@ -377,7 +435,7 @@ def test_failing_factory_is_not_called_for_duplicate_wakes_until_backoff_expires
 def test_scheduled_driver_failure_defers_then_finishes_without_self_wake(store, database, clock, monkeypatch):
     start(store)
     wakes = []
-    rt = runtime(database, [LLMResponse("done")], wake=wakes.append)
+    rt = runtime(store, database, [LLMResponse("done")], wake=wakes.append)
     step = _Driver.step
     failed = False
 

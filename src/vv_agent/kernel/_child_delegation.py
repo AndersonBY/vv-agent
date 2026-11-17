@@ -12,6 +12,7 @@ from ._budget_values import RunBudgetLimits
 from ._child_store import ChildSession
 from ._execution_values import AgentStatus, AgentTask, CompletionReason, SubAgentConfig, SubTaskOutcome, SubTaskRequest
 from ._records import CHILD_ADMISSION, Record, SessionSpec, copy_json, digest, validate
+from ._requirements import definition_requirements
 from ._store import SessionStore
 from ._token_count import _StopIterationTransport
 from ._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -245,15 +246,16 @@ def assemble(
                 child_task.agent_type = task.agent_type
             facts = yield ChildDefinition(child_task)
             definition = facts.definitions.definition(child_task, facts.bindings, facts.catalog)
-            facts = yield ChildDefinition(child_task)
             definition_digest = facts.definitions.definition_digest(child_task, facts.bindings, facts.catalog)
+            handler_version = yield ChildRead.HANDLER_VERSION
+            requirements = definition_requirements(definition, handler_version=handler_version)
             admission = {
                 "mode": mode,
                 "selector": selector,
                 "definition": definition,
                 "definition_digest": definition_digest,
                 "budget": ((yield ChildRead.BUDGET_LIMITS) or RunBudgetLimits()).to_dict(),
-                "handler_version": (yield ChildRead.HANDLER_VERSION),
+                "handler_version": handler_version,
                 "sub_config": sub.to_dict() if sub else None,
                 "exclude_files_pattern": request.exclude_files_pattern,
                 "handoff_count": count + (mode == "handoff"),
@@ -264,7 +266,12 @@ def assemble(
             result.append(
                 ChildSession(
                     SessionSpec(
-                        sid, created._payload["principal"], (yield ChildRead.WORKSPACE), attributes={"child_admission": admission}
+                        sid,
+                        created._payload["principal"],
+                        (yield ChildRead.WORKSPACE),
+                        attributes={"child_admission": admission},
+                        feature_level=2,
+                        bootstrap=requirements,
                     ),
                     child_task.user_prompt,
                     background=background,

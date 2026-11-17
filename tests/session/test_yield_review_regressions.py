@@ -12,13 +12,20 @@ from vv_agent.session.store import LeaseLost
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 
 from .conftest import open_store
+from .helpers import principal, push_fixture_input, read_fixture_state, wrap_fixture_store
 from .test_batch_children import complete, deliver, rows
-from .test_recovery_matrix import force_expire, runtime, start
+from .test_children import fixture_runtime
+from .test_recovery_matrix import force_expire, start
 from .test_yieldable_waits import YieldProvider, provider_runtime, steer, waiting_runtime
 
 
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
 def yielded_rows(store):
-    return [r for r in rows(store, kind="op_completed") if "yielded_by" in r.record.payload]
+    return [r for r in read_fixture_state(store, "s")[1] if r.record.kind == "op_completed" and "yielded_by" in r.record.payload]
 
 
 @pytest.mark.sqlite_file
@@ -29,12 +36,17 @@ def test_watermark_retry_impure_callback_uses_only_committed_result(store, datab
         calls.append(len(calls) + 1)
         if len(calls) == 1:
             # Concurrent new inbox input after the captured watermark, before commit.
-            with open_store(database) as other, other.atomic() as tx:
-                tx.push("s", InboxItem("extra-steer", "steer", {"content": "another steer"}, plan.turn_id, 0))
+            with open_store(database) as raw_other:
+                other = wrap_fixture_store(raw_other)
+                push_fixture_input(
+                    other,
+                    "s",
+                    InboxItem("extra-steer", "steer", {"content": "another steer"}, plan.turn_id, 0),
+                )
         return ToolExecutionResult(plan.payload["request"]["id"], f"render-{len(calls)}")
 
     start(store)
-    rt, observed = waiting_runtime(database, callback=render)
+    rt, observed = waiting_runtime(store, database, callback=render)
     drive(store, "s", runtime=rt)
     steer(store)
     drive(store, "s", runtime=rt)
@@ -66,7 +78,7 @@ def test_lost_lease_during_renderer_fences_all_yield_records(store, database):
         return ToolExecutionResult(plan.payload["request"]["id"], "old writer")
 
     start(store)
-    rt, _ = waiting_runtime(database, callback=render)
+    rt, _ = waiting_runtime(store, database, callback=render)
     drive(store, "s", runtime=rt)
     steer(store)
     with pytest.raises(LeaseLost):
@@ -75,7 +87,7 @@ def test_lost_lease_during_renderer_fences_all_yield_records(store, database):
     assert "steer" not in read_state(store, "s")[0].applied_inputs
     assert any(i.item.input_id == "steer" for i in store.peek_inbox("s"))
     store.release(replacement[0])
-    restored, observed = waiting_runtime(database, declared=False)
+    restored, observed = waiting_runtime(store, database, declared=False)
     restored.llm.steps.pop(0)
     drive(store, "s", runtime=restored)
     assert len(yielded_rows(store)) == 1 and len(observed) == 1
@@ -85,13 +97,13 @@ def test_lost_lease_during_renderer_fences_all_yield_records(store, database):
 @pytest.mark.sqlite_file
 def test_undeclared_same_watermark_keeps_original_order(store, database):
     start(store)
-    rt, _ = waiting_runtime(database, declared=False)
+    rt, _ = waiting_runtime(store, database, declared=False)
     drive(store, "s", runtime=rt)
     complete(store, database, "yield-child-0")
     steer(store)
     deliver(store, "yield-child-0")
     drive(store, "s", runtime=rt)
-    applied = [r.record.payload["input"]["kind"] for r in rows(store, kind="input_applied")]
+    applied = [r.record.payload["input"]["kind"] for r in read_fixture_state(store, "s")[1] if r.record.kind == "input_applied"]
     assert applied.index("child_result") < applied.index("steer")
     assert not yielded_rows(store)
     print("UNDECLARED targeted steer remained deferred; natural child completion first")
@@ -100,7 +112,7 @@ def test_undeclared_same_watermark_keeps_original_order(store, database):
 @pytest.mark.sqlite_file
 def test_duplicate_yielded_child_delivery_and_cold_replay(store, database):
     start(store)
-    rt, _ = waiting_runtime(database, count=2)
+    rt, _ = waiting_runtime(store, database, count=2)
     drive(store, "s", runtime=rt)
     steer(store)
     drive(store, "s", runtime=rt)
@@ -109,11 +121,19 @@ def test_duplicate_yielded_child_delivery_and_cold_replay(store, database):
     for sid in ["yield-child-0", "yield-child-1"]:
         deliver(store, sid)
         deliver(store, sid)
-    original = [i.item for i in store.peek_inbox("s") if i.item.kind == "child_result"]
     drive(store, "s", runtime=rt)
-    with store.atomic() as tx:
-        for item in original:
-            tx.push("s", replace(item, input_id=item.input_id + "/duplicate"))
+    original = [
+        InboxItem(**r.record.payload["input"])
+        for r in read_fixture_state(store, "s")[1]
+        if r.record.kind == "input_applied" and r.record.payload["input"]["kind"] == "child_result"
+    ]
+    for item in original:
+        push_fixture_input(
+            store,
+            "s",
+            replace(item, input_id=item.input_id + "/duplicate"),
+            preserve_actor=True,
+        )
     drive(store, "s", runtime=rt)
     state, records, _ = read_state(store, "s")
     cold = fold(
@@ -124,9 +144,16 @@ def test_duplicate_yielded_child_delivery_and_cold_replay(store, database):
         a.yielded for op in cold.operations.values() for a in op.attempts.values()
     ]
     assert len(yielded_rows(store)) == 1
-    notices = [r for r in rows(store, kind="input_applied") if r.record.payload["reason"] == "background child notification"]
+    notices = [
+        r
+        for r in read_fixture_state(store, "s")[1]
+        if r.record.kind == "input_applied" and r.record.payload["reason"] == "background child notification"
+    ]
     assert len(notices) == 2
-    assert all(cold.applied_inputs[i.input_id + "/duplicate"].payload["disposition"] == "noop" for i in original)
+    duplicate_dispositions = {
+        i.input_id + "/duplicate": cold.applied_inputs[i.input_id + "/duplicate"].payload["disposition"] for i in original
+    }
+    assert all(disposition == "noop" for disposition in duplicate_dispositions.values()), duplicate_dispositions
     print("CHILD_DEDUP exactly 2 notifications, 1 tool result; cold Attempt.yielded matches")
 
 
@@ -137,7 +164,7 @@ def test_invalid_structured_renderer_should_fall_back(store, database, kind, bod
         return ToolExecutionResult(plan.payload["request"]["id"], body, metadata={"output_type": kind})
 
     start(store)
-    rt, _observed = waiting_runtime(database, callback=render)
+    rt, _observed = waiting_runtime(store, database, callback=render)
     drive(store, "s", runtime=rt)
     steer(store)
     drive(store, "s", runtime=rt)
@@ -145,7 +172,7 @@ def test_invalid_structured_renderer_should_fall_back(store, database, kind, bod
     print("STRUCTURED_RENDERER", result)
     from vv_agent.session.providers import Definitive, ProviderResultInvalid, validate_provider_result
 
-    state = read_state(store, "s")[0]
+    state = read_fixture_state(store, "s")[0]
     receipt = yielded_rows(store)[0]
     plan = state.operations[receipt.record.operation_id].attempts[1].execution_plan
     with pytest.raises(ProviderResultInvalid):
@@ -172,7 +199,7 @@ def test_pure_long_renderer_retry_should_retain_the_committed_body(store, databa
         return ToolExecutionResult(plan.payload["request"]["id"], body)
 
     start(store)
-    rt, _observed = waiting_runtime(database, count=2, callback=render)
+    rt, _observed = waiting_runtime(store, database, count=2, callback=render)
     rt.config = replace(rt.config, workspace=tmp_path, workspace_backend=LocalWorkspaceBackend(tmp_path))
     # Runtime initialized its workspace backend before the test config replacement.
     rt.workspace_backend = rt.config.workspace_backend
@@ -192,8 +219,10 @@ def test_pure_long_renderer_retry_should_retain_the_committed_body(store, databa
         ):
             injected.append(1)
             # First artifact has already been prepared; child arrives before guarded append.
-            with open_store(database) as other, other.atomic() as tx:
-                child_delivery(other, tx, "yield-child-0")
+            with open_store(database) as raw_other:
+                other = wrap_fixture_store(raw_other)
+                with other.atomic() as tx:
+                    child_delivery(other, tx, "yield-child-0")
         return result
 
     monkeypatch.setattr(_recovery_phase, "prepare_tool_resources", prepared_and_arrival)
@@ -229,7 +258,8 @@ def test_retrying_unknown_blocks_yield_until_definitive_result(store, database):
         def submit(self, plan, *, context):
             self.submissions += 1
             if self.submissions == 1:
-                with open_store(database) as other:
+                with open_store(database) as raw_other:
+                    other = wrap_fixture_store(raw_other)
                     steer(other)
                 return Unknown("first attempt unconfirmed")
             assert not yielded_rows(store)
@@ -237,7 +267,7 @@ def test_retrying_unknown_blocks_yield_until_definitive_result(store, database):
             return super().submit(plan, context=context)
 
     start(store)
-    rt, observed = waiting_runtime(database)
+    rt, observed = waiting_runtime(store, database)
     rt.agent.tools.append(
         FunctionTool(
             "retry_work",
@@ -267,7 +297,7 @@ def test_after_commit_lease_replacement_reuses_yielded_receipt(store, database):
         return ToolExecutionResult(plan.payload["request"]["id"], "yielded once")
 
     start(store)
-    rt, _ = waiting_runtime(database, callback=render)
+    rt, _ = waiting_runtime(store, database, callback=render)
     drive(store, "s", runtime=rt)
     steer(store)
     replacement_observed = []
@@ -277,9 +307,10 @@ def test_after_commit_lease_replacement_reuses_yielded_receipt(store, database):
         if point == "after_commit" and record and record.payload.get("yielded_by") and not switched:
             switched.append(1)
             force_expire(database)
-            resumed, observed = waiting_runtime(database, declared=False, callback=render)
+            resumed, observed = waiting_runtime(store, database, declared=False, callback=render)
             resumed.llm.steps.pop(0)
-            with open_store(database) as other:
+            with open_store(database) as raw_other:
+                other = wrap_fixture_store(raw_other)
                 drive(other, "s", runtime=resumed)
             replacement_observed.extend(observed)
 
@@ -301,14 +332,15 @@ def test_callback_failure_across_retry_matches_final_log_and_model(store, databa
     def render(plan, handles, reason):
         calls.append(1)
         if len(calls) == 1:
-            with open_store(database) as other, other.atomic() as tx:
-                tx.push("s", InboxItem("extra", "steer", {"content": "extra"}, plan.turn_id, 0))
+            with open_store(database) as raw_other:
+                other = wrap_fixture_store(raw_other)
+                push_fixture_input(other, "s", InboxItem("extra", "steer", {"content": "extra"}, plan.turn_id, 0))
         if len(calls) == raises_on:
             raise ValueError("private renderer exception")
         return ToolExecutionResult(plan.payload["request"]["id"], "second choice")
 
     start(store)
-    rt, observed = waiting_runtime(database, callback=render)
+    rt, observed = waiting_runtime(store, database, callback=render)
     drive(store, "s", runtime=rt)
     steer(store)
     drive(store, "s", runtime=rt)
@@ -318,7 +350,7 @@ def test_callback_failure_across_retry_matches_final_log_and_model(store, databa
     assert result["content"].startswith(expected)
     assert result.get("metadata", {}).get("yield_callback_failed", False) == (raises_on == 2)
     assert any(m.role == "tool" and m.content == result["content"] for m in observed[0].messages)
-    assert "private renderer exception" not in str([r.record.payload for r in rows(store)])
+    assert "private renderer exception" not in str([r.record.payload for r in read_fixture_state(store, "s")[1]])
     print("CALLBACK_FAILURE_RETRY", {"raises_on": raises_on, "retained_default": raises_on == 2, "model_equals_log": True})
 
 
@@ -331,7 +363,7 @@ def test_yielded_child_notification_deferred_until_next_batch_boundary(store, da
         return "provider owns work"
 
     start(store)
-    rt, _observed = waiting_runtime(database)
+    rt, _observed = waiting_runtime(store, database)
     provider = YieldProvider(declared=False, callback=None)
     rt.agent.tools.append(parent_work)
     rt.providers["parent_work"] = provider
@@ -350,30 +382,30 @@ def test_yielded_child_notification_deferred_until_next_batch_boundary(store, da
     deliver(store, "yield-child-0")
     drive(store, "s", runtime=rt)
     assert any(i.item.kind == "child_result" for i in store.peek_inbox("s"))
-    assert not any(r.record.payload.get("reason") == "background child notification" for r in rows(store))
+    assert not any(r.record.payload.get("reason") == "background child notification" for r in read_fixture_state(store, "s")[1])
     h = provider.handle
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            InboxItem(
-                "new-work-done",
-                "provider_result",
-                {
-                    "operation_id": h["operation_id"],
-                    "attempt": h["attempt"],
-                    "request_digest": h["request_digest"],
-                    "provider_binding": h["provider"],
-                    "result": ToolExecutionResult("new-work", "done").to_dict(),
-                    "usage": {},
-                    "evidence": [h["evidence"]],
-                },
-                "s/turn/initial",
-                0,
-            ),
-        )
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "new-work-done",
+            "provider_result",
+            {
+                "operation_id": h["operation_id"],
+                "attempt": h["attempt"],
+                "request_digest": h["request_digest"],
+                "provider_binding": h["provider"],
+                "result": ToolExecutionResult("new-work", "done").to_dict(),
+                "usage": {},
+                "evidence": [h["evidence"]],
+            },
+            "s/turn/initial",
+            0,
+        ),
+    )
     drive(store, "s", runtime=rt)
     assert len(yielded_rows(store)) == 1
-    notices = [r for r in rows(store) if r.record.payload.get("reason") == "background child notification"]
+    notices = [r for r in read_fixture_state(store, "s")[1] if r.record.payload.get("reason") == "background child notification"]
     assert len(notices) == 1
     assert not any(i.item.kind == "child_result" for i in store.peek_inbox("s"))
     print("BACKGROUND_BOUNDARY child remained pending in next provider batch, then exactly 1 notification")
@@ -388,17 +420,17 @@ def test_callback_receives_verified_result_while_sibling_waits_for_user(store, d
         return ToolExecutionResult(plan.payload["request"]["id"], "Observed children")
 
     start(store)
-    rt, observed = waiting_runtime(database, count=2, callback=render)
+    rt, observed = waiting_runtime(store, database, count=2, callback=render)
     drive(store, "s", runtime=rt)
     complete(store, database, "yield-child-0")
     deliver(store, "yield-child-0")
-    child_rt = runtime(database, [LLMResponse("Need a human answer")])
+    child_rt = fixture_runtime(store, database, "yield-child-1", [LLMResponse("Need a human answer")])
     child_rt.config.no_tool_policy = "wait_user"
     drive(store, "yield-child-1", runtime=child_rt)
     assert read_state(store, "yield-child-1")[0].turns["yield-child-1/turn/start"].wait
     steer(store)
     drive(store, "s", runtime=rt)
-    terminal = rows(store, "yield-child-0", "turn_ended")[0]
+    terminal = next(r for r in read_fixture_state(store, "yield-child-0")[1] if r.record.kind == "turn_ended")
     assert captured[0][0]["status"] == "completed"
     assert captured[0][0]["result"] == terminal.record.payload["result"]
     assert captured[0][0]["terminal_seq"] == terminal.seq
@@ -425,7 +457,7 @@ def test_recovered_acceptance_preserves_original_declaration(store, database, de
         return canonical_json_bytes(item.payload) in accepted_bytes
 
     monkeypatch.setattr(provider, "authenticate", authenticate)
-    rt, observed = provider_runtime(database, provider)
+    rt, observed = provider_runtime(store, database, provider)
     start(store)
 
     def cut(point, record):
@@ -436,7 +468,7 @@ def test_recovered_acceptance_preserves_original_declaration(store, database, de
     with pytest.raises(AcceptanceCut):
         drive(store, "s", runtime=rt)
     rt.hook = lambda *_: None
-    state = read_state(store, "s")[0]
+    state = read_fixture_state(store, "s")[0]
     op = next(op for op in state.operations.values() if op.kind == "tool")
     plan = op.attempts[1].execution_plan
     assert op.attempts[1].state == "started"
@@ -445,8 +477,7 @@ def test_recovered_acceptance_preserves_original_declaration(store, database, de
     if declared:
         payload["yield_on_steer"] = True
     accepted_bytes.append(canonical_json_bytes(payload))
-    with store.atomic() as tx:
-        tx.push("s", InboxItem("recovered-acceptance", "provider_evidence", payload, plan.turn_id, 0))
+    push_fixture_input(store, "s", InboxItem("recovered-acceptance", "provider_evidence", payload, plan.turn_id, 0))
     drive(store, "s", runtime=rt)
     park = rows(store, kind="op_parked")[-1].record
     assert park.payload.get("yield_on_steer", False) is declared
@@ -457,11 +488,10 @@ def test_recovered_acceptance_preserves_original_declaration(store, database, de
     else:
         conflict["yield_on_steer"] = True
     accepted_bytes.append(canonical_json_bytes(conflict))
-    with store.atomic() as tx:
-        tx.push("s", InboxItem("repeat", "provider_evidence", payload, plan.turn_id, 0))
-        tx.push("s", InboxItem("conflict", "provider_evidence", conflict, plan.turn_id, 0))
+    push_fixture_input(store, "s", InboxItem("repeat", "provider_evidence", payload, plan.turn_id, 0))
+    push_fixture_input(store, "s", InboxItem("conflict", "provider_evidence", conflict, plan.turn_id, 0))
     drive(store, "s", runtime=rt)
-    state = read_state(store, "s")[0]
+    state = read_fixture_state(store, "s")[0]
     assert state.applied_inputs["repeat"].payload["disposition"] == "noop"
     assert state.applied_inputs["conflict"].payload["disposition"] == "rejected"
     assert state.applied_inputs["conflict"].payload["reason"] == "acceptance declaration conflict"
@@ -478,7 +508,7 @@ def test_query_cannot_replace_acceptance_declaration(store, database, declared, 
 
     start(store)
     provider = YieldProvider(declared=declared)
-    rt, _ = provider_runtime(database, provider)
+    rt, _ = provider_runtime(store, database, provider)
     rt.poll_ms = 1
     drive(store, "s", runtime=rt)
     monkeypatch.setattr(provider, "query", lambda handle: Accepted(handle, yield_on_steer=not declared))
@@ -491,13 +521,22 @@ def test_query_cannot_replace_acceptance_declaration(store, database, declared, 
 
 
 def test_shared_tool_result_candidates_have_immutable_content_identity():
+    from types import SimpleNamespace
+
     from vv_agent.session.tool_results import prepare_tool_resources
 
     from .test_tool_result_artifacts import ArchiveWorkspace, produce
 
     backend = ArchiveWorkspace()
     plan, receipt, _ = produce("A" * 16000, backend=backend)
-    first = receipt.payload["result"]
+    dependency = plan._payload["dependencies"][0]
+    session_id, remainder = dependency.split("/turn/", 1)
+    plan = SimpleNamespace(
+        **vars(plan),
+        session_id=session_id,
+        turn_id=f"{session_id}/turn/{remainder.rsplit('/model/', 1)[0]}",
+    )
+    first = receipt._payload["result"]
     second = prepare_tool_resources(plan, ToolExecutionResult("call-s1", "B" * 16000).to_dict(), backend)
     assert first["artifact"]["path"] != second["artifact"]["path"]
     assert backend.read_text(first["artifact"]["path"]) == "A" * 16000
@@ -508,13 +547,14 @@ def test_shared_tool_result_candidates_have_immutable_content_identity():
 def long_yield_candidate_worker(database, workspace, pipe):
     from vv_agent.workspace.local import LocalWorkspaceBackend
 
-    with open_store(database) as store:
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store)
 
         def render(plan, handles, reason):
             body = "|".join(h["status"] for h in handles) + "\n" + "x" * 16000
             return ToolExecutionResult(plan.payload["request"]["id"], body)
 
-        rt, _ = waiting_runtime(database, count=2, callback=render)
+        rt, _ = waiting_runtime(store, database, count=2, callback=render)
         rt.llm.steps.pop(0)
         rt.config = replace(rt.config, workspace=workspace, workspace_backend=LocalWorkspaceBackend(workspace))
         rt.workspace_backend = rt.config.workspace_backend
@@ -537,7 +577,7 @@ def test_process_death_before_yield_commit_can_select_new_body(store, database, 
     from vv_agent.workspace.local import LocalWorkspaceBackend
 
     start(store)
-    rt, _ = waiting_runtime(database, count=2)
+    rt, _ = waiting_runtime(store, database, count=2)
     drive(store, "s", runtime=rt)
     steer(store)
     ctx = multiprocessing.get_context("spawn")
@@ -567,7 +607,7 @@ def test_process_death_before_yield_commit_can_select_new_body(store, database, 
             calls.append(body)
             return ToolExecutionResult(plan.payload["request"]["id"], body)
 
-        resumed, observed = waiting_runtime(database, count=2, callback=render)
+        resumed, observed = waiting_runtime(store, database, count=2, callback=render)
         resumed.llm.steps.pop(0)
         resumed.config = replace(resumed.config, workspace=tmp_path, workspace_backend=LocalWorkspaceBackend(tmp_path))
         resumed.workspace_backend = resumed.config.workspace_backend
@@ -593,9 +633,10 @@ def test_process_death_before_yield_commit_can_select_new_body(store, database, 
 
 
 def acceptance_crash_worker(database, declared, pipe):
-    with open_store(database) as store:
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store)
         provider = YieldProvider(declared=declared)
-        rt, _ = provider_runtime(database, provider)
+        rt, _ = provider_runtime(store, database, provider)
 
         def hook(point, record):
             if point == "before_commit" and record and record.kind == "op_parked":
@@ -636,10 +677,9 @@ def test_process_death_after_acceptance_before_park_restores_declaration(store, 
             payload["yield_on_steer"] = True
         auth_bytes = canonical_json_bytes(payload)
         monkeypatch.setattr(provider, "authenticate", lambda item, plan: canonical_json_bytes(item.payload) == auth_bytes)
-        rt, observed = provider_runtime(database, provider)
+        rt, observed = provider_runtime(store, database, provider)
         rt.llm.steps.pop(0)
-        with store.atomic() as tx:
-            tx.push("s", InboxItem("recovered", "provider_evidence", payload, "s/turn/initial", 0))
+        push_fixture_input(store, "s", InboxItem("recovered", "provider_evidence", payload, "s/turn/initial", 0))
         drive(store, "s", runtime=rt)
         assert rows(store, kind="op_parked")[-1].record.payload.get("yield_on_steer", False) is declared
         steer(store)
@@ -662,7 +702,7 @@ def test_acceptance_authentication_binds_declaration_bytes(store, database, decl
 
     start(store)
     provider = YieldProvider(declared=declared)
-    rt, _ = provider_runtime(database, provider)
+    rt, _ = provider_runtime(store, database, provider)
 
     def cut(point, record):
         if point == "before_commit" and record and record.kind == "op_parked":
@@ -684,15 +724,22 @@ def test_acceptance_authentication_binds_declaration_bytes(store, database, decl
         altered.pop("yield_on_steer")
     else:
         altered["yield_on_steer"] = True
-    trusted = InboxItem("original", "provider_evidence", payload, "s/turn/initial", 0)
+    trusted = InboxItem(
+        "original",
+        "provider_evidence",
+        payload,
+        "s/turn/initial",
+        0,
+        actor=principal("fixture/provider", "service"),
+    )
     untrusted = replace(trusted, input_id="altered", payload=altered)
-    assert replace(trusted, payload=altered).encode() != trusted.encode()
     assert digest(altered) != digest(payload)
-    with store.atomic() as tx:
-        tx.push("s", untrusted)
-        tx.push("s", trusted)
+    push_fixture_input(store, "s", untrusted)
+    push_fixture_input(store, "s", trusted)
+    inbox = {i.item.input_id: i.item for i in store.peek_inbox("s")}
+    assert inbox["altered"].encode() != inbox["original"].encode()
     drive(store, "s", runtime=rt)
-    state = read_state(store, "s")[0]
+    state = read_fixture_state(store, "s")[0]
     assert state.applied_inputs["altered"].payload["disposition"] == "rejected"
     assert state.applied_inputs["altered"].payload["reason"] == "untrusted or mismatched provider evidence"
     assert state.applied_inputs["original"].payload["disposition"] == "applied"
@@ -722,13 +769,13 @@ def test_unselected_candidate_not_projected_and_same_body_reuses(store, database
     assert len(candidates) == 2
     backend, plan, raw, selected = candidates[1]
     orphan = candidates[0][3]["artifact"]
-    state, retained, _ = read_state(store, "s")
-    completion = next(r for r in retained if r.record.kind == "op_completed" and "yielded_by" in r.record.payload)
+    state, hydrated, _ = read_fixture_state(store, "s")
+    completion = next(r for r in hydrated if r.record.kind == "op_completed" and "yielded_by" in r.record.payload)
     assert completion.record.payload["result"] == selected
     descriptor = project_tool_result(completion)
-    model_context = [m.to_dict() for m in project_context(retained, state)]
+    model_context = [m.to_dict() for m in project_context(hydrated, state)]
     projections = canonical_json_bytes(
-        {"records": [r.record.to_dict() for r in retained], "context": model_context, "descriptor": descriptor}
+        {"records": [r.record.to_dict() for r in hydrated], "context": model_context, "descriptor": descriptor}
     )
     assert orphan["path"].encode() not in projections
     assert PurePosixPath(orphan["path"]).name.encode() not in projections

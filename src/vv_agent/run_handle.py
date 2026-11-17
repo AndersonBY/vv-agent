@@ -1,24 +1,23 @@
 from __future__ import annotations
 
-import warnings
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import suppress
-from dataclasses import dataclass, replace
-from threading import Condition, Thread
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from dataclasses import dataclass
+from queue import Empty, SimpleQueue
+from threading import Event
+from time import monotonic
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import uuid4
+from weakref import ReferenceType, ref
 
 from vv_agent.events import RunEvent
 from vv_agent.result import RunResult
-from vv_agent.session.children import cancel_children, child_delivery, child_handles
-from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.records import InboxItem
-from vv_agent.session.store import Conflict, LeaseLost, LeaseRetryExhausted
-from vv_agent.tracing import trace_processors
 
 if TYPE_CHECKING:
     from vv_agent.session.runtime import Runtime
-    from vv_agent.session.surfaces import SessionDriver
+    from vv_agent.session.store import SessionStore
+    from vv_agent.session.surfaces import SessionDriver, _ProjectionRuntime
 
 RunHandleStatus = Literal[
     "pending",
@@ -43,6 +42,13 @@ class RunHandleState:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamEvent:
+    watermark: int
+    ordinal: int
+    event: RunEvent
+
+
 class RunHandleController(Protocol):
     def steer(self, message: str) -> None: ...
 
@@ -50,270 +56,170 @@ class RunHandleController(Protocol):
 
 
 class RunHandle:
-    def __init__(self, kernel: SessionDriver, sid: str, tid: str, runtime: Runtime, consumer: str | None) -> None:
-        self.kernel, self.session_id, self.run_id, self.runtime, self.consumer = kernel, sid, tid, runtime, consumer
-        self._condition = Condition()
-        self._events: list[RunEvent] = []
-        self._observer = runtime.config.stream
-        runtime.config = replace(runtime.config, stream=self._emit)
-        self._done = False
-        self._cancel_bound = False
-        self._error: BaseException | None = None
-        self._deliver_to_parent = False
-        self._background_child: tuple[RunHandle, dict[str, Any]] | None = None
-        self._wait_for_lease = True
-        self._lease_acquired = False
-        self._lease_unavailable = False
-        self._lease_unavailable_session: str | None = None
-        self._lease_retry_allowed = True
-        self._thread = Thread(target=self._run, name="session-surface-driver")
-        original_hook = runtime.hook
+    """An independent cursor over one durable session turn.
 
-        def hook(point, record):
-            if point in {"after_commit", "after_drive"}:
-                self._lease_acquired = True
-            original_hook(point, record)
-            if point == "after_commit":
-                self._bind_cancel()
-                self._publish()
-            if point in {"after_commit", "after_drive", "after_input"}:
-                self._schedule_background()
+    The handle submits inputs and reads fresh client-store snapshots.  It never
+    owns a drive store, a drive thread, or a worker-visible execution state.
+    Provider deltas are retained as a temporary notification stream because
+    they are deliberately absent from the durable ledger.
+    """
 
-        runtime.hook = hook
+    def __init__(
+        self,
+        kernel: SessionDriver,
+        sid: str,
+        tid: str,
+        runtime: Runtime | None,
+        consumer: str | None,
+        *,
+        handler_version: str | None = None,
+    ) -> None:
+        self.kernel, self.session_id, self.run_id, self.consumer = kernel, sid, tid, consumer
+        self._notify = Event()
+        self._stream_mailboxes: list[ReferenceType[SimpleQueue[_StreamEvent]]] = []
+        self._stream_ordinal = 0
+        self._pending_submission = None
+        self._runtime_reservation: object | None = None
+        self._owns_driver = False
+        if runtime is not None:
+            kernel._register_runtime(sid, runtime, tid=tid, armed=True, handler_version=handler_version)
 
-    def _bind_cancel(self) -> None:
-        token = self.runtime.config.cancellation_token
-        if self._cancel_bound or token is None:
-            return
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        if self.run_id not in state.turns:
-            return
-        self._cancel_bound = True
-
-        def cancel() -> None:
-            self.cancel()
-
-        token.on_cancel(cancel)
+    @property
+    def runtime(self) -> Runtime | _ProjectionRuntime:
+        return self.kernel._runtime_view(self.session_id)
 
     def start(self) -> None:
-        self._thread.start()
+        """Arm, submit any held input, then wake the sole LocalWorker owner."""
+
+        self.kernel._arm_handle(self)
 
     def join(self, timeout: float | None = None) -> None:
-        if self._thread.ident is not None:
-            self._thread.join(timeout)
+        deadline = None if timeout is None else monotonic() + timeout
+        while not self.done():
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                return
+            self._notify.wait(0.05 if remaining is None else min(0.05, remaining))
+            self._notify.clear()
 
-    def _emit(self, event: RunEvent) -> None:
-        if self.runtime.config.event_store:
-            try:
-                self.runtime.config.event_store.append(event)
-            except Exception as exc:
-                if self.runtime.config.event_store_fail_closed:
-                    raise
-                warnings.warn(f"Run event store append failed: {exc}", RuntimeWarning, stacklevel=2)
-        if self._observer:
-            with suppress(Exception):
-                self._observer(event)
-        with self._condition:
-            self._events.append(event)
-            self._condition.notify_all()
+    def close(self) -> None:
+        """Release an explicitly owned Runner/SessionDriver lifecycle."""
 
-    def _publish(self) -> None:
-        if self.consumer is None:
+        self.notify()
+        self.kernel._abandon_handle(self)
+        if self._owns_driver:
+            self.kernel.close()
+
+    def __enter__(self) -> RunHandle:
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.close()
+
+    def _add_stream_event(self, event: RunEvent, watermark: int) -> None:
+        if event.run_id != self.run_id or event.session_id != self.session_id:
             return
+        self._stream_ordinal += 1
+        entry = _StreamEvent(watermark, self._stream_ordinal, event)
+        for mailbox_ref in tuple(self._stream_mailboxes):
+            mailbox = mailbox_ref()
+            if mailbox is not None:
+                mailbox.put(entry)
+        self._notify.set()
 
-        events = SessionRunEventStore(self.kernel.store, self.session_id, self.consumer)
-        while events.consume(self._emit):
-            pass
-        from vv_agent.session.tracing import deliver_spans
+    def notify(self) -> None:
+        self._notify.set()
 
-        processors = trace_processors(self.runtime.config)
-        if processors:
-            deliver_spans(self.kernel.store, self.session_id, processors)
+    def _durable_event_page(
+        self,
+        after_seq: int,
+        *,
+        store: SessionStore | None = None,
+    ) -> tuple[str, list[RunEvent], int, bool, bool, BaseException | None]:
+        return self.kernel._handle_event_page(
+            self.session_id,
+            self.run_id,
+            after_seq=after_seq,
+            store=store,
+        )
 
-    def _schedule_background(self) -> None:
-        parent_state, _, _ = self.kernel.store.read_state(self.session_id)
-        for operation in parent_state.operations.values():
-            for attempt in operation.attempts.values():
-                if attempt.child_handle is None:
-                    continue
-                for child in child_handles(attempt.child_handle):
-                    self._schedule_child(child)
+    def events(self) -> Generator[RunEvent, None, None]:
+        """Replay durable events plus the independent transient delta stream."""
 
-    def _schedule_child(self, child) -> None:
-        sid = child["session_id"]
-        with self.kernel._background_lock:
-            previous = self.kernel._background.get(sid)
-            if previous is not None and not previous.done():
-                return
-            state, _, _ = self.kernel.store.read_state(sid)
-            pending = self.kernel.store.peek_inbox(sid)
-            if not child["background"] and not (
-                state.active_turn_id is None and state.turns and any(item.item.kind == "follow_up" for item in pending)
-            ):
-                return
-            if state.turns and state.active_turn_id is None and not pending:
-                return
-            handle = RunHandle(self.kernel, sid, child["turn_id"], self.runtime.child_runtime(self.kernel.store, sid), None)
-            handle._deliver_to_parent = True
-            handle._background_child = self, child
-            self.kernel._background[sid] = handle
-            self.kernel.handles.append(handle)
-            handle.start()
+        mailbox: SimpleQueue[_StreamEvent] = SimpleQueue()
+        mailbox_ref = ref(mailbox)
+        self._stream_mailboxes = [value for value in self._stream_mailboxes if value() is not None]
+        self._stream_mailboxes.append(mailbox_ref)
+        return self._iter_events(mailbox, mailbox_ref)
 
-    def _drive_tree(self, sid: str, runtime: Runtime, tid: str) -> None:
-        from vv_agent.session.kernel import drive
-
-        losses = 0
-        while True:
-            try:
-                acquired = drive(self.kernel.store, sid, runtime=runtime, _one_turn=True, _wait_for_lease=self._wait_for_lease)
-                if not acquired:
-                    self._lease_unavailable = True
-                    self._lease_unavailable_session = sid
-                    return
-                if sid == self.session_id:
-                    self._lease_acquired = True
-            except LeaseLost as exc:
-                state = None
-                with suppress(LeaseLost):
-                    state, _, _ = self.kernel.store.read_state(sid)
-                # A terminal receipt already committed by this drive must not admit another turn.
-                if state is None or tid not in state.turns or not state.turns[tid].ended:
-                    losses += 1
-                    if losses >= runtime.lease_retry_attempts:
-                        raise LeaseRetryExhausted(sid, tid, losses) from exc
-                    delay = min(runtime.lease_retry_cap_seconds, runtime.lease_retry_base_seconds * 2 ** min(losses - 1, 30))
-                    runtime.lease_retry_sleep(runtime.lease_retry_jitter(delay / 2, delay))
-                    continue
-            state, _, _ = self.kernel.store.read_state(sid)
-            if tid in state.turns and state.turns[tid].ended:
-                # Parent closure enqueues descendant cancellation atomically. Drain those
-                # controls even though terminal parents no longer have active child waits.
-                for operation in state.operations.values():
-                    if operation.turn_id != tid:
-                        continue
-                    for attempt in operation.attempts.values():
-                        if attempt.child_handle is None:
-                            continue
-                        for child in child_handles(attempt.child_handle):
-                            child_id = child["session_id"]
-                            if any(i.item.kind == "control" for i in self.kernel.store.peek_inbox(child_id)):
-                                self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
-                                self._deliver_child(child_id, runtime)
-            completed = False
-            for (oid, _), wait in state.waits.items():
-                handle = wait["handle"]
-                if state.operations[oid].turn_id != state.active_turn_id or handle["kind"] != "child" or handle["background"]:
-                    continue
-                for child in child_handles(handle):
-                    child_id = child["session_id"]
-                    self._drive_tree(child_id, runtime.child_runtime(self.kernel.store, child_id), child["turn_id"])
-                    delivered = self._deliver_child(child_id, runtime)
-                    child_state, _, _ = self.kernel.store.read_state(child_id)
-                    completed |= bool(delivered and child_state.turns[child["turn_id"]].ended)
-            if not completed:
-                return
-
-    def _deliver_child(self, sid: str, runtime: Runtime) -> int:
-        pushed = False
-
-        def hook(point):
-            nonlocal pushed
-            pushed |= point == "after_parent_inbox"
-
-        with self.kernel.store.atomic() as tx:
-            delivered = child_delivery(self.kernel.store, tx, sid, hook=hook)
-        if pushed:
-            created = self.kernel.store.read(sid, limit=1).records[0].record
-            runtime.wake(created._payload["parent_session_id"])
-        return delivered
-
-    def _run(self) -> None:
+    def _iter_events(
+        self,
+        mailbox: SimpleQueue[_StreamEvent],
+        mailbox_ref: ReferenceType[SimpleQueue[_StreamEvent]],
+    ) -> Generator[RunEvent, None, None]:
+        record_cursor = 0
+        pending_stream: list[_StreamEvent] = []
         try:
-            self._bind_cancel()
-            self._publish()
-            self._schedule_background()
-            self._drive_tree(self.session_id, self.runtime, self.run_id)
-            if self._deliver_to_parent:
-                self._deliver_child(self.session_id, self.runtime)
-            self._publish()
-        except BaseException as exc:
-            self._error = exc
-        finally:
-            # Pair completion with child scheduling so input cannot miss an exiting driver.
-            with self.kernel._background_lock:
-                with self._condition:
-                    self._done = True
-                    self._condition.notify_all()
-                if self._background_child is not None and self._error is None and self.kernel.store.is_runnable(self.session_id):
-                    parent, child = self._background_child
-                    parent._schedule_child(child)
-
-    def events(self) -> Iterator[RunEvent]:
-        position = 0
-        while True:
-            with self._condition:
-                self._condition.wait_for(lambda position=position: position < len(self._events) or self._done)
-                if position < len(self._events):
-                    event = self._events[position]
-                    position += 1
-                else:
+            while True:
+                self.run_id, durable, next_record_cursor, has_more, quiescent, error = self._durable_event_page(
+                    record_cursor,
+                    store=self.kernel.store,
+                )
+                record_cursor = next_record_cursor
+                while True:
+                    try:
+                        pending_stream.append(mailbox.get_nowait())
+                    except Empty:
+                        break
+                ready_stream = [entry for entry in pending_stream if entry.watermark <= record_cursor]
+                if ready_stream:
+                    ready_ids = {id(entry) for entry in ready_stream}
+                    pending_stream[:] = [entry for entry in pending_stream if id(entry) not in ready_ids]
+                merged: list[tuple[int, int, int, RunEvent, int | None]] = [
+                    (event.metadata["session_seq"], 0, index, event, None) for index, event in enumerate(durable)
+                ]
+                merged.extend((entry.watermark, 1, entry.ordinal, entry.event, index) for index, entry in enumerate(ready_stream))
+                emitted = False
+                for _, _, _, event, _ in sorted(merged, key=lambda value: value[:3]):
+                    emitted = True
+                    yield event
+                if quiescent and not has_more and not pending_stream and mailbox.empty():
+                    if error is not None:
+                        raise error
                     return
-            yield event
+                if not emitted:
+                    self._notify.wait(0.05)
+                    self._notify.clear()
+        finally:
+            with suppress(ValueError):
+                self._stream_mailboxes.remove(mailbox_ref)
 
     def result(self, timeout: float | None = None) -> RunResult:
-        from vv_agent.session.result import project_result
-
-        self.join(timeout)
-        if not self._done:
-            raise TimeoutError("session execution is still active")
-        if self._error:
-            raise self._error
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        tid = self.run_id if self.run_id in state.turns else state.active_turn_id or next(reversed(state.turns), "")
-        if not tid:
-            raise Conflict("session has no admitted turn")
-        self.run_id = tid
-        result = project_result(self.kernel.store, self.session_id, tid, runtime=self.runtime)
-        waits = self.kernel.waits(self.session_id, self.runtime)
-        if waits:
-            result.metadata["session_waits"] = [{"session_id": sid, **wait} for sid, _, wait in waits]
-            result.raw_result.wait_reason = waits[0][2].get("question", result.raw_result.wait_reason)
-        result._session_driver = self.kernel
-        return result
+        self.kernel._wait_for_handle(self, timeout)
+        return self.kernel._project_handle_result(self)
 
     def cancel(self, reason: str = "") -> bool:
         del reason
-        state, _, _ = self.kernel.store.read_state(self.session_id)
-        if state.active_turn_id != self.run_id:
+        state = self.kernel._handle_snapshot(self.session_id, self.run_id)[0]
+        if state is None or state.active_turn_id != self.run_id or self.kernel._is_closed:
             return False
-        with self.kernel.store.atomic() as tx:
-            state, _, _ = self.kernel.store.read_state(self.session_id)
-            if state.active_turn_id != self.run_id:
-                return False
-            receipt = self.kernel._push_in_transaction(
-                tx,
-                self.session_id,
-                InboxItem(
-                    f"cancel/{self.run_id}",
-                    "control",
-                    {"action": "cancel"},
-                    self.run_id,
-                ),
-                actor_subject_id="run-handle",
-            )
-            cancel_children(self.kernel.store, tx, state, self.session_id, self.run_id)
+        receipt = self.kernel.push(
+            self.session_id,
+            InboxItem(f"cancel/{self.run_id}", "control", {"action": "cancel"}, self.run_id),
+            actor_subject_id="run-handle",
+        )
         return not receipt.replayed
 
     def done(self) -> bool:
-        return self._done
+        return self.kernel._handle_done(self.session_id, self.run_id)
 
     def state(self) -> RunHandleState:
-        if self._error:
-            return RunHandleState("failed", True, error=str(self._error))
-        if not self._done:
+        if not self.done():
             return RunHandleState("running", False)
-        result = self.result()
+        try:
+            result = self.result(timeout=0)
+        except BaseException as exc:
+            return RunHandleState("failed", True, error=str(exc))
         cancelled = bool(result.completion_reason and result.completion_reason.value == "cancelled")
         return RunHandleState("cancelled" if cancelled else result.status.value, True, cancelled)
 
@@ -328,27 +234,17 @@ class RunHandle:
         )
 
     def steer(self, message: str) -> None:
-        input_id = uuid4().hex
+        generation = self.kernel._handle_steer_generation(self.session_id, self.run_id)
         self.kernel.push(
             self.session_id,
-            InboxItem(
-                input_id,
-                "steer",
-                {"content": message},
-                self.run_id,
-            ),
+            InboxItem(uuid4().hex, "steer", {"content": message}, self.run_id, generation),
             actor_subject_id="run-handle",
         )
 
     def follow_up(self, message: str) -> None:
-        input_id = uuid4().hex
         self.kernel.push(
             self.session_id,
-            InboxItem(
-                input_id,
-                "follow_up",
-                {"content": message},
-            ),
+            InboxItem(uuid4().hex, "follow_up", {"content": message}),
             actor_subject_id="run-handle",
         )
 
@@ -358,3 +254,6 @@ class RunHandle:
         from vv_agent.session.surfaces import resume_turn
 
         return resume_turn(self.session_id, self.run_id, tenant_id=self.kernel.tenant_id)
+
+
+__all__ = ["RunHandle", "RunHandleController", "RunHandleState"]

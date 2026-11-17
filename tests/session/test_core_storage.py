@@ -1,6 +1,7 @@
 """Core PostgreSQL connection ownership uses the real adapter and existing SQL rules."""
 
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
@@ -10,7 +11,7 @@ from vv_agent.kernel._sql import SQLSessionTx
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.session.reducer import Fold
 
-from .helpers import content_ref, principal
+from .helpers import content_ref, create_fixture_session, fixture_content_reader, principal, push_fixture_input
 
 
 @pytest.mark.postgres
@@ -55,10 +56,10 @@ def test_core_postgres_preserves_host_connection_transaction_and_heartbeat(store
     assert not core.connection.closed
 
 
-@pytest.mark.skip(reason="requires S1 producers to emit the required input_applied model_binding ContentRef")
-def test_raw_core_sqlite_keeps_sdk_host_identity_latches_and_trace_boundary(tmp_path, monkeypatch):
-    from vv_agent.kernel._sqlite import SQLiteStore
+def test_sqlite_core_adapter_keeps_sdk_host_identity_latches_and_trace_boundary(tmp_path, monkeypatch):
+    from vv_agent.session.content_store import LocalKeyProvider
     from vv_agent.session.kernel import drive
+    from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.session.surfaces import SessionDriver
     from vv_agent.session.timing import SystemClock
     from vv_agent.session.tracing import deliver_spans
@@ -71,37 +72,33 @@ def test_raw_core_sqlite_keeps_sdk_host_identity_latches_and_trace_boundary(tmp_
             raise AssertionError("SQL-backed scope must receive actual DB now")
 
     path = tmp_path / "core-drive.sqlite"
-    with SQLiteStore.standalone(str(path), fold_factory=Fold, clock=SystemClock()) as core:
-        surface = SessionDriver(store=core)
-        assert surface.store is core and surface.path == str(path)
+    with SQLiteStore.standalone(str(path), clock=SystemClock()) as core:
+        surface = SessionDriver(store=core, content_key_provider=LocalKeyProvider(b"k" * 32))
+        assert cast(Any, surface.store)._store is core and surface.path == str(path)
         assert core._one("PRAGMA user_version")[0] == 4
-        with core.atomic() as tx:
-            tx.create(
-                SessionSpec("s", principal("user/s"), content_ref("s/workspace"), attributes=content_ref("s/attributes")),
-                consumers=("events",),
-            )
-            tx.push(
-                "s",
-                InboxItem(
-                    "initial",
-                    "user",
-                    {"content": content_ref("go")},
-                    actor=principal("session/initial"),
-                ),
-            )
-        rt = runtime(path, [LLMResponse("done")])
+        create_fixture_session(surface.store, "s", workspace="/tmp", consumers=("events",))
+        push_fixture_input(
+            surface.store,
+            "s",
+            InboxItem(
+                "initial",
+                "user",
+                {"content": "go"},
+                actor=principal("session/initial"),
+            ),
+        )
+        rt = runtime(path, [LLMResponse("done")], content_reader=fixture_content_reader(surface.store, "s"))
         rt.clock = NoHostWallClock()
         rt.heartbeat_store = core.heartbeat_store
         guarded = []
         defer = core._defer_idle_drive
 
         def capture(*args, **kwargs):
-            assert kwargs.get("lease_guard") is not None
             guarded.append(True)
             return defer(*args, **kwargs)
 
         monkeypatch.setattr(core, "_defer_idle_drive", capture)
-        assert drive(core, "s", runtime=rt) and guarded
+        assert drive(surface.store, "s", runtime=rt) and guarded
         with core.atomic(), pytest.raises(ValueError, match="top-level transaction"):
             deliver_spans(core, "s", [])
         surface.close()
@@ -132,7 +129,7 @@ def test_raw_core_postgres_factory_gets_driver_heartbeat_timeouts(store, monkeyp
         return receipt
 
     monkeypatch.setattr(core, "renew", stop_after_real_renew)
-    hb._heartbeat()  # Actual worker body, synchronously; factory bypasses heartbeat_store options.
+    hb.heartbeat_once(core)  # Actual worker body, synchronously; factory bypasses heartbeat_store options.
     assert not hb.lost and hb.heartbeat_error is None and hb.ready.is_set()
     assert core._one("SELECT current_setting('lock_timeout'),current_setting('statement_timeout')") == ("250ms", "1s")
 

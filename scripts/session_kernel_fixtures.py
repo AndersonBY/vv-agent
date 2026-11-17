@@ -1,4 +1,4 @@
-"""Author v24 vectors from the private kernel; never modify the vendored snapshot."""
+"""Author current S1 vectors from the private kernel; never modify the vendored snapshot."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConf
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import BudgetEvaluator, RunBudgetLimits, UnavailableMetricPolicy
-from vv_agent.events import event_from_dict
+from vv_agent.events import ModelCallCompletedEvent, event_from_dict
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
 from vv_agent.llm.scripted import ScriptedLLM
@@ -36,7 +36,7 @@ from vv_agent.session.children import ChildSession, child_delivery, child_handle
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import (
     APP_SERVER_ATTRIBUTES,
@@ -57,6 +57,7 @@ from vv_agent.session.records import (
 )
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.result import project_result
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict, LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
@@ -80,6 +81,22 @@ for (const x of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   process.stdout.write(Buffer.from(jcs(x), 'utf8').toString('base64') + '\n');
 }
 """
+
+
+def _load_s1_fixture_values():
+    spec = importlib.util.spec_from_file_location(
+        "_session_kernel_s1_fixture_values",
+        Path(__file__).with_name("s1_fixture_values.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+S1_FIXTURE_VALUES = _load_s1_fixture_values()
+deterministic_content_secrets = S1_FIXTURE_VALUES.deterministic_content_secrets
+fixture_key_provider_for_store = S1_FIXTURE_VALUES.fixture_key_provider_for_store
 NOW = 1_000_000
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 APPROVED_EFFECTS = []
@@ -90,6 +107,25 @@ class FixedDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
         return datetime.fromtimestamp(NOW / 1000, tz=tz or UTC)
+
+
+class _FixtureClock:
+    """Give every S1 connection the fixture's deterministic wall and monotonic time."""
+
+    def __init__(self, fixtures: Fixtures):
+        self.fixtures = fixtures
+
+    def now_ms(self) -> int:
+        return self.fixtures.clock
+
+    def monotonic(self) -> float:
+        return self.fixtures.clock / 1000
+
+    def monotonic_ns(self) -> int:
+        return self.fixtures.clock * 1_000_000
+
+    def sleep(self, seconds: float) -> None:
+        self.fixtures.clock += int(seconds * 1000)
 
 
 def independent_bytes(values: list[Any]) -> list[bytes]:
@@ -229,9 +265,25 @@ def wait_turn() -> ToolExecutionResult:
 
 class Fixtures:
     def __init__(self):
-        self.kernel = SessionDriver()
         self.clock = NOW
-        self.kernel.store.connection.create_function("session_now_ms", 0, lambda: self.clock)
+        self._clock = _FixtureClock(self)
+        self._state_directory = TemporaryDirectory(prefix="vva-s1-fixture-state-")
+        self._raw_store = SQLiteStore(
+            str(Path(self._state_directory.name) / "sessions.sqlite3"),
+            clock=self._clock,
+        )
+        self.content_key_provider = fixture_key_provider_for_store(self._raw_store)
+        self._deterministic_secrets = deterministic_content_secrets()
+        self._deterministic_secrets.__enter__()
+        self.kernel = SessionDriver(store=self._raw_store, content_key_provider=self.content_key_provider)
+
+        def close_fixture_store():
+            self.content_key_provider.close()
+            self._raw_store.connection.close()
+            self._deterministic_secrets.__exit__(None, None, None)
+            self._state_directory.cleanup()
+
+        self.kernel._on_close(close_fixture_store)
         self.runtimes: dict[str, Any] = {}
         self.inbox: dict[tuple[str, str], InboxItem] = {}
         self.semantics = []
@@ -255,34 +307,56 @@ class Fixtures:
         return replace(config, tool_registry_factory=config.tool_registry_factory or partial(cls.registry, names))
 
     def push(self, sid, item):
-        self.inbox[(sid, item.input_id)] = item
-        return self.kernel.push(sid, item)
+        """Push through SQL admission and retain the exact published inbox item."""
+
+        receipt = self.kernel.push(sid, item)
+        stored = self.kernel.store.read_input(sid, item.input_id)
+        if stored is None:
+            raise AssertionError("published inbox input is missing")
+        self.inbox[(sid, item.input_id)] = stored.item
+        return receipt
 
     def admit(self, sid, steps, *, agent=None, config=None, attributes=None, memory=None, content="go", **kwargs):
+        """Create one S1 session and bind its real SDK runtime and content reader."""
+
         agent = agent or Agent("fixture", "Be precise.", model="m", tools=[echo])
         provider = ScriptedModelProvider("scripted", "m", ScriptedLLM(steps), context_length=None, max_output_tokens=None)
         config = replace(self.config(config, steps), model_provider=provider, workspace="/fixture")
-        rt = self.kernel.runtime(agent, config)
-        rt.__dict__.update(kwargs)
-        if memory is not None:
-            rt.memory_manager = memory
-        self.runtimes[sid] = rt
         if config.initial_messages and attributes is None:
             # Retain the imported-history fixtures' original creation policy.
             attributes = {"seed": {"unseen_input_protection": False}}
         self.kernel.create(sid, "/fixture", attributes)
+        rt = self.kernel.runtime(agent, config, session_id=sid)
+        rt.__dict__.update(kwargs)
+        rt.clock = kwargs.get("clock", self._clock)
+        if memory is not None:
+            rt.memory_manager = memory
+        self.runtimes[sid] = rt
         self.push(sid, InboxItem("initial", "user", {"content": content}))
         return rt
 
     def run(self, sid):
+        """Drive one real turn without synthesizing terminal or usage records."""
+
         drive(self.kernel.store, sid, runtime=self.runtimes[sid], _one_turn=True)
 
     def state(self, sid):
-        return self.kernel.store.read_state(sid)[0]
+        """Return the hydrated typed state from the SDK snapshot reader."""
+
+        return self.kernel._read_state(sid)[0]
 
     def result(self, sid):
-        state = self.state(sid)
-        return project_result(self.kernel.store, sid, next(reversed(state.turns)), runtime=self.runtimes[sid])
+        """Project a typed result from one hydrated ledger snapshot."""
+
+        snapshot = self.kernel._read_state(sid)
+        state = snapshot[0]
+        return project_result(
+            self.kernel.store,
+            sid,
+            next(reversed(state.turns)),
+            runtime=self.runtimes[sid],
+            snapshot=snapshot,
+        )
 
     def drain_children(self, sid, rt):
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
@@ -1494,18 +1568,28 @@ class Fixtures:
             self.push(sid, provider.callback("provider_result", f"{sid}/turn/initial", "replay"))
             rt.hook = lambda *_: None
             self.run(sid)
-            state, rows, _ = self.kernel.store.read_state(sid)
+            state, rows, _ = self.kernel._read_state(sid)
             assert state.applied_inputs["replay"].payload["disposition"] == "noop"
             completions = [r.record for r in rows if r.record.kind == "op_completed" and r.record.attempt == 1]
             assert len(completions) == 1
-            assert independent_bytes([completions[0].payload["usage"]])[0] == independent_bytes([usage])[0]
-            events = [e for e in project_records(rows) if e.type == "model_call_completed" and e.attempt == 1]
+            hydration = hydration_for_session_store(self.kernel.store, sid)
+            completion = next(
+                hydrate_record_payload(row, hydration)
+                for row in rows
+                if row.record.kind == "op_completed" and row.record.attempt == 1
+            )
+            assert independent_bytes([completion["usage"]])[0] == independent_bytes([usage])[0]
+            events = [
+                event
+                for event in project_records(rows, hydration=hydration)
+                if isinstance(event, ModelCallCompletedEvent) and event.attempt == 1
+            ]
             assert len(events) == 1 and events[0].usage == first.usage
             assert self.result(sid).token_usage == result.token_usage
             self.semantics.append(
                 {
                     "case": sid,
-                    "context": completions[0].payload["context"],
+                    "context": completion["context"],
                     "usage": usage,
                     "projected_usage": first.usage.to_dict(),
                     "billable_call_id": first.call_id,

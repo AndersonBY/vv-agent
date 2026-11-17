@@ -7,16 +7,19 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
+from typing import TypedDict
 
 import pytest
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from support.contract import fixture_root
+from support.s1_fixture_values import append_fixture_records
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import (
     ContentBindingMismatch,
     ContentLifecycleError,
+    ExportContentMode,
     ExportDocument,
     ExportHeader,
     ForgetTombstone,
@@ -25,15 +28,74 @@ from vv_agent.kernel._content import (
     SessionHead,
     TombstoneState,
 )
-from vv_agent.session.records import SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 
-from .helpers import content_ref, item, principal, record
+from .helpers import (
+    create_fixture_session,
+    fixture_key_provider,
+    item,
+    push_fixture_input,
+    record,
+    wrap_fixture_store,
+)
 
 TENANT = "default"
 SESSION = "export-session"
 KEY_ID = "ledger-key-fixed"
 FIXED_PRIVATE_BYTES = bytes.fromhex("a6d5c55c9f6216db66b7e0df14d51a4d220ba7074bdd09a8461f429b055bc84c")
+
+type JsonObject = dict[str, object]
+
+
+class PrincipalFixture(TypedDict, total=False):
+    subject_id: str
+
+
+class RecordPayloadFixture(TypedDict, total=False):
+    principal: PrincipalFixture
+
+
+class RecordFixture(TypedDict, total=False):
+    payload: RecordPayloadFixture
+
+
+class StorageEnvelopeFixture(TypedDict, total=False):
+    tenant_id: str
+    record_digest: str
+    chain_digest: str
+
+
+class AdmissionProofFixture(TypedDict):
+    admission_key_id: str
+    admission_signature: str
+    admission_signed_ms: int
+
+
+class InputFixture(TypedDict, total=False):
+    input_id: str
+    admission_proof: AdmissionProofFixture | None
+
+
+class ExportHeaderFixture(TypedDict):
+    tenant_id: str
+    session_id: str
+    head_seq: int
+    chain_digest: str
+
+
+class ExportLineFixture(TypedDict, total=False):
+    line: str
+    seq: int
+    chain_digest: str
+    key_id: str
+    signature: str
+    signed_ms: int
+    input_seq: int
+    received_ms: int
+    input: InputFixture
+    storage_envelope: StorageEnvelopeFixture
+    record: RecordFixture
+    checkpoint_lines: int
 
 
 class FixedSigner:
@@ -144,16 +206,18 @@ def _lifecycle() -> dict:
     return json.loads((fixture_root() / "session_storage_lifecycle.json").read_text())
 
 
-def _signed_fixture(signer: FixedSigner) -> tuple[dict, dict, SessionHead]:
+def _signed_fixture(signer: FixedSigner) -> tuple[ExportHeaderFixture, list[ExportLineFixture], SessionHead]:
     lifecycle = _lifecycle()
     case = deepcopy(lifecycle["export_cases"][0])
-    checkpoint = next(line for line in case["lines"] if line["line"] == "checkpoint")
+    header: ExportHeaderFixture = case["header"]
+    lines: list[ExportLineFixture] = case["lines"]
+    checkpoint = next(line for line in lines if line["line"] == "checkpoint")
     checkpoint["key_id"] = KEY_ID
     checkpoint["signature"] = base64.b64encode(
         signer.sign(
             _checkpoint_message(
-                case["header"]["tenant_id"],
-                case["header"]["session_id"],
+                header["tenant_id"],
+                header["session_id"],
                 checkpoint["seq"],
                 checkpoint["chain_digest"],
                 checkpoint["key_id"],
@@ -162,14 +226,14 @@ def _signed_fixture(signer: FixedSigner) -> tuple[dict, dict, SessionHead]:
         )
     ).decode("ascii")
 
-    inbox = next(line for line in case["lines"] if line["line"] == "inbox")
+    inbox = next(line for line in lines if line["line"] == "inbox")
     body = deepcopy(inbox["input"])
     body["admission_proof"] = None
     body_digest = sha256(canonical_json_bytes(body)).hexdigest()
     signed = signer.sign(
         _input_message(
-            case["header"]["tenant_id"],
-            case["header"]["session_id"],
+            header["tenant_id"],
+            header["session_id"],
             body["input_id"],
             inbox["input_seq"],
             inbox["received_ms"],
@@ -178,19 +242,20 @@ def _signed_fixture(signer: FixedSigner) -> tuple[dict, dict, SessionHead]:
             inbox["received_ms"],
         )
     )
-    inbox["input"]["admission_proof"] = {
+    body["admission_proof"] = {
         "admission_key_id": KEY_ID,
         "admission_signature": base64.b64encode(signed).decode("ascii"),
         "admission_signed_ms": inbox["received_ms"],
     }
+    inbox["input"] = body
     head = SessionHead(
-        tenant_id=case["header"]["tenant_id"],
-        session_id=case["header"]["session_id"],
-        final_seq=case["header"]["head_seq"],
-        chain_digest=case["header"]["chain_digest"],
+        tenant_id=header["tenant_id"],
+        session_id=header["session_id"],
+        final_seq=header["head_seq"],
+        chain_digest=header["chain_digest"],
         key_id=KEY_ID,
     )
-    return case["header"], case["lines"], head
+    return header, lines, head
 
 
 def _record_line(stored, chain_digest: str) -> dict:
@@ -212,85 +277,76 @@ def _record_line(stored, chain_digest: str) -> dict:
 
 def _store_export(tmp_path) -> tuple[ExportDocument, SessionHead, FixedSigner]:
     signer = FixedSigner()
-    with SQLiteStore.standalone(str(tmp_path / "export.sqlite")) as store:
-        store.install_schema()
-        store.configure_input_admission(signer)
-        with store.atomic() as tx:
-            tx.create(
-                SessionSpec(SESSION, principal(), content_ref("workspace"), attributes=content_ref("attributes")),
-                consumers=(),
-            )
-            tx.push(SESSION, item("input"))
+    provider = fixture_key_provider()
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "export.sqlite")) as raw_store:
+            raw_store.install_schema()
+            raw_store.configure_input_admission(signer)
+            store = wrap_fixture_store(raw_store, provider)
+            create_fixture_session(store, SESSION, subject_id="fixture/export-host")
+            push_fixture_input(store, SESSION, item("input"))
+            append_fixture_records(store, SESSION, (record("turn_started", sid=SESSION),), commit_id="turn")
 
-        lease = store.acquire(SESSION, owner="export-test", ttl_ms=10_000)
-        assert lease is not None
-        with store.atomic() as tx:
-            tx.append(
-                SESSION,
-                lease=lease,
-                expected_seq=1,
-                commit_id="turn",
-                records=(record("turn_started", sid=SESSION),),
-            )
+            page = store.read(SESSION)
+            assert [stored.seq for stored in page.records] == [1, 2]
+            previous = _initial_chain(TENANT, SESSION)
+            record_lines: list[dict[str, object]] = []
+            for stored in page.records:
+                previous = _extend_chain(previous, stored.seq, stored.record.digest)
+                record_lines.append(_record_line(stored, previous))
 
-        page = store.read(SESSION)
-        assert [stored.seq for stored in page.records] == [1, 2]
-        previous = _initial_chain(TENANT, SESSION)
-        record_lines = []
-        for stored in page.records:
-            previous = _extend_chain(previous, stored.seq, stored.record.digest)
-            record_lines.append(_record_line(stored, previous))
-
-        stored_input = store.read_input(SESSION, "input")
-        assert stored_input is not None
-        inbox_lines = [
-            {
-                "line": "inbox",
-                "input_seq": stored_input.input_seq,
-                "received_ms": stored_input.received_ms,
-                "consumed_seq": stored_input.consumed_seq,
-                "input": stored_input.item.to_dict(),
-            }
-        ]
-        checkpoint_lines = [
-            {
-                "line": "checkpoint",
-                "seq": seq,
-                "chain_digest": chain_digest,
-                "key_id": key_id,
-                "signature": base64.b64encode(bytes(signature)).decode("ascii"),
-                "signed_ms": signed_ms,
-            }
-            for seq, chain_digest, key_id, signature, signed_ms in store._rows(
-                "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
-                "WHERE tenant_id=? AND session_id=? ORDER BY seq",
-                (TENANT, SESSION),
+            stored_input = store.read_input(SESSION, "input")
+            assert stored_input is not None
+            inbox_lines: list[dict[str, object]] = [
+                {
+                    "line": "inbox",
+                    "input_seq": stored_input.input_seq,
+                    "received_ms": stored_input.received_ms,
+                    "consumed_seq": stored_input.consumed_seq,
+                    "input": stored_input.item.to_dict(),
+                }
+            ]
+            checkpoint_lines: list[dict[str, object]] = [
+                {
+                    "line": "checkpoint",
+                    "seq": seq,
+                    "chain_digest": chain_digest,
+                    "key_id": key_id,
+                    "signature": base64.b64encode(bytes(signature)).decode("ascii"),
+                    "signed_ms": signed_ms,
+                }
+                for seq, chain_digest, key_id, signature, signed_ms in store._rows(
+                    "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
+                    "WHERE tenant_id=? AND session_id=? ORDER BY seq",
+                    (TENANT, SESSION),
+                )
+            ]
+            lines = [
+                *record_lines,
+                *inbox_lines,
+                *checkpoint_lines,
+                {
+                    "line": "manifest",
+                    "record_lines": len(record_lines),
+                    "inbox_lines": len(inbox_lines),
+                    "checkpoint_lines": len(checkpoint_lines),
+                    "head_seq": page.head_seq,
+                    "chain_digest": previous,
+                },
+            ]
+            document = ExportDocument.from_dict(
+                ExportHeader(
+                    tenant_id=TENANT,
+                    session_id=SESSION,
+                    head_seq=page.head_seq,
+                    chain_digest=previous,
+                    content_mode=ExportContentMode.SKELETON,
+                ).to_dict(),
+                lines,
             )
-        ]
-        lines = [
-            *record_lines,
-            *inbox_lines,
-            *checkpoint_lines,
-            {
-                "line": "manifest",
-                "record_lines": len(record_lines),
-                "inbox_lines": len(inbox_lines),
-                "checkpoint_lines": len(checkpoint_lines),
-                "head_seq": page.head_seq,
-                "chain_digest": previous,
-            },
-        ]
-        document = ExportDocument.from_dict(
-            ExportHeader(
-                tenant_id=TENANT,
-                session_id=SESSION,
-                head_seq=page.head_seq,
-                chain_digest=previous,
-                content_mode="skeleton",
-            ).to_dict(),
-            lines,
-        )
-        return document, SessionHead(TENANT, SESSION, page.head_seq, previous, KEY_ID), signer
+            return document, SessionHead(TENANT, SESSION, page.head_seq, previous, KEY_ID), signer
+    finally:
+        provider.close()
 
 
 def test_versioned_skeleton_export_verifies_with_real_ed25519_proofs(tmp_path) -> None:
@@ -381,7 +437,9 @@ def test_signed_export_rejects_invalid_input_proof() -> None:
     signer = FixedSigner()
     header, lines, head = _signed_fixture(signer)
     inbox = next(line for line in lines if line["line"] == "inbox")
-    inbox["input"]["admission_proof"]["admission_signature"] = "AA=="
+    proof = inbox["input"]["admission_proof"]
+    assert proof is not None
+    proof["admission_signature"] = "AA=="
 
     with pytest.raises(InvalidExport):
         ExportDocument.from_dict(header, lines).verify(head, signer)
@@ -391,7 +449,10 @@ def test_signed_export_rejects_invalid_input_proof() -> None:
 def test_export_rejects_wrong_header_binding(field: str) -> None:
     signer = FixedSigner()
     header, lines, head = _signed_fixture(signer)
-    header[field] = "other"
+    if field == "tenant_id":
+        header["tenant_id"] = "other"
+    else:
+        header["session_id"] = "other"
 
     with pytest.raises(ContentBindingMismatch):
         ExportDocument.from_dict(header, lines).verify(head, signer)

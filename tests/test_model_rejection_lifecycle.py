@@ -134,14 +134,16 @@ def resources():
         (400, "too many tokens per minute", 1, 1),
     ],
 )
-def test_quota_rejection_through_real_http_kernel(loopback, monkeypatch, provider, status, message, attempts, http_requests):
+def test_quota_rejection_through_real_http_kernel(
+    loopback, monkeypatch, provider, status, message, attempts, http_requests, tmp_path
+):
     from session.test_compaction import configured
 
     loopback.rejection = (status, {"message": message, "type": "invalid_request_error"})
     native = importlib.import_module(provider)
     monkeypatch.setattr(native._base_client.SyncAPIClient, "_sleep_for_retry", lambda *args, **kwargs: None)
     monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
-    with SQLiteStore.standalone(":memory:") as store:
+    with SQLiteStore.standalone(str(tmp_path / "quota.sqlite")) as store:
         store.install_schema()
         start(store)
         rt = configured(store, [])
@@ -215,7 +217,7 @@ def test_default_ten_second_deadline_with_ninety_second_read_timeout(loopback):
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("kernel", [False, True])
-def test_real_vv_llm_stalled_intermediate_429_releases_resources(loopback, monkeypatch, provider, kernel):
+def test_real_vv_llm_stalled_intermediate_429_releases_resources(loopback, monkeypatch, provider, kernel, tmp_path):
     native = importlib.import_module(provider)
     loopback.retry = True
     monkeypatch.setattr(h, "_PREFETCH_SECONDS", 0.025)
@@ -230,7 +232,7 @@ def test_real_vv_llm_stalled_intermediate_429_releases_resources(loopback, monke
         clients.append(self)
 
     monkeypatch.setattr(httpx2.Client, "__init__", init)
-    with SQLiteStore.standalone(":memory:") as store:
+    with SQLiteStore.standalone(str(tmp_path / "stalled.sqlite")) as store:
         store.install_schema()
         start(store)
         rt = runtime(store, [])

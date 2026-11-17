@@ -180,10 +180,10 @@ def live_budget_inputs_steps(
     self: CoreDriver,
 ) -> Generator[OutcomeRequest, Any, tuple[RunBudgetLimits, BudgetUsageSnapshot] | None]:
     try:
-        state = self._logical_state() if self.content_reader is not None and hasattr(self, "_logical_state") else self.state
+        state = self.fold.state
         tid = state.active_turn_id
         assert tid is not None
-        inputs = retained_budget_inputs(state, tid)
+        inputs = retained_budget_inputs(state, tid, hydrator=self)
         if inputs is None:
             return None
         evaluator = retained_evaluator(inputs)

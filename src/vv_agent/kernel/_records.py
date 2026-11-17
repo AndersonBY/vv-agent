@@ -6,7 +6,7 @@ import base64
 import json
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from hashlib import sha256
 from typing import Any
 
@@ -18,14 +18,23 @@ from vv_agent.kernel._record_codec import RecordError, _load, validate
 from vv_agent.kernel._record_schema import (
     BOUNDARY_DATA,
     CONTENT_REF,
+    INBOX_ITEM_SCHEMA,
     INPUT_PAYLOADS,
     INPUT_SCHEMA,
+    INPUT_SCHEMA_LEVEL_2,
     PAYLOADS,
     PRINCIPAL,
+    RECORD_ITEM_SCHEMA,
     RECORD_SCHEMA,
+    RECORD_SCHEMA_LEVEL_2,
     SEED_POLICIES,
+    SESSION_CREATED_LEVEL_2,
 )
 from vv_agent.kernel._record_schema import CHILD_ADMISSION as CHILD_ADMISSION
+from vv_agent.kernel._requirements import (
+    SessionRequirements,
+    normalize_requirements,
+)
 
 
 def _walk(value: Any):
@@ -281,23 +290,54 @@ class InboxItem:
     admission_proof: dict[str, Any] | None = None
     schema_version: str = "S1"
     feature_level: int = 1
+    requirements: SessionRequirements | dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = {field.name: getattr(self, field.name) for field in fields(self)}
+        if self.requirements is None:
+            value.pop("requirements")
+        else:
+            value["requirements"] = self._requirements().to_dict()
+        return value
+
+    def _requirements(self) -> SessionRequirements:
+        if self.requirements is None:
+            raise RecordError("level-2 inbox requirements are required")
+        try:
+            return normalize_requirements(self.requirements)
+        except (TypeError, ValueError) as exc:
+            raise RecordError(str(exc)) from exc
 
     def _validate(self, value: dict[str, Any]) -> None:
         if self.actor is None:
             raise RecordError("S1 actor requires a closed Principal")
-        validate(value, INPUT_SCHEMA, canonical=False)
+        schema = INPUT_SCHEMA_LEVEL_2 if self.feature_level == 2 else INPUT_SCHEMA
+        validate(value, schema, canonical=False)
         validate(self.payload, INPUT_PAYLOADS[self.kind], canonical=False)
         validate(self.actor, PRINCIPAL, canonical=False)
         _validate_content_refs(value)
         _validate_admission_proof(self.admission_proof)
         if self.kind == "model_selection" and (self.target_turn_id is not None or self.generation is not None):
             raise RecordError("model_selection requires session scope")
+        if self.feature_level == 1:
+            if self.requirements is not None:
+                raise RecordError("level-1 inbox items cannot contain requirements")
+        elif self.feature_level == 2:
+            if self.kind not in {"user", "follow_up", "model_selection"}:
+                raise RecordError("level-2 inbox requirements are limited to user, follow_up and model_selection")
+            requirements = self._requirements()
+            if self.kind == "model_selection":
+                if requirements.handler_version is None:
+                    raise RecordError("model_selection requirements need the current handler")
+                if any(not item.startswith("model:") for item in requirements.capabilities):
+                    raise RecordError("model_selection requirements may contain model capabilities only")
+            elif requirements.handler_version is None and not requirements.capabilities:
+                raise RecordError("null-handler requirements need an explicit family capability")
+        else:
+            raise RecordError("unsupported inbox feature level")
 
     def encode(self) -> bytes:
-        value = {f.name: getattr(self, f.name) for f in fields(self)}
+        value = self.to_dict()
         self._validate(value)
         try:
             return canonical_json_bytes(value)
@@ -311,8 +351,11 @@ class InboxItem:
     @classmethod
     def parse(cls, body: bytes) -> InboxItem:
         value = _load(body)
-        validate(value, INPUT_SCHEMA, canonical=False)
-        item = cls(**value)
+        validate(value, INBOX_ITEM_SCHEMA, canonical=False)
+        try:
+            item = cls(**value)
+        except TypeError as exc:
+            raise RecordError(str(exc)) from exc
         item._validate(value)
         try:
             canonical_json_bytes(value)
@@ -367,6 +410,8 @@ class Record:
     _message_cache_id: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def _task(self) -> AgentTask:
+        if self._task_value is not None:
+            return self._task_value
         raise RecordError("S1 content hydration is unavailable in the producer/codec phase")
 
     def task(self) -> AgentTask:
@@ -424,8 +469,10 @@ class Record:
         object.__setattr__(self, "_message_cache_id", id(messages))
 
     def _validate(self, value: dict[str, Any], messages: _MessageCache | None = None) -> dict[str, bytes]:
-        validate(value, RECORD_SCHEMA, canonical=False)
-        validate(self.payload, PAYLOADS[self.kind], canonical=False)
+        level_schema = RECORD_SCHEMA_LEVEL_2 if self.feature_level == 2 else RECORD_SCHEMA
+        validate(value, level_schema, canonical=False)
+        payload_schema = SESSION_CREATED_LEVEL_2 if self.feature_level == 2 else PAYLOADS[self.kind]
+        validate(self.payload, payload_schema, canonical=False)
         _validate_content_refs(value)
         op = self.kind.startswith("op_")
         if op != (self.operation_id is not None) or op != (self.attempt is not None):
@@ -449,7 +496,11 @@ class Record:
                 _check_digest(self.payload, digest_field)
         if self.kind == "input_applied":
             incoming = self.payload["input"]
-            InboxItem(**incoming)._validate(incoming)
+            try:
+                nested = InboxItem(**incoming)
+            except TypeError as exc:
+                raise RecordError(str(exc)) from exc
+            nested._validate(incoming)
             proof = self.payload["input_proof"]
             admission = incoming["admission_proof"]
             if (proof is None) != (admission is None):
@@ -465,6 +516,13 @@ class Record:
                 )
             ):
                 raise RecordError("input proof does not copy admission proof")
+        if self.feature_level == 2:
+            try:
+                bootstrap = normalize_requirements(self.payload["bootstrap"])
+            except (TypeError, ValueError) as exc:
+                raise RecordError(str(exc)) from exc
+            if bootstrap.handler_version is None and not bootstrap.capabilities:
+                raise RecordError("null-handler bootstrap needs an explicit family capability")
         if self.kind == "turn_started":
             requirements = self.payload["requirements"]
             if requirements["capabilities"] != sorted(requirements["capabilities"]):
@@ -509,7 +567,7 @@ class Record:
     @classmethod
     def _parse(cls, body: bytes, messages: _MessageCache | None = None) -> Record:
         value = _load(body)
-        validate(value, RECORD_SCHEMA, canonical=False)
+        validate(value, RECORD_ITEM_SCHEMA, canonical=False)
         try:
             record = cls(**value)
         except TypeError as exc:
@@ -536,10 +594,21 @@ def make_record(
     turn_id: str | None = None,
     operation_id: str | None = None,
     attempt: int | None = None,
+    feature_level: int = 1,
+    bootstrap: SessionRequirements | dict[str, Any] | None = None,
 ) -> Record:
     if kind not in PAYLOADS:
         raise RecordError("unknown record kind")
     payload = copy_json(payload)
+    if feature_level == 2 and kind != "session_created":
+        raise RecordError("record feature level 2 is limited to session_created")
+    if bootstrap is not None:
+        if feature_level != 2 or kind != "session_created":
+            raise RecordError("bootstrap is limited to level-2 session_created records")
+        try:
+            payload["bootstrap"] = normalize_requirements(bootstrap).to_dict()
+        except (TypeError, ValueError) as exc:
+            raise RecordError(str(exc)) from exc
     if kind == "turn_started":
         payload.setdefault("policy_digest", None)
         payload.setdefault(
@@ -550,7 +619,8 @@ def make_record(
         payload.setdefault("environment", None)
     elif kind in {"op_planned", "op_prepared", "op_completed"}:
         payload.setdefault("policy_decision", None)
-    validate(payload, PAYLOADS[kind], canonical=False)
+    payload_schema = SESSION_CREATED_LEVEL_2 if feature_level == 2 else PAYLOADS[kind]
+    validate(payload, payload_schema, canonical=False)
     record = Record(
         record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
         kind,
@@ -559,6 +629,7 @@ def make_record(
         operation_id,
         attempt,
         payload,
+        feature_level=feature_level,
     )
     record.encode()
     return record
@@ -572,6 +643,8 @@ class SessionSpec:
     parent_session_id: str | None = None
     parent_operation_id: str | None = None
     attributes: dict[str, Any] | None = None
+    feature_level: int = 1
+    bootstrap: SessionRequirements | dict[str, Any] | None = None
 
     def record(self, *, _existing: Record | None = None) -> Record:
         attributes = copy_json(self.attributes)
@@ -579,6 +652,9 @@ class SessionSpec:
             attributes = copy_json(_existing._payload["attributes"])
         if attributes is None:
             raise RecordError("attributes requires a ContentRef produced by the content store")
+        bootstrap = copy_json(self.bootstrap)
+        if bootstrap is None and _existing is not None and _existing.feature_level == 2:
+            bootstrap = copy_json(_existing._payload["bootstrap"])
         validate(self.principal, PRINCIPAL, canonical=False)
         _validate_ref(self.workspace, "workspace")
         _validate_ref(attributes, "attributes")
@@ -592,4 +668,6 @@ class SessionSpec:
                 "parent_operation_id": self.parent_operation_id,
                 "attributes": attributes,
             },
+            feature_level=self.feature_level,
+            bootstrap=bootstrap,
         )

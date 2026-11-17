@@ -1,12 +1,10 @@
 """Owner-bound logical-state reads for exploration evidence."""
 
-from session.helpers import read_fixture_state
-
 
 def read_logical_state(world, session_id="s"):
     """Read witness state through the store's tenant/session content boundary."""
 
-    return read_fixture_state(world.connection("observer"), session_id)
+    return world.read_state(session_id)
 
 
 def retained_definition(world, session_id="s"):

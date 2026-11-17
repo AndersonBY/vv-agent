@@ -1,7 +1,6 @@
 """Caller-owned PostgreSQL stores and business admission share the real SQL transaction."""
 
 from contextlib import nullcontext
-from dataclasses import replace
 from threading import RLock
 
 import pytest
@@ -10,14 +9,12 @@ from vv_agent.kernel import _driver_dispatch
 from vv_agent.session import kernel
 from vv_agent.session.children import ChildSession, ChildTool, InvalidChildBatch
 from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.records import SessionSpec
 from vv_agent.session.sql import SQLSessionTx
 from vv_agent.session.store import LeaseLost, SequenceConflict
 from vv_agent.session.supervisor import tick
 
 from .conftest import open_store
-from .helpers import content_ref, principal
-from .test_batch_children import rows
+from .helpers import fixture_child_spec, read_fixture_state, wrap_fixture_store
 from .test_children import parent_runtime
 from .test_recovery_matrix import start
 
@@ -34,31 +31,45 @@ class HostPostgresStore(PostgresStore):
         return self.raw
 
 
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+def rows(store, sid="s", kind=None):
+    return [r for r in read_fixture_state(store, sid)[1] if kind is None or r.record.kind == kind]
+
+
 @pytest.mark.postgres
 def test_public_drive_and_dispatch_tick_preserve_host_instance(store, database, monkeypatch):
-    host = HostPostgresStore(store.connection)
+    raw_host = HostPostgresStore(store.connection)
+    host = wrap_fixture_store(raw_host)
     assert "connection" not in vars(host)
-    epochs, peeks, scans = [], [], []
-    acquire, peek, scan = host.acquire, host.peek_inbox, host.list_runnable
+    epochs, claimed_epochs, peeks, observations = [], [], [], []
+    acquire, claim, peek = host.acquire, host.claim_runnable, host.peek_inbox
 
     def capture_acquire(*args, **kwargs):
+        observations.append((host, raw_host, host.connection, raw_host.connection))
         lease = acquire(*args, **kwargs)
         epochs.append(None if lease is None else lease.epoch)
         return lease
 
+    def capture_claim(*args, **kwargs):
+        observations.append((host, raw_host, host.connection, raw_host.connection))
+        claimed = claim(*args, **kwargs)
+        claimed_epochs.extend(None if item.lease is None else item.lease.epoch for item in claimed)
+        return claimed
+
     def capture_peek(*args, **kwargs):
+        observations.append((host, raw_host, host.connection, raw_host.connection))
         peeks.append(args[0])
         return peek(*args, **kwargs)
 
-    def capture_scan(*args, **kwargs):
-        scans.append(kwargs)
-        return scan(*args, **kwargs)
-
     monkeypatch.setattr(host, "acquire", capture_acquire)
+    monkeypatch.setattr(host, "claim_runnable", capture_claim)
     monkeypatch.setattr(host, "peek_inbox", capture_peek)
-    monkeypatch.setattr(host, "list_runnable", capture_scan)
     start(host)
-    rt = parent_runtime(database)
+    rt = parent_runtime(host, database)
     assert kernel.drive(host, "s", runtime=lambda _sid: rt)
     assert epochs == [1] and peeks and set(peeks) == {"s"}
     assert {r.writer_epoch for r in rows(host) if r.writer_epoch} == {epochs[0]}
@@ -75,10 +86,27 @@ def test_public_drive_and_dispatch_tick_preserve_host_instance(store, database, 
             if batch:
                 tx.ack(batch)
 
-    assert tick(host, dispatch=dispatched.append, runtime=forbidden, project=project, page_size=1) >= 1
-    assert scans and "queued" in dispatched and epochs == [1]
+    assert (
+        tick(
+            host,
+            dispatch_claimed=lambda sid, lease: dispatched.append(sid),
+            runtime=forbidden,
+            project=project,
+            page_size=1,
+        )
+        >= 1
+    )
+    assert claimed_epochs and "queued" in dispatched and epochs == [1]
     assert projected
-    print("HOST_INSTANCE", {"epochs": epochs, "peek_calls": len(peeks), "scan_calls": len(scans), "dispatch": dispatched})
+    assert all(
+        adapter is host and root is raw_host and connection is raw_connection is root.connection
+        for adapter, root, connection, raw_connection in observations
+    )
+    assert host._store is raw_host and host._root is raw_host
+    print(
+        "HOST_INSTANCE",
+        {"epochs": epochs, "claim_epochs": claimed_epochs, "peek_calls": len(peeks), "dispatch": dispatched},
+    )
 
 
 class PlannedCut(BaseException):
@@ -90,7 +118,8 @@ class PlannedCut(BaseException):
 def test_child_admission_business_and_session_increment_is_atomic(store, database, monkeypatch, fault):
     import psycopg
 
-    host = HostPostgresStore(store.connection)
+    raw_host = HostPostgresStore(store.connection)
+    host = wrap_fixture_store(raw_host)
     host._rows("CREATE TABLE allowed (id integer PRIMARY KEY)")
     host._rows("INSERT INTO allowed VALUES (1)")
     host._rows(
@@ -98,7 +127,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
         "DEFERRABLE INITIALLY DEFERRED)"
     )
     start(host)
-    rt = parent_runtime(database)
+    rt = parent_runtime(host, database)
     admissions = []
 
     def admit(_plan):
@@ -108,12 +137,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
             host._rows("INSERT INTO business_child VALUES (%s,%s)", (i, 2 if fault == "commit" else 1))
         specs = [
             ChildSession(
-                SessionSpec(
-                    f"business-{i}",
-                    principal("test"),
-                    content_ref("workspace"),
-                    attributes=content_ref("attributes"),
-                ),
+                fixture_child_spec(host, "s", f"business-{i}"),
                 "go",
                 yield_on_steer=True,
             )
@@ -147,10 +171,14 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
             if fault == "cas":
                 kwargs["expected_seq"] -= 1
             if fault == "lease":
-                # The actual SQL fence rejects the expired captured object.
+                # Invalidate the database row after the driver's late guard sample.
                 guard = tx._lease_guard
                 assert guard is not None
-                tx._lease_guard = lambda: replace(guard(), expires_at_ms=0)
+                kwargs["lease"] = guard()
+                host._rows(
+                    "UPDATE sk_session SET lease_epoch=lease_epoch+1,lease_until_ms=0 WHERE tenant_id=%s AND session_id=%s",
+                    (host.tenant_id, sid),
+                )
         receipt = append(tx, sid, **kwargs)
         append_returned.append(receipt)
         return receipt
@@ -162,6 +190,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
     scope = kernel._Scope(lease, rt, now_ms=host._now())
     driver = kernel._Driver(host, "s", rt, scope)
     driver.bind_turn()
+    scope.poll(host)
     attempt = next(op.attempts[1] for op in driver.state.operations.values() if op.kind == "tool")
     errors = {
         "invalid": InvalidChildBatch,
@@ -193,7 +222,8 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
             assert len(rows(host, sid, "session_created")) == 1
             assert len(host.peek_inbox(sid)) == 1
     # Independent read proves this is committed state, not the writer's view.
-    with open_store(database) as reader:
+    with open_store(database) as raw_reader:
+        reader = wrap_fixture_store(raw_reader)
         assert reader._one("SELECT count(*) FROM business_child")[0] == (0 if fault else 2)
         assert reader.list_sessions() == host.list_sessions()
     print("BUSINESS_ATOMIC", {"fault": fault, "admissions": len(admissions), "append_returned": len(append_returned)})

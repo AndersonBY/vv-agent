@@ -11,13 +11,16 @@ from sim.assembly import ScheduledHeartbeat, Scope, SimDriver, _cancellation_fac
 from sim.scenarios import Provider, run_scenario
 from sim.world import SimWorld
 from vv_agent._memory_settings import normalize_memory_settings
+from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_record_payload
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation
 from vv_agent.kernel._budget_values import BudgetUnavailableReason, HostCost
 from vv_agent.kernel._compaction_phase import CompactionMemory
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import APPROVAL_SCOPE, INPUT_ACTOR_ATTRIBUTES, ContentRef
+from vv_agent.kernel._content_runtime import durable_content_reader
 from vv_agent.kernel._driver_outcomes import OutcomeRead
+from vv_agent.kernel._driver_recovery import PushApprovalAnswer
 from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership
-from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+from vv_agent.kernel._records import InboxItem
 
 
 def capture_factory_heartbeats(monkeypatch):
@@ -143,6 +146,41 @@ def test_scheduled_heartbeat_constructs_actual_lease_ownership(tmp_path):
         assert store.release(lease)
 
 
+def test_core_approval_answer_publication_binds_trusted_actor_and_owner_slots(tmp_path):
+    with SimWorld(tmp_path / "approval-host.sqlite", seed=17) as world:
+        worker, _runtime = core_worker(world)
+        worker.handle(
+            PushApprovalAnswer(
+                InboxItem(
+                    "approval",
+                    "approval_answer",
+                    {
+                        "operation_id": "s/op/approval",
+                        "attempt": 1,
+                        "request_id": "approval-request",
+                        "request_digest": "a" * 64,
+                        "scope": ["effect"],
+                        "decision": "approve",
+                    },
+                )
+            )
+        )
+
+        store = world.connection("observer")
+        stored = store.read_input("s", "approval")
+        assert stored is not None
+        actor = stored.item.actor
+        assert actor is not None
+        assert actor["subject_id"] == "sim-host"
+        assert actor["subject_kind"] == "service"
+
+        reader = durable_content_reader(store, tenant_id=store.tenant_id, session_id="s")
+        scope = ContentRef.from_dict(stored.item.payload["scope"])
+        actor_attributes = ContentRef.from_dict(actor["attributes"])
+        assert reader.read(store.tenant_id, "s", "input:approval", APPROVAL_SCOPE, scope)
+        assert reader.read(store.tenant_id, "s", "input:approval", INPUT_ACTOR_ATTRIBUTES, actor_attributes)
+
+
 def test_factory_runtime_owns_driver_scope_hook_and_ttl(tmp_path, monkeypatch):
     with SimWorld(tmp_path / "factory-runtime.sqlite", seed=17) as world:
         world.create()
@@ -154,6 +192,14 @@ def test_factory_runtime_owns_driver_scope_hook_and_ttl(tmp_path, monkeypatch):
         factory_runtime.ttl_ms = 22_000
         world.runtimes[("s", "worker-0")] = base
 
+        store = world.connection("worker-0")
+        supported = store.worker_supports
+        store.configure_worker(
+            level=supported.max_level,
+            handler_versions=tuple(dict.fromkeys((*supported.handler_versions, "factory-runtime-v2"))),
+            capabilities=supported.capabilities,
+        )
+
         hook_points = []
         original_hook = factory_runtime.hook
 
@@ -162,18 +208,18 @@ def test_factory_runtime_owns_driver_scope_hook_and_ttl(tmp_path, monkeypatch):
             original_hook(point, record)
 
         factory_runtime.hook = observed_hook
-        store = world.connection("worker-0")
-        renew = store.renew
+        heartbeat_store = world.connection("worker-0/heartbeat")
+        renew = heartbeat_store.renew
         ttl_values = []
 
         def observed_renew(lease, *, ttl_ms):
             ttl_values.append(ttl_ms)
             return renew(lease, ttl_ms=ttl_ms)
 
-        monkeypatch.setattr(store, "renew", observed_renew)
+        monkeypatch.setattr(heartbeat_store, "renew", observed_renew)
         assert world.drive(provider=provider, factory=lambda _sid: factory_runtime)
 
-        _state, rows, _ = world.connection("observer").read_state("s")
+        _state, rows, _ = store.read_state("s")
         started = next(row.record for row in rows if row.record.kind == "turn_started")
         assert started.payload["handler_version"] == "factory-runtime-v2"
         assert 22_000 in ttl_values and ttl_values[-1] == 22_000
@@ -228,7 +274,12 @@ def test_context_compaction_event_uses_core_effective_threshold(tmp_path):
         started = started_row.record
         raw_event = started.payload["data"]["event"]
         assert ContentRef.from_dict(raw_event).content_id
-        event = hydrate_record_payload(started_row, hydration_for_session_store(store, "s"))["data"]["event"]
+        hydration = SessionHydration(
+            durable_content_reader(store, tenant_id=store.tenant_id, session_id="s"),
+            tenant_id=store.tenant_id,
+            session_id="s",
+        )
+        event = hydrate_session_record_payload(started_row, hydration)["data"]["event"]
         manager = CompactionMemory(normalize_memory_settings(world.memory_settings, None), None, False)
 
     assert summary["scenario"] == "context_compacted"

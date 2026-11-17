@@ -15,6 +15,7 @@ from ._tool_values import ToolExecutionResult
 
 class ProviderResultInvalid(ValueError):
     code = "provider_result_invalid"
+    _query_operation_key: tuple[str, int] | None = None
 
     def __init__(self) -> None:
         super().__init__(self.code)

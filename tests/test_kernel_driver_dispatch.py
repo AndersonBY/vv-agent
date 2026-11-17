@@ -6,19 +6,28 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 
 def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
+    from hashlib import sha256
+
     from session.controlled import ControlledProvider
-    from session.test_recovery_matrix import start
     from sim.world import SimClock
+    from support.s1_fixture_values import create_fixture_session, push_fixture_input
 
     from vv_agent import Agent, RunConfig, function_tool
     from vv_agent.config import ResolvedModelConfig
     from vv_agent.kernel import _driver_dispatch as core
     from vv_agent.kernel import _tool_admission as admission
+    from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
+    from vv_agent.kernel._content_runtime import (
+        bind_content_runtime,
+        durable_content_reader,
+        wrap_session_content_store,
+    )
     from vv_agent.llm.scripted import ScriptedLLM
     from vv_agent.run_config import ToolPolicy
     from vv_agent.session import _driver_dispatch as host
@@ -26,6 +35,7 @@ def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
     from vv_agent.session._driver_scope import _Scope
     from vv_agent.session.kernel import _Driver, drive
     from vv_agent.session.providers import Definitive
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.runtime import Runtime
     from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata
@@ -33,6 +43,43 @@ def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
 
     calls = []
     contexts = []
+
+    class FixtureKeyProvider:
+        provider_id = "dispatch-fixture-v1"
+
+        @staticmethod
+        def _key(tenant_id: str, session_id: str) -> bytes:
+            return sha256(f"{tenant_id}\x00{session_id}".encode()).digest()
+
+        def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
+            return WrappedDataKey(tenant_id, session_id, f"key/{tenant_id}/{session_id}", self._key(tenant_id, session_id))
+
+        def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
+            assert (wrapped_key.tenant_id, wrapped_key.session_id) == (tenant_id, session_id)
+            return wrapped_key.wrapped_key
+
+        def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
+            return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"destroy/{tenant_id}/{key_id}")
+
+    class FixtureCipher:
+        def __init__(self, counter: int = 0) -> None:
+            self.counter = counter
+
+        def encrypt(self, key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
+            del key, nonce, aad
+            return b"dispatch-cipher" + plaintext
+
+        def decrypt(self, key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+            del key, nonce, aad
+            assert ciphertext.startswith(b"dispatch-cipher")
+            return ciphertext.removeprefix(b"dispatch-cipher")
+
+        def random_bytes(self, n: int) -> bytes:
+            output = b""
+            while len(output) < n:
+                output += sha256(f"dispatch-cipher:{self.counter}".encode()).digest()
+                self.counter += 1
+            return output[:n]
 
     @function_tool(tool_metadata=ToolMetadata(idempotency=ToolIdempotency.UNSUPPORTED))
     def effect(count: int = 1) -> str:
@@ -46,9 +93,24 @@ def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
     database = tmp_path / "sdk.sqlite"
     core_database = tmp_path / "core.sqlite"
     data = {"mode": mode, "clock_ms": clock.now_ms(), "resources_noop": True}
-    with SQLiteStore.standalone(str(database), clock=clock) as store:
-        store.install_schema()
-        start(store)
+    with SQLiteStore.standalone(str(database), clock=clock) as raw_store:
+        raw_store.install_schema()
+        cipher = FixtureCipher()
+        binding = bind_content_runtime(raw_store, key_provider=FixtureKeyProvider(), cipher=cipher)
+        store = wrap_session_content_store(raw_store, binding)
+        create_fixture_session(
+            store,
+            "s",
+            attributes={
+                "seed": {
+                    "messages": [],
+                    "shared_state": {},
+                    "unseen_input_protection": True,
+                    "response_rejection": True,
+                }
+            },
+        )
+        push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
         runtime = Runtime(
             Agent("dispatch", "Work.", tools=[effect]),
             RunConfig(session_memory_enabled=False, workspace=tmp_path),
@@ -63,8 +125,9 @@ def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
             store.heartbeat_store,
             clock=clock,
         )
+        runtime.content_reader = durable_content_reader(store, tenant_id=raw_store.tenant_id, session_id="s")
         if mode == "unknown":
-            provider = ControlledProvider(store, mode="unknown")
+            provider = ControlledProvider(database, mode="unknown")
             provider.install()
             runtime.providers["effect"] = provider
         target = "model" if mode == "model" else "tool"
@@ -82,67 +145,86 @@ def _produced_prefix(tmp_path, mode, monkeypatch, configure=None):
         if configure is not None:
             configure(runtime, effect)
         with sqlite3.connect(core_database) as copied:
-            store.connection.backup(copied)
+            raw_store.connection.backup(copied)
+        data["cipher_calls"] = cipher.counter
         lease = store.acquire("s", owner="dispatch-reader", ttl_ms=15000)
         assert lease is not None
-        driver = _Driver(store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
-        driver.bind_turn()
-        operation = next(op for op in driver.state.operations.values() if op.kind == target and op.selected_attempt is None)
-        attempt = operation.attempts[max(operation.attempts)]
-        plan = attempt.execution_plan
-        data.update(
-            oid=plan.operation_id,
-            attempt=plan.attempt,
-            prefix_seq=driver.records[-1].seq,
-            handler_version=runtime.handler_version,
-        )
-        handle = host._DispatchHost._handle
+        scope = _Scope(lease, runtime, now_ms=raw_store._now())
+        scope.start()
+        try:
+            assert scope.ready.wait(runtime.ttl_ms / 1000)
+            assert scope.successful_ready
+            driver = _Driver(store, "s", runtime, scope)
+            driver.bind_turn()
+            operation = next(op for op in driver.state.operations.values() if op.kind == target and op.selected_attempt is None)
+            attempt = operation.attempts[max(operation.attempts)]
+            plan = attempt.execution_plan
+            data.update(
+                oid=plan.operation_id,
+                attempt=plan.attempt,
+                prefix_seq=driver.records[-1].seq,
+                handler_version=runtime.handler_version,
+            )
+            handle = host._DispatchHost._handle
 
-        def observe(self, request):
-            if isinstance(request, core.SelectProvider):
-                assert "_vv_agent_tool_dispatch_callback" not in self.context.metadata
-            response = handle(self, request)
-            if isinstance(request, core.FinishContext):
-                contexts.append(self.context)
-                data["context"] = {
-                    "metadata": dict(response),
-                    "cycle": self.context.cycle_index,
-                    "shared": runtime.durable_state(self.context.shared_state),
-                }
-            elif request is admission.Read.SCHEMA:
-                data["schema"] = response
-            elif request is admission.Read.POLICY_METADATA:
-                data["policy"] = response
-            elif request is admission.Read.TOOL_METADATA:
-                data["tool_metadata"] = response.to_dict() if response is not None else None
-            elif isinstance(request, core.InvokeOperation):
-                data["outcome"] = {"type": "definitive" if isinstance(response, Definitive) else "unknown", **asdict(response)}
-            return response
+            def observe(self, request):
+                if isinstance(request, core.SelectProvider):
+                    assert "_vv_agent_tool_dispatch_callback" not in self.context.metadata
+                response = handle(self, request)
+                if isinstance(request, core.FinishContext):
+                    contexts.append(self.context)
+                    data["context"] = {
+                        "metadata": dict(response),
+                        "cycle": self.context.cycle_index,
+                        "shared": runtime.durable_state(self.context.shared_state),
+                    }
+                elif request is admission.Read.SCHEMA:
+                    data["schema"] = response
+                elif request is admission.Read.POLICY_METADATA:
+                    data["policy"] = response
+                elif request is admission.Read.TOOL_METADATA:
+                    data["tool_metadata"] = response.to_dict() if response is not None else None
+                elif isinstance(request, core.InvokeOperation):
+                    data["outcome"] = {
+                        "type": "definitive" if isinstance(response, Definitive) else "unknown",
+                        **asdict(response),
+                    }
+                return response
 
-        monkeypatch.setattr(host._DispatchHost, "_handle", observe)
-        resources = _recovery_phase.prepare_tool_resources
+            monkeypatch.setattr(host._DispatchHost, "_handle", observe)
+            resources = _recovery_phase.prepare_tool_resources
 
-        def observe_resources(plan, raw, backend):
-            result = resources(plan, raw, backend)
-            assert result == raw
-            return result
+            def observe_resources(plan, raw, backend):
+                result = resources(plan, raw, backend)
+                assert result == raw
+                return result
 
-        monkeypatch.setattr(_recovery_phase, "prepare_tool_resources", observe_resources)
-        driver.dispatch(attempt)
-        data["expected"] = [r.record.encode().decode() for r in driver.records if r.seq > data["prefix_seq"]]
-        if configure is None:
-            assert bool(calls) == (mode == "tool")
-        data["effect_calls"] = calls
-        if mode != "tool":
-            assert all("_vv_agent_tool_dispatch_callback" not in context.metadata for context in contexts)
-        if mode == "unknown":
-            assert provider.counts() == (1, 1)
-        if mode in {"schema", "policy"}:
-            code = "invalid_tool_arguments" if mode == "schema" else "tool_not_allowed"
-            assert attempt.result is not None and attempt.result._payload["result"]["error_code"] == code
-            assert not attempt.started
-        elif mode == "unknown":
-            assert attempt.unknown is not None and attempt.unknown._payload["retry"] == "stop"
+            monkeypatch.setattr(_recovery_phase, "prepare_tool_resources", observe_resources)
+            driver.dispatch(attempt)
+            if attempt.result is not None:
+                data["result"] = driver.hydrate_record_field(
+                    attempt.result,
+                    "result",
+                    attempt.result._payload["result"],
+                )
+            data["expected"] = [r.record.encode().decode() for r in driver.records if r.seq > data["prefix_seq"]]
+            if configure is None:
+                assert bool(calls) == (mode == "tool")
+            data["effect_calls"] = calls
+            if mode != "tool":
+                assert all("_vv_agent_tool_dispatch_callback" not in context.metadata for context in contexts)
+            if mode == "unknown":
+                assert provider.counts() == (1, 1)
+            if mode in {"schema", "policy"}:
+                code = "invalid_tool_arguments" if mode == "schema" else "tool_not_allowed"
+                result = data.get("result")
+                assert isinstance(result, dict)
+                assert result["error_code"] == code
+                assert not attempt.started
+            elif mode == "unknown":
+                assert attempt.unknown is not None and attempt.unknown._payload["retry"] == "stop"
+        finally:
+            scope.close()
         assert store.release(lease)
     return core_database, data
 
@@ -158,8 +240,9 @@ def test_real_core_dispatch_without_sdk_imports(tmp_path, monkeypatch, flags, mo
     facts.write_text(json.dumps(data))
     script = r"""
 import importlib.abc, json, sys
+from hashlib import sha256
 from pathlib import Path
-from threading import Event, Lock, local, get_ident
+from threading import Event
 
 sys.path.insert(0, sys.argv[1])
 
@@ -175,6 +258,13 @@ class CoreOnly(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, CoreOnly())
 from vv_agent.kernel import _driver_dispatch as core, _tool_admission as admission
+from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
+from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_and_fold_records
+from vv_agent.kernel._content_runtime import (
+    bind_content_runtime,
+    durable_content_reader,
+    wrap_session_content_store,
+)
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_outcomes import OutcomeRead, PrepareToolResources
 from vv_agent.kernel._lease_scope import LeaseOwnership
@@ -185,6 +275,45 @@ from vv_agent.kernel._tool_metadata import ToolMetadata
 from vv_agent.kernel._tool_schema import SchemaIssue
 
 source = json.loads(Path(sys.argv[3]).read_text())
+
+
+class FixtureKeyProvider:
+    provider_id = "dispatch-fixture-v1"
+
+    @staticmethod
+    def _key(tenant_id, session_id):
+        return sha256(f"{tenant_id}\x00{session_id}".encode()).digest()
+
+    def generate_data_key(self, tenant_id, session_id):
+        return WrappedDataKey(tenant_id, session_id, f"key/{tenant_id}/{session_id}", self._key(tenant_id, session_id))
+
+    def unwrap(self, tenant_id, session_id, wrapped_key):
+        assert (wrapped_key.tenant_id, wrapped_key.session_id) == (tenant_id, session_id)
+        return wrapped_key.wrapped_key
+
+    def destroy(self, tenant_id, key_id):
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"destroy/{tenant_id}/{key_id}")
+
+
+class FixtureCipher:
+    def __init__(self, counter=0):
+        self.counter = counter
+
+    def encrypt(self, key, nonce, plaintext, aad):
+        del key, nonce, aad
+        return b"dispatch-cipher" + plaintext
+
+    def decrypt(self, key, nonce, ciphertext, aad):
+        del key, nonce, aad
+        assert ciphertext.startswith(b"dispatch-cipher")
+        return ciphertext.removeprefix(b"dispatch-cipher")
+
+    def random_bytes(self, n):
+        output = b""
+        while len(output) < n:
+            output += sha256(f"dispatch-cipher:{self.counter}".encode()).digest()
+            self.counter += 1
+        return output[:n]
 
 
 class Clock:
@@ -212,12 +341,49 @@ def factory():
     return Fold(normalize_memory_settings=unused, count_messages=unused)
 
 
+class Token:
+    def cancel(self, reason):
+        raise AssertionError(f"unexpected cancellation: {reason}")
+
+
 class Scope(LeaseOwnership):
     turn_id = None
     generation = None
 
 
-with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as store:
+class FixtureDriver(CoreDriver):
+    def logical_state(self):
+        raw_state = self.fold.state
+        logical = hydrate_and_fold_records(
+            self.records,
+            factory,
+            SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id="s"),
+        )
+        for operation_id, operation in logical.state.operations.items():
+            raw_operation = raw_state.operations[operation_id]
+            for attempt_number, attempt in operation.attempts.items():
+                raw_attempt = raw_operation.attempts[attempt_number]
+                attempt.plan = raw_attempt.plan
+                attempt.prepared = raw_attempt.prepared
+        return logical.state
+
+    def extend(self, records):
+        super().extend(records)
+        self.state = self.logical_state()
+
+    def hydrated_definition(self, record):
+        return super().hydrated_definition(self.stored_record(record).record)
+
+
+with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as raw_store:
+    raw_store.install_schema()
+    binding = bind_content_runtime(
+        raw_store,
+        key_provider=FixtureKeyProvider(),
+        cipher=FixtureCipher(source["cipher_calls"]),
+    )
+    store = wrap_session_content_store(raw_store, binding)
+    reader = durable_content_reader(store, tenant_id=store.tenant_id, session_id="s")
     lease = store.acquire("s", owner="dispatch-reader", ttl_ms=15000)
     scope = Scope(
         lease,
@@ -226,13 +392,10 @@ with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as s
         clock=clock,
         stop=Event(),
         ready=Event(),
-        lock=Lock(),
-        poll_lock=Lock(),
-        commit_lock=Lock(),
-        latch_entry=local(),
-        actor_identity=get_ident,
+        now_ms=source["clock_ms"],
+        token_factory=Token,
     )
-    driver = CoreDriver(
+    driver = FixtureDriver(
         store,
         "s",
         scope,
@@ -241,7 +404,9 @@ with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as s
         observe_cost=lambda: None,
         hook=lambda *a: None,
         emit_phase=lambda *a: None,
+        content_reader=reader,
     )
+    driver.state = driver.logical_state()
     driver.bind_turn()
     attempt = driver.state.operations[source["oid"]].attempts[source["attempt"]]
     steps = core.dispatch(driver, attempt)
@@ -347,7 +512,9 @@ with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as s
     assert invoked == (0 if source["mode"] in {"schema", "policy"} else 1)
     assert checks == (0 if source["mode"] == "model" else 1)
     if source["mode"] == "unknown":
-        assert attempt.unknown.payload["measurement_missing"] and attempt.unknown.payload["retry"] == "stop"
+        current_attempt = driver.state.operations[source["oid"]].attempts[source["attempt"]]
+        assert current_attempt.unknown is not None
+        assert current_attempt.unknown.payload["measurement_missing"] and current_attempt.unknown.payload["retry"] == "stop"
     assert all(
         n in {"vv_agent", "vv_agent.kernel"} or n.startswith("vv_agent.kernel.") for n in sys.modules if n.startswith("vv_agent")
     )
@@ -407,7 +574,7 @@ def test_dispatch_preflight_formatter_keeps_callback_exception_chain(tmp_path, m
     _, data = _produced_prefix(tmp_path, "formatter", monkeypatch, configure)
     assert observed == [(original, context, explicit, suppressed)]
     assert data["effect_calls"] == []
-    result = next(json.loads(row)["payload"]["result"] for row in data["expected"] if json.loads(row)["kind"] == "op_completed")
+    result = data["result"]
     assert result["error_code"] == "tool_execution_failed"
     assert "formatted original policy failure" in result["content"]
 
@@ -419,9 +586,12 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
     from vv_agent.kernel import _driver_dispatch as core
     from vv_agent.kernel._content import ContentRef
     from vv_agent.kernel._content_publication import make_record_before_publication, publish_record_content
+    from vv_agent.kernel._driver import CoreDriver
     from vv_agent.kernel._driver_planning import ProviderAvailable
-    from vv_agent.kernel._hydration import reference_digest
-    from vv_agent.kernel._records import digest
+    from vv_agent.kernel._hydration import DefinitionContent, reference_digest
+    from vv_agent.kernel._records import Record, digest
+    from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn
+    from vv_agent.kernel._store import StoredRecord
     from vv_agent.kernel._tool_values import ToolCall, ToolExecutionResult
     from vv_agent.session.content_runtime import SessionContentWriter
     from vv_agent.session.content_store import LocalKeyProvider
@@ -487,26 +657,60 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
         },
     )
 
-    class Driver:
+    turn_start = Record(
+        "turn/s/turn/tool/start",
+        "turn_started",
+        "s",
+        turn_id,
+        None,
+        None,
+        {"handler_version": "handler/h2", "generation": 0},
+    )
+    fixture_state = ExecutionState(
+        session_id="s",
+        active_turn_id=turn_id,
+        turns={turn_id: Turn(turn_start)},
+        operations={
+            parent_id: Operation(
+                turn_id=turn_id,
+                kind="model",
+                attempts={1: Attempt(parent)},
+                selected_attempt=1,
+            )
+        },
+    )
+
+    class Driver(CoreDriver):
         sid = "s"
-        records = (SimpleNamespace(seq=2),)
+        records = (StoredRecord(turn_start, 2, "commit", 1, 0),)
         fold = None
-        state = SimpleNamespace(
-            active_turn_id=turn_id,
-            preferred_endpoint_id=None,
-            turns={turn_id: SimpleNamespace(start=object())},
-            operations={parent_id: SimpleNamespace(selected_attempt=1, attempts={1: SimpleNamespace(plan=parent)})},
-        )
+        state = fixture_state
         scope = SimpleNamespace(lease=SimpleNamespace(epoch=7))
 
-        def hydrated_definition(self, record):
+        def hydrated_definition(self, record: Record) -> DefinitionContent:
             del record
-            return SimpleNamespace(task=task, capabilities={})
+            return DefinitionContent(
+                agent_name="dispatch",
+                memory_settings={},
+                child_tools=(),
+                model_binding={},
+                capabilities={},
+                task=task,
+                tools=(),
+            )
 
-        def hydrate_plan(self, record):
+        def hydrate_plan(self, record: Record) -> Record:
             return record
 
-        def record(self, kind, payload, plan=None):
+        def record(
+            self,
+            kind: str,
+            payload: dict[str, Any],
+            plan: Record | None = None,
+            *,
+            tid: str | None = None,
+        ) -> Record:
+            del tid
             return make_record_before_publication(
                 kind,
                 session_id="s",
@@ -516,8 +720,8 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
                 payload=payload,
             )
 
-    driver = Driver()
-    attempt = SimpleNamespace(plan=plan, execution_plan=plan, approval=None, prepared=None)
+    driver = object.__new__(Driver)
+    attempt = Attempt(plan)
     steps = core.dispatch(driver, attempt)
     response = None
     captured = None

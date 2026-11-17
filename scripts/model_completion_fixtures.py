@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -15,13 +16,19 @@ from vv_agent.session.sqlite import SQLiteStore
 
 def generate():
     cases = []
-    with patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000):
+    with (
+        patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000),
+        patch("vv_agent.session.timing.time.time_ns", return_value=1_000_000_000_000),
+    ):
         for case in CASES:
             for declared in (None, False, True):
-                with SQLiteStore.standalone(":memory:") as store:
+                with (
+                    TemporaryDirectory(prefix="model-completion-") as directory,
+                    SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+                ):
                     store.install_schema()
                     store.connection.create_function("session_now_ms", 0, lambda: 1_000_000)
-                    cases.append(run_completion_case(store, store, case, declared))
+                    cases.append(run_completion_case(store, Path(store.path), case, declared))
     return {"producer": "scripts/model_completion_fixtures.py", "cases": cases}
 
 

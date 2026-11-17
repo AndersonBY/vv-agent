@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
@@ -22,6 +23,19 @@ RUNNING_SUB_TASK_STATUSES = {
     "pending",
     "running",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class SubTaskStatusRequest:
+    manager: Any
+    task_ids: list[str]
+    detail_level: str
+    workspace_file_limit: int
+    message: str
+    wait_for_response: bool
+    wait_for_completion: bool
+    check_interval_seconds: int
+    max_wait_seconds: int
 
 
 def _error(message: str, *, error_code: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
@@ -257,7 +271,7 @@ def _add_wait_metadata(
         )
 
 
-def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+def parse_sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> SubTaskStatusRequest | ToolExecutionResult:
     manager = context.sub_task_manager
     if manager is None:
         return _error("Sub-task manager is not available for this task", error_code="sub_task_manager_unavailable")
@@ -319,42 +333,80 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     ):
         return _error("`max_wait_seconds` must be null or an integer from 60 to 86400", error_code="invalid_tool_arguments")
 
-    interaction: dict[str, Any] | None = None
-    if message:
+    return SubTaskStatusRequest(
+        manager=manager,
+        task_ids=task_ids,
+        detail_level=detail_level,
+        workspace_file_limit=workspace_file_limit,
+        message=message,
+        wait_for_response=wait_for_response,
+        wait_for_completion=wait_for_completion,
+        check_interval_seconds=check_interval_seconds,
+        max_wait_seconds=max_wait_seconds,
+    )
+
+
+def snapshot_sub_task_status(request: SubTaskStatusRequest, *, wait_exceeded: bool = False) -> ToolExecutionResult:
+    tasks = _build_status_entries(
+        manager=request.manager,
+        task_ids=request.task_ids,
+        detail_level=request.detail_level,
+        workspace_file_limit=request.workspace_file_limit,
+    )
+    running_task_ids = _running_task_ids(tasks)
+    payload: dict[str, Any] = {
+        "tasks": tasks,
+        "detail_level": request.detail_level,
+    }
+    _add_wait_metadata(
+        payload,
+        wait_for_completion=request.wait_for_completion,
+        check_interval_seconds=request.check_interval_seconds,
+        max_wait_seconds=request.max_wait_seconds,
+        running_task_ids=running_task_ids,
+        wait_exceeded=wait_exceeded,
+    )
+    return _success(payload)
+
+
+def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    request = parse_sub_task_status(context, arguments)
+    if isinstance(request, ToolExecutionResult):
+        return request
+
+    if request.message:
         from vv_agent.session.delegation import status_with_store
 
         return status_with_store(context, arguments)
 
-    if wait_for_completion:
+    if request.wait_for_completion:
         tasks, running_task_ids, wait_exceeded = _wait_for_sub_task_completion(
-            manager=manager,
-            task_ids=task_ids,
-            detail_level=detail_level,
-            workspace_file_limit=workspace_file_limit,
-            max_wait_seconds=max_wait_seconds,
+            manager=request.manager,
+            task_ids=request.task_ids,
+            detail_level=request.detail_level,
+            workspace_file_limit=request.workspace_file_limit,
+            max_wait_seconds=request.max_wait_seconds,
         )
     else:
         tasks = _build_status_entries(
-            manager=manager,
-            task_ids=task_ids,
-            detail_level=detail_level,
-            workspace_file_limit=workspace_file_limit,
+            manager=request.manager,
+            task_ids=request.task_ids,
+            detail_level=request.detail_level,
+            workspace_file_limit=request.workspace_file_limit,
         )
         running_task_ids = _running_task_ids(tasks)
         wait_exceeded = False
 
     payload: dict[str, Any] = {
         "tasks": tasks,
-        "detail_level": detail_level,
+        "detail_level": request.detail_level,
     }
     _add_wait_metadata(
         payload,
-        wait_for_completion=wait_for_completion,
-        check_interval_seconds=check_interval_seconds,
-        max_wait_seconds=max_wait_seconds,
+        wait_for_completion=request.wait_for_completion,
+        check_interval_seconds=request.check_interval_seconds,
+        max_wait_seconds=request.max_wait_seconds,
         running_task_ids=running_task_ids,
         wait_exceeded=wait_exceeded,
     )
-    if interaction is not None:
-        payload["interaction"] = interaction
     return _success(payload)

@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import replace
 from typing import Any, Protocol
 
-from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._boundary_hydration import validate_logical_preflight
 from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter, SessionHead
 from vv_agent.kernel._content_publication import (
     has_record_content,
     has_record_content_payload,
     link_declared_record_content,
+    make_retained_record_before_publication,
     publish_record_content,
     require_record_link_writer,
     resolve_record_content_links,
@@ -22,17 +22,14 @@ from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import (
     ContentReader,
     DefinitionContent,
-    IntegrityFailure,
     MissingContentLink,
     SessionHydrator,
-    TypedSchemaFailure,
 )
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLSessionTx
-from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, LeasePoll, SessionStore, SessionTx, StoredRecord
 
 _RECORD_CONTENT_PATHS: dict[tuple[str, str], tuple[str, ...]] = {
     ("session_created", SESSION_ATTRIBUTES): ("attributes",),
@@ -69,6 +66,7 @@ _RECORD_CONTENT_PATHS: dict[tuple[str, str], tuple[str, ...]] = {
     ("turn_ended", "turn_ended_budget"): ("budget",),
     ("usage_observed", "usage"): ("usage",),
     ("usage_observed", "usage_source"): ("source",),
+    ("boundary_recorded", "budget_usage"): ("data", "usage"),
     ("boundary_recorded", "shared_state"): ("data", "shared_state"),
 }
 _PREPARED_PLAN_CONTENT_SLOTS = frozenset({"request", "tool", "hook_result", "shared_state"})
@@ -76,8 +74,12 @@ _PREPARED_PLAN_CONTENT_SLOTS = frozenset({"request", "tool", "hook_result", "sha
 
 class DriverLeaseScope(Protocol):
     lease: Lease
-    turn_id: str | None
-    generation: int | None
+
+    def confirmed_poll(self) -> LeasePoll: ...
+
+    def bind_turn(self, turn_id: str | None, generation: int | None, applied_inputs: Mapping[str, object]) -> None: ...
+
+    def reset_token(self) -> None: ...
 
     def committing(self) -> AbstractContextManager[Lease]: ...
 
@@ -153,8 +155,8 @@ class CoreDriver:
         if tid != self.active_tid:
             self.active_since = self.clock.monotonic_ns()
             self.active_tid = tid
-        self.scope.turn_id = tid
-        self.scope.generation = self.state.turns[tid].start._payload["generation"] if tid else None
+        generation = self.state.turns[tid].start._payload["generation"] if tid else None
+        self.scope.bind_turn(tid, generation, self.state.applied_inputs)
 
     def record(self, kind: str, payload: dict[str, Any], plan: Record | None = None, *, tid: str | None = None) -> Record:
         payload = copy_json(payload)
@@ -236,26 +238,18 @@ class CoreDriver:
         """Read one already-linked JSON object through the bound content reader."""
 
         if owner.startswith("record:") and owner.removeprefix("record:").isdecimal():
-            hydrator = self.hydrator_for(int(owner.removeprefix("record:")))
+            record_owner: int | str = int(owner.removeprefix("record:"))
         elif owner.startswith("input:") and owner.removeprefix("input:"):
-            hydrator = self.hydrator_for(owner)
+            record_owner = owner
         else:
             raise RecordError("content owner must use a record sequence or input id")
+        self._content_reader_binding()
+        hydrator = self.hydrator_for(record_owner)
         try:
             parsed = ref if isinstance(ref, ContentRef) else ContentRef.from_dict(ref)
         except (TypeError, ValueError) as exc:
             raise RecordError(f"S1 content slot {slot} requires a valid ContentRef") from exc
-        reader, tenant_id = self._content_reader_binding()
-        body = reader.read(tenant_id, self.sid, hydrator.binding[2], slot, parsed)
-        if type(body) is not bytes or len(body) != parsed.size:
-            raise IntegrityFailure(f"{slot} reader bytes do not match the ContentRef")
-        try:
-            value = json.loads(body)
-            if canonical_json_bytes(value) != body:
-                raise ValueError("content is not canonical JSON")
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise TypedSchemaFailure(f"{slot} must be canonical JSON") from exc
-        return value
+        return hydrator._read_link(slot, parsed)
 
     def stored_record(self, record: Record) -> StoredRecord:
         """Return the retained ledger row for one record identity."""
@@ -469,8 +463,15 @@ class CoreDriver:
         assert self.state.active_turn_id is not None
         return self.hydrated_definition(self.state.turns[self.state.active_turn_id].start).task
 
-    def _logical_preflight(self, records: list[Record], encoded_records: list[Record]) -> None:
+    def _logical_preflight(
+        self,
+        records: list[Record],
+        encoded_records: list[Record],
+        *,
+        base_fold: Fold | None = None,
+    ) -> None:
         """Validate logical semantics inside the caller-owned transaction."""
+        validate_logical_preflight(self, records, encoded_records, base_fold=base_fold)
 
     def commit(
         self,
@@ -479,6 +480,7 @@ class CoreDriver:
         *,
         guarded: bool = False,
         prepare: Callable[[SessionTx], list[Record]] | None = None,
+        _logical_base: Fold | None = None,
     ) -> None:
         tid = self.state.active_turn_id
         prepared_records = list(records)
@@ -508,31 +510,59 @@ class CoreDriver:
                         prepared_records.extend(prepare(tx))
                 committed = {stored.record.record_id: stored.record for stored in self.records}
                 record_ids = [record.record_id for record in prepared_records]
-                new_records: list[Record] = prepared_records
                 if any(record_id in committed for record_id in record_ids):
                     if not all(record_id in committed for record_id in record_ids):
                         raise Conflict("commit mixes new records with already committed record ids")
                     prepared_records = [committed[record_id] for record_id in record_ids]
                     new_records = []
+                else:
+                    new_records = list(prepared_records)
+                if new_records and tid is not None:
+                    meter_id = f"active/{tid}/{self.scope.lease.epoch}"
+                    usage = self.record(
+                        "usage_observed",
+                        {
+                            "meter_id": meter_id,
+                            "observation": self.state.usage_observations.get(meter_id, 0) + 1,
+                            "mode": "cumulative",
+                            "source": "kernel-active-scope",
+                            "usage": {
+                                "elapsed_ms": (self.clock.monotonic_ns() - self.active_since) // 1_000_000,
+                                "host_cost": self._observe_cost(),
+                            },
+                        },
+                    )
+                    new_records.insert(0, usage)
+                    prepared_records = new_records
+                    commit_records = prepared_records
                 if has_record_content(prepared_records):
                     with phase("publish"):
                         content_writer = require_record_link_writer(self.content_writer(tx))
-                        publication = publish_record_content(content_writer, prepared_records)
+                        publication = publish_record_content(
+                            content_writer,
+                            (
+                                make_retained_record_before_publication(
+                                    record.kind,
+                                    session_id=record.session_id,
+                                    turn_id=record.turn_id,
+                                    operation_id=record.operation_id,
+                                    attempt=record.attempt,
+                                    payload=record._payload,
+                                )
+                                for record in prepared_records
+                            ),
+                        )
                         commit_records = list(publication.records)
                         declarations = publication.links
-                if new_records:
-                    with phase("logical_preflight"):
-                        self._logical_preflight(new_records, commit_records)
                 with phase("before_commit"):
                     self._hook("before_commit", commit_records[-1] if commit_records else None)
-                # SQL append calls this only after encoding and immutable history
-                # preparation. Keep the latch through the outer atomic exit.
-                if isinstance(tx, SQLSessionTx):
-                    tx._lease_guard = lambda: latch.enter_context(self.scope.committing())
+                # SQL append evaluates the guard only after encoding and immutable
+                # history preparation. Keep the late precheck through atomic exit.
+                tx.bind_lease_guard(lambda: latch.enter_context(self.scope.committing()))
                 with phase("append"):
                     receipt = tx.append(
                         self.sid,
-                        lease=self.scope.lease if isinstance(tx, SQLSessionTx) else latch.enter_context(self.scope.committing()),
+                        lease=self.scope.lease,
                         expected_seq=self.records[-1].seq,
                         commit_id=digest({"record_ids": [r.record_id for r in commit_records], "consumed": list(consumed)}),
                         records=tuple(commit_records),
@@ -540,6 +570,9 @@ class CoreDriver:
                         expected_inbox_seq=self.watermark if guarded else None,
                         expected_head=self._expected_head,
                     )
+                if new_records:
+                    with phase("logical_preflight"):
+                        self._logical_preflight(new_records, commit_records, base_fold=_logical_base)
                 links = resolve_record_content_links(declarations, receipt.record_sequences)
                 if links:
                     with phase("finalize"):
@@ -632,12 +665,6 @@ class CoreDriver:
         return copy_json(self._task().initial_shared_state)
 
     def pending_batch(self) -> bool:
-        return any(
-            op.turn_id == self.state.active_turn_id
-            and (
-                a.state in {"planned", "started", "parked"}
-                or (a.state == "unknown" and a.unknown is not None and a.unknown._payload["retry"] == "retry")
-            )
-            for op in self.state.operations.values()
-            for a in [op.attempts[max(op.attempts)]]
-        )
+        from ._driver_inputs import _pending_batch_in_state
+
+        return _pending_batch_in_state(self.state)

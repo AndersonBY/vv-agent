@@ -252,14 +252,14 @@ def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch
     assert all("apply_microcompaction" in chains for kind, chains in seen if kind in {"archive", "excerpt"})
 
 
-def _threshold_history():
+def _threshold_history(directory):
     from session.test_compaction import SUMMARY, configured, start
 
     from vv_agent.session.kernel import drive
     from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.types import LLMResponse
 
-    with SQLiteStore.standalone(":memory:") as store:
+    with SQLiteStore.standalone(str(directory / "threshold-history.sqlite")) as store:
         store.install_schema()
         start(store)
         runtime = configured(store, [LLMResponse(SUMMARY), LLMResponse("done")])
@@ -268,8 +268,8 @@ def _threshold_history():
 
 
 @pytest.fixture(scope="module")
-def threshold_history():
-    return _threshold_history()
+def threshold_history(tmp_path_factory):
+    return _threshold_history(tmp_path_factory.mktemp("threshold-history"))
 
 
 THRESHOLD_CASES = (

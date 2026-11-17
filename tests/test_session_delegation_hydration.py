@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +12,7 @@ from support.kernel_runtime import start_runner
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
 from vv_agent.app_server import DefaultAppServerHost
+from vv_agent.config import ResolvedModelConfig
 from vv_agent.kernel._child_store import _bound_actor as bind_child_actor
 from vv_agent.kernel._content import (
     SESSION_PRINCIPAL_ATTRIBUTES,
@@ -26,13 +27,14 @@ from vv_agent.kernel._content import (
 from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._hydration import MissingContentLink
+from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle
 from vv_agent.session import delegation
 from vv_agent.session.children import ChildSession, child_delivery, child_handles, create_child
 from vv_agent.session.content_reader import record_owner
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.fork import fork_thread
-from vv_agent.session.kernel import drive
+from vv_agent.session.kernel import Runtime, drive
 from vv_agent.session.projection import SessionHydration, hydrate_records
 from vv_agent.session.records import InboxItem, SessionSpec, digest
 from vv_agent.session.sqlite import SQLiteStore
@@ -114,14 +116,37 @@ def test_reconstruct_hydrates_child_admission_nested_messages(tmp_path, monkeypa
         assert declared_content_ref(task["initial_messages"][0]) is not None
         assert declared_content_ref(task["metadata"]["vv_session"]["input_messages"][0]) is not None
 
-        child_runtime = SimpleNamespace()
-        runtime = SimpleNamespace(
-            handler_version="1",
-            config=SimpleNamespace(workspace_backend=None),
-            bind_state=lambda state, task: dict(state),
-            for_agent=lambda agent, config: child_runtime,
+        resolved = ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", [])
+
+        def heartbeat_store():
+            return nullcontext(sessions.store)
+
+        child_runtime = Runtime(
+            agent=Agent(
+                "worker",
+                "Work.",
+                model="scripted",
+                sub_agents={"worker": SubAgentConfig(model="scripted", description="Work.")},
+            ),
+            config=RunConfig(workspace="/workspace"),
+            resolved=resolved,
+            llm=ScriptedLLM([]),
+            heartbeat_store=heartbeat_store,
+        )
+        runtime = Runtime(
+            agent=Agent(
+                "worker",
+                "Work.",
+                model="scripted",
+                sub_agents={"worker": SubAgentConfig(model="scripted", description="Work.")},
+            ),
+            config=RunConfig(workspace="/workspace"),
+            resolved=resolved,
+            llm=ScriptedLLM([]),
+            heartbeat_store=heartbeat_store,
         )
         monkeypatch.setattr(delegation, "target_agent", lambda *args, **kwargs: Agent("worker", "Work.", model="scripted"))
+        monkeypatch.setattr(runtime, "for_agent", lambda agent, config: child_runtime)
         monkeypatch.setattr(
             delegation,
             "child_config",
@@ -141,8 +166,9 @@ def test_reconstruct_hydrates_child_admission_nested_messages(tmp_path, monkeypa
 
     assert reconstructed is child_runtime
     assert created.payload["principal"]["tenant_id"] == "child-tenant"
-    assert child_runtime.frozen_task.initial_messages == [initial]
-    assert child_runtime.frozen_task.metadata["vv_session"]["input_messages"] == [input_message.to_dict()]
+    assert reconstructed.frozen_task is not None
+    assert reconstructed.frozen_task.initial_messages == [initial]
+    assert reconstructed.frozen_task.metadata["vv_session"]["input_messages"] == [input_message.to_dict()]
     assert created.payload["attributes"] == attributes_ref.to_dict()
 
 
@@ -262,7 +288,7 @@ def test_fork_rejects_tampered_creation_owner_links(tmp_path, slot):
                 model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("done")]),
             ),
         )
-        server = server_for(store, host)
+        server = server_for(store, host, tmp_path / "app-server-key-state.sqlite")
         try:
             send(server, "create", "thread/start", {"inputId": "source"})
             run_turn(server, "source", "turn")

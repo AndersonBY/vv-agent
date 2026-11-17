@@ -1,8 +1,9 @@
 """Authoritative S1 logical session schemas and decoded-content validators.
 
-The runtime remains stdlib-only. Logical wire values use the contract 40.0.0
-closed shapes; the plaintext schemas below validate typed content after a future
-content-store hydration step and are never accepted in a logical C slot.
+The runtime remains stdlib-only. Logical wire values use the contract 41.0.0
+closed shapes. The plaintext schemas below validate typed content after the
+implemented S1 content-store hydration step and are never accepted in a logical
+C slot.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ SIGNATURE = {
 CONTROL = enum("close", "archive", "suspend", "resume", "cancel", "abort")
 
 
-# Contract 40 logical definitions. Sharing these objects keeps one schema owner
+# Contract 41 logical definitions. Sharing these objects keeps one schema owner
 # for every Principal, ContentRef, proof, usage and handle slot.
 CONTENT_LABELS = closed(
     source=array(enum("system", "user", "internal", "untrusted")),
@@ -217,6 +218,12 @@ TASK_SESSION_METADATA["required"] = []
 REQUEST_SESSION_METADATA = closed(endpoint_order=STRINGS, endpoint_id=TEXT, shared_state=ANY_OBJECT, cycle_index=POS)
 REQUEST_SESSION_METADATA["required"] = []
 
+MODEL_CAPABILITY = closed(
+    backend=TEXT,
+    model=TEXT,
+    context_length=nullable(POS),
+    max_output_tokens=NULLABLE_NAT,
+)
 MODEL_BINDING = closed(
     backend=TEXT,
     model=TEXT,
@@ -224,6 +231,14 @@ MODEL_BINDING = closed(
     context_length=nullable(POS),
     max_output_tokens=NULLABLE_NAT,
 )
+DEFINITION_MODEL_BINDING = closed(
+    backend=TEXT,
+    model=TEXT,
+    context_length=nullable(POS),
+    max_output_tokens=NULLABLE_NAT,
+    internal={"type": "object", "additionalProperties": MODEL_CAPABILITY},
+)
+DEFINITION_MODEL_BINDING["required"].remove("internal")
 MODEL_SETTINGS = closed(
     temperature=nullable({"type": "number", "minimum": 0}),
     top_p=nullable({"type": "number", "minimum": 0, "maximum": 1}),
@@ -342,6 +357,21 @@ INPUT_SCHEMA = closed(
     payload=ANY_OBJECT,
 )
 
+INPUT_SCHEMA_LEVEL_2 = closed(
+    schema_version={"const": "S1"},
+    feature_level={"const": 2, "type": "integer"},
+    actor=PRINCIPAL,
+    admission_proof=ADMISSION_PROOF,
+    input_id=TEXT,
+    kind=enum(*INPUT_PAYLOADS),
+    target_turn_id=NULLABLE_TEXT,
+    generation=nullable(NAT),
+    available_ms=NAT,
+    requirements=REQUIREMENTS,
+    payload=ANY_OBJECT,
+)
+INBOX_ITEM_SCHEMA = {"oneOf": [INPUT_SCHEMA, INPUT_SCHEMA_LEVEL_2]}
+
 PAYLOADS = {
     "session_created": closed(
         principal=PRINCIPAL,
@@ -364,7 +394,7 @@ PAYLOADS = {
         environment=ENVIRONMENT_BINDING,
     ),
     "input_applied": closed(
-        input=INPUT_SCHEMA,
+        input=INBOX_ITEM_SCHEMA,
         input_digest=HASH,
         input_proof=INPUT_PROOF,
         disposition=enum("applied", "rejected", "noop", "queued"),
@@ -475,6 +505,15 @@ PAYLOADS = {
     ),
 }
 
+SESSION_CREATED_LEVEL_2 = closed(
+    principal=PRINCIPAL,
+    workspace=CONTENT_REF,
+    parent_session_id=NULLABLE_TEXT,
+    parent_operation_id=NULLABLE_TEXT,
+    attributes=CONTENT_REF,
+    bootstrap=REQUIREMENTS,
+)
+
 PAYLOADS["input_applied"]["required"].remove("model_binding")
 PAYLOADS["op_started"]["required"].remove("endpoint_id")
 for name in ("interaction_result", "delegation", "yield_on_steer", "yieldable_children"):
@@ -495,9 +534,26 @@ RECORD_SCHEMA = closed(
     payload=ANY_OBJECT,
 )
 
+RECORD_SCHEMA_LEVEL_2 = closed(
+    schema_version={"const": "S1"},
+    feature_level={"const": 2, "type": "integer"},
+    record_id=TEXT,
+    kind=enum("session_created"),
+    session_id=TEXT,
+    turn_id=NULLABLE_TEXT,
+    operation_id=NULLABLE_TEXT,
+    attempt=nullable(POS),
+    payload=ANY_OBJECT,
+)
+RECORD_ITEM_SCHEMA = {"oneOf": [RECORD_SCHEMA, RECORD_SCHEMA_LEVEL_2]}
+
 SCHEMAS = (
     RECORD_SCHEMA,
+    RECORD_SCHEMA_LEVEL_2,
+    RECORD_ITEM_SCHEMA,
     INPUT_SCHEMA,
+    INPUT_SCHEMA_LEVEL_2,
+    INBOX_ITEM_SCHEMA,
     CONTENT_LABELS,
     CONTENT_REF,
     PRINCIPAL,
@@ -510,6 +566,7 @@ SCHEMAS = (
     BUDGET_COUNTS,
     USAGE_COUNTS,
     REQUIREMENTS,
+    SESSION_CREATED_LEVEL_2,
     ENVIRONMENT_BINDING,
     RESULT_ID,
     CHILD_ADMISSION,
@@ -517,7 +574,9 @@ SCHEMAS = (
     SEED,
     TASK_SESSION_METADATA,
     REQUEST_SESSION_METADATA,
+    MODEL_CAPABILITY,
     MODEL_BINDING,
+    DEFINITION_MODEL_BINDING,
     MODEL_SELECTION,
     HANDLE,
     *PAYLOADS.values(),

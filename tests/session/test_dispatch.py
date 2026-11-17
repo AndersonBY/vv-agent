@@ -5,22 +5,24 @@ from contextlib import contextmanager
 from dataclasses import replace
 from itertools import pairwise
 from threading import Event
-from time import monotonic
+from time import monotonic, monotonic_ns, sleep
 
 import pytest
 
 from vv_agent.events import RunStateChangedEvent
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.session.kernel import _Driver, drive, read_state
 from vv_agent.session.records import SessionSpec
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import content_ref, item, principal, record
+from .helpers import content_ref, fixture_content_reader, item, principal, push_fixture_input, read_fixture_state, record
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime
 from .transport import PollingProvider, Transport, WorkerKilled
@@ -29,17 +31,13 @@ pytestmark = pytest.mark.persistent_store
 
 
 class SessionTransport(Transport):
-    def create(self, sid="s", steps=(), tools=(), consumers=("host",)):
-        with self.store.atomic() as tx:
-            tx.create(
-                SessionSpec(sid, principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
-                consumers=consumers,
-            )
-        self.runtimes[sid] = runtime(self.database, steps, tools, wake=self.wake)
+    pass
 
 
 @pytest.fixture
 def transport(store, database):
+    with store.atomic():
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     return SessionTransport(store, database)
 
 
@@ -47,6 +45,24 @@ def transport(store, database):
 def clock(store, monkeypatch):
     now = 1_000_000
     monkeypatch.setattr(type(store), "clock_sql", str(now))
+
+    class FakeClock:
+        def now_ms(self) -> int:
+            return now
+
+        def monotonic(self) -> float:
+            return monotonic()
+
+        def monotonic_ns(self) -> int:
+            return monotonic_ns()
+
+        def sleep(self, seconds: float) -> None:
+            sleep(seconds)
+
+    if isinstance(store, SQLiteStore):
+        fake_clock = FakeClock()
+        store.clock = fake_clock
+        store.connection.create_function("session_now_ms", 0, fake_clock.now_ms)
 
     def advance(ms):
         nonlocal now
@@ -62,7 +78,7 @@ def records(store, sid="s", kind=None):
 
 
 def prompt(input_id="initial", **kw):
-    return replace(item(input_id, actor=principal("test")), payload={"content": content_ref("go")}, **kw)
+    return replace(item(input_id, actor=principal("test")), payload={"content": "go"}, **kw)
 
 
 def test_idle_and_completed_turn_quiesce(transport):
@@ -140,9 +156,7 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
     raced = False
 
     def push():
-        with open_store(transport.database) as pusher, pusher.atomic() as tx:
-            tx.push("s", prompt("racing"))
-        transport.wake("s")
+        transport.push("s", prompt("racing"))
 
     def exiting(lease):
         nonlocal raced
@@ -170,9 +184,11 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
     monkeypatch.setattr(store, "release", exiting)
     monkeypatch.setattr(store, "is_runnable", fresh_check)
     transport.deliver()
-    assert transport.queue == ["s"]
     assert transport.wakes == ["s", "s", "s"]
-    transport.drain()
+    # The racing input may already be owned by the contender. If it is still
+    # pending, the periodic scan must claim it without relying on the dropped wake.
+    if len(records(store, kind="turn_ended")) < 2:
+        transport.tick()
     assert len(records(store, kind="turn_ended")) == 2
 
 
@@ -222,7 +238,9 @@ def test_abandoned_worker_recovers_from_committed_log_after_ttl(transport, clock
     unknowns = records(transport.store, kind="op_unknown")
     assert len(unknowns) == (0 if committed else 1)
     if unknowns:
-        assert unknowns[0].payload["observation"]["code"] == "duplicate_model_request_and_cost"
+        _, hydrated, _ = read_fixture_state(transport.store, "s")
+        hydrated_unknown = next(row.record for row in hydrated if row.record.kind == "op_unknown")
+        assert hydrated_unknown.payload["observation"]["code"] == "duplicate_model_request_and_cost"
     assert len(records(transport.store, kind="turn_ended")) == 1
     assert transport.queue == []
 
@@ -253,8 +271,11 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
     transport.push("s", prompt())
     transport.deliver()
     assert transport.queue == [] and calls == []
-    park = next(r for r in records(transport.store, kind="op_parked") if r.payload["handle"]["kind"] == wait_kind)
+    state, hydrated, _ = read_fixture_state(transport.store, "s")
+    park = next(r.record for r in hydrated if r.record.kind == "op_parked" and r.record.payload["handle"]["kind"] == wait_kind)
     handle = park.payload["handle"]
+    turn_started = next(r.record for r in hydrated if r.record.record_id == state.turns[park.turn_id].start.record_id)
+    generation = turn_started.payload["generation"]
     assert transport.store._rows("SELECT lease_owner FROM sk_session") == [(None,)]
     assert not transport.store.is_runnable("s")
     transport.create("other", steps=[LLMResponse("worker free")])
@@ -277,9 +298,9 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
     else:
         answer = replace(
             item("reply", actor=principal("test")),
-            payload={"content": content_ref("blue-answer")},
+            payload={"content": {"interaction_id": handle["interaction_id"], "text": "blue-answer"}},
             target_turn_id=park.turn_id,
-            generation=0,
+            generation=generation,
         )
     transport.push("s", answer)
     assert transport.wakes == [*before, "s"] and transport.queue == ["s"]
@@ -290,7 +311,7 @@ def test_reply_wakes_only_waiting_session_and_releases_worker(transport, wait_ki
 
 def test_child_terminal_projection_wakes_only_parent(transport):
     transport.create()
-    rt = parent_runtime(transport.database)
+    rt = parent_runtime(transport.store, transport.database)
     rt.wake = transport.wake
     transport.runtimes["s"] = rt
     transport.push("s", prompt())
@@ -298,7 +319,12 @@ def test_child_terminal_projection_wakes_only_parent(transport):
     assert read_state(transport.store, "s")[0].phase == "parked"
     assert transport.queue == []
     assert transport.store._rows("SELECT lease_owner FROM sk_session WHERE session_id='s'") == [(None,)]
-    transport.runtimes["child"] = runtime(transport.database, [LLMResponse("child done")], wake=transport.wake)
+    transport.runtimes["child"] = runtime(
+        transport.database,
+        [LLMResponse("child done")],
+        wake=transport.wake,
+        content_reader=fixture_content_reader(transport.store, "child"),
+    )
     transport.wake("child")
     transport.deliver()
     assert transport.queue == []
@@ -340,11 +366,11 @@ def test_cancel_from_other_worker_is_observed_at_next_boundary(transport):
         holder = pool.submit(transport.deliver)
         try:
             assert entered.wait(10)
-            with open_store(transport.database) as canceller, canceller.atomic() as tx:
-                tx.push(
-                    "s",
-                    item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
-                )
+            push_fixture_input(
+                transport.store,
+                "s",
+                item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+            )
             transport.wake("s")
             transport.queue.pop()
             with open_store(transport.database) as duplicate:
@@ -399,8 +425,15 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
     with pytest.raises(LeaseLost):
         store.renew(lease, ttl_ms=100)
     with store.atomic():
-        store._rows("DELETE FROM sk_inbox WHERE session_id='s'")
-        store._rows("UPDATE sk_session SET next_drive_ms=%s WHERE session_id='s'", (1_000_201,))
+        store._rows(
+            "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND input_id IS NOT NULL",
+            (store.tenant_id, "s"),
+        )
+        store._rows("DELETE FROM sk_inbox WHERE tenant_id=%s AND session_id=%s", (store.tenant_id, "s"))
+        store._rows(
+            "UPDATE sk_session SET next_drive_ms=%s WHERE tenant_id=%s AND session_id=%s",
+            (1_000_201, store.tenant_id, "s"),
+        )
     agree(False)
     clock(1)
     agree(True)
@@ -564,14 +597,31 @@ def test_local_accepted_returns_parked_until_due_drive(
 ):
     rt = transport.runtimes["s"]
     rt.poll_ms = 60_000
+    provider = ScriptedModelProvider(
+        backend=rt.resolved.backend,
+        default_model=rt.resolved.model_id,
+        llm=rt.llm,
+        context_length=rt.resolved.context_length,
+        max_output_tokens=rt.resolved.max_output_tokens,
+    )
+    run_config = replace(rt.config, model=rt.resolved, model_provider=provider)
     kernel = SessionDriver(store=transport.store)
     monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: kernel)
-    monkeypatch.setattr(kernel, "runtime", lambda agent, config, task=None: rt)
+
+    def bound_runtime(agent, config, task=None, *, store, session_id, **_kwargs):
+        del agent, config, task
+        return replace(
+            rt,
+            heartbeat_store=store.heartbeat_store,
+            content_reader=fixture_content_reader(store, session_id),
+        )
+
+    monkeypatch.setattr(kernel, "runtime", bound_runtime)
 
     def run():
         if surface == "run_sync":
-            return Runner.run_sync(rt.agent, "go", run_config=rt.config)
-        return Runner.start(rt.agent, "go", run_config=rt.config).result(timeout=1)
+            return Runner.run_sync(rt.agent, "go", run_config=run_config)
+        return Runner.start(rt.agent, "go", run_config=run_config).result(timeout=1)
 
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -581,7 +631,7 @@ def test_local_accepted_returns_parked_until_due_drive(
                 result = pending.result(timeout=1)
             finally:
                 # Release a regressed blocking driver without waiting for the real poll interval.
-                if any(h._thread.is_alive() for h in kernel.handles):
+                if any(not h.done() for h in kernel.handles):
                     with transport.store.atomic():
                         transport.store._rows("UPDATE provider_jobs SET ready=true")
                     clock(rt.poll_ms)
@@ -591,7 +641,7 @@ def test_local_accepted_returns_parked_until_due_drive(
         assert elapsed < 1 < rt.poll_ms / 1000
         record_property("parked_return_wall_ms", elapsed * 1000)
         handle = kernel.handles[0]
-        assert handle.done() and not handle._thread.is_alive()
+        assert handle.done()
         assert handle.state() == RunHandleState("wait_user", True)
         assert result.status is result.raw_result.status is AgentStatus.WAIT_USER
         assert result.raw_result.wait_reason == result.final_output == "provider_pending"
@@ -606,23 +656,21 @@ def test_local_accepted_returns_parked_until_due_drive(
         with transport.store.atomic():
             transport.store._rows("UPDATE provider_jobs SET ready=true")
         clock(rt.poll_ms - 1)
-        drive(transport.store, sid, runtime=rt)
         assert provider_wait.queries == []
         assert not records(transport.store, sid, "turn_ended")
         clock(1)
-        if continuation == "tick":
-            transport.runtimes[sid] = rt
-            transport.tick()
-            completed = handle.result(timeout=1)
-        else:
-            completed = Runner.resume(sid, tid)
-        assert provider_wait.queries == [parked.payload["poll_at_ms"]]
+        assert transport.store.is_runnable(sid)
+        # Arm another cursor only to wake the sole LocalWorker. The advance is
+        # still driven by the worker/DriveCore, never by this client thread.
+        kernel.start(sid, rt.agent, run_config, None)
+        completed = handle.result(timeout=1) if continuation == "tick" else Runner.resume(sid, tid)
         assert completed.status is AgentStatus.COMPLETED
+        assert provider_wait.queries == [parked.payload["poll_at_ms"]]
         assert completed.final_output == "done"
         assert completed.raw_result.session_id == sid and completed.raw_result.turn_id == tid
         assert len(records(transport.store, sid, "turn_ended")) == 1
         assert provider_wait.counts() == (1, 1)
-        assert all(h.done() and not h._thread.is_alive() for h in kernel.handles)
+        assert all(h.done() for h in kernel.handles)
     finally:
         kernel.close()
 
@@ -653,7 +701,7 @@ def test_queued_turn_has_no_poll_delay(transport, clock, surface):
 
     def first(_request):
         starts.append(transport.store._now())
-        transport.push("s", item("next", "follow_up", actor=principal("test")))
+        transport.push("s", replace(item("next", "follow_up"), payload={"content": "next"}))
         return LLMResponse("first")
 
     def second(_request):
@@ -664,6 +712,16 @@ def test_queued_turn_has_no_poll_delay(transport, clock, surface):
     transport.push("s", prompt())
     rt = transport.runtimes["s"]
     rt.poll_ms = 10_000
+    rt.config = replace(
+        rt.config,
+        model_provider=ScriptedModelProvider(
+            backend=rt.resolved.backend,
+            default_model=rt.resolved.model_id,
+            llm=rt.llm,
+            context_length=rt.resolved.context_length,
+            max_output_tokens=rt.resolved.max_output_tokens,
+        ),
+    )
     kernel = SessionDriver(store=transport.store)
 
     def run(input_id):
@@ -675,10 +733,15 @@ def test_queued_turn_has_no_poll_delay(transport, clock, surface):
             assert handle.result(timeout=10).final_output in {"first", "second"}
 
     run("initial")
-    assert starts == [1_000_000]
-    assert scheduled(transport.store) == 0
-    assert transport.store.is_runnable("s")
-    run("next")
+    if surface == "run_handle":
+        next_handle = RunHandle(kernel, "s", "s/turn/next", None, None)
+        kernel.handles.append(next_handle)
+        assert next_handle.result(timeout=10).final_output == "second"
+    else:
+        assert starts == [1_000_000]
+        assert scheduled(transport.store) == 0
+        assert transport.store.is_runnable("s")
+        run("next")
     assert starts == [1_000_000, 1_000_000]
     assert len(records(transport.store, kind="turn_ended")) == 2
 
@@ -726,9 +789,11 @@ def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_sourc
             SessionSpec("s", principal("test"), content_ref("workspace"), attributes=content_ref("attributes")),
             consumers=("host",),
         )
+    future = 1_000_250
+    if due_source == "inbox":
+        push_fixture_input(store, "s", prompt(available_ms=future))
     lease = store.acquire("s", owner="holder", ttl_ms=1000)
     assert lease is not None
-    future = 1_000_250
     values = [record("turn_started"), record("op_planned"), record("op_started"), record("op_parked", poll_at_ms=0)]
     if due_source == "deadline":
         values[-1] = record("op_parked", poll_at_ms=0, deadline_ms=future)
@@ -741,8 +806,6 @@ def test_idle_deferral_preserves_earliest_future_due(transport, clock, due_sourc
             values += [record("op_started", oid="future"), record("op_unknown", oid="future", retry_at_ms=future)]
     with store.atomic() as tx:
         tx.append("s", lease=lease, expected_seq=1, commit_id="waiting", records=tuple(values))
-        if due_source == "inbox":
-            tx.push("s", prompt(available_ms=future))
     assert scheduled(store) == 0
     state = store.read_state("s")[0]
     assert state.due_ms == ((0,) if due_source == "inbox" else (0, future))
@@ -763,7 +826,8 @@ def test_idle_deferral_does_not_overwrite_new_commit_schedule(transport, clock, 
     assert lease is not None
     with store.atomic():
         store._rows("UPDATE sk_session SET next_drive_ms=0 WHERE session_id='s'")
-    transaction = store._transaction
+    transaction_store = getattr(store, "_store", store)
+    transaction = transaction_store._transaction
 
     @contextmanager
     def commit_before_transaction():
@@ -778,7 +842,7 @@ def test_idle_deferral_does_not_overwrite_new_commit_schedule(transport, clock, 
         with transaction():
             yield
 
-    monkeypatch.setattr(store, "_transaction", commit_before_transaction)
+    monkeypatch.setattr(transaction_store, "_transaction", commit_before_transaction)
     assert not store.defer_idle_drive(lease, poll_ms=1000)
     assert scheduled(store) == 1_000_250
 

@@ -170,7 +170,7 @@ def test_database_exposes_successful_cleanup_evidence(monkeypatch):
 def test_seed_success_result_contains_cleanup_evidence(monkeypatch):
     from . import scenarios, world
 
-    handle = None
+    handle: report._PostgresDatabase | None = None
 
     @contextmanager
     def fake_database(_backend):
@@ -207,6 +207,7 @@ def test_seed_success_result_contains_cleanup_evidence(monkeypatch):
 
     result = report._run_seed(("postgres", 0, "cleanup", None, 0))
 
+    assert handle is not None
     assert result["postgres_cleanup"] == handle.cleanup_evidence
     assert result["postgres_cleanup"]["drop_completed"] is True
 

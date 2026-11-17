@@ -17,6 +17,7 @@ from functools import cache
 from itertools import batched
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
+from typing import Any, Self
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +30,10 @@ DEFAULT_WORKERS = min(10, len(AFFINITY) if AFFINITY is not None else (os.cpu_cou
 
 
 class _PostgresDatabase(str):
-    def __new__(cls, value):
+    cleanup_evidence: dict[str, Any] | None
+    cleanup_error: dict[str, str] | None
+
+    def __new__(cls, value: str) -> Self:
         instance = super().__new__(cls, value)
         instance.cleanup_evidence = None
         instance.cleanup_error = None
@@ -60,7 +64,10 @@ def postgres_connection_counts(dsn):
             "current_setting('superuser_reserved_connections')::int,"
             "(SELECT count(*)::int FROM pg_stat_activity)"
         )
-        return cursor.fetchone()
+        row: tuple[int, int, int] | None = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("PostgreSQL connection projection returned no row")
+        return row
 
 
 def postgres_worker_plan(workers):
@@ -103,16 +110,17 @@ def _cleanup_postgres_database(admin, name):
         try:
             with admin.cursor() as cursor:
                 cursor.execute("SELECT current_user")
-                row = cursor.fetchone()
-                if row is None:
+                role_row: tuple[str] | None = cursor.fetchone()
+                if role_row is None:
                     raise RuntimeError("PostgreSQL cleanup could not resolve current_user")
-                role = row[0]
+                role = role_row[0]
                 cursor.execute(
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                     "WHERE datname = %s AND usename = %s AND pid <> pg_backend_pid()",
                     (name, role),
                 )
-                signals = [result[0] for result in cursor.fetchall() if result]
+                signal_rows: list[tuple[bool]] = cursor.fetchall()
+                signals = [result[0] for result in signal_rows if result]
                 cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
             return {
                 "database": name,

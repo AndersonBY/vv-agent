@@ -9,11 +9,12 @@ from typing import Protocol
 from uuid import uuid4
 
 from vv_agent.kernel._lease_scope import Clock, Signal
-from vv_agent.kernel._sql import SQLStore
-from vv_agent.kernel._store import Lease, LeaseLost, SequenceConflict, SessionStore, StoredRecord
+from vv_agent.kernel._sql import SQLStore, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
+from vv_agent.kernel._store import Lease, LeaseLost, LeasePoll, SequenceConflict, SessionStore, StoredRecord
 
 FACTORY_LEASE_TTL_MS = 15000
 FACTORY_HEARTBEAT_SECONDS = 0.25
+_TYPED_HEARTBEAT_FAILURES = (UnsupportedFeatureLevel, UnsupportedWorkerCapabilities)
 
 
 class DriveRuntime(Protocol):
@@ -22,15 +23,20 @@ class DriveRuntime(Protocol):
 
 
 class DriveHeartbeat(Protocol):
+    clock: Clock
     ready: Signal
     lost: bool
     successful_ready: bool
     heartbeat_error: Exception | None
     lease: Lease
+    latest_poll: LeasePoll | None
+    expires_deadline: float
 
     def start(self) -> None: ...
 
     def close(self) -> None: ...
+
+    def adopt_confirmed(self, poll: LeasePoll, *, expires_deadline: float) -> None: ...
 
 
 class DriveLeaseScope(DriveHeartbeat, Protocol):
@@ -53,7 +59,6 @@ class DriveBinding:
     make_factory_heartbeat: Callable[[Lease, int], DriveHeartbeat] | None
     make_runtime: Callable[[], DriveRuntime] | None
     factory_retry_after_ms: Callable[[Exception], int | None]
-    heartbeat_alive: Callable[[DriveHeartbeat], bool]
     make_scope: Callable[[Lease, DriveRuntime], DriveLeaseScope]
     make_driver: Callable[[SessionStore, str, DriveRuntime, DriveLeaseScope], DriveStep]
     after_drive: Callable[[DriveRuntime], None]
@@ -69,6 +74,15 @@ def _defer_after_error(store: SessionStore, lease: Lease, retry_after_ms: int, e
         raise error from backoff_error
 
 
+def _typed_heartbeat_failure(heartbeat: DriveHeartbeat) -> Exception | None:
+    error = heartbeat.heartbeat_error
+    return error if isinstance(error, _TYPED_HEARTBEAT_FAILURES) else None
+
+
+def _is_typed_heartbeat_failure(error: BaseException | None) -> bool:
+    return isinstance(error, _TYPED_HEARTBEAT_FAILURES)
+
+
 def drive_core(
     store: SessionStore,
     session_id: str,
@@ -76,69 +90,134 @@ def drive_core(
     failure_backoff_ms: int = 1000,
     one_turn: bool = False,
     wait_for_lease: bool = False,
+    lease: Lease | None = None,
     make_binding: Callable[[], DriveBinding],
 ) -> bool:
-    """Acquire, drive and release one session using an explicitly bound host."""
+    """Drive one session with an existing claim or a directly acquired lease."""
     if type(failure_backoff_ms) is not int or failure_backoff_ms <= 0:
         raise ValueError("failure_backoff_ms must be a positive integer")
-    binding = make_binding()
+    store_tenant_id = getattr(store, "tenant_id", lease.tenant_id if lease is not None else None)
+    if lease is not None and (lease.session_id != session_id or lease.tenant_id != store_tenant_id):
+        raise ValueError("claimed lease does not belong to the requested session and tenant")
+    try:
+        binding = make_binding()
+    except BaseException:
+        if lease is not None:
+            with suppress(Exception):
+                store.release(lease)
+        raise
     ttl_ms = binding.ttl_ms
-    lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
-    delay = 0.05
-    while lease is None and wait_for_lease:
-        binding.clock.sleep(delay)
-        delay = min(1.0, delay * 2)
-        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
     if lease is None:
-        return False
+        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
+        delay = 0.05
+        while lease is None and wait_for_lease:
+            binding.clock.sleep(delay)
+            delay = min(1.0, delay * 2)
+            lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=ttl_ms)
+        if lease is None:
+            return False
 
     runtime = binding.runtime
     scheduled = binding.make_runtime is not None
+    handoff_poll: LeasePoll | None = None
+    handoff_clock: Clock | None = None
+    handoff_deadline: float | None = None
     if scheduled:
         build = None
+        scheduled_error: BaseException | None = None
+        scheduled_error_cause: BaseException | None = None
         try:
             make_heartbeat = binding.make_factory_heartbeat
             make_runtime = binding.make_runtime
             assert make_heartbeat is not None and make_runtime is not None and runtime is None
             build = make_heartbeat(lease, ttl_ms)
             build.start()
-            try:
-                if not build.ready.wait(ttl_ms / 1000):
-                    raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
-                if build.lost or not build.successful_ready:
-                    raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
-                runtime = make_runtime()
-            finally:
-                build.close()
-                lease = build.lease
-            if build.lost:
+            if not build.ready.wait(ttl_ms / 1000):
+                typed_failure = _typed_heartbeat_failure(build)
+                if typed_failure is not None:
+                    raise typed_failure
+                raise LeaseLost("factory heartbeat did not become ready") from build.heartbeat_error
+            if build.lost or not build.successful_ready:
+                typed_failure = _typed_heartbeat_failure(build)
+                if typed_failure is not None:
+                    raise typed_failure
                 raise LeaseLost("factory heartbeat lost ownership") from build.heartbeat_error
-            lease = store.renew(lease, ttl_ms=runtime.ttl_ms).lease
-        except Exception as exc:
-            retry_after_ms = binding.factory_retry_after_ms(exc)
-            if retry_after_ms is not None:
+            runtime = make_runtime()
+        except BaseException as exc:
+            scheduled_error = exc
+        finally:
+            if build is not None:
                 try:
-                    _defer_after_error(store, lease, retry_after_ms, exc)
-                finally:
-                    store.release(lease)
-                return True
-            if build is not None and binding.heartbeat_alive(build):
-                raise
+                    build.close()
+                except BaseException:
+                    if scheduled_error is not None:
+                        raise scheduled_error from None
+                    raise
+                lease = build.lease
+
+        if build is not None and build.lost and scheduled_error is None:
+            scheduled_error = _typed_heartbeat_failure(build) or LeaseLost("factory heartbeat lost ownership")
+            scheduled_error_cause = build.heartbeat_error
+        if scheduled_error is not None:
+            retry_after_ms = binding.factory_retry_after_ms(scheduled_error) if isinstance(scheduled_error, Exception) else None
             try:
-                _defer_after_error(store, lease, failure_backoff_ms, exc)
+                if isinstance(scheduled_error, Exception) and not _is_typed_heartbeat_failure(scheduled_error):
+                    _defer_after_error(
+                        store,
+                        lease,
+                        retry_after_ms if retry_after_ms is not None else failure_backoff_ms,
+                        scheduled_error,
+                    )
             finally:
                 store.release(lease)
-            raise
-        except BaseException:
-            if build is None or not binding.heartbeat_alive(build):
-                with suppress(Exception):
-                    store.release(lease)
-            raise
+            if retry_after_ms is not None:
+                return True
+            raise scheduled_error from scheduled_error_cause
+
+        if build is None:
+            raise LeaseLost("factory heartbeat was not constructed")
+        handoff_poll = build.latest_poll
+        if handoff_poll is None:
+            try:
+                _defer_after_error(
+                    store,
+                    lease,
+                    failure_backoff_ms,
+                    LeaseLost("factory heartbeat did not publish a confirmed lease"),
+                )
+            finally:
+                store.release(lease)
+            raise LeaseLost("factory heartbeat did not publish a confirmed lease")
+        handoff_clock = build.clock
+        handoff_deadline = build.expires_deadline
+        lease = handoff_poll.lease
     assert runtime is not None
 
-    scope = binding.make_scope(lease, runtime)
-    scope.start()
+    scope = None
+    scope_close_attempted = False
+    scope_close_succeeded = False
     try:
+        scope = binding.make_scope(lease, runtime)
+        if handoff_poll is not None and handoff_clock is not None and handoff_deadline is not None:
+            # Read the destination clock first. Any time spent converting is then
+            # charged by the second, source-clock read rather than extending the lease.
+            runtime_now = scope.clock.monotonic()
+            factory_now = handoff_clock.monotonic()
+            scope.adopt_confirmed(
+                handoff_poll,
+                expires_deadline=runtime_now + (handoff_deadline - factory_now),
+            )
+        scope.start()
+        if not scope.ready.wait(ttl_ms / 1000):
+            typed_failure = _typed_heartbeat_failure(scope)
+            if typed_failure is not None:
+                raise typed_failure
+            raise LeaseLost("runtime heartbeat did not become ready") from scope.heartbeat_error
+        if scope.lost or not scope.successful_ready:
+            typed_failure = _typed_heartbeat_failure(scope)
+            if typed_failure is not None:
+                raise typed_failure
+            raise LeaseLost("runtime heartbeat lost ownership") from scope.heartbeat_error
         driver = binding.make_driver(store, session_id, runtime, scope)
         while not scope.lost:
             try:
@@ -158,16 +237,34 @@ def drive_core(
             except SequenceConflict:
                 continue
         if scope.lost:
+            typed_failure = _typed_heartbeat_failure(scope)
+            if typed_failure is not None:
+                raise typed_failure
             raise LeaseLost("heartbeat lost ownership") from scope.heartbeat_error
-    except Exception as exc:
+        scope_close_attempted = True
         scope.close()
-        if scheduled:
-            _defer_after_error(store, scope.lease, failure_backoff_ms, exc)
+        scope_close_succeeded = True
+    except BaseException as exc:
+        if scope is not None and not scope_close_attempted:
+            scope_close_attempted = True
+            try:
+                scope.close()
+            except BaseException:
+                pass
+            else:
+                scope_close_succeeded = True
+        if (
+            scheduled
+            and (scope is None or scope_close_succeeded)
+            and isinstance(exc, Exception)
+            and not _is_typed_heartbeat_failure(exc)
+        ):
+            _defer_after_error(store, scope.lease if scope is not None else lease, failure_backoff_ms, exc)
         raise
     finally:
-        scope.close()
-        with suppress(Exception):
-            store.release(scope.lease)
+        if scope is None or scope_close_succeeded:
+            with suppress(Exception):
+                store.release(scope.lease if scope is not None else lease)
         with suppress(Exception):
             binding.after_drive(runtime)
         with suppress(Exception):

@@ -8,20 +8,36 @@ import pytest
 
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.session.kernel import drive
+from vv_agent.session.records import InboxItem
 
-from .test_recovery_matrix import records_of, runtime, start
+from .helpers import create_fixture_session, fixture_content_reader, push_fixture_input, read_fixture_state, wrap_fixture_store
+from .test_recovery_matrix import records_of, runtime
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("case", ["timeout_then_400", "500_then_400", "always_429", "single_400"])
 def test_vendor_retries_are_observed(store, database, provider, case):
     with local_vendor_transport(case) as (requests, clients):
-        rt = runtime(database, [])
+        content_store = wrap_fixture_store(store)
+        create_fixture_session(
+            content_store,
+            "s",
+            attributes={
+                "seed": {
+                    "messages": [],
+                    "shared_state": {},
+                    "unseen_input_protection": True,
+                    "response_rejection": True,
+                }
+            },
+        )
+        push_fixture_input(content_store, "s", InboxItem("initial", "user", {"content": "go"}))
+        rt = runtime(database, [], content_reader=fixture_content_reader(content_store, "s"))
         rt.llm = VvLlmClient([EndpointTarget("a", "synthetic-unused", "https://provider.invalid")], backend=provider)
-        start(store)
-        drive(store, "s", runtime=rt)
+        drive(content_store, "s", runtime=rt)
     unknown = case in {"timeout_then_400", "500_then_400"}
-    terminal = records_of(store, "turn_ended")[-1].payload
+    _, hydrated, _ = read_fixture_state(store, "s")
+    terminal = next(row.record for row in reversed(hydrated) if row.record.kind == "turn_ended").payload
     assert terminal["reason"] == ("model_outcome_unknown" if unknown else "model_request_rejected")
     assert len(requests) == (4 if unknown else 6 if case == "always_429" else 1)
     assert len(records_of(store, "op_planned")) == (2 if unknown or case == "always_429" else 1)

@@ -26,7 +26,6 @@ from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
-from vv_agent.session.kernel import drive
 from vv_agent.session.projection import hydrate_stored_record, hydration_for_session_store
 from vv_agent.session.records import InboxItem, Record, copy_json
 from vv_agent.session.result import project_result
@@ -437,6 +436,7 @@ class AgentSession:
                 approval_broker.reset_cancelled()
             self._active_approval_broker = approval_broker
             self._active_cancellation_token = self._new_run_cancellation_token()
+            self._active_cancellation_token.on_cancel(self._cancel_active_run)
             existing_message_count = len(self.messages)
             current_shared_state = self.shared_state
 
@@ -501,7 +501,16 @@ class AgentSession:
             previous_handle.detach_controller(self)
         if handle is not None and hasattr(handle, "attach_controller"):
             handle.attach_controller(self)
+        if handle is not None and self._active_cancellation_token is not None and self._active_cancellation_token.cancelled:
+            handle.cancel("host cancellation")
         self._emit("session_active_run_handle_changed", handle=handle)
+
+    def _cancel_active_run(self) -> None:
+        if self._closed:
+            return
+        handle = self._active_run_handle
+        if handle is not None:
+            handle.cancel("host cancellation")
 
     def _session_event_handler(self, event: RunEvent) -> None:
         self._sync_background_command_watchers(event)
@@ -651,37 +660,7 @@ class AgentSession:
         if handle is None:
             handle = next((h for h in reversed(self.driver.handles) if h.session_id == self.session_id), None)
         if handle is None:
-            state, _, _ = self.driver.store.read_state(self.session_id)
-            definition = self.definition
-            task = (
-                _hydrated_task(self.driver, self.session_id, state.turns[next(reversed(state.turns))].start)
-                if state.turns and definition
-                else None
-            )
-            agent = self.agent
-            if agent is None:
-                assert definition is not None
-                agent = Agent(
-                    self.agent_name,
-                    task.prompt_bundle if task else definition.system_prompt or definition.description,
-                    model=definition.model,
-                    sub_agents=definition.sub_agents,
-                )
-            options = self._client.options
-            config = RunConfig(
-                model_provider=options.model_provider,
-                workspace=self.workspace,
-                tool_policy=options.tool_policy,
-                approval_provider=options.approval_provider,
-                approval_broker=self._approval_broker,
-                approval_timeout_seconds=options.approval_timeout_seconds,
-                tool_registry_factory=options.tool_registry_factory,
-                hooks=options.runtime_hooks,
-                memory_providers=[*options.memory_providers, *(definition.memory_providers if definition else [])],
-                context_providers=[*options.context_providers, *(definition.context_providers if definition else [])],
-                metadata={"session_id": self.session_id},
-            )
-            return self.driver.runtime(agent, config, task)
+            return self.driver._runtime_view(self.session_id)
         return handle.runtime
 
     def steer(self, prompt):
@@ -725,7 +704,16 @@ class AgentSession:
             )
             self.driver.answer(self.session_id, self._runtime(), target, InteractionAnswer("text", text=text), uuid4().hex)
         run = self._run_once(text)
-        while auto_follow_up and run.status == AgentStatus.COMPLETED and self._pending("follow_up"):
+        while auto_follow_up and run.status == AgentStatus.COMPLETED:
+            state, _, _ = self.driver.store.read_state(self.session_id)
+            latest_turn = next(reversed(state.turns), None)
+            follow_up_available = (
+                (state.active_turn_id is not None and state.active_turn_id != run.run_id)
+                or (latest_turn is not None and latest_turn != run.run_id)
+                or bool(self._pending("follow_up"))
+            )
+            if not follow_up_available:
+                break
             run = self._run_once("")
         return run
 
@@ -748,12 +736,6 @@ class AgentSession:
         state, _, _ = self.driver.store.read_state(self.session_id)
         self.driver.control(self.session_id, "close", input_id)
         changed = self._close_subscriptions()
-        if not self._running:
-            try:
-                runtime = self._runtime()
-            except RuntimeError:
-                return changed
-            drive(self.driver.store, self.session_id, runtime=runtime, _one_turn=True)
         return changed and not state.closed
 
     def cancel(self):

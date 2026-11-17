@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -48,6 +49,61 @@ class SequenceConflict(Conflict):
 
 class LeaseLost(Conflict):
     pass
+
+
+@dataclass(frozen=True)
+class WorkerSupports:
+    """The immutable, deterministically serializable worker support declaration."""
+
+    storage_major: Literal["S1"] = "S1"
+    max_level: int = 1
+    handler_versions: tuple[str, ...] = ("1",)
+    capabilities: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.storage_major != "S1":
+            raise ValueError("worker storage major must be S1")
+        if type(self.max_level) is not int or self.max_level <= 0:
+            raise ValueError("worker max_level must be a positive integer")
+        object.__setattr__(
+            self,
+            "handler_versions",
+            _support_ids(self.handler_versions, "worker handler_version"),
+        )
+        object.__setattr__(self, "capabilities", _support_ids(self.capabilities, "worker capability"))
+
+    def accepts(
+        self,
+        *,
+        level: int,
+        handler_version: str | None,
+        capabilities: Iterable[str],
+    ) -> bool:
+        required_capabilities = set(capabilities)
+        return (
+            level <= self.max_level
+            and (handler_version is None or handler_version in self.handler_versions)
+            and required_capabilities.issubset(self.capabilities)
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable representation with stable sequence ordering."""
+
+        return {
+            "storage_major": self.storage_major,
+            "max_level": self.max_level,
+            "handler_versions": list(self.handler_versions),
+            "capabilities": list(self.capabilities),
+        }
+
+
+def _support_ids(values: Iterable[str], name: str) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError(f"{name} values must be an iterable of identifiers")
+    normalized = set(values)
+    if any(not isinstance(value, str) or not value or "\x00" in value for value in normalized):
+        raise ValueError(f"{name} values must be nonempty text without NUL")
+    return tuple(sorted(normalized))
 
 
 @dataclass(frozen=True)
@@ -123,6 +179,7 @@ class WorkCursor:
     session_id: str
     kind: Literal["drive", "project"]
     consumer: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
 
 @dataclass(frozen=True)
@@ -130,10 +187,24 @@ class WorkItem:
     session_id: str
     kind: Literal["drive", "project"]
     consumer: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
     @property
     def cursor(self) -> WorkCursor:
-        return WorkCursor(self.session_id, self.kind, self.consumer)
+        return WorkCursor(self.session_id, self.kind, self.consumer, self.tenant_id)
+
+
+@dataclass(frozen=True)
+class ClaimedWork:
+    """A runnable work item and the drive lease atomically claimed with it."""
+
+    work: WorkItem
+    lease: Lease | None = None
+
+
+ProjectionConsumers = tuple[str, ...]
+WorkKind = Literal["drive", "project"]
+WorkKinds = tuple[WorkKind, ...]
 
 
 @dataclass(frozen=True)
@@ -146,6 +217,8 @@ class LeasePoll:
 
 class SessionTx(Protocol):
     def lock_session(self, session_id: str) -> None: ...
+
+    def bind_lease_guard(self, guard: Callable[[], Lease]) -> None: ...
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt: ...
     def push(self, session_id: str, item: InboxItem) -> InputReceipt: ...
@@ -174,6 +247,10 @@ class ContentSessionTx(SessionTx, Protocol):
 
 class SessionStore(Protocol):
     def for_tenant(self, tenant_id: str) -> SessionStore: ...
+
+    def heartbeat_store_factory(self) -> Callable[[], AbstractContextManager[SessionStore]]:
+        """Return a repeatable factory that opens a new renewal connection per call."""
+        ...
 
     def heartbeat_store(self) -> AbstractContextManager[SessionStore]:
         """Open a runtime-independent renewal connection; memory stores may share their lock."""
@@ -223,7 +300,24 @@ class SessionStore(Protocol):
     def defer_drive(self, lease: Lease, *, retry_after_ms: int) -> None: ...
     def defer_projection(self, session_id: str, consumer: str, *, retry_after_ms: int) -> None: ...
     def is_runnable(self, session_id: str) -> bool: ...
-    def list_runnable(self, *, limit: int = 100, after: WorkCursor | None = None) -> tuple[WorkItem, ...]: ...
+    def list_runnable(
+        self,
+        *,
+        limit: int = 100,
+        after: WorkCursor | None = None,
+        work_kinds: WorkKinds | None = None,
+        projection_consumers: ProjectionConsumers | None = None,
+    ) -> tuple[WorkItem, ...]: ...
+    def claim_runnable(
+        self,
+        *,
+        owner: str,
+        ttl_ms: int,
+        limit: int = 100,
+        after: WorkCursor | None = None,
+        work_kinds: WorkKinds | None = None,
+        projection_consumers: ProjectionConsumers | None = None,
+    ) -> tuple[ClaimedWork, ...]: ...
 
 
 class LeaseRetryExhausted(LeaseLost):

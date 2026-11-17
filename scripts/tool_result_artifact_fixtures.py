@@ -120,7 +120,19 @@ def produce(text, *, backend=None, truncated=False, named=False, forged=False, t
         def submit(self, plan, *, context):
             return Definitive(result().to_dict())
 
-    with SQLiteStore.standalone(":memory:") as store:
+        def query(self, handle):
+            raise AssertionError("fixed provider does not query")
+
+        def cancel(self, handle):
+            raise AssertionError("fixed provider does not cancel")
+
+        def authenticate(self, item, plan):
+            return False
+
+    with (
+        TemporaryDirectory(prefix="tool-result-session-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         store.install_schema()
         store = wrap_fixture_store(store)
         create_fixture_session(store, "s1", consumers=())

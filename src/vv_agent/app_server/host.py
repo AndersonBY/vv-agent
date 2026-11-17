@@ -216,7 +216,7 @@ class AppServerApprovalProvider(ApprovalProvider):
             ApprovalRequestParams(
                 request_id=request.request_id,
                 thread_id=self._thread_id,
-                turn_id=self._turn_id,
+                turn_id=request.run_id,
                 tool_call_id=request.tool_call_id,
                 tool_name=request.tool_name,
                 preview=f"Approval required for tool {request.tool_name}.",

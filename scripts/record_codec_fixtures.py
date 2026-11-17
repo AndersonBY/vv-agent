@@ -11,7 +11,8 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, cast
 from unittest.mock import patch
 
 try:
@@ -19,6 +20,8 @@ try:
         content_ref,
         create_fixture_session,
         fixture_content_reader,
+        fixture_key_provider,
+        fixture_key_provider_for_store,
         principal,
         push_fixture_input,
         wrap_fixture_store,
@@ -28,6 +31,8 @@ except ModuleNotFoundError:
         content_ref,
         create_fixture_session,
         fixture_content_reader,
+        fixture_key_provider,
+        fixture_key_provider_for_store,
         principal,
         push_fixture_input,
         wrap_fixture_store,
@@ -59,7 +64,10 @@ def rejected(callback) -> dict[str, str]:
 
 
 def app_server_error() -> dict[str, Any]:
-    with SQLiteStore.standalone(":memory:") as store:
+    with (
+        TemporaryDirectory(prefix="record-codec-app-server-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         store.install_schema()
         transport = ChannelTransport(connection_id="codec-owner", outbound_capacity=100)
         host = DefaultAppServerHost(
@@ -68,7 +76,13 @@ def app_server_error() -> dict[str, Any]:
                 model_provider=ScriptedModelProvider.new("test", "m", []), workspace_backend=MemoryWorkspaceBackend()
             ),
         )
-        server = AppServer(transport=transport, host=host, store=store)
+        content_key_provider = fixture_key_provider()
+        server = AppServer(
+            transport=transport,
+            host=host,
+            store=store,
+            content_key_provider=content_key_provider,
+        )
         request_id = 0
 
         def rpc(method, params):
@@ -82,6 +96,7 @@ def app_server_error() -> dict[str, Any]:
                 if wire.get("id") == request_id:
                     return wire
 
+        server_open = True
         try:
             assert "result" in rpc("initialize", {"clientInfo": {"name": "codec-producer"}})
             server.processor.process_message(transport.connection_id, {"jsonrpc": "2.0", "method": "initialized"})
@@ -94,15 +109,33 @@ def app_server_error() -> dict[str, Any]:
                     "UPDATE sk_record SET body=%s,digest=%s WHERE session_id=%s AND seq=1",
                     (body, sha256(body).hexdigest(), "codec-thread"),
                 )
+            server.run_adapter.close()
+            server.kernel.close()
+            server_open = False
+            transport = ChannelTransport(connection_id="codec-owner-reopened", outbound_capacity=100)
+            server = AppServer(
+                transport=transport,
+                host=host,
+                store=store,
+                content_key_provider=content_key_provider,
+            )
+            server_open = True
+            assert "result" in rpc("initialize", {"clientInfo": {"name": "codec-producer"}})
+            server.processor.process_message(transport.connection_id, {"jsonrpc": "2.0", "method": "initialized"})
             reply = rpc("thread/read", {"threadId": "codec-thread"})
             return reply["error"]
         finally:
-            server.run_adapter.close()
-            server.kernel.close()
+            if server_open:
+                server.run_adapter.close()
+                server.kernel.close()
+            content_key_provider.close()
 
 
 def model_selection_reason() -> str:
-    with SQLiteStore.standalone(":memory:") as store:
+    with (
+        TemporaryDirectory(prefix="record-codec-model-selection-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         store.install_schema()
         store = wrap_fixture_store(store)
         client = ScriptedLLM([])
@@ -244,8 +277,9 @@ def produce() -> dict[str, Any]:
             "inbox_sha256": item.digest,
         },
     }
-    assert all(case["error"]["type"] == "RecordError" for case in value["schema_diagnostics"])
-    assert value["app_server_error"] == {"code": -32603, "message": "stored record chain digest mismatch"}
+    assert all(case["error"]["type"] == "RecordError" for case in cast(list[dict[str, Any]], value["schema_diagnostics"]))
+    app_server_failure = value["app_server_error"]
+    assert app_server_failure["message"].startswith("stored record chain digest mismatch")
     assert value["provider_reason"] == "provider_result_invalid"
     assert value["model_selection_reason"] == "model_selection_unresolvable"
     return value
@@ -323,9 +357,12 @@ def _trusted_storage_capture_impl() -> dict[str, Any]:
     revision = _git(repo, "rev-parse", "HEAD").decode().strip()
     dirty = _source_worktree_dirty(repo)
 
-    with SQLiteStore.standalone(":memory:") as raw_store:
+    with (
+        TemporaryDirectory(prefix="trusted-storage-capture-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as raw_store,
+    ):
         raw_store.install_schema()
-        store = wrap_fixture_store(raw_store)
+        store = wrap_fixture_store(raw_store, fixture_key_provider_for_store(raw_store))
         create_fixture_session(store, "trusted", workspace={"cwd": "/fixture"}, consumers=())
         created = store.read("trusted", limit=1).records[0].record
         with store.atomic() as tx:
@@ -621,7 +658,7 @@ def _trusted_storage_capture_impl() -> dict[str, Any]:
         value: Any = missing,
         delete: bool = False,
     ) -> dict[str, Any]:
-        operation = {"path": path}
+        operation: dict[str, Any] = {"path": path}
         if delete:
             operation["delete"] = True
         else:

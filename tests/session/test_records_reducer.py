@@ -148,7 +148,9 @@ def test_parked_provider_evidence_defers_binding_and_duplicate_result():
     assert raw.operations["o"].attempts[1].state == "completed"
 
     logical = fold(log)
-    logical.operations["o"].attempts[1].wait["handle"]["evidence"] = ["parked-evidence"]
+    wait = logical.operations["o"].attempts[1].wait
+    assert wait is not None
+    wait["handle"]["evidence"] = ["parked-evidence"]
     completed = record("op_completed")
     completed = replace(completed, payload=completed._payload | {"evidence": ["result-evidence"]})
     with pytest.raises(TransitionError):

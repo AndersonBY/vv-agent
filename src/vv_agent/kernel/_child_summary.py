@@ -9,15 +9,15 @@ from typing import Any
 
 from . import _driver_outcomes as outcomes
 from . import _summary_compaction as summary
-from ._boundary_hydration import active_task, hydrate_stored_records
+from ._boundary_hydration import _prepare_fold_records, active_task, hydrate_stored_records
 from ._context import project_context
 from ._driver import CoreDriver
 from ._driver_planning import plan as plan_steps
 from ._driver_requests import CommitRecords
 from ._message_values import Message
 from ._provider_outcomes import Definitive
-from ._records import InboxItem, Record, digest
-from ._reducer import CountMessages
+from ._records import Record, digest
+from ._reducer import CountMessages, logical_inputs
 from ._summary_requests import summary_pending
 from ._token_count import TokenCount, _StopIterationTransport
 from ._tool_values import ToolExecutionResult, ToolResultStatus
@@ -50,27 +50,27 @@ class CountPrefix:
 def source_at(driver: CoreDriver, version: str) -> Generator[CountPrefix, int, list[Message]]:
     prefix = tuple(row for row in driver.records if row.seq <= int(version))
     hydrated = hydrate_stored_records(driver, prefix)
-    logical = [row.record for row in hydrated]
-    inputs = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
+    fold_records, logical_inputs_by_id, _ = _prepare_fold_records(prefix, hydrated)
     folded = driver._fold_factory()
-    steps = folded.extend_steps(
-        logical,
-        consumed_inputs=inputs,
-        bodies=(row.record.encode() for row in prefix),
-    )
     count = None
-    try:
-        while True:
-            try:
-                request = next(steps) if count is None else steps.send(count)
-            except StopIteration as done:
-                state = done.value
-                break
-            count = yield CountPrefix(request, folded._count_messages)
-    except StopIteration as error:
-        raise _StopIterationTransport(error) from error
-    finally:
-        steps.close()
+    with logical_inputs(logical_inputs_by_id):
+        steps = folded.extend_steps(
+            fold_records,
+            consumed_inputs=logical_inputs_by_id.values(),
+            bodies=(row.record.encode() for row in prefix),
+        )
+        try:
+            while True:
+                try:
+                    request = next(steps) if count is None else steps.send(count)
+                except StopIteration as done:
+                    state = done.value
+                    break
+                count = yield CountPrefix(request, folded._count_messages)
+        except StopIteration as error:
+            raise _StopIterationTransport(error) from error
+        finally:
+            steps.close()
     return project_context(hydrated, state)
 
 
@@ -84,7 +84,8 @@ def child_summary(driver: CoreDriver, plan: Record) -> Generator[object, Any, tu
         if op is None:
             parent = driver.state.operations[plan._payload["dependencies"][0]]
             receipt = parent.attempts[parent.selected_attempt or 1].result
-            version = str(next(row.seq for row in driver.records if row.record == receipt) - 1)
+            assert receipt is not None
+            version = str(driver.stored_record(receipt).seq - 1)
             source = yield from source_at(driver, version)
             summary_plan = summary.plan_full_summary(source, **(yield SummaryRead.PLAN_SETTINGS))
             if summary_plan is not None and (yield CountSummaryPrompt([Message("user", summary_plan.prompt)])) < (

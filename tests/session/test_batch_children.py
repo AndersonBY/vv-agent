@@ -6,29 +6,31 @@ from dataclasses import replace
 
 import pytest
 
+from vv_agent.kernel._content_publication import link_declared_input_content
 from vv_agent.session import children
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
-from .helpers import content_ref, item, principal
-from .test_children import parent_runtime, start
-from .test_recovery_matrix import runtime
+from .helpers import fixture_child_spec, item, push_fixture_input, wrap_fixture_store
+from .test_children import fixture_runtime, parent_runtime, start
 
 CHILDREN = ("child-0", "child-1", "child-2")
 
 
-def batch_runtime(database, *, background=False):
-    rt = parent_runtime(database)
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
+def batch_runtime(store, database, *, background=False):
+    rt = parent_runtime(store, database)
     rt.children["child_task"] = lambda _plan: tuple(
         children.ChildSession(
-            SessionSpec(
-                sid,
-                principal(f"{sid}-user"),
-                content_ref(f"{sid}/workspace"),
-                attributes=content_ref(f"{sid}/attributes"),
-            ),
+            fixture_child_spec(store, _plan.session_id, sid),
             "work",
             background=background,
         )
@@ -41,18 +43,23 @@ def rows(store, sid="s", kind=None):
     return [r for r in read_state(store, sid)[1] if kind is None or r.record.kind == kind]
 
 
+def tool_result(store, sid="s"):
+    row = next(r for r in rows(store, sid, "op_completed") if "/tool/" in r.record.operation_id)
+    return hydrate_record_payload(row, hydration_for_session_store(store, sid))["result"]
+
+
 def deliver(store, sid, hook=lambda _: None):
     with store.atomic() as tx:
         children.child_delivery(store, tx, sid, hook=hook)
 
 
 def complete(store, database, sid):
-    drive(store, sid, runtime=runtime(database, [LLMResponse(sid + " done")]))
+    drive(store, sid, runtime=fixture_runtime(store, database, sid, [LLMResponse(sid + " done")]))
 
 
 def test_batch_admission_waits_for_every_sibling_and_retains_order(store, database):
     start(store)
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     drive(store, "s", runtime=rt)
     parked = rows(store, kind="op_parked")[0]
     handles = children.child_handles(parked.record.payload["handle"])
@@ -66,7 +73,7 @@ def test_batch_admission_waits_for_every_sibling_and_retains_order(store, databa
         deliver(store, sid)
         drive(store, "s", runtime=rt)
         assert bool(rows(store, kind="turn_ended")) == (sid == CHILDREN[0])
-    result = next(r.record.payload["result"] for r in rows(store, kind="op_completed") if "/tool/" in r.record.operation_id)
+    result = tool_result(store)
     outcomes = json.loads(result["content"])
     assert [o["content"] for o in outcomes] == [sid + " done" for sid in CHILDREN]
     assert result["status_code"] == "SUCCESS"
@@ -77,8 +84,11 @@ def test_batch_admission_waits_for_every_sibling_and_retains_order(store, databa
             if r.record.payload["input"]["kind"] == "child_result" and r.record.payload["input"]["payload"]["session_id"] == sid
         )
         item = InboxItem(**original.payload["input"])
+        duplicate = replace(item, input_id=item.input_id + "/duplicate")
         with store.atomic() as tx:
-            tx.push("s", replace(item, input_id=item.input_id + "/duplicate"))
+            writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id="s")
+            tx.push("s", duplicate)
+            link_declared_input_content(writer, duplicate)
     drive(store, "s", runtime=rt)
     assert len(rows(store, kind="turn_ended")) == 1
     assert all(
@@ -94,7 +104,7 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
 
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     callback = rt.children["child_task"]
 
     def admit(plan):
@@ -131,7 +141,7 @@ def test_batch_kth_failure_rolls_back_host_rows_children_and_park(store, databas
 def test_invalid_batch_has_no_admission_effect(store, database, invalid):
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     callback = rt.children["child_task"]
 
     def bad(plan):
@@ -156,7 +166,7 @@ def test_invalid_batch_has_no_admission_effect(store, database, invalid):
 def test_batch_host_rows_and_child_admission_roll_back_with_parent_append(store, database):
     start(store)
     store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     callback = rt.children["child_task"]
 
     def admit(plan):
@@ -180,7 +190,7 @@ def test_batch_host_rows_and_child_admission_roll_back_with_parent_append(store,
 @pytest.mark.parametrize("background", [False, True])
 def test_cancel_reaches_every_sibling_and_late_delivery_never_revives(store, database, background):
     start(store)
-    rt = batch_runtime(database, background=background)
+    rt = batch_runtime(store, database, background=background)
     if background:
         rt.llm.steps.pop()  # Park parent on its next ask_user instead of completing it.
         from vv_agent.types import ToolCall
@@ -189,12 +199,11 @@ def test_cancel_reaches_every_sibling_and_late_delivery_never_revives(store, dat
     drive(store, "s", runtime=rt)
     state = read_state(store, "s")[0]
     tid = state.active_turn_id
-    with store.atomic() as tx:
-        tx.push("s", item("cancel", "control", action="cancel", target_turn_id=tid, generation=0))
+    push_fixture_input(store, "s", item("cancel", "control", action="cancel", target_turn_id=tid, generation=0))
     drive(store, "s", runtime=rt)
     for sid in CHILDREN:
         assert any(i.item.payload == {"action": "cancel"} for i in store.peek_inbox(sid))
-        drive(store, sid, runtime=runtime(database, []))
+        drive(store, sid, runtime=fixture_runtime(store, database, sid, []))
         deliver(store, sid)
     drive(store, "s", runtime=rt)
     assert [r.record.payload["status"] for r in rows(store, kind="turn_ended")] == ["cancelled"]
@@ -203,9 +212,9 @@ def test_cancel_reaches_every_sibling_and_late_delivery_never_revives(store, dat
 
 def test_background_batch_result_lists_every_admitted_child(store, database):
     start(store)
-    rt = batch_runtime(database, background=True)
+    rt = batch_runtime(store, database, background=True)
     drive(store, "s", runtime=rt)
-    result = next(r.record.payload["result"] for r in rows(store, kind="op_completed") if "/tool/" in r.record.operation_id)
+    result = tool_result(store)
     assert [h["session_id"] for h in json.loads(result["content"])] == list(CHILDREN)
     assert len(result["metadata"]["children"]) == 3
     for sid in CHILDREN:
@@ -216,21 +225,23 @@ def test_background_batch_result_lists_every_admitted_child(store, database):
 
 
 def delivery_worker(database, sid, pipe, point):
-    with open_store(database) as store, store.atomic() as tx:
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store)
+        with store.atomic() as tx:
 
-        def hook(at):
-            if at == point:
-                pipe.send("barrier")
-                pipe.recv()
+            def hook(at):
+                if at == point:
+                    pipe.send("barrier")
+                    pipe.recv()
 
-        children.child_delivery(store, tx, sid, hook=hook)
+            children.child_delivery(store, tx, sid, hook=hook)
 
 
 @pytest.mark.persistent_store
 @pytest.mark.parametrize("point", ["before_parent_inbox", "after_parent_inbox", "after_child_ack"])
 def test_batch_delivery_crash_replays_atomically(store, database, point):
     start(store)
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     drive(store, "s", runtime=rt)
     for sid in CHILDREN:
         complete(store, database, sid)
@@ -265,7 +276,7 @@ def test_batch_delivery_crash_replays_atomically(store, database, point):
 
 def test_background_batch_delivers_all_notifications_at_next_safe_model_boundary(store, database):
     start(store)
-    rt = batch_runtime(database, background=True)
+    rt = batch_runtime(store, database, background=True)
     seen = []
 
     def model(request):
@@ -288,18 +299,21 @@ def test_background_batch_delivers_all_notifications_at_next_safe_model_boundary
 
 def test_batch_error_result_keeps_every_child_outcome(store, database):
     start(store)
-    rt = batch_runtime(database)
+    rt = batch_runtime(store, database)
     drive(store, "s", runtime=rt)
     for index, sid in enumerate(CHILDREN):
         if index == 1:
-            with store.atomic() as tx:
-                tx.push(sid, item("cancel", "control", action="cancel", target_turn_id=f"{sid}/turn/start", generation=0))
-            drive(store, sid, runtime=runtime(database, []))
+            push_fixture_input(
+                store,
+                sid,
+                item("cancel", "control", action="cancel", target_turn_id=f"{sid}/turn/start", generation=0),
+            )
+            drive(store, sid, runtime=fixture_runtime(store, database, sid, []))
         else:
             complete(store, database, sid)
         deliver(store, sid)
     drive(store, "s", runtime=rt)
-    result = next(r.record.payload["result"] for r in rows(store, kind="op_completed") if "/tool/" in r.record.operation_id)
+    result = tool_result(store)
     assert result["status_code"] == "ERROR"
     outcomes = json.loads(result["content"])
     assert [o["status_code"] for o in outcomes] == ["SUCCESS", "ERROR", "SUCCESS"]

@@ -20,7 +20,7 @@ from vv_agent.memory.input_protection import UnseenInputError
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeLLMPatch
 from vv_agent.session.context import protected_start
 from vv_agent.session.kernel import drive
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, Message
 
 from .fold_history import extend_logical
@@ -57,12 +57,12 @@ def read_runtime_state(database):
         return state, rows, watermark
 
 
-def test_new_session_declares_protection():
+def test_new_session_declares_protection(tmp_path):
     from vv_agent.session.projection import hydration_for_session_store
     from vv_agent.session.records import Record
     from vv_agent.session.sqlite import SQLiteStore
 
-    with SQLiteStore.standalone(":memory:") as store:
+    with SQLiteStore.standalone(str(tmp_path / "unseen.sqlite")) as store:
         store.install_schema()
         store = wrap_fixture_store(store)
         create_fixture_session(
@@ -514,20 +514,12 @@ def test_declared_primary_rejects_invalid_context_reference(store, database, ver
         extend_logical(Fold(), records, consumed_inputs=consumed)
 
 
-def test_0333_producer_replays_byte_for_byte_without_declaration():
-    from vv_agent.session.context import project_context
-    from vv_agent.session.records import Record
-    from vv_agent.session.reducer import fold
-    from vv_agent.session.store import StoredRecord
+def test_0333_producer_is_rejected_by_current_codec():
+    from vv_agent.session.records import Record, RecordError
 
     fixture = json.loads((Path(__file__).parent / "fixtures" / "legacy-unseen-0333.json").read_text())
-    records = [Record.parse(body.encode()) for body in fixture["records"]]
-    assert "unseen_input_protection" not in records[0].payload["attributes"].get("seed", {})
-    assert [r.encode().decode() for r in records] == fixture["records"]
-    state = fold(records, consumed_inputs=[InboxItem(**r.payload["input"]) for r in records if r.kind == "input_applied"])
-    stored = [StoredRecord(r, i + 1, "", 0, 0) for i, r in enumerate(records)]
-    assert protected_start(stored, state) is None
-    assert [m.to_dict() for m in project_context(stored, state)] == fixture["messages"]
+    with pytest.raises(RecordError):
+        Record.parse(fixture["records"][0].encode())
 
 
 def test_unseen_fixture_matches_local_contract():
@@ -565,21 +557,29 @@ def test_custom_children_inherit_parent_choice(store, database, enabled, policy)
 
 @pytest.mark.parametrize("policy", ["unseen_input_protection", "response_rejection"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_app_server_fork_inherits_choice(store, enabled, policy):
+def test_app_server_fork_inherits_choice(store, tmp_path, monkeypatch, enabled, policy):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider
     from vv_agent.app_server import DefaultAppServerHost
+    from vv_agent.session import app_server as session_app_server
 
     from .test_app_server_fork import run_turn, send, server_for
 
     provider = ScriptedModelProvider.new("test", "test", [LLMResponse("done")])
     host = DefaultAppServerHost(agent=Agent("test", "test", model="test"), run_config=RunConfig(model_provider=provider))
-    server = server_for(store, host)
+    server = server_for(store, host, tmp_path / "unseen-fork-keys.sqlite")
     try:
-        server.kernel.create(
-            "source",
-            "/tmp",
-            {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}, "seed": {policy: enabled}},
-        )
+        publish_created = session_app_server.publish_session_created_content
+
+        def seed_created_content(writer, *, principal, workspace, attributes):
+            return publish_created(
+                writer,
+                principal=principal,
+                workspace=workspace,
+                attributes=attributes | {"seed": {policy: enabled}},
+            )
+
+        monkeypatch.setattr(session_app_server, "publish_session_created_content", seed_created_content)
+        send(server, "create", "thread/start", {"inputId": "source"})
         turn = run_turn(server, "source", "first")
         result = send(server, "fork", "thread/fork", {"threadId": "source", "forkId": "copy", "throughTurnId": turn})
         from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
@@ -653,64 +653,55 @@ def test_process_death_preserves_unseen_suffix(store, database, cut):
 
 @pytest.mark.parametrize("attributes", [None, {"host": {"id": 7}}, {"seed": {"messages": [], "shared_state": {}}}])
 @pytest.mark.persistent_store
-def test_0333_database_tx_create_replay(database, attributes):
-    """The old runtime writes the actual SQLite/PostgreSQL database, not a mocked record."""
-    import os
-    import subprocess
-
+def test_s1_database_tx_create_replay(database, attributes):
+    """S1 create replays exact bytes after reopening the real SQLite/PostgreSQL database."""
     from vv_agent.session.store import Conflict
 
     from .conftest import open_store
 
-    python = os.environ.get("VV_AGENT_0333_PYTHON")
-    if not python:
-        pytest.skip("Set VV_AGENT_0333_PYTHON to an isolated PyPI vv-agent==0.33.3 interpreter")
-    script = """
-import json, sys
-from importlib.metadata import version
-from vv_agent.session.records import SessionSpec
-from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.postgres import PostgresStore
-assert version('vv-agent') == '0.33.3'
-kind, database, attributes = sys.argv[1:]
-factory = SQLiteStore if kind == 'sqlite' else PostgresStore
-with factory.standalone(database) as store:
-    store.install_schema()
-    with store.atomic() as tx:
-        tx.create(SessionSpec('legacy', 'test', '/tmp', attributes=json.loads(attributes)), consumers=('events',))
-    before = store.read('legacy').records[0].record.encode()
-    with store.atomic() as tx:
-        assert tx.create(SessionSpec('legacy', 'test', '/tmp', attributes=json.loads(attributes)), consumers=('events',)).replayed
-    assert store.read('legacy').records[0].record.encode() == before
-print('0.33.3 real database creation and replay: PASS')
-"""
-    result = subprocess.run(
-        [python, "-c", script, "sqlite" if isinstance(database, Path) else "postgres", str(database), json.dumps(attributes)],
-        cwd="/tmp",
-        env={key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "VV_AGENT_CONTRACT_SOURCE"}},
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    assert "0.33.3 real database creation and replay: PASS" in result.stdout
     with open_store(database) as store:
+        store.install_schema()
+        store = wrap_fixture_store(store)
+        first = create_fixture_session(store, "legacy", workspace="/tmp", attributes=attributes, consumers=("events",))
+        assert not first.replayed
         before = store.read("legacy").records[0].record.encode()
-        with store.atomic() as tx:
-            assert tx.create(SessionSpec("legacy", "test", "/tmp", attributes=attributes), consumers=("events",)).replayed
+    with open_store(database) as store:
+        store = wrap_fixture_store(store)
+        replay = create_fixture_session(
+            store,
+            "legacy",
+            workspace="/tmp",
+            attributes=attributes,
+            consumers=("events",),
+        )
+        assert replay.replayed
         assert store.read("legacy").records[0].record.encode() == before
         for change in (True, False):
             attrs = json.loads(json.dumps(attributes or {}))
             attrs.setdefault("seed", {})["unseen_input_protection"] = change
-            with pytest.raises(Conflict), store.atomic() as tx:
-                tx.create(SessionSpec("legacy", "test", "/tmp", attributes=attrs), consumers=("events",))
-        for spec, consumers in (
-            (SessionSpec("legacy", "other", "/tmp", attributes=attributes), ("events",)),
-            (SessionSpec("legacy", "test", "/different", attributes=attributes), ("events",)),
-            (SessionSpec("legacy", "test", "/tmp", attributes=(attributes or {}) | {"other": 1}), ("events",)),
-            (SessionSpec("legacy", "test", "/tmp", attributes=attributes), ("different",)),
-        ):
-            with pytest.raises(Conflict), store.atomic() as tx:
-                tx.create(spec, consumers=consumers)
+            with pytest.raises(Conflict):
+                create_fixture_session(store, "legacy", workspace="/tmp", attributes=attrs, consumers=("events",))
+        with pytest.raises(Conflict):
+            create_fixture_session(
+                store,
+                "legacy",
+                workspace="/tmp",
+                attributes=attributes,
+                consumers=("events",),
+                subject_id="other",
+            )
+        with pytest.raises(Conflict):
+            create_fixture_session(store, "legacy", workspace="/different", attributes=attributes, consumers=("events",))
+        with pytest.raises(Conflict):
+            create_fixture_session(
+                store,
+                "legacy",
+                workspace="/tmp",
+                attributes=(attributes or {}) | {"other": 1},
+                consumers=("events",),
+            )
+        with pytest.raises(Conflict):
+            create_fixture_session(store, "legacy", workspace="/tmp", attributes=attributes, consumers=("different",))
         assert store.read("legacy").records[0].record.encode() == before
 
 
@@ -1169,7 +1160,9 @@ def test_normal_callback_after_snapshot_reaches_next_primary(store, database, re
         logical_boundary_sources({boundary.record_id: source}),
     ):
         append_fixture_records(store, "s", [boundary], commit_id="snapshot")
-    park = records_of(store, "op_parked")[-1]
+    clear_fixture_state_cache(store)
+    _, hydrated, _ = read_fixture_state(store, "s")
+    park = next(row.record for row in reversed(hydrated) if row.record.kind == "op_parked")
     handle = park.payload["handle"]
     if reply == "provider":
         plan = provider.plan

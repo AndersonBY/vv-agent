@@ -146,6 +146,12 @@ class OutgoingRouter:
         with self._lock:
             return len(self._pending)
 
+    def get_pending_server_request(self, request_id: RequestId) -> PendingServerRequest | None:
+        """Return an existing pending server request without taking ownership of it."""
+
+        with self._lock:
+            return self._pending.get(request_id.require_wire())
+
     def resolve_response(self, connection_id: str, response: JsonRpcResponse) -> bool:
         with self._lock:
             wire_id = response.id.require_wire()

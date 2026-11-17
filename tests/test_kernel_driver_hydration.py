@@ -114,7 +114,6 @@ def test_definition_and_session_attributes_hydrate_from_creation_owners() -> Non
         "model_binding": {
             "backend": "scripted",
             "model": "scripted",
-            "endpoints": [],
             "context_length": None,
             "max_output_tokens": None,
         },
@@ -172,7 +171,6 @@ def test_definition_and_session_attribute_nested_messages_hydrate_explicitly() -
         "model_binding": {
             "backend": "scripted",
             "model": "scripted",
-            "endpoints": [],
             "context_length": None,
             "max_output_tokens": None,
         },

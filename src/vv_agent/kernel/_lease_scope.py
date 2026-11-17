@@ -1,9 +1,10 @@
-"""Lease ownership and latch rules using supplied time and synchronization ports."""
+"""Lease ownership and renewal rules using supplied time and signaling ports."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol
 
@@ -38,25 +39,30 @@ class Latch(Protocol):
     def __enter__(self) -> object: ...
 
     def __exit__(
-        self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None, /
+        self,
+        kind: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
     ) -> bool | None: ...
-
-
-class LatchEntry(Protocol):
-    commit: bool
-    poll: bool
 
 
 class CancellationSink(Protocol):
     def cancel(self, reason: str) -> None: ...
 
 
-class ControlScope(Protocol):
-    @property
-    def token(self) -> CancellationSink: ...
+@dataclass(frozen=True, slots=True)
+class ControlBinding[TokenT: CancellationSink]:
+    """One token, turn identity and consumed-input view for control delivery."""
 
+    token: TokenT
     turn_id: str | None
     generation: int | None
+    applied_inputs: Mapping[str, object]
+
+
+class ControlScope[TokenT: CancellationSink](Protocol):
+    control_binding: ControlBinding[TokenT] | None
     lost: bool
 
 
@@ -64,7 +70,13 @@ class HeartbeatStopped(LeaseLost):
     """Normal stop of a lease-renewal worker; grants no execution ownership."""
 
 
-class LeaseOwnership:
+@dataclass(frozen=True, slots=True)
+class _ConfirmedLease:
+    poll: LeasePoll
+    expires_deadline: float
+
+
+class LeaseOwnership[TokenT: CancellationSink]:
     def __init__(
         self,
         lease: Lease,
@@ -74,134 +86,279 @@ class LeaseOwnership:
         clock: Clock,
         stop: Signal,
         ready: Signal,
-        lock: Latch,
-        poll_lock: Latch,
-        commit_lock: Latch,
-        latch_entry: LatchEntry,
-        actor_identity: Callable[[], int],
         now_ms: int | None = None,
+        token_factory: Callable[[], TokenT] | None = None,
     ) -> None:
         self.clock = clock
         self.successful_ready = False
-        self.lease = lease
+        self._initial_lease = lease
+        self._confirmed: _ConfirmedLease | None = None
+        self._db_anchor_deadline: float | None = None
         self.ttl_ms, self.heartbeat_seconds = ttl_ms, heartbeat_seconds
         self.stop, self.ready = stop, ready
-        self.lock, self.poll_lock, self.commit_lock = lock, poll_lock, commit_lock
-        self._latch_entry = latch_entry
-        self._actor_identity = actor_identity
-        self._poll_thread: int | None = None
-        self._commit_thread: int | None = None
         self.lost = False
         self.heartbeat_error: Exception | None = None
-        now_ms = self.clock.now_ms() if now_ms is None else now_ms
-        self.expires_deadline = self.clock.monotonic() + (lease.expires_at_ms - now_ms) / 1000
+        self._token_factory = token_factory
+        self.control_binding: ControlBinding[TokenT] | None = (
+            ControlBinding(token_factory(), None, None, {}) if token_factory is not None else None
+        )
+        if now_ms is not None:
+            self._db_anchor_deadline = self.clock.monotonic() + (lease.expires_at_ms - now_ms) / 1000
+
+    @property
+    def latest_poll(self) -> LeasePoll | None:
+        """Return the latest immutable renewal receipt as one confirmed snapshot."""
+
+        confirmed = self._confirmed
+        return None if confirmed is None else confirmed.poll
+
+    def confirmed_poll(self) -> LeasePoll:
+        """Return the current complete receipt without opening a renewal connection."""
+
+        if self.lost:
+            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+        if self.stop.is_set():
+            raise HeartbeatStopped("heartbeat stopped")
+        confirmed = self._confirmed
+        if confirmed is None:
+            raise LeaseLost("heartbeat lease has no confirmed poll")
+        if self.clock.monotonic() >= confirmed.expires_deadline:
+            self.lost = True
+            raise LeaseLost("heartbeat lease expired")
+        return confirmed.poll
+
+    @property
+    def token(self) -> TokenT:
+        binding = self.control_binding
+        if binding is None:
+            raise RuntimeError("lease scope has no cancellation token")
+        return binding.token
+
+    @property
+    def turn_id(self) -> str | None:
+        binding = self.control_binding
+        return None if binding is None else binding.turn_id
+
+    @property
+    def generation(self) -> int | None:
+        binding = self.control_binding
+        return None if binding is None else binding.generation
+
+    def bind_turn(
+        self,
+        turn_id: str | None,
+        generation: int | None,
+        applied_inputs: Mapping[str, object],
+    ) -> None:
+        """Atomically publish token and principal turn identity for controls."""
+
+        previous = self.control_binding
+        same_turn = previous is not None and (previous.turn_id, previous.generation) == (turn_id, generation)
+        token = previous.token if same_turn else self._new_token()
+        self.control_binding = ControlBinding(token, turn_id, generation, applied_inputs)
+        self._apply_latest_controls()
+
+    def reset_token(self) -> None:
+        """Replace only the cancellation token while preserving the current binding."""
+
+        previous = self.control_binding
+        token = self._new_token()
+        self.control_binding = ControlBinding(
+            token,
+            None if previous is None else previous.turn_id,
+            None if previous is None else previous.generation,
+            {} if previous is None else previous.applied_inputs,
+        )
+        self._apply_latest_controls()
+
+    def _new_token(self) -> TokenT:
+        if self._token_factory is None:
+            raise RuntimeError("lease scope has no cancellation token factory")
+        return self._token_factory()
+
+    def _apply_latest_controls(self) -> None:
+        poll = self.latest_poll
+        if poll is not None:
+            apply_controls(self, poll)
+
+    @property
+    def lease(self) -> Lease:
+        confirmed = self._confirmed
+        return self._initial_lease if confirmed is None else confirmed.poll.lease
+
+    @property
+    def expires_deadline(self) -> float:
+        confirmed = self._confirmed
+        if confirmed is not None:
+            return confirmed.expires_deadline
+        # A database read may seed only the local deadline. It is not published
+        # as latest_poll because no renewal/inbox receipt has been confirmed.
+        return self._db_anchor_deadline if self._db_anchor_deadline is not None else self.clock.monotonic()
+
+    @property
+    def safety_deadline(self) -> float:
+        margin = min(self.ttl_ms / 2000, max(2 * self.heartbeat_seconds, 1.0))
+        return self.expires_deadline - margin
 
     def poll(self, store: SessionStore):
-        thread = self._actor_identity()
-        if getattr(self._latch_entry, "commit", False) or getattr(self._latch_entry, "poll", False):
-            raise RuntimeError("poll while holding commit/poll latch")
-        self._latch_entry.poll = True
-        try:
-            with self.poll_lock:
-                self._poll_thread = thread
-                try:
-                    with self.lock:
-                        if self.lost:
-                            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
-                        if self.stop.is_set():
-                            raise HeartbeatStopped("heartbeat stopped")
-                        lease = self.lease
-                    started = self.clock.monotonic()
-                    poll = store.renew(lease, ttl_ms=self.ttl_ms)
-                    with self.lock:
-                        if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch) != (
-                            lease.session_id,
-                            lease.owner,
-                            lease.epoch,
-                        ):
-                            self.lost = True
-                            raise LeaseLost("heartbeat changed lease identity")
-                        if not self.stop.is_set() and not self.lost:
-                            self.lease = poll.lease
-                            self.expires_deadline = started + (poll.lease.expires_at_ms - poll.db_now_ms) / 1000
-                            self.heartbeat_error = None
-                            self.successful_ready = True
-                            self.ready.set()
-                finally:
-                    self._poll_thread = None
-        finally:
-            self._latch_entry.poll = False
+        if self.lost:
+            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+        if self.stop.is_set():
+            raise HeartbeatStopped("heartbeat stopped")
+        lease = self.lease
+        started = self.clock.monotonic()
+        poll = store.renew(lease, ttl_ms=self.ttl_ms)
+        if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch, poll.lease.tenant_id) != (
+            lease.session_id,
+            lease.owner,
+            lease.epoch,
+            lease.tenant_id,
+        ):
+            self.lost = True
+            raise LeaseLost("heartbeat changed lease identity")
+        if poll.db_now_ms >= poll.lease.expires_at_ms:
+            self.lost = True
+            raise LeaseLost("heartbeat renewal returned an expired lease")
+        confirmed = _ConfirmedLease(
+            poll,
+            started + (poll.lease.expires_at_ms - poll.db_now_ms) / 1000,
+        )
+        current = self._confirmed
+        if current is None or (poll.db_now_ms, poll.lease.expires_at_ms) >= (
+            current.poll.db_now_ms,
+            current.poll.lease.expires_at_ms,
+        ):
+            self._confirmed = confirmed
+            self.heartbeat_error = None
+            self.successful_ready = True
+            self.heartbeat_confirmed(poll)
         return poll
+
+    def heartbeat_confirmed(self, poll: LeasePoll) -> None:
+        """Publish readiness after subclass-specific confirmed-receipt handling."""
+
+        del poll
+        self.ready.set()
+
+    def anchor_from_database(self, now_ms: int) -> None:
+        """Seed the first renewal deadline from the renewal connection's clock."""
+
+        if self.lost:
+            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+        if self.stop.is_set():
+            raise HeartbeatStopped("heartbeat stopped")
+        lease = self.lease
+        if now_ms >= lease.expires_at_ms:
+            self.lost = True
+            raise LeaseLost("heartbeat lease expired before its first renewal")
+        self._db_anchor_deadline = self.clock.monotonic() + (lease.expires_at_ms - now_ms) / 1000
+
+    def adopt_confirmed(self, poll: LeasePoll, *, expires_deadline: float) -> None:
+        """Seed a runtime scope from a stopped factory's confirmed handoff."""
+
+        if self.lost:
+            raise LeaseLost("cannot adopt a lease snapshot after ownership loss")
+        if self.stop.is_set():
+            raise HeartbeatStopped("cannot adopt a lease snapshot after stop")
+        lease = self.lease
+        if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch, poll.lease.tenant_id) != (
+            lease.session_id,
+            lease.owner,
+            lease.epoch,
+            lease.tenant_id,
+        ):
+            raise LeaseLost("handoff snapshot belongs to a different lease")
+        if self.clock.monotonic() >= expires_deadline:
+            raise LeaseLost("handoff snapshot is already outside its lease deadline")
+        current = self._confirmed
+        if current is None or (poll.db_now_ms, poll.lease.expires_at_ms) >= (
+            current.poll.db_now_ms,
+            current.poll.lease.expires_at_ms,
+        ):
+            self._confirmed = _ConfirmedLease(poll, expires_deadline)
+            self.successful_ready = True
+            self.heartbeat_error = None
 
     @contextmanager
     def committing(self) -> Iterator[Lease]:
-        self._latch_entry.commit = True
-        try:
-            with self.commit_lock:
-                self._commit_thread = self._actor_identity()
-                try:
-                    with self.lock:
-                        if self.lost:
-                            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
-                        if self.stop.is_set():
-                            raise HeartbeatStopped("heartbeat stopped")
-                        if self.clock.monotonic() >= self.expires_deadline:
-                            self.lost = True
-                            raise LeaseLost("heartbeat lease expired")
-                        lease = self.lease
-                    yield lease
-                finally:
-                    self._commit_thread = None
-        finally:
-            self._latch_entry.commit = False
+        if self.lost:
+            raise LeaseLost("heartbeat lost ownership") from self.heartbeat_error
+        if self.stop.is_set():
+            raise HeartbeatStopped("heartbeat stopped")
+        confirmed = self._confirmed
+        if confirmed is not None:
+            lease, expires_deadline = confirmed.poll.lease, confirmed.expires_deadline
+        elif self._db_anchor_deadline is not None:
+            lease, expires_deadline = self._initial_lease, self._db_anchor_deadline
+        else:
+            raise LeaseLost("heartbeat lease has not been confirmed by the database")
+        if self.clock.monotonic() >= expires_deadline:
+            self.lost = True
+            raise LeaseLost("heartbeat lease expired")
+        # This is a non-blocking local precheck. The transaction's owner, epoch
+        # and expiry fences remain authoritative after any concurrent renewal.
+        yield lease
+
+    def heartbeat_once(self, store: SessionStore) -> None:
+        """Perform one renewal using the core state transition and receipt checks."""
+
+        self.heartbeat_step(store, (TimeoutError,))
 
     def heartbeat_step(self, store: SessionStore, transient_errors: tuple[type[Exception], ...]) -> None:
-        with self.lock:
-            if self.heartbeat_error is not None and self.expires_deadline - self.clock.monotonic() <= max(
-                2 * self.heartbeat_seconds, 1.0
-            ):
-                raise self.heartbeat_error
+        prior_error = self.heartbeat_error
+        if prior_error is not None and self.clock.monotonic() >= self.safety_deadline:
+            self.lost = True
+            raise LeaseLost("heartbeat reached the lease safety deadline") from prior_error
         try:
             self.poll(store)
         except Exception as exc:
+            if isinstance(exc, LeaseLost):
+                raise
             if not isinstance(exc, transient_errors):
                 raise
-            with self.lock:
-                self.heartbeat_error = exc
-                if self.expires_deadline - self.clock.monotonic() <= max(2 * self.heartbeat_seconds, 1.0):
-                    raise
+            self.heartbeat_error = exc
+            if self._confirmed is None and self._db_anchor_deadline is None:
+                self.lost = True
+                raise LeaseLost("heartbeat lease has no database-time safety bound") from exc
+            if self.clock.monotonic() >= self.safety_deadline:
+                self.lost = True
+                raise LeaseLost("heartbeat reached the lease safety deadline") from exc
 
     def heartbeat_failed(self, error: Exception) -> None:
         if isinstance(error, HeartbeatStopped):
             return
-        with self.lock:
-            self.heartbeat_error = error
-            self.lost = True
+        self.heartbeat_error = error
+        self.lost = True
 
     def heartbeat_finished(self) -> None:
-        self.ready.set()
+        if self.successful_ready or self.lost or self.stop.is_set():
+            self.ready.set()
 
     def request_stop(self) -> None:
-        with self.lock:
-            self.stop.set()
+        self.stop.set()
 
     def check_closed(self, alive: bool) -> None:
         if alive:
-            with self.lock:
-                self.lost = True
+            self.lost = True
             raise LeaseLost("heartbeat did not stop; lease cannot be released or handed off")
 
 
-def apply_controls(self: ControlScope, poll: LeasePoll) -> None:
+def apply_controls[TokenT: CancellationSink](self: ControlScope[TokenT], poll: LeasePoll) -> None:
+    binding = self.control_binding
+    if binding is None or binding.turn_id is None:
+        return
     for item in poll.controls:
+        if item.input_id in binding.applied_inputs:
+            continue
         if (
-            item.target_turn_id in {None, self.turn_id}
-            and item.generation in {None, self.generation}
-            and item.payload["action"] in {"cancel", "abort", "close", "suspend"}
+            item.target_turn_id in {None, binding.turn_id}
+            and item.generation in {None, binding.generation}
+            and item.payload.get("action") in {"cancel", "abort", "close", "suspend"}
         ):
-            self.token.cancel(item.payload["action"])
+            binding.token.cancel(item.payload["action"])
 
 
-def cancel_if_lost(self: ControlScope) -> None:
-    if self.lost:
-        self.token.cancel("lease_lost")
+def cancel_if_lost[TokenT: CancellationSink](self: ControlScope[TokenT]) -> None:
+    binding = self.control_binding
+    if self.lost and binding is not None:
+        binding.token.cancel("lease_lost")

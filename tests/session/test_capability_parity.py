@@ -10,27 +10,45 @@ from unittest.mock import patch
 
 import pytest
 from support import FixedModelProvider
+from support.s1_fixture_values import (
+    append_fixture_records,
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_key_provider,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.budget import HostCost, RunBudgetLimits, UnavailableMetricPolicy
 from vv_agent.events import DiagnosticEvent, ToolCallPlannedEvent, ToolCallStartedEvent, event_from_dict
+from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.memory import MemoryManager
 from vv_agent.memory.provider import MemoryProviderResult
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.runtime.hooks import BaseRuntimeHook
 from vv_agent.runtime.lifecycle import AfterCycleDecision
+from vv_agent.session.content_runtime import bind_content_key_provider
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
+from vv_agent.session.records import InboxItem
 from vv_agent.session.result import project_result
 from vv_agent.session.tracing import deliver_spans
 from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall
 
+from .test_recovery_matrix import runtime as recovery_runtime
 from .test_runner_parity import RESOLVED, echo
 from .test_tools_control_parity import Restart, admit, records, runtime
 
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "prompt_tokens_details": {"cached_tokens": 4}}
 SUMMARY = json.dumps({"original_user_messages": ["request"], "current_work_state": "Continue"})
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
 
 
 def old_run(agent, config, steps):
@@ -440,7 +458,10 @@ def test_lost_active_interval_is_unavailable_after_restart(store, database, tmp_
         value.dimension == BudgetDimension.WALL_TIME and value.reason == BudgetUnavailableReason.ACCOUNTING_MISSING
         for value in new.budget_usage.unavailable_dimensions
     )
-    assert any(r.payload["observation"]["active_interval_missing"] for r in records(store, kind="op_unknown"))
+    _, hydrated, _ = read_fixture_state(store, "control")
+    assert any(
+        row.record._payload["observation"]["active_interval_missing"] for row in hydrated if row.record.kind == "op_unknown"
+    )
     if policy == UnavailableMetricPolicy.STOP:
         assert new.budget_exhaustion.dimension == BudgetDimension.WALL_TIME
         assert new.budget_exhaustion.reason == BudgetExhaustionReason.METRIC_UNAVAILABLE
@@ -551,11 +572,13 @@ def test_trace_delivery_span_parity_and_no_recovery_duplicates(store, database, 
     steps: list[ScriptStep] = [LLMResponse("", [ToolCall("a", "echo", {"text": "one"})]), LLMResponse("done")]
     old_run(agent, config, steps)
     # The internal assembly registers the trace cursor with session creation.
-    from vv_agent.session.records import InboxItem, SessionSpec
-
-    with store.atomic() as tx:
-        tx.create(SessionSpec("control", "test", str(tmp_path)), consumers=("events", "traces"))
-        tx.push("control", InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(
+        store,
+        "control",
+        workspace=str(tmp_path),
+        consumers=("events", "traces"),
+    )
+    push_fixture_input(store, "control", InboxItem("initial", "user", {"content": "go"}))
     rt = runtime(store, database, agent, config, ScriptedLLM(deepcopy(steps)))
     drive(store, "control", runtime=rt)
     assert deliver_spans(store, "control", [new_processor]) == 6
@@ -618,15 +641,17 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     new = new_run(store, database, agent, config, steps, memory=memory, cut=cut_boundary("session_memory_saved"))
     same_result(new, old)
     assert [c["purpose"] for c in new.metadata["session_model_calls"]] == ["session_memory", "primary"]
-    old_file = Path(old_config.workspace) / ".memory/session/remember/session_memory.json"
     new_file = Path(config.workspace) / ".memory/session/remember/session_memory.json"
-    assert json.loads(new_file.read_text()) == json.loads(old_file.read_text())
-    # Rebuild the disposable file entirely from log state before compiling the next turn.
-    new_file.unlink()
-    from vv_agent.session.records import InboxItem
-
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("second", "user", {"content": "go"}))
+    assert not new_file.exists()
+    _, persisted, _ = read_fixture_state(store, "control")
+    saved = [
+        row.record
+        for row in persisted
+        if row.record.kind == "boundary_recorded" and row.record._payload["stage"] == "session_memory_saved"
+    ]
+    assert saved and "retain user goal" in json.dumps(saved[-1]._payload["data"], ensure_ascii=False)
+    # Rebuild the disposable state entirely from content-backed log state before compiling the next turn.
+    push_fixture_input(store, "control", InboxItem("second", "user", {"content": "go"}))
     requests = []
 
     def answer(request):
@@ -641,7 +666,7 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     drive(store, "control", runtime=rt)
     new2 = project_result(store, "control", "control/turn/second", runtime=rt)
     same_result(new2, old2)
-    assert len(requests) == 2 and new_file.exists()
+    assert len(requests) == 2 and not new_file.exists()
 
 
 class StreamingScripted(ScriptedLLM):
@@ -791,10 +816,7 @@ def test_endpoint_routing_preference_logged_attempts_parity(
     planned = records(store, kind="op_planned")
     assert len({r.payload["request_digest"] for r in planned}) == 1
     assert initial.max_retries_per_endpoint == 3
-    from vv_agent.session.records import InboxItem
-
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("second", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("second", "user", {"content": "go"}))
     drive(store, "control", runtime=rt)
     assert calls[-1] == expected_next
     new2 = project_result(store, "control", "control/turn/second", runtime=rt)
@@ -932,7 +954,7 @@ def test_boundary_validation_rolls_back(store, database, tmp_path, fault):
         drive(
             store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([]), hook=cut_boundary("before_memory"))
         )
-    state, rows, watermark = store.read_state("control")
+    state, rows, watermark = read_fixture_state(store, "control")
     before = next(r.record for r in rows if r.record.kind == "boundary_recorded")
     payload = before.payload | {"boundary_id": "invalid"}
     if fault == "unknown_field":
@@ -976,7 +998,8 @@ def test_boundary_validation_rolls_back(store, database, tmp_path, fault):
                 commit_id="invalid",
                 records=(record,),
             )
-        assert store.read_state("control")[1] == rows
+        persisted = read_fixture_state(store, "control")[1]
+        assert [(row.seq, row.record.encode()) for row in persisted] == [(row.seq, row.record.encode()) for row in rows]
     finally:
         store.release(lease)
 
@@ -984,6 +1007,7 @@ def test_boundary_validation_rolls_back(store, database, tmp_path, fault):
 @pytest.mark.capability("endpoint-routing")
 def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_path):
     from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
+    from vv_agent.session.kernel import _Driver, _Scope
     from vv_agent.session.records import make_record
 
     agent, config = Agent("test", "test"), RunConfig(workspace=tmp_path)
@@ -996,10 +1020,13 @@ def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_pa
 
     with pytest.raises(Restart):
         drive(store, "control", runtime=runtime(store, database, agent, config, llm, hook=cut))
-    _, rows, watermark = store.read_state("control")
+    _, rows, _ = read_fixture_state(store, "control")
     plan = next(r.record for r in rows if r.record.kind == "op_planned")
     lease = store.acquire("control", owner="validation", ttl_ms=15000)
+    assert lease is not None
     try:
+        rt = runtime(store, database, agent, config, llm)
+        driver = _Driver(store, "control", rt, _Scope(lease, rt, now_ms=store._now()))
         started = make_record(
             "op_started",
             session_id="control",
@@ -1014,16 +1041,9 @@ def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_pa
                 "endpoint_id": "b",
             },
         )
-        with pytest.raises(ValueError, match="endpoint"), store.atomic() as tx:
-            tx.append(
-                "control",
-                lease=lease,
-                expected_seq=rows[-1].seq,
-                expected_inbox_seq=watermark,
-                commit_id="tamper",
-                records=(started,),
-            )
-        assert store.read_state("control")[1] == rows
+        with pytest.raises(ValueError, match="endpoint"):
+            driver.commit([started], guarded=True)
+        assert read_fixture_state(store, "control")[1] == rows
     finally:
         store.release(lease)
 
@@ -1033,7 +1053,6 @@ def test_logged_endpoint_dispatch_rejects_routing_tamper(store, database, tmp_pa
 def test_delegation_events_and_child_replay_paired_producer(store, database, tmp_path):
     from vv_agent.event_store import RunEventReplayQuery
     from vv_agent.session.children import ChildSession, child_delivery
-    from vv_agent.session.records import SessionSpec
 
     child = Agent("child", "child")
     from vv_agent.types import SubAgentConfig
@@ -1045,10 +1064,14 @@ def test_delegation_events_and_child_replay_paired_producer(store, database, tmp
 
     agent = parent
     admit(store, config)
-    children = {"create_sub_task": lambda _: ChildSession(SessionSpec("child", "test", str(tmp_path)), "child")}
+    children = {"create_sub_task": lambda _: ChildSession(fixture_child_spec(store, "control", "child"), "child")}
     rt = runtime(store, database, agent, config, ScriptedLLM([LLMResponse("", [call]), LLMResponse("done")]), children=children)
     drive(store, "control", runtime=rt)
-    drive(store, "child", runtime=runtime(store, database, child, config, ScriptedLLM([LLMResponse("child done")])))
+    drive(
+        store,
+        "child",
+        runtime=runtime(store, database, child, config, ScriptedLLM([LLMResponse("child done")]), sid="child"),
+    )
     with store.atomic() as tx:
         child_delivery(store, tx, "child")
     store._fold_cache = None
@@ -1070,11 +1093,8 @@ def test_delegation_events_and_child_replay_paired_producer(store, database, tmp
 
 @pytest.mark.capability("tracing")
 def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
-    from vv_agent.session.records import InboxItem, SessionSpec
-
-    with store.atomic() as tx:
-        tx.create(SessionSpec("control", "test", str(tmp_path)), consumers=("traces",))
-        tx.push("control", InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(store, "control", workspace=str(tmp_path), consumers=("traces",))
+    push_fixture_input(store, "control", InboxItem("initial", "user", {"content": "go"}))
     agent, config = Agent("test", "test"), RunConfig(workspace=tmp_path)
     drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([LLMResponse("done")])))
     seen = []
@@ -1097,6 +1117,34 @@ def test_trace_ack_boundary_and_processor_failure(store, database, tmp_path):
     saved = list(seen)
     store._fold_cache = None
     assert deliver_spans(store, "control", [Processor()]) == 0 and seen == saved
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["raw", "wrapped"])
+def test_trace_delivery_requires_top_level_transaction_for_real_store(store, database, tmp_path, wrapped):
+    create_fixture_session(store, "control", workspace=str(tmp_path), consumers=("traces",))
+    push_fixture_input(store, "control", InboxItem("initial", "user", {"content": "go"}))
+    agent, config = Agent("test", "test"), RunConfig(workspace=tmp_path)
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([LLMResponse("done")])))
+
+    seen = []
+
+    class Processor:
+        def on_span_start(self, span):
+            seen.append(span.span_id)
+
+        def on_span_end(self, span):
+            seen.append(span.span_id)
+
+    from .conftest import open_store
+
+    with open_store(database) as reopened:
+        provider = fixture_key_provider()
+        bind_content_key_provider(reopened, provider)
+        selected = wrap_fixture_store(reopened, provider) if wrapped else reopened
+        with selected.atomic(), pytest.raises(ValueError, match="top-level transaction"):
+            deliver_spans(selected, "control", [Processor()])
+        assert not seen
+        assert deliver_spans(selected, "control", [Processor()]) == 4
 
 
 @pytest.mark.capability("typed-output")
@@ -1205,11 +1253,8 @@ def test_event_observers_cannot_mutate_durable_receipts(store, database, tmp_pat
 
 @pytest.mark.capability("tracing")
 def test_trace_processors_cannot_mutate_durable_output(store, database, tmp_path):
-    from vv_agent.session.records import InboxItem, SessionSpec
-
-    with store.atomic() as tx:
-        tx.create(SessionSpec("control", "test", str(tmp_path)), consumers=("traces",))
-        tx.push("control", InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(store, "control", workspace=str(tmp_path), consumers=("traces",))
+    push_fixture_input(store, "control", InboxItem("initial", "user", {"content": "go"}))
     agent, config = Agent("test", "test", output_type=dict), RunConfig(workspace=tmp_path)
     rt = runtime(store, database, agent, config, ScriptedLLM([LLMResponse('{"items":[1]}')]))
     drive(store, "control", runtime=rt)
@@ -1229,24 +1274,32 @@ def test_trace_processors_cannot_mutate_durable_output(store, database, tmp_path
     assert project_result(store, "control", "control/turn/initial", runtime=rt).final_output == {"items": [1]}
 
 
-def test_span_ids_are_scoped_by_session():
+def test_span_ids_are_scoped_by_session(store, database):
     from vv_agent.session.records import digest
-    from vv_agent.session.store import StoredRecord
     from vv_agent.session.tracing import project_spans
 
+    from .conftest import open_store
     from .helpers import record
 
-    definition = {"agent_name": "test", "task": {}}
-    events = [
-        project_spans(
-            (
-                StoredRecord(
-                    record("turn_started", sid=sid, definition=definition, definition_digest=digest(definition)), 1, "c", 1, 0
-                ),
-            )
-        )
-        for sid in ("one", "two")
-    ]
+    recovery = recovery_runtime(database, [])
+    recovery.model_binding(recovery.llm, recovery.resolved)
+    rows_by_session = {}
+    for sid in ("one", "two"):
+        create_fixture_session(store, sid)
+        task = recovery.compile("go", "t")
+        definition = recovery.definition(task)
+        payload = record("turn_started").payload | {
+            "definition": definition,
+            "definition_digest": digest(definition),
+            "budget": RunBudgetLimits().to_dict(),
+        }
+        turn = make_record_before_publication("turn_started", session_id=sid, turn_id="t", payload=payload)
+        append_fixture_records(store, sid, (turn,), commit_id="span")
+    with open_store(database) as persisted:
+        persisted = wrap_fixture_store(persisted)
+        for sid in ("one", "two"):
+            rows_by_session[sid] = read_fixture_state(persisted, sid)[1]
+    events = [project_spans(tuple(rows_by_session[sid])) for sid in ("one", "two")]
     assert {span.span_id for _, _, span in events[0]}.isdisjoint(span.span_id for _, _, span in events[1])
 
 

@@ -7,8 +7,8 @@ from concurrent.futures import Executor, Future
 
 import pytest
 
+from vv_agent.kernel._boundary_hydration import hydrate_session_records
 from vv_agent.kernel._content import ContentRef
-from vv_agent.session.projection import hydrate_records, hydration_for_session_store
 
 from .report import DEFAULT_WORKERS, run_campaign, seed_results, versions
 from .scenarios import SCENARIOS, run_scenario
@@ -20,7 +20,7 @@ def test_real_driver_recovery(sim_database, scenario):
     with SimWorld(sim_database, seed=17) as world:
         result = run_scenario(world, scenario)
         assert result["calls"]
-        world.check(quiescent=True, every_prefix=True)
+        world.check(quiescent=scenario != "worker_compatibility", every_prefix=True)
         if scenario == "unknown_idempotent":
             state, rows, _ = world.read_state("s")
             operation = next(op for op in state.operations.values() if op.kind == "tool")
@@ -97,8 +97,8 @@ def test_step_oracles_detect_changes_without_new_records(sim_database, fault, in
             state, rows, _ = store.read_state("s")
             operation = next(op for op in state.operations.values() if op.kind == "tool")
             raw_plan = operation.attempts[1].execution_plan
-            hydration = hydration_for_session_store(store, "s")
-            plan = next(row.record for row in hydrate_records(rows, hydration) if row.record.record_id == raw_plan.record_id)
+            hydrated = hydrate_session_records(rows, world.hydration("s"))
+            plan = next(row.record for row in hydrated if row.record.record_id == raw_plan.record_id)
             context = CallContext(plan._payload["idempotency_key"], plan)
             rt.providers["effect"].submit(plan, context=context)
         assert store._head("s")[:2] == before

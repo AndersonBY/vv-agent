@@ -11,6 +11,7 @@ from typing import Any
 from . import _child_delegation as delegation
 from . import _driver_outcomes as outcomes
 from . import _tool_admission as admission
+from ._boundary_hydration import hydrate_input
 from ._call_context import CompiledCallFacts
 from ._child_store import ChildSession, InvalidChildBatch, create_child
 from ._child_summary import child_summary
@@ -19,7 +20,7 @@ from ._driver_planning import plan as plan_steps
 from ._execution_values import AgentTask
 from ._interactions import InteractionError, user_interaction
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, Unknown, validate_acceptance
-from ._records import Record, copy_json, digest, inherited_seed_policies
+from ._records import InboxItem, Record, copy_json, digest, inherited_seed_policies
 from ._state import Attempt
 from ._store import SequenceConflict, SessionTx
 from ._token_count import _StopIterationTransport
@@ -212,6 +213,13 @@ class EndPreflight(Enum):
     CLEANUP = auto()
 
 
+def _approval_answer_payload(driver: CoreDriver, record: Record) -> dict[str, Any]:
+    """Hydrate one applied approval answer through its input-owned content slots."""
+    if record.kind != "input_applied" or record._payload["input"]["kind"] != "approval_answer":
+        raise TypeError("approval answer hydration requires an input_applied approval record")
+    return hydrate_input(driver, InboxItem(**record._payload["input"])).payload
+
+
 def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
@@ -393,7 +401,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             return
         if attempt.approval in {"deny", "timeout"}:
             assert attempt.approval_answer is not None
-            answer = attempt.approval_answer._payload["input"]["payload"]
+            answer = _approval_answer_payload(driver, attempt.approval_answer)
             result = yield ApprovalDenied(plan, answer, attempt.approval)
             final = yield from finalize_tool(driver, plan, Definitive(result.to_dict(), ()))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)))
@@ -403,8 +411,8 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             if any(
                 r._payload["disposition"] == "applied"
                 and r._payload["input"]["kind"] == "approval_answer"
-                and r._payload["input"]["payload"]["decision"] == "allow_session"
-                and name in r._payload["input"]["payload"]["scope"]
+                and (answer := _approval_answer_payload(driver, r))["decision"] == "allow_session"
+                and name in answer["scope"]
                 for r in driver.state.applied_inputs.values()
             ):
                 yield ApproveSessionCall(ToolCall.from_dict(plan.payload["request"]))

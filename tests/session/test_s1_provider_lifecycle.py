@@ -13,7 +13,7 @@ from vv_agent.kernel._sql import stored_input_proof
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import InboxItem, Record
-from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.store import SessionStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
@@ -218,6 +218,6 @@ def test_s1_parked_provider_callbacks_rehydrate_after_restart(tmp_path: Path, ki
         sessions.close()
 
 
-def _state_generation(store: SQLiteStore, turn_id: str | None) -> int:
+def _state_generation(store: SessionStore, turn_id: str | None) -> int:
     assert turn_id is not None
     return store.read_state(SESSION_ID)[0].turns[turn_id].start._payload["generation"]

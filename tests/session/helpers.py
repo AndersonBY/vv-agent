@@ -1,32 +1,22 @@
 from typing import Any
 
-try:
-    from support.s1_fixture_values import (
-        content_ref,
-        create_fixture_session,
-        fixture_child_spec,
-        fixture_content_reader,
-        fixture_key_provider,
-        principal,
-        push_fixture_input,
-        read_fixture_state,
-        wrap_fixture_store,
-    )
-except ModuleNotFoundError:
-    from scripts.s1_fixture_values import (
-        content_ref,
-        create_fixture_session,
-        fixture_child_spec,
-        fixture_content_reader,
-        fixture_key_provider,
-        principal,
-        push_fixture_input,
-        read_fixture_state,
-        wrap_fixture_store,
-    )
+from support.s1_fixture_values import (
+    append_fixture_records,
+    content_ref,
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    fixture_key_provider,
+    principal,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
+
 from vv_agent.session.records import InboxItem, Record, digest, make_record
 
 __all__ = [
+    "append_fixture_records",
     "base",
     "content_ref",
     "create_fixture_session",

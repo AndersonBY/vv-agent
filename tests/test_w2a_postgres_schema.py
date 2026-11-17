@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ def _fold_factory():
 class PGDatabase:
     admin: Any
     dsn: str
+    name: str
     roles: list[str] = field(default_factory=list)
 
     def add_role(self) -> tuple[str, str]:
@@ -68,12 +70,13 @@ def pg_database(postgres_admin):
         postgres_admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     except psycopg.errors.InsufficientPrivilege:
         pytest.skip("PostgreSQL test role cannot create disposable databases")
-    database = PGDatabase(postgres_admin, make_conninfo(postgres_admin.info.dsn, dbname=name))
+    database = PGDatabase(postgres_admin, make_conninfo(postgres_admin.info.dsn, dbname=name), name)
     try:
         yield database
     finally:
         with psycopg.connect(postgres_admin.info.dsn, autocommit=True, connect_timeout=3) as admin:
-            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+            _wait_for_no_live_database_connections(database)
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name)))
             for role in database.roles:
                 admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
@@ -83,6 +86,30 @@ def _install(database: PGDatabase) -> None:
 
     with psycopg.connect(database.dsn, autocommit=True, connect_timeout=3) as connection:
         PostgresStore(connection, fold_factory=_fold_factory).install_schema()
+
+
+def _wait_for_no_live_database_connections(database: PGDatabase) -> None:
+    deadline = monotonic() + 2
+    while True:
+        active = database.admin.execute(
+            "SELECT pid,state,query FROM pg_stat_activity WHERE datname=%s AND pid<>pg_backend_pid() ORDER BY pid",
+            (database.name,),
+        ).fetchall()
+        if not active:
+            return
+        if monotonic() >= deadline:
+            raise AssertionError(f"disposable database {database.name} still has live connections: {active!r}")
+        sleep(0.02)
+
+
+def _assert_fresh_connection_reopen_rejected(database: PGDatabase) -> None:
+    import psycopg
+
+    with (
+        psycopg.connect(database.dsn, autocommit=True, connect_timeout=3) as connection,
+        pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"),
+    ):
+        PostgresStore(connection, fold_factory=_fold_factory)
 
 
 def _install_runtime_roles(database: PGDatabase):
@@ -169,11 +196,8 @@ def test_postgres_schema_rejects_catalog_drift(pg_database, drift):
         with pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"):
             PostgresStore(connection, fold_factory=_fold_factory).install_schema()
 
-    with (
-        pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"),
-        PostgresStore.standalone(pg_database.dsn, fold_factory=_fold_factory),
-    ):
-        pass
+    _assert_fresh_connection_reopen_rejected(pg_database)
+    _wait_for_no_live_database_connections(pg_database)
 
 
 @pytest.mark.postgres
@@ -185,11 +209,8 @@ def test_postgres_rejects_partial_initialization_on_install_and_reopen(pg_databa
         with pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"):
             PostgresStore(connection, fold_factory=_fold_factory).install_schema()
 
-    with (
-        pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"),
-        PostgresStore.standalone(pg_database.dsn, fold_factory=_fold_factory),
-    ):
-        pass
+    _assert_fresh_connection_reopen_rejected(pg_database)
+    _wait_for_no_live_database_connections(pg_database)
 
 
 @pytest.mark.postgres
@@ -297,7 +318,8 @@ def test_postgres_tenant_worker_gateway_bindings_and_heartbeats_are_preserved(pg
     with PostgresStore.tenant_standalone(tenant_dsn, tenant_id=TENANT_ID, fold_factory=_fold_factory) as tenant:
         assert tenant.runtime_mode == "tenant"
         assert tenant.runtime_binding.credential_isolation is True
-        assert not hasattr(tenant, "credential_isolation")
+        assert tenant.credential_isolation is True
+        assert tenant.credential_tenant_id == TENANT_ID
         with tenant.heartbeat_store() as heartbeat:
             assert heartbeat.runtime_mode == "tenant"
             assert heartbeat.runtime_binding.tenant_id == TENANT_ID

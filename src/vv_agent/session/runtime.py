@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import random
+import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from vv_agent.agent import Agent, RunContext
 from vv_agent.budget import (
@@ -24,7 +25,14 @@ from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
 from vv_agent.kernel._hydration import ContentReader
+from vv_agent.kernel._requirements import (
+    SessionRequirements,
+    capability_supports,
+    model_capability_tags,
+    static_capability_requirements,
+)
 from vv_agent.kernel._retained_budget import retained_budget_inputs
+from vv_agent.kernel._tool_policy import _apply_tool_policy_metadata
 from vv_agent.kernel._usage import model_usage as model_usage
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager
@@ -35,6 +43,7 @@ from vv_agent.run_config import RunConfig, effective_run_config, merge_tool_poli
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler, tool_is_enabled
 from vv_agent.runtime.hooks import RuntimeHookManager
+from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure, is_tool_executor
@@ -65,6 +74,227 @@ class RuntimeNotReady(Exception):
 
 class EndpointUnavailable(Exception):
     """The frozen endpoint disappeared before dispatch."""
+
+
+class _EndpointClient(Protocol):
+    endpoint_targets: list[Any]
+    max_retries_per_endpoint: int
+    randomize_endpoints: bool
+
+    def ordered_targets(self, preferred: str | None = None) -> list[Any]: ...
+
+
+def _is_vv_endpoint_client(client: object) -> bool:
+    """Use the real class only when its defining module is already loaded."""
+
+    module = sys.modules.get("vv_agent.llm.vv_llm_client")
+    client_type = getattr(module, "VvLlmClient", None)
+    return isinstance(client_type, type) and isinstance(client, client_type)
+
+
+def _resolved_model_binding(resolved: ResolvedModelConfig) -> dict[str, Any]:
+    return {
+        "backend": resolved.backend,
+        "model": resolved.model_id,
+        "context_length": resolved.context_length,
+        "max_output_tokens": resolved.max_output_tokens,
+    }
+
+
+def _metadata_text(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resolve_static_model_config(agent: Agent, config: RunConfig) -> ResolvedModelConfig:
+    """Resolve trusted model metadata without constructing an execution client."""
+
+    provider = config.model_provider
+    if provider is None:
+        raise ValueError("RunConfig.model_provider is required")
+    model = config.model or agent.model or provider.default_model_ref()
+    if model is None:
+        raise ValueError("Agent.model, RunConfig.model, or ModelProvider.default_model_ref() is required")
+    return provider.resolve(ModelRef.coerce(model))
+
+
+def _static_model_bindings(
+    agent: Agent,
+    config: RunConfig,
+    resolved: ResolvedModelConfig,
+) -> list[dict[str, Any]]:
+    metadata = {**agent.metadata, **config.metadata}
+    summary_backend = _metadata_text(metadata, "memory_summary_backend")
+    summary_model = _metadata_text(metadata, "memory_summary_model") or resolved.model_id
+    extraction_backend = _metadata_text(metadata, "session_memory_extraction_backend") or summary_backend
+    extraction_model = _metadata_text(metadata, "session_memory_extraction_model") or summary_model
+    routes = {
+        "compaction": (summary_backend, summary_model),
+        "session_memory": (extraction_backend, extraction_model),
+    }
+    provider = config.model_provider
+    bindings = [_resolved_model_binding(resolved)]
+    for backend, model in routes.values():
+        if model == resolved.model_id and (backend is None or backend == resolved.backend):
+            continue
+        if provider is None:
+            raise ValueError("RunConfig.model_provider is required for internal model requirements")
+        route = provider.resolve(ModelRef.backend(backend, model) if backend else ModelRef.named(model))
+        bindings.append(_resolved_model_binding(route))
+    return bindings
+
+
+def _build_configured_registry(
+    agent: Agent,
+    config: RunConfig,
+    *,
+    runtime: Runtime | None,
+) -> tuple[ToolRegistry, dict[str, FunctionTool]]:
+    registry = config.tool_registry_factory() if config.tool_registry_factory else build_default_registry()
+    dynamic: dict[str, FunctionTool] = {}
+    for candidate in agent.tools:
+        if is_tool_executor(candidate):
+            executor = candidate
+        else:
+            tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
+            if callable(tool.is_enabled):
+                dynamic[tool.name] = tool
+            elif not tool_is_enabled(tool=tool, agent=agent, run_config=config):
+                continue
+            executor = tool.to_executor()
+        visible = executor.exposure == ToolExposure.DIRECT
+        registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
+    if runtime is None:
+        from .delegation import register_handoffs
+
+        register_handoffs(cast(Any, SimpleNamespace(agent=agent)), registry)
+    else:
+        from .delegation import register_adapters
+
+        register_adapters(runtime, registry)
+    return registry, dynamic
+
+
+def _trusted_planning_task(
+    agent: Agent,
+    config: RunConfig,
+    registry: ToolRegistry,
+    resolved: ResolvedModelConfig,
+) -> AgentTask:
+    metadata = {**agent.metadata, **config.metadata}
+    metadata["session_memory_enabled"] = config.session_memory_enabled
+    policy = merge_tool_policies(agent.tool_policy, config.tool_policy)
+    _apply_tool_policy_metadata(metadata, policy)
+    extra_tool_names = [
+        *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure is ToolExposure.DIRECT],
+        *(transfer.tool_name for transfer in agent.handoffs if transfer.tool_name is not None),
+        *registry.list_planner_extra_tool_names(),
+    ]
+    return AgentTask(
+        task_id="requirements-bound",
+        model=resolved.model_id,
+        prompt_bundle=PromptBundle((PromptSection(id="requirements_bound", text="requirements bound", stable=True),)),
+        user_prompt="",
+        microcompaction_policy=config.microcompaction_policy,
+        no_tool_policy=config.no_tool_policy or agent.no_tool_policy or "finish",
+        sub_agents=deepcopy(agent.sub_agents),
+        native_multimodal=resolved.native_multimodal,
+        extra_tool_names=list(dict.fromkeys(extra_tool_names)),
+        metadata=metadata,
+    )
+
+
+def _static_capability_tags(
+    agent: Agent,
+    config: RunConfig,
+    resolved: ResolvedModelConfig | None,
+    *,
+    extra_capabilities: Iterable[str],
+    complete_catalog: bool = False,
+) -> tuple[str, ...]:
+    effective = effective_run_config(agent, config)
+    if resolved is None:
+        resolved = _resolve_static_model_config(agent, effective)
+    registry, _ = _build_configured_registry(agent, effective, runtime=None)
+    schemas = (
+        registry.list_openai_schemas()
+        if complete_catalog
+        else plan_tool_schemas(
+            registry=registry,
+            task=_trusted_planning_task(agent, effective, registry, resolved),
+            include_dynamic_hints=False,
+        )
+    )
+    tools = [(schema, registry.tool_metadata(schema["function"]["name"])) for schema in schemas]
+    return capability_supports(
+        tools=tools,
+        models=_static_model_bindings(agent, effective, resolved),
+        extra_capabilities=extra_capabilities,
+    )
+
+
+def static_session_requirements(
+    agent: Agent,
+    config: RunConfig,
+    resolved: ResolvedModelConfig | None = None,
+    *,
+    level: int = 2,
+    handler_version: str | None,
+    extra_capabilities: Iterable[str] = (),
+) -> SessionRequirements:
+    """Build an L2 pre-admission bound from trusted static configuration only."""
+
+    extra = tuple(extra_capabilities)
+    if handler_version is None and not extra:
+        raise ValueError("null handler requirements require an explicit trusted family capability")
+    return static_capability_requirements(
+        level=level,
+        handler_version=handler_version,
+        extra_capabilities=_static_capability_tags(
+            agent,
+            config,
+            resolved,
+            extra_capabilities=extra,
+        ),
+    )
+
+
+def static_worker_supports(
+    agent: Agent,
+    config: RunConfig,
+    resolved: ResolvedModelConfig | None = None,
+    *,
+    extra_capabilities: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Return the complete trusted tool and model capability tag set."""
+
+    return _static_capability_tags(
+        agent,
+        config,
+        resolved,
+        extra_capabilities=extra_capabilities,
+        complete_catalog=True,
+    )
+
+
+def static_model_selection_requirements(
+    selection: dict[str, Any],
+    *,
+    resolve_model: Callable[[dict[str, Any]], tuple[LLMClient, ResolvedModelConfig]],
+    handler_version: str,
+    level: int = 2,
+) -> SessionRequirements:
+    """Tag one already validated trusted model-resolution result."""
+
+    _, resolved = resolve_model(copy_json(selection))
+    return SessionRequirements(
+        level=level,
+        handler_version=handler_version,
+        capabilities=model_capability_tags(_resolved_model_binding(resolved)),
+    )
 
 
 @dataclass
@@ -100,6 +330,8 @@ class Runtime:
     clock: Clock = field(default_factory=SystemClock)
     lease_keeper: LeaseKeeper = field(default_factory=ThreadLeaseKeeper)
     invoker: Invoker = field(default_factory=ThreadInvoker)
+    _dynamic_enablement_turn_id: str | None = field(default=None, init=False, repr=False)
+    _requirements_bound: SessionRequirements | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -145,26 +377,56 @@ class Runtime:
     @cached_property
     def registry(self) -> ToolRegistry:
         # A read-only child result projection does not dispatch or plan tools.
+        return self._configured_registry()
 
-        registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
-        for candidate in self.agent.tools:
-            if is_tool_executor(candidate):
-                executor = candidate
-            else:
-                tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
-                if callable(tool.is_enabled):
-                    self._dynamic_tools[tool.name] = tool
-                if not tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
-                    continue
-                executor = tool.to_executor()
-                if tool.name in self._dynamic_tools:
-                    self._enabled_dynamic_tools.add(tool.name)
-            visible = executor.exposure == ToolExposure.DIRECT
-            registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
-        from .delegation import register_adapters
-
-        register_adapters(self, registry)
+    def _configured_registry(self) -> ToolRegistry:
+        registry, self._dynamic_tools = _build_configured_registry(
+            self.agent,
+            self.config,
+            runtime=self,
+        )
         return registry
+
+    def _sync_dynamic_tools(self, turn_id: str) -> None:
+        """Evaluate callable enablement once per turn before definition planning."""
+
+        if self._dynamic_enablement_turn_id == turn_id:
+            return
+        registry = self.registry
+        for name, tool in self._dynamic_tools.items():
+            enabled = tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
+            registered = registry.has_executor(name)
+            if enabled and not registered:
+                visible = tool.exposure == ToolExposure.DIRECT
+                registry.register_executor(tool.to_executor(), expose_to_model=visible, planner_extra=visible)
+                self._enabled_dynamic_tools.add(name)
+            elif not enabled and registered:
+                registry.unregister(name)
+                self._enabled_dynamic_tools.discard(name)
+            elif enabled:
+                self._enabled_dynamic_tools.add(name)
+        self._dynamic_enablement_turn_id = turn_id
+
+    def requirements_bound(self) -> SessionRequirements:
+        """Return the trusted static pre-admission bound without compiling input."""
+
+        if self._requirements_bound is None:
+            self._requirements_bound = static_session_requirements(
+                self.agent,
+                self.config,
+                self.resolved,
+                handler_version=self.handler_version,
+            )
+        return self._requirements_bound
+
+    def model_selection_requirements(self, selection: dict[str, Any]) -> SessionRequirements:
+        """Resolve one logged selection into its exact model-only requirements."""
+
+        return static_model_selection_requirements(
+            selection,
+            resolve_model=self.resolve_model,
+            handler_version=self.handler_version,
+        )
 
     @cached_property
     def delegated_tools(self) -> set[str]:
@@ -304,35 +566,38 @@ class Runtime:
 
     @staticmethod
     def model_binding(client: LLMClient, resolved: ResolvedModelConfig) -> dict[str, Any]:
-        from vv_agent.llm.vv_llm_client import VvLlmClient
-
+        is_vv_client = _is_vv_endpoint_client(client)
+        endpoint_client = cast(_EndpointClient, client)
         return {
             "backend": resolved.backend,
             "model": resolved.model_id,
-            "endpoints": [t.endpoint_id for t in client.endpoint_targets] if isinstance(client, VvLlmClient) else [],
+            "endpoints": [target.endpoint_id for target in endpoint_client.endpoint_targets] if is_vv_client else [],
             "context_length": resolved.context_length,
             "max_output_tokens": resolved.max_output_tokens,
         }
 
     def prepare_model(self, planned_request: dict[str, Any], purpose: str, attempt: int) -> LLMClient:
         """Bind one current endpoint before admitting a dispatch."""
-        from vv_agent.llm.vv_llm_client import VvLlmClient
 
         client, resolved = self.resolve_model(planned_request) if purpose == "primary" else self.model_route(purpose)
         retained = planned_request.get("metadata", {}).get("vv_session", {}).get("model_binding")
         if retained is not None and _model_identity(self.model_binding(client, resolved)) != _model_identity(retained):
             raise ValueError("Resolved model binding differs from the retained plan")
-        if isinstance(client, VvLlmClient):
+        if _is_vv_endpoint_client(client):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
+            endpoint_client = cast(_EndpointClient, copy(client))
             order = planned_request.get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
             endpoint_id = order[(attempt - 1) % len(order)] if order else None
-            target = next((t for t in client.endpoint_targets if t.endpoint_id == endpoint_id), None)
+            target = next(
+                (item for item in endpoint_client.endpoint_targets if item.endpoint_id == endpoint_id),
+                None,
+            )
             if target is None:
                 raise EndpointUnavailable("The planned endpoint is no longer available")
-            client = copy(client)
-            client.endpoint_targets = [target]
-            client.max_retries_per_endpoint = 1
-            client.randomize_endpoints = False
+            endpoint_client.endpoint_targets = [target]
+            endpoint_client.max_retries_per_endpoint = 1
+            endpoint_client.randomize_endpoints = False
+            client = cast(LLMClient, endpoint_client)
         return client
 
     def complete(
@@ -355,16 +620,7 @@ class Runtime:
             if tid != self.frozen_task.task_id:
                 task.user_prompt = content
             return task
-        _ = self.registry
-        for name, tool in self._dynamic_tools.items():
-            enabled = tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
-            if enabled and name not in self._enabled_dynamic_tools:
-                visible = tool.exposure == ToolExposure.DIRECT
-                self.registry.register_executor(tool.to_executor(), expose_to_model=visible, planner_extra=visible)
-                self._enabled_dynamic_tools.add(name)
-            elif not enabled and name in self._enabled_dynamic_tools:
-                self.registry.unregister(name)
-                self._enabled_dynamic_tools.remove(name)
+        self._sync_dynamic_tools(tid)
         guardrail = (
             GuardrailResult.allow()
             if control
@@ -475,12 +731,15 @@ class Runtime:
         )
 
     def definition(self, task: AgentTask) -> dict[str, Any]:
+        self._sync_dynamic_tools(task.task_id)
         return self._definitions.definition(task, self._definition_bindings(task), self.registry)
 
     def definition_digest(self, task: AgentTask | Record) -> str:
+        self._sync_dynamic_tools(task.task_id if isinstance(task, AgentTask) else str(task.turn_id or task.record_id))
         return self._definitions.definition_digest(task, self._definition_bindings(task), self.registry)
 
     def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
+        self._sync_dynamic_tools(task.task_id if isinstance(task, AgentTask) else str(task.turn_id or task.record_id))
         return self._definitions._definition(task, self._definition_bindings(task), self.registry)
 
 

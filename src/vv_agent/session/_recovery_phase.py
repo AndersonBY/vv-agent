@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from vv_agent.approval import ApprovalDecision, ApprovalRequest
@@ -16,13 +16,16 @@ from vv_agent.kernel import _driver_recovery as core
 from vv_agent.kernel import _output_phase as output_core
 from vv_agent.kernel._budget import BudgetObservation
 from vv_agent.kernel._child_store import cancel_children
-from vv_agent.kernel._content_publication import publish_turn_started
+from vv_agent.kernel._content_publication import (
+    declare_input_content,
+    link_declared_input_content,
+    publish_turn_started,
+)
 from vv_agent.kernel._cycles import project_cycles, turn_result_prefix
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._usage import project_model_usage
-from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.lifecycle import AfterCycleHookManager
 from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message
 
@@ -30,6 +33,7 @@ from . import compaction, memory
 from . import output as output_host
 from ._driver_scope import _invoke
 from .delegation import result_for_children
+from .runtime import _is_vv_endpoint_client
 from .tool_results import prepare_tool_resources, project_tool_content
 
 if TYPE_CHECKING:
@@ -99,7 +103,7 @@ class _Host:
         if request in (core.Read.CANCELLED, inputs.InputSetting.CANCELLED):
             return driver.scope.token.cancelled
         if request in (core.Read.RESET_TOKEN, inputs.InputSetting.RESET_TOKEN):
-            driver.scope.token = CancellationToken()
+            driver.scope.reset_token()
             return None
         if request in (core.Read.HANDLER_VERSION, inputs.InputSetting.HANDLER_VERSION):
             return driver.runtime.handler_version
@@ -159,26 +163,22 @@ class _Host:
                     request.budget,
                     admission_definition_digest=request.admission_definition_digest,
                 )
-                return [
-                    driver.record(
-                        "turn_started",
-                        {
-                            "input_ids": [request.input_id],
-                            "definition": content.definition.to_dict(),
-                            "definition_digest": content.definition_digest,
-                            "handler_version": request.handler_version,
-                            "budget": content.budget.to_dict(),
-                            "binding": None,
-                            "generation": request.generation,
-                        },
-                        tid=request.tid,
-                    )
-                ]
+                payload = {
+                    "input_ids": [request.input_id],
+                    "definition": content.definition.to_dict(),
+                    "definition_digest": content.definition_digest,
+                    "handler_version": request.handler_version,
+                    "budget": content.budget.to_dict(),
+                    "binding": None,
+                    "generation": request.generation,
+                }
+                if request.requirements is not None:
+                    payload["requirements"] = request.requirements
+                return [driver.record("turn_started", payload, tid=request.tid)]
 
             return driver.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, inputs.CommitInput):
-            with _raw_approval_commit(driver, request.records):
-                return driver.commit(request.records, (request.input_id,), guarded=True)
+            return driver.commit(request.records, (request.input_id,), guarded=True)
         if isinstance(request, inputs.CompileTurn):
             return driver.runtime.compile(request.content, request.turn_id, seed=request.seed, control=request.control)
         if isinstance(request, inputs.ResolveModelSelection):
@@ -216,32 +216,30 @@ class _Host:
             plan = driver.hydrate_plan(request.plan)
             return result_for_children(driver.store, plan, request.handles, driver.runtime).to_dict()
         if request is inputs.InputSetting.POLL_NOW:
-            return driver.scope.poll(driver.store).db_now_ms
+            return driver.scope.confirmed_poll().db_now_ms
         if request is inputs.InputSetting.POLL_MS:
             return driver.runtime.poll_ms
         if request is inputs.InputSetting.BUDGET_LIMITS:
             return driver.runtime.config.budget_limits
         if isinstance(request, planning.ResolveModel):
-            from vv_agent.llm.vv_llm_client import VvLlmClient
-
             client, resolved = (
                 driver.runtime.resolve_model(request.request)
                 if request.purpose == "primary"
                 else driver.runtime.model_route(request.purpose)
             )
-            self.route = client, resolved, VvLlmClient
+            self.route = client, resolved
             return None
         if request is planning.PlanningRead.MODEL_BINDING:
             assert self.route is not None
-            client, resolved, _ = self.route
+            client, resolved = self.route
             return driver.runtime.model_binding(client, resolved)
         if request is planning.PlanningRead.ENDPOINT_SUPPORT:
             assert self.route is not None
-            client, _, client_type = self.route
-            return isinstance(client, client_type)
+            client, _ = self.route
+            return _is_vv_endpoint_client(client)
         if isinstance(request, planning.OrderedEndpoints):
             assert self.route is not None
-            client, _, _ = self.route
+            client, _ = self.route
             preferred = request.preferred
             if preferred not in {t.endpoint_id for t in client.endpoint_targets}:
                 preferred = None
@@ -403,6 +401,7 @@ class _Host:
             plan, handle, deadline = request.plan, request.handle, request.deadline
             executor = driver.runtime.functions.orchestrator._resolve_executor(plan._payload["request"]["name"])
             assert executor is not None
+            now_ms = driver.scope.confirmed_poll().db_now_ms if deadline is not None else None
             self.approval_request = ApprovalRequest(
                 request_id=handle["request_id"],
                 tool_name=plan._payload["request"]["name"],
@@ -415,8 +414,8 @@ class _Host:
                 metadata={
                     "tool_metadata": dict(executor.metadata),
                     "session_id": driver.sid,
-                    "timeout_seconds": max(0, (deadline - driver.scope.poll(driver.store).db_now_ms) / 1000)
-                    if deadline is not None
+                    "timeout_seconds": max(0, (deadline - now_ms) / 1000)
+                    if deadline is not None and now_ms is not None
                     else None,
                 },
             )
@@ -435,7 +434,15 @@ class _Host:
             return self.broker.resolve(self.approval_request.request_id, request.decision)
         if isinstance(request, core.PushApprovalAnswer):
             with driver.store.atomic() as tx:
-                return tx.push(driver.sid, request.item)
+                writer = driver.content_writer(tx)
+                actor, _ = writer.service_principal("approval-provider")
+                publication = declare_input_content(
+                    writer,
+                    replace(request.item, actor=actor),
+                )
+                receipt = tx.push(driver.sid, publication.item)
+                link_declared_input_content(writer, publication.item)
+                return receipt
         if isinstance(request, output_core.OutputSetting):
             agent = self.output_agent
             assert agent is not None
@@ -485,21 +492,6 @@ class _Host:
         if isinstance(request, output_core.SerializeOutput):
             return output_host.serializable_output(request.value)
         return self.dispatch()._handle(request)
-
-
-@contextmanager
-def _raw_approval_commit(driver: _Driver, records: list[Any]):
-    """Let the reducer compare raw approval refs after typed input validation."""
-
-    if not any(record.kind == "input_applied" and record._payload["input"]["kind"] == "approval_answer" for record in records):
-        yield
-        return
-    reader = driver.content_reader
-    driver.content_reader = None
-    try:
-        yield
-    finally:
-        driver.content_reader = reader
 
 
 def run[T](

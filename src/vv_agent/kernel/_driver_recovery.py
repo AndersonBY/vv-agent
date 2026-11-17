@@ -14,6 +14,7 @@ from . import _driver_inputs as inputs
 from . import _driver_outcomes as outcomes
 from . import _driver_planning as planning
 from . import _output_phase as output
+from ._boundary_hydration import hydrate_record
 from ._content_publication import make_retained_record_before_publication
 from ._context import protected_start
 from ._driver import CoreDriver
@@ -157,24 +158,9 @@ def _hydrated_wait(driver: CoreDriver, attempt: Attempt) -> dict[str, Any]:
     return driver.hydrate_parked_wait(attempt.plan.operation_id, attempt.plan.attempt, attempt.wait)
 
 
-def _retained_budget(state, tid):
-    value = retained_budget_inputs(state, tid)
+def _retained_budget(driver: CoreDriver, tid: str):
+    value = retained_budget_inputs(driver.fold.state, tid, hydrator=driver)
     return retained_evaluator(value) if value is not None else None
-
-
-def _preserve_endpoint_history(current: dict[str, Any], retained: dict[str, Any]) -> None:
-    for binding, old in [
-        (current["model_binding"], retained),
-        *[
-            (value, retained.get("internal", {}).get(purpose, {}))
-            for purpose, value in current["model_binding"].get("internal", {}).items()
-        ],
-    ]:
-        if "endpoints" in old:
-            binding["endpoints"] = old["endpoints"]
-            for limit in ("context_length", "max_output_tokens"):
-                if limit not in old:
-                    binding.pop(limit, None)
 
 
 def _definition_matches(driver, start):
@@ -189,12 +175,8 @@ def _definition_matches(driver, start):
         "task": definition.task.to_dict(),
         "tools": list(definition.tools),
     }
-    if "endpoints" not in frozen["model_binding"]:
-        current = facts.definitions.definition_digest(definition.task, facts.bindings, facts.catalog)
-        return current == digest(frozen)
-    current = facts.definitions.definition(definition.task, facts.bindings, facts.catalog)
-    _preserve_endpoint_history(current, frozen["model_binding"])
-    return digest(current) == digest(frozen)
+    current = facts.definitions.definition_digest(definition.task, facts.bindings, facts.catalog)
+    return current == digest(frozen)
 
 
 def _compact(driver, *, requested_by=None):
@@ -505,13 +487,16 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     due = a.unknown._payload["retry_at_ms"] or 0
                     if due > now:
                         return False
+                    payload = a.plan._payload
+                    if a.prepared is not None:
+                        payload = hydrate_record(self, a.plan)._payload
                     next_plan = make_retained_record_before_publication(
                         "op_planned",
                         session_id=self.sid,
                         turn_id=tid,
                         operation_id=oid,
                         attempt=(a.plan.attempt or 1) + 1,
-                        payload=a.execution_plan._payload | {"not_before_ms": due},
+                        payload=payload | {"not_before_ms": due},
                     )
                     yield CommitRecords([next_plan])
                     return True
@@ -541,17 +526,22 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     handle = wait["handle"]
                     plan = self.hydrate_plan(a.execution_plan)
                     yield SelectProvider(plan)
-                    outcome = yield ProviderCall("query", handle, 1)
+                    try:
+                        outcome = yield ProviderCall("query", handle, 1)
+                        if isinstance(outcome, Definitive):
+                            outcomes.check_provider_result(self, a.execution_plan, outcome)
+                        elif isinstance(outcome, Accepted):
+                            validate_acceptance(plan, outcome)
+                            if outcome.handle != handle or outcome.yield_on_steer != wait.get("yield_on_steer", False):
+                                raise ProviderResultInvalid()
+                    except ProviderResultInvalid as exc:
+                        exc._query_operation_key = key
+                        raise
                     if isinstance(outcome, Definitive):
-                        outcomes.check_provider_result(self, a.execution_plan, outcome)
                         yield CommitRecords(
                             (yield from _compose(self, outcomes.completed_steps(self, a.execution_plan, outcome)))
                         )
                         return True
-                    if isinstance(outcome, Accepted):
-                        validate_acceptance(plan, outcome)
-                        if outcome.handle != handle or outcome.yield_on_steer != wait.get("yield_on_steer", False):
-                            raise ProviderResultInvalid()
                 return False
         if self.pending_batch():
             return False
@@ -747,7 +737,7 @@ def close(
         stopping = status in {"failed", "cancelled", "aborted"}
         if records or stopping:
             yield CommitStopping(records, tid, stopping)
-        evaluator = _retained_budget(self.state, tid)
+        evaluator = _retained_budget(self, tid)
         terminal = self.record(
             "turn_ended",
             {

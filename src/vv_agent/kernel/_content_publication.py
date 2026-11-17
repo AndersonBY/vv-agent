@@ -226,6 +226,7 @@ _REFERENCE_DIGESTS: Mapping[tuple[str, str], str] = {
 }
 
 
+@runtime_checkable
 class _RecordLinkStore(Protocol):
     def link_record(
         self,
@@ -235,13 +236,6 @@ class _RecordLinkStore(Protocol):
         ref: ContentRef,
         slot: str,
     ) -> None: ...
-
-
-@runtime_checkable
-class RecordContentSessionWriter(ContentSessionWriter, Protocol):
-    tenant_id: str
-    session_id: str
-    durable: _RecordLinkStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -641,9 +635,15 @@ def declared_record_content(
     return resolve_record_content_links(declarations, record_sequences)
 
 
-def require_record_link_writer(writer: ContentSessionWriter) -> RecordContentSessionWriter:
-    if not isinstance(writer, RecordContentSessionWriter):
+def _require_record_link_store(writer: ContentSessionWriter) -> _RecordLinkStore:
+    durable = getattr(writer, "durable", None)
+    if not isinstance(durable, _RecordLinkStore):
         raise ValueError("session content writer lacks durable record-link capability")
+    return durable
+
+
+def require_record_link_writer(writer: ContentSessionWriter) -> ContentSessionWriter:
+    _require_record_link_store(writer)
     return writer
 
 
@@ -653,11 +653,11 @@ def link_declared_record_content(
 ) -> None:
     """Link every declared ref to the record sequence assigned by append."""
 
-    record_writer = require_record_link_writer(writer)
+    durable = _require_record_link_store(writer)
     for link in links:
-        record_writer.durable.link_record(
-            record_writer.tenant_id,
-            record_writer.session_id,
+        durable.link_record(
+            writer.tenant_id,
+            writer.session_id,
             link.record_seq,
             link.ref,
             link.slot,

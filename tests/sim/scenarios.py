@@ -6,11 +6,20 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from scripts.s1_fixture_values import create_fixture_session, push_fixture_input
+from vv_agent.kernel._boundary_hydration import hydrate_session_records
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._child_store import ChildSession, child_delivery
 from vv_agent.kernel._content import CHILD_RESULT, INPUT_ACTOR_ATTRIBUTES, ContentRef
+from vv_agent.kernel._content_runtime import SessionContentWriter
 from vv_agent.kernel._provider_outcomes import Accepted, Definitive, Unknown
-from vv_agent.kernel._records import InboxItem
+from vv_agent.kernel._records import InboxItem, copy_json
+from vv_agent.kernel._requirements import (
+    SessionRequirements,
+    capability_supports,
+    definition_requirements,
+)
+from vv_agent.kernel._sql import LedgerIntegrityError
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolExecutionResult
 
@@ -39,6 +48,7 @@ SCENARIOS = (
     "future_input",
     "cancel_descendants",
     "context_compacted",
+    "worker_compatibility",
 )
 
 
@@ -139,10 +149,8 @@ TOOL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_d
 
 
 def _hydrated_records_by_id(w, sid, rows):
-    from vv_agent.session.projection import hydrate_records, hydration_for_session_store
-
-    hydration = hydration_for_session_store(w.connection("observer"), sid)
-    return {row.record.record_id: row.record for row in hydrate_records(rows, hydration)}
+    hydrated = hydrate_session_records(rows, w.hydration(sid))
+    return {row.record.record_id: row.record for row in hydrated}
 
 
 def scan_after_hint_loss(w, provider, children, *, ready_active=False):
@@ -571,6 +579,372 @@ def cancel_descendants(w, provider):
     w.queue.clear()
 
 
+def _create_level_two_work(world, store, session_id, requirements):
+    store.configure_reader(level=2)
+    create_fixture_session(
+        store,
+        session_id,
+        consumers=(),
+        feature_level=2,
+        bootstrap=requirements,
+    )
+    push_fixture_input(
+        store,
+        session_id,
+        InboxItem(
+            "start",
+            "user",
+            {"content": session_id},
+            feature_level=2,
+            requirements=requirements,
+        ),
+    )
+
+
+def _observe_worker_claim(world, store, owner, session_id, *, expected):
+    store.configure_reader(level=2)
+    before = store.lease_status(session_id)
+    decrypts = world.content_cipher.decrypts
+    claimed = store.claim_runnable(owner=owner, ttl_ms=30_000, limit=1)
+    matches = tuple(
+        item
+        for item in claimed
+        if item.work.kind == "drive" and item.work.session_id == session_id and item.work.tenant_id == store.tenant_id
+    )
+    matched = len(matches) == 1 and matches[0].lease is not None
+    after = store.lease_status(session_id)
+    world.worker_claims.append(
+        {
+            "owner": owner,
+            "tenant_id": store.tenant_id,
+            "session_id": session_id,
+            "matched": matched,
+            "lease_epoch_before": before[1],
+            "lease_epoch_after": after[1],
+            "decrypts_before": decrypts,
+            "decrypts_after": world.content_cipher.decrypts,
+        }
+    )
+    require(world.content_cipher.decrypts == decrypts, "I11", f"claim {owner} read encrypted content")
+    require(matched == expected, "I11", f"worker support mismatch for {owner}: expected match={expected}")
+    if not expected:
+        require(after[1] == before[1], "I11", f"incompatible worker {owner} advanced lease epoch")
+        require(not claimed, "I11", f"incompatible worker {owner} received work")
+    return matches[0] if matches else None
+
+
+def worker_compatibility(w):
+    """Exercise worker support filtering through real SQL claims and core execution."""
+
+    session_id = "worker-compatible"
+    unmatched_id = "worker-unmatched"
+    shared_id = "worker-shared"
+
+    creator = w.connection("worker/creator")
+    creator._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    runtime = w.runtime(session_id, "compatible")
+    task = runtime.compile_task("go", f"{session_id}/turn/start")
+    definition = runtime._definitions.definition(
+        task,
+        runtime.definition_bindings(task),
+        runtime.registry,
+    )
+    declared_requirements = definition_requirements(definition, handler_version=runtime.handler_version)
+    target_capability = "deployment:worker-target"
+    requirements = SessionRequirements.normalized(
+        level=declared_requirements.level,
+        handler_version=declared_requirements.handler_version,
+        capabilities=(*declared_requirements.capabilities, target_capability),
+    )
+    _create_level_two_work(w, creator, session_id, requirements)
+
+    schema = copy_json(runtime.registry.get_schema("effect"))
+    metadata = runtime.registry.tool_metadata("effect")
+    declared = capability_supports(tools=((schema, metadata),), models=(runtime.model_binding,))
+    require(
+        set(declared).issubset(requirements.capabilities),
+        "I11",
+        "worker declaration surface disagrees with the compiled definition requirements",
+    )
+
+    wrong_schema = copy_json(schema)
+    wrong_schema["function"]["description"] = "different worker declaration"
+    wrong_metadata = (
+        {"idempotency": "supported"} if metadata is None else {"idempotency": "supported", "result_retention": "preserve"}
+    )
+    wrong_model = copy_json(runtime.model_binding) | {"model": "scripted-other"}
+    mismatched = (
+        ("level-1", 1, (runtime.handler_version,), requirements.capabilities, "feature level"),
+        ("handler-other", 2, ("handler/other",), requirements.capabilities, "handler version"),
+        ("capability-missing", 2, (runtime.handler_version,), requirements.capabilities[:-1], "missing capability"),
+        (
+            "tool-schema-other",
+            2,
+            (runtime.handler_version,),
+            capability_supports(
+                tools=((wrong_schema, metadata),),
+                models=(runtime.model_binding,),
+                extra_capabilities=(target_capability,),
+            ),
+            "tool schema",
+        ),
+        (
+            "tool-metadata-other",
+            2,
+            (runtime.handler_version,),
+            capability_supports(
+                tools=((schema, wrong_metadata),),
+                models=(runtime.model_binding,),
+                extra_capabilities=(target_capability,),
+            ),
+            "tool metadata",
+        ),
+        (
+            "model-other",
+            2,
+            (runtime.handler_version,),
+            capability_supports(
+                tools=((schema, metadata),),
+                models=(wrong_model,),
+                extra_capabilities=(target_capability,),
+            ),
+            "model identity",
+        ),
+    )
+    workers = {}
+    for name, level, handlers, capabilities, detail in mismatched:
+        store = w.connection(f"worker/{name}")
+        store.configure_worker(level=level, handler_versions=handlers, capabilities=capabilities)
+        workers[name] = store
+        require(
+            not store.worker_supports.accepts(
+                level=requirements.level,
+                handler_version=requirements.handler_version,
+                capabilities=requirements.capabilities,
+            ),
+            "I11",
+            f"{detail} worker unexpectedly declared the exact support set",
+        )
+        _observe_worker_claim(w, store, name, session_id, expected=False)
+
+    extra_schema = copy_json(schema)
+    extra_schema["function"]["name"] = "extra"
+    extra_capabilities = capability_supports(
+        tools=((extra_schema, None),),
+        extra_capabilities=requirements.capabilities,
+    )
+    extra = w.connection("worker/extra-capability")
+    extra.configure_worker(
+        level=requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=extra_capabilities,
+    )
+    require(
+        extra.worker_supports.accepts(
+            level=requirements.level,
+            handler_version=requirements.handler_version,
+            capabilities=requirements.capabilities,
+        ),
+        "I11",
+        "extra tool support made an otherwise capable worker incompatible",
+    )
+    extra_claim = _observe_worker_claim(w, extra, "extra-capability", session_id, expected=True)
+    assert extra_claim is not None and extra_claim.lease is not None
+    require(extra.release(extra_claim.lease), "I11", "extra-capability worker could not release its claim")
+
+    exact = w.connection("worker/exact")
+    exact.configure_reader(level=2)
+    exact.configure_worker(
+        level=requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=requirements.capabilities,
+    )
+    exact_claim = _observe_worker_claim(w, exact, "compatible", session_id, expected=True)
+    assert exact_claim is not None and exact_claim.lease is not None
+    heartbeat = w.connection("compatible/heartbeat")
+    heartbeat.configure_reader(level=2)
+    heartbeat.configure_worker(
+        level=requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=requirements.capabilities,
+    )
+    w.events.append(
+        {
+            "preclaimed_core_drive": session_id,
+            "tenant_id": exact_claim.lease.tenant_id,
+            "owner": exact_claim.lease.owner,
+            "epoch": exact_claim.lease.epoch,
+        }
+    )
+    runtime.drive(exact, session_id, lease=exact_claim.lease)
+    state, rows, _ = w.read_state(session_id)
+    terminals = [stored.record for stored in rows if stored.record.kind == "turn_ended"]
+    require(state.active_turn_id is None, "I11", "compatible preclaimed worker did not finish its turn")
+    require(
+        len(terminals) == 1 and terminals[0].payload["status"] == "completed",
+        "I11",
+        "compatible worker has no completed terminal",
+    )
+    require(
+        all(call[3] == "model" for call in w.calls), "I11", "worker compatibility path unexpectedly dispatched a side-effect tool"
+    )
+
+    unmatched_requirements = SessionRequirements.normalized(
+        level=requirements.level,
+        handler_version=requirements.handler_version,
+        capabilities=(*requirements.capabilities, "deployment:worker-unmatched"),
+    )
+    _create_level_two_work(w, creator, unmatched_id, unmatched_requirements)
+    for name, store in (*workers.items(), ("extra-capability", extra), ("compatible", exact)):
+        _observe_worker_claim(w, store, f"unmatched/{name}", unmatched_id, expected=False)
+
+    pending = creator.read_input(unmatched_id, "start")
+    require(pending is not None and pending.consumed_seq is None, "I11", "unmatched input was consumed")
+    unmatched_rows = creator.read(unmatched_id, limit=100).records
+    require(
+        not any(stored.record.kind in {"turn_started", "turn_ended"} for stored in unmatched_rows),
+        "I11",
+        "unmatched input produced a false turn or terminal",
+    )
+    require(
+        unmatched_id in {work.session_id for work in creator.list_runnable()},
+        "I11",
+        "unmatched input no longer has host-visible runnable evidence",
+    )
+
+    route_capability = "deployment:worker-cross-tenant"
+    cross_requirements = SessionRequirements.normalized(
+        level=requirements.level,
+        handler_version=requirements.handler_version,
+        capabilities=(*declared_requirements.capabilities, route_capability),
+    )
+    tenants = ("tenant-a", "tenant-b")
+    for tenant_id in tenants:
+        _create_level_two_work(w, creator.for_tenant(tenant_id), shared_id, cross_requirements)
+
+    root = w.connection("worker/root")
+    root.configure_reader(level=2)
+    root.configure_worker(
+        level=cross_requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=cross_requirements.capabilities,
+        all_tenants=True,
+    )
+    decrypts = w.content_cipher.decrypts
+    first_page = root.claim_runnable(owner="root/page-1", ttl_ms=30_000, limit=1)
+    require(
+        len(first_page) == 1 and first_page[0].lease is not None and first_page[0].work.tenant_id == tenants[0],
+        "I11",
+        f"root claim did not return the first same-SID tenant: {first_page}",
+    )
+    first_lease = first_page[0].lease
+    assert first_lease is not None
+    first_store = creator.for_tenant(first_lease.tenant_id)
+    require(first_store.release(first_lease), "I11", "first cross-tenant claim could not be released")
+
+    second_page = root.claim_runnable(
+        owner="root/page-2",
+        ttl_ms=30_000,
+        limit=1,
+        after=first_page[0].work.cursor,
+    )
+    require(
+        len(second_page) == 1 and second_page[0].lease is not None and second_page[0].work.tenant_id == tenants[1],
+        "I11",
+        f"root cursor did not page to the second same-SID tenant: {second_page}",
+    )
+    second_lease = second_page[0].lease
+    assert second_lease is not None
+    second_store = creator.for_tenant(second_lease.tenant_id)
+    require(w.content_cipher.decrypts == decrypts, "I11", "cross-tenant claims read encrypted content")
+    w.worker_claims.append(
+        {
+            "owner": "root",
+            "tenant_ids": [first_lease.tenant_id, second_lease.tenant_id],
+            "session_id": shared_id,
+            "same_session_id": first_page[0].work.session_id == second_page[0].work.session_id == shared_id,
+            "paged": True,
+            "tenant_fenced": True,
+        }
+    )
+
+    tenant_store = creator.for_tenant(tenants[0])
+    tenant_store.configure_worker(
+        level=cross_requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=cross_requirements.capabilities,
+    )
+    tenant_store.configure_reader(level=2)
+    try:
+        tenant_store.claim_runnable(
+            owner="tenant-a/page",
+            ttl_ms=30_000,
+            limit=1,
+            after=second_page[0].work.cursor,
+        )
+    except ValueError as exc:
+        require("another tenant" in str(exc), "I11", "tenant cursor failed for the wrong reason")
+    else:
+        require(False, "I11", "tenant-scoped claim accepted another tenant's cursor")
+    tenant_claim = tenant_store.claim_runnable(owner="tenant-a/own", ttl_ms=30_000, limit=1)
+    require(
+        len(tenant_claim) == 1 and tenant_claim[0].lease is not None and tenant_claim[0].work.tenant_id == tenants[0],
+        "I11",
+        "tenant-scoped claim escaped its tenant",
+    )
+    assert tenant_claim[0].lease is not None
+    require(tenant_store.release(tenant_claim[0].lease), "I11", "tenant-scoped claim could not be released")
+
+    try:
+        runtime.drive(tenant_store, shared_id, lease=second_lease)
+    except ValueError as exc:
+        require("requested session and tenant" in str(exc), "I11", "cross-tenant lease failed the wrong core fence")
+    else:
+        require(False, "I11", "core accepted a lease from another tenant")
+    finally:
+        require(second_store.release(second_lease), "I11", "second cross-tenant claim could not be released")
+
+    mutator = w.connection("worker/cache-mutator").for_tenant(tenants[1])
+    old_capabilities = mutator._one(
+        "SELECT required_capabilities FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+        (tenants[1], shared_id),
+    )[0]
+    try:
+        with mutator.atomic():
+            mutator._rows(
+                "UPDATE sk_session SET required_capabilities=%s WHERE tenant_id=%s AND session_id=%s",
+                (b"[]", tenants[1], shared_id),
+            )
+        tamper_worker = w.connection("worker/cache-tamper").for_tenant(tenants[1])
+        tamper_worker.configure_reader(level=2)
+        tamper_worker.configure_worker(
+            level=cross_requirements.level,
+            handler_versions=(runtime.handler_version,),
+            capabilities=cross_requirements.capabilities,
+        )
+        decrypts = w.content_cipher.decrypts
+        try:
+            tamper_worker.claim_runnable(owner="cache-tamper", ttl_ms=30_000, limit=1)
+        except LedgerIntegrityError:
+            cache_rejected = True
+        else:
+            cache_rejected = False
+        require(cache_rejected, "I11", "claim accepted an understated routing cache")
+        require(w.content_cipher.decrypts == decrypts, "I11", "cache verification read encrypted content")
+    finally:
+        with mutator.atomic():
+            mutator._rows(
+                "UPDATE sk_session SET required_capabilities=%s WHERE tenant_id=%s AND session_id=%s",
+                (old_capabilities, tenants[1], shared_id),
+            )
+    w.worker_claims.append({"owner": "cache-tamper", "session_id": shared_id, "cache_rejected": True})
+
+    w.check()
+    w.check_accounting()
+    w.covered.add("I11")
+    return w.summary()
+
+
 def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
     w = world
     w.scenario = w.choices.choose("scenario", [scenario] if scenario else SCENARIOS)
@@ -592,6 +966,8 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
             configured.update(memory_settings)
         w.memory_settings = configured
     w.install_write_observer()
+    if w.scenario == "worker_compatibility":
+        return worker_compatibility(w)
     w.create()
     w.push("s", InboxItem("initial", "user", {"content": "go"}))
     w.stale_writer_probe()
@@ -682,8 +1058,6 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
         ):
             item = replace(template, input_id=input_id, payload=payload)
             with delivery.atomic() as tx:
-                from vv_agent.session.content_runtime import SessionContentWriter
-
                 writer = SessionContentWriter.bind(tx, tenant_id=delivery.tenant_id, session_id="s")
                 tx.push("s", item)
                 assert item.actor is not None

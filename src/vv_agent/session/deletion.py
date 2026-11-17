@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import Any
 
 from vv_agent.kernel._content import ForgetTombstone, Principal, TombstoneState
+from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._sql import LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
 from vv_agent.kernel._store import (
     SESSION_DELETION_INVENTORY,
@@ -19,8 +20,6 @@ from vv_agent.kernel._store import (
     StoredInput,
     StoredRecord,
 )
-
-from .content_store import SQLContentStore
 
 SESSION_DELETION_TABLES = SESSION_DELETION_INVENTORY
 
@@ -84,7 +83,7 @@ class SessionDeletionStore:
     def __init__(
         self,
         store: SQLStore,
-        content_store: SQLContentStore,
+        content_store: CoreSQLContentStore,
         *,
         signer: LedgerSigner | None = None,
         allow_unsigned: bool = False,
@@ -182,9 +181,12 @@ class SessionDeletionStore:
                 return False
             seen.add(current)
             member = members_by_id.get(current)
-            if member is None or member.parent_session_id not in members_by_id:
+            if member is None:
                 return False
-            current = member.parent_session_id
+            parent_session_id = member.parent_session_id
+            if parent_session_id is None or parent_session_id not in members_by_id:
+                return False
+            current = parent_session_id
         return True
 
     def _verify_scope_evidence(

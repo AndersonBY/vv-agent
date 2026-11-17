@@ -2,8 +2,10 @@
 
 This guide is for hosts that keep sessions in a durable store (SQLite file or
 PostgreSQL) and want to move to a newer vv-agent release. If your runs only use
-the default in-memory store, upgrading is an ordinary dependency bump; read the
-[version notes](#version-notes) for API changes and skip the rest.
+the driver-owned temporary SQLite file, upgrading is an ordinary dependency
+bump; read the [version notes](#version-notes) for API changes and skip the
+rest. The temporary file exists only for the driver lifetime. An explicit
+`:memory:` session store is rejected.
 
 ## Session data and upgrades
 
@@ -31,6 +33,14 @@ session when claiming work and is fenced from renewing its lease, appending,
 deferring work or advancing a consumer projection. It may release an existing
 lease so an upgraded worker can take over. The worker level is a capability
 gate; it does not replace the database write ceiling or the exact schema checks.
+
+A host moving a worker to `SessionDriver` must replace any cached runtime with
+its per-claim `runtime_factory` and rebuild callbacks against that claim's drive
+store. The host must redeclare its worker level, accepted handler versions and
+complete trusted capability set, including configured statically reachable
+sub-agents. Persisted bootstrap and input requirements cannot supplement that
+declaration. See [runtime factory](host-integration.md#runtime-factory) for the
+exact signature and connection obligations.
 
 Tenant identity is part of the persisted key. Session, record, inbox, consumer,
 commit, checkpoint, key, content, content-link and tombstone rows carry
@@ -70,7 +80,7 @@ destroyed key cannot be unwrapped by a new process. Omitting or losing that stat
 fails closed; it does not make wrapped keys readable again.
 
 Durable `SessionDriver` and `AppServer` stores must receive an explicit
-`content_key_provider`. Only a driver-owned in-memory SQLite store gets a
+`content_key_provider`. Only a driver-owned ephemeral SQLite store gets a
 temporary development provider, which is removed when the driver closes.
 
 S1 key wrapping, content AAD and content HMAC now include versioned purpose and
@@ -192,18 +202,23 @@ and makes the principal, actor and content-reference shapes closed. Pre-S1
 stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
 migration or import tool is provided.
 
-This branch implements the S1 schema, tenant-bound store routing, the
+The unreleased S1 branch contains the schema, tenant-bound store routing, the
 producer/codec boundary, explicit PostgreSQL tenant RLS installation, encrypted
 content and key-provider integration, declared content hydration, fenced
 forget/purge primitives, and checkpoint, input-admission and tombstone signing
-when a ledger signer is configured. P2 still depends on the documented host
-key-provider and signer policy, explicit deletion orchestration, and the exact
-S1 upgrade cutover; none of those become automatic from installing the schema.
-The development `LocalKeyProvider` is not a production key service. Hash-only
-or unsigned modes are not proof of authenticity, deletion does not erase
-provider or host copies outside the store, and no import or in-place migration
-is provided. Hosts must not claim database credential isolation without the
-explicit tenant role installation and startup checks.
+when a ledger signer is configured. The S1 cutover still depends on the
+documented host key-provider and signer policy, explicit deletion orchestration,
+and the exact upgrade procedure; none of those become automatic from installing
+the schema. The development `LocalKeyProvider` is not a production key service.
+Hash-only or unsigned modes are not proof of authenticity, deletion does not
+erase provider or host copies outside the store, and no import or in-place
+migration is provided. Hosts must not claim database credential isolation
+without the explicit tenant role installation and startup checks.
+
+Under the W4 execution boundary, Runner/RunHandle, Interactive and App Server
+use the same declared child/provider wait semantics as other workers. A
+declaration may yield to steering; an absent declaration remains
+non-yieldable. Hosts should not add entry-point-specific wait handling.
 
 Contract 39 narrows failed closed-session diagnostics to
 `invalid session schema`. This is a public diagnostic change, but accepted and
@@ -919,7 +934,7 @@ the [contract 24.0.0 changelog](https://github.com/AndersonBY/vv-agent-contract/
 | `ApprovalSnapshot`, `RunResult.approval_snapshot` | Pending approvals on the live handle or session, and App Server approval requests |
 | `Runner.start_distributed`, `start_distributed_compiled`, `finalize_distributed` | The host creates a session and pushes inputs with stable IDs; a worker calls `drive`; consumers project committed records |
 | `AgentRuntime`, `ToolCallRunner` | `Runner.run_sync`, `Runner.start`, `Runner.stream_sync`; low-level code uses `session.kernel.drive` with `session.runtime.Runtime` |
-| `ExecutionBackend`, `InlineBackend`, `ThreadBackend`, `CeleryBackend.start/advance` | One kernel driver. `RunHandle` runs locally in the background; the host's queue dispatches workers |
+| `ExecutionBackend`, `InlineBackend`, `ThreadBackend`, `CeleryBackend.start/advance` | One kernel driver. `SessionDriver` owns a `LocalWorker`; `RunHandle` submits inbox work and reads the durable cursor, while the host queue may dispatch separate workers |
 
 ```python
 # Before

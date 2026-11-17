@@ -8,13 +8,64 @@ import httpx2 as httpx
 import pytest
 from openai import APIStatusError
 
-from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.projection import project_records
+from vv_agent.kernel._content_publication import make_record_before_publication
+from vv_agent.memory import MemoryManager
+from vv_agent.session.kernel import drive as _drive
+from vv_agent.session.kernel import read_state
+from vv_agent.session.projection import hydration_for_session_store, project_records
+from vv_agent.session.records import InboxItem
+from vv_agent.session.reducer import TransitionError
 from vv_agent.session.result import project_result
 from vv_agent.types import LLMResponse, Message
 
-from .test_compaction import SUMMARY, compiled_system, configured, history, start
-from .test_recovery_matrix import records_of, runtime
+from .helpers import create_fixture_session, fixture_content_reader, push_fixture_input, read_fixture_state, wrap_fixture_store
+from .test_compaction import SUMMARY, compiled_system, history
+from .test_recovery_matrix import runtime as _runtime
+
+_FIXTURE_CONTENT_STORES = {}
+
+
+def start(store, sid="s"):
+    _FIXTURE_CONTENT_STORES.clear()
+    content_store = wrap_fixture_store(store)
+    create_fixture_session(
+        content_store,
+        sid,
+        attributes={
+            "seed": {
+                "messages": [message.to_dict() for message in history()],
+                "shared_state": {},
+                "unseen_input_protection": False,
+                "response_rejection": True,
+            }
+        },
+    )
+    push_fixture_input(content_store, sid, InboxItem("initial", "user", {"content": "go"}))
+
+
+def runtime(store, database, steps, *args, **kwargs):
+    content_store = wrap_fixture_store(store)
+    kwargs["content_reader"] = fixture_content_reader(content_store, "s")
+    rt = _runtime(database, steps, *args, **kwargs)
+    _FIXTURE_CONTENT_STORES[id(rt)] = content_store
+    return rt
+
+
+def configured(store, database, steps, **kwargs):
+    rt = runtime(store, database, steps, **kwargs)
+    rt.config = replace(rt.config, initial_messages=history())
+    rt.memory_manager = MemoryManager(compact_threshold=1000, keep_recent_messages=1)
+    return rt
+
+
+def drive(store, sid, runtime):
+    content_store = _FIXTURE_CONTENT_STORES.get(id(runtime), wrap_fixture_store(store))
+    return _drive(content_store, sid, runtime=runtime)
+
+
+def records_of(store, kind):
+    _, hydrated, _ = read_fixture_state(store, "s")
+    return [row.record for row in hydrated if row.record.kind == kind]
 
 
 def http_error(status, message="Invalid user message", *, observed=True):
@@ -101,7 +152,7 @@ def fail(error, calls):
 def test_http_rejection_is_one_definitive_failure(store, database, status):
     calls = []
     start(store)
-    drive(store, "s", runtime=runtime(database, [fail(http_error(status), calls)] * 2))
+    drive(store, "s", runtime=runtime(store, database, [fail(http_error(status), calls)] * 2))
     assert len(calls) == 1
     assert not records_of(store, "op_unknown")
     receipt = records_of(store, "op_completed")[0].payload["result"]
@@ -118,7 +169,7 @@ def test_http_rejection_is_one_definitive_failure(store, database, status):
     assert terminal.payload["status"] == "failed"
     assert terminal.payload["unconfirmed_operations"] == []
     assert "Model provider request failed." in terminal.payload["result"]
-    events = project_records(read_state(store, "s")[1])
+    events = project_records(read_state(store, "s")[1], hydration=hydration_for_session_store(store, "s"))
     assert not any(e.to_dict()["type"] == "model_retry_duplicate_risk" for e in events)
     assert project_result(store, "s", terminal.turn_id).error_code == "model_request_rejected"
     failure = next(e for e in events if e.to_dict()["type"] == "run_failed")
@@ -139,7 +190,9 @@ def test_http_context_error_compacts_then_next_primary_succeeds(store, database,
         return LLMResponse("done")
 
     rt = configured(
-        database, [fail(context_http_error(kind, transport=transport, wrapped=wrapped), calls), LLMResponse(SUMMARY), answer]
+        store,
+        database,
+        [fail(context_http_error(kind, transport=transport, wrapped=wrapped), calls), LLMResponse(SUMMARY), answer],
     )
     rt.memory_manager.compact_threshold = 999999
     drive(store, "s", runtime=rt)
@@ -153,7 +206,13 @@ def test_http_context_error_compacts_then_next_primary_succeeds(store, database,
     terminal = records_of(store, "turn_ended")[-1].payload
     assert terminal["status"] == "completed"
     assert terminal["unconfirmed_operations"] == []
-    assert not any(e.type == "model_retry_duplicate_risk" for e in project_records(read_state(store, "s")[1]))
+    assert not any(
+        e.type == "model_retry_duplicate_risk"
+        for e in project_records(
+            read_state(store, "s")[1],
+            hydration=hydration_for_session_store(store, "s"),
+        )
+    )
 
 
 @pytest.mark.parametrize("success", [True, False])
@@ -162,7 +221,7 @@ def test_rate_limit_has_definitive_receipts_and_bounded_retry(store, database, m
     calls = []
     rejected = fail(http_error(429, "Rate limited"), calls)
     start(store)
-    drive(store, "s", runtime=runtime(database, [rejected, LLMResponse("done") if success else rejected]))
+    drive(store, "s", runtime=runtime(store, database, [rejected, LLMResponse("done") if success else rejected]))
     assert len(calls) == (1 if success else 2)
     assert len(records_of(store, "op_started")) == 2
     assert not records_of(store, "op_unknown")
@@ -188,7 +247,7 @@ def test_ambiguous_failures_keep_unknown_retry(store, database, error):
     calls = []
     step = fail(error, calls)
     start(store)
-    drive(store, "s", runtime=runtime(database, [step, step]))
+    drive(store, "s", runtime=runtime(store, database, [step, step]))
     assert len(calls) == 2
     assert len(records_of(store, "op_unknown")) == 2
     assert all(r.payload["duplicate_cost_risk"] for r in records_of(store, "op_unknown"))
@@ -203,7 +262,7 @@ def test_summary_rejection_preserves_history_and_continues(store, database):
         return LLMResponse("done")
 
     start(store)
-    drive(store, "s", runtime=configured(database, [fail(http_error(400), calls), answer]))
+    drive(store, "s", runtime=configured(store, database, [fail(http_error(400), calls), answer]))
     assert len(calls) == 1
     assert not records_of(store, "op_unknown")
     assert not records_of(store, "context_compacted")
@@ -215,7 +274,7 @@ def test_rejection_redacts_before_persistence_and_projection(store, database):
     secret = "sk-super-secret-123456789"
     message = f"Invalid user. Authorization: Bearer {secret}\napi_key={secret}\n" + "x" * 900
     start(store)
-    drive(store, "s", runtime=runtime(database, [fail(http_error(400, message), [])]))
+    drive(store, "s", runtime=runtime(store, database, [fail(http_error(400, message), [])]))
     rows = read_state(store, "s")[1]
     saved = json.dumps([r.record.payload for r in rows])
     assert secret not in saved
@@ -236,7 +295,7 @@ def test_stream_output_then_http_error_remains_unknown(store, database, error):
             raise error
 
     start(store)
-    rt = runtime(database, [])
+    rt = runtime(store, database, [])
     rt.llm = Streaming()
     rt.config = replace(rt.config, stream=lambda _event: None)
     drive(store, "s", runtime=rt)
@@ -268,7 +327,7 @@ def test_real_vv_llm_adapter_preserves_rejection_and_stream_boundary(
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", create)
     monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
-    rt = runtime(database, [])
+    rt = runtime(store, database, [])
     rt.llm = VvLlmClient([EndpointTarget("a", "unused", "https://provider.invalid")], backend="openai")
     if with_callback:
         rt.config = replace(rt.config, stream=lambda _event: None)
@@ -293,14 +352,14 @@ def test_rate_limit_backoff_survives_restart_and_does_not_repeat_rejected_attemp
     start(store)
     now = store._now()
     with pytest.raises(WorkerDeath):
-        drive(store, "s", runtime=runtime(database, [fail(http_error(429), calls)], hook=cut))
+        drive(store, "s", runtime=runtime(store, database, [fail(http_error(429), calls)], hook=cut))
     successor = records_of(store, "op_planned")[-1]
     assert successor.attempt == 2 and successor.payload["not_before_ms"] >= now + 2000
-    rt = runtime(database, [LLMResponse("done")])
+    rt = runtime(store, database, [LLMResponse("done")])
     drive(store, "s", runtime=rt)
     assert len(records_of(store, "op_started")) == 1
     assert not records_of(store, "turn_ended")
-    monkeypatch.setattr(store, "clock_sql", str(successor.payload["not_before_ms"] + 1))
+    monkeypatch.setattr(type(store), "clock_sql", str(successor.payload["not_before_ms"] + 1))
     drive(store, "s", runtime=rt)
     assert len(calls) == 1
     assert len(records_of(store, "op_started")) == 2
@@ -314,7 +373,9 @@ def test_explicit_temporary_rejection_retries(store, database, monkeypatch):
     monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
     start(store)
     drive(
-        store, "s", runtime=runtime(database, [fail(ModelRequestRejected(409, "Busy", retryable=True), []), LLMResponse("done")])
+        store,
+        "s",
+        runtime=runtime(store, database, [fail(ModelRequestRejected(409, "Busy", retryable=True), []), LLMResponse("done")]),
     )
     assert len(records_of(store, "op_completed")) == 2
     assert not records_of(store, "op_unknown")
@@ -325,7 +386,7 @@ def test_explicit_temporary_rejection_retries(store, database, monkeypatch):
 def test_http_ambiguous_status_never_uses_prompt_too_long_text_heuristic(store, database, status):
     step = fail(http_error(status, "maximum context length exceeded"), [])
     start(store)
-    drive(store, "s", runtime=runtime(database, [step, step]))
+    drive(store, "s", runtime=runtime(store, database, [step, step]))
     assert len(records_of(store, "op_unknown")) == 2
     assert not records_of(store, "op_completed")
 
@@ -338,7 +399,7 @@ def test_summary_rate_limit_can_recover_or_keep_original_history(store, database
     drive(
         store,
         "s",
-        runtime=configured(database, [rejected, LLMResponse(SUMMARY) if success else rejected, LLMResponse("done")]),
+        runtime=configured(store, database, [rejected, LLMResponse(SUMMARY) if success else rejected, LLMResponse("done")]),
     )
     assert not records_of(store, "op_unknown")
     assert len(records_of(store, "context_compacted")) == int(success)
@@ -347,9 +408,6 @@ def test_summary_rate_limit_can_recover_or_keep_original_history(store, database
 
 
 def test_nonretryable_definitive_result_cannot_authorize_successor(store, database):
-    from vv_agent.session.records import InboxItem, make_record
-    from vv_agent.session.reducer import TransitionError, fold
-
     class WorkerDeath(BaseException):
         pass
 
@@ -359,15 +417,28 @@ def test_nonretryable_definitive_result_cannot_authorize_successor(store, databa
 
     start(store)
     with pytest.raises(WorkerDeath):
-        drive(store, "s", runtime=runtime(database, [fail(http_error(400), [])], hook=cut))
-    log = [r.record for r in read_state(store, "s")[1]]
-    plan = records_of(store, "op_planned")[0]
-    forged = make_record(
-        "op_planned", session_id="s", turn_id=plan.turn_id, operation_id=plan.operation_id, attempt=2, payload=plan.payload
+        drive(store, "s", runtime=runtime(store, database, [fail(http_error(400), [])], hook=cut))
+    _, hydrated, _ = read_fixture_state(store, "s")
+    plan = next(row.record for row in hydrated if row.record.kind == "op_planned")
+    content_store = wrap_fixture_store(store)
+    lease = content_store.acquire("s", owner="nonretryable-successor", ttl_ms=15_000)
+    assert lease is not None
+    rt = runtime(store, database, [])
+    from vv_agent.session._driver_scope import _Scope
+    from vv_agent.session.kernel import _Driver
+
+    driver = _Driver(content_store, "s", rt, _Scope(lease, rt, now_ms=store._now()))
+    successor = make_record_before_publication(
+        "op_planned",
+        session_id="s",
+        turn_id=plan.turn_id,
+        operation_id=plan.operation_id,
+        attempt=2,
+        payload=plan._payload,
     )
-    inputs = [InboxItem(**r.payload["input"]) for r in log if r.kind == "input_applied"]
     with pytest.raises(TransitionError, match="retry not authorized"):
-        fold([*log, forged], consumed_inputs=inputs)
+        driver.commit([successor])
+    assert content_store.release(lease)
 
 
 @pytest.mark.parametrize("child", [False, True])
@@ -375,13 +446,13 @@ def test_json_in_rejection_message_cannot_become_a_summary(store, database, chil
     from .test_summary_requests import call
     from .test_summary_requests import configured as summary_runtime
 
+    start(store)
     rejected = fail(http_error(400, SUMMARY), [])
     rt = (
-        summary_runtime(database, [call("child_task"), rejected, LLMResponse("done")], child=True)
+        summary_runtime(store, database, [call("child_task"), rejected, LLMResponse("done")], child=True)
         if child
-        else configured(database, [rejected, LLMResponse("done")])
+        else configured(store, database, [rejected, LLMResponse("done")])
     )
-    start(store)
     drive(store, "s", runtime=rt)
     assert not records_of(store, "op_unknown")
     assert not records_of(store, "context_compacted")
@@ -395,7 +466,7 @@ def test_json_in_rejection_message_cannot_become_a_summary(store, database, chil
 
 def test_rejection_does_not_settle_an_earlier_genuinely_unknown_attempt(store, database):
     start(store)
-    drive(store, "s", runtime=runtime(database, [fail(TimeoutError("lost"), []), fail(http_error(400), [])]))
+    drive(store, "s", runtime=runtime(store, database, [fail(TimeoutError("lost"), []), fail(http_error(400), [])]))
     unknowns = records_of(store, "op_unknown")
     assert len(unknowns) == 1 and unknowns[0].payload["duplicate_cost_risk"]
     assert len(records_of(store, "op_completed")) == 1
@@ -411,14 +482,14 @@ def test_quota_in_summary_preserves_history_and_child_boundary(store, database, 
     from .test_summary_requests import configured as summary_runtime
 
     monkeypatch.setattr("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0)
+    start(store)
     rejected = fail(http_error(status, message), [])
     steps = [rejected] * (2 if status == 429 else 1)
     rt = (
-        summary_runtime(database, [call("child_task"), *steps, LLMResponse("done")], child=True)
+        summary_runtime(store, database, [call("child_task"), *steps, LLMResponse("done")], child=True)
         if child
-        else configured(database, [*steps, LLMResponse("done")])
+        else configured(store, database, [*steps, LLMResponse("done")])
     )
-    start(store)
     drive(store, "s", runtime=rt)
     receipts = records_of(store, "op_completed")
     codes = [r.payload["result"].get("error_code") for r in receipts]
@@ -441,13 +512,13 @@ def test_http_context_error_in_summary_keeps_existing_failure_semantics(store, d
     from .test_summary_requests import configured as summary_runtime
 
     calls = []
+    start(store)
     too_long = fail(context_http_error("openai", wrapped=True), calls)
     rt = (
-        summary_runtime(database, [call("child_task"), too_long, LLMResponse("done")], child=True)
+        summary_runtime(store, database, [call("child_task"), too_long, LLMResponse("done")], child=True)
         if child
-        else configured(database, [too_long, LLMResponse("done")])
+        else configured(store, database, [too_long, LLMResponse("done")])
     )
-    start(store)
     drive(store, "s", runtime=rt)
     assert len(calls) == 1
     assert not records_of(store, "op_unknown")
@@ -465,7 +536,7 @@ def test_http_errors_in_output_repair_still_use_repair_provider_error(store, dat
     from vv_agent.output_validation import OutputValidationResult
 
     calls = []
-    rt = runtime(database, [LLMResponse("invalid")])
+    rt = runtime(store, database, [LLMResponse("invalid")])
     rt.agent.output_validation_enabled = True
     rt.agent.output_validator = lambda value, context: OutputValidationResult.reject("invalid")
     rt.agent.output_repair = fail(error, calls)
@@ -479,7 +550,7 @@ def test_http_errors_in_output_repair_still_use_repair_provider_error(store, dat
 
 def test_http_context_exhaustion_is_compaction_failure_not_rejection(store, database):
     too_long = fail(context_http_error("openai"), [])
-    rt = configured(database, [too_long, LLMResponse("invalid"), too_long, LLMResponse("invalid"), too_long, too_long])
+    rt = configured(store, database, [too_long, LLMResponse("invalid"), too_long, LLMResponse("invalid"), too_long, too_long])
     rt.memory_manager.compact_threshold = 999999
     rt.memory_manager.keep_recent_messages = 2
     start(store)
@@ -494,7 +565,7 @@ def test_session_memory_error_paths_keep_definitive_and_unknown_distinct(store, 
     error = {"rejected": http_error(400), "context": context_http_error("openai"), "timeout": TimeoutError("lost")}[kind]
     calls = []
     step = fail(error, calls)
-    rt = configured(database, [step, step] if kind == "timeout" else [step, LLMResponse("done")])
+    rt = configured(store, database, [step, step] if kind == "timeout" else [step, LLMResponse("done")])
     rt.memory_manager.compact_threshold = 999999
     rt.config = replace(
         rt.config,

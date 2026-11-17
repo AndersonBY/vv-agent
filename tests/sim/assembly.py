@@ -12,14 +12,13 @@ import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
-from unittest.mock import patch
+from typing import Any, Protocol, cast
 
 from vv_agent._jsonschema import schema_issues
 from vv_agent._memory_settings import normalize_memory_settings
 from vv_agent._token_counting import count_messages_tokens
 from vv_agent.kernel import _after_cycle as cycle
-from vv_agent.kernel import _child_store, _driver_dispatch, _driver_recovery, _reducer
+from vv_agent.kernel import _child_store, _driver_dispatch, _driver_recovery
 from vv_agent.kernel import _child_summary as child_summary
 from vv_agent.kernel import _compaction_phase as compaction
 from vv_agent.kernel import _driver_inputs as inputs
@@ -27,6 +26,7 @@ from vv_agent.kernel import _driver_outcomes as outcomes
 from vv_agent.kernel import _driver_planning as planning
 from vv_agent.kernel import _output_phase as output
 from vv_agent.kernel import _tool_admission as admission
+from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_and_fold_records
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation
 from vv_agent.kernel._budget_values import BudgetUnavailableReason, RunBudgetLimits
 from vv_agent.kernel._call_context import approved_tool_call
@@ -34,10 +34,12 @@ from vv_agent.kernel._cancellation import Cancellation, CancelledError
 from vv_agent.kernel._child_store import ordinary_result_for_children
 from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import (
-    declared_content_ref,
-    make_record_before_publication,
+    declare_input_content,
+    link_declared_input_content,
     publish_turn_started,
 )
+from vv_agent.kernel._content_reader import DurableContentReader, owner_scope
+from vv_agent.kernel._content_runtime import durable_content_reader
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._drive import DriveBinding, drive_core
 from vv_agent.kernel._driver import CoreDriver
@@ -51,21 +53,15 @@ from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._provider_outcomes import Definitive, Unknown
 from vv_agent.kernel._record_codec import RecordError
-from vv_agent.kernel._records import InboxItem, Record, copy_json, digest
-from vv_agent.kernel._reducer import Fold, logical_inputs, logical_operation_payloads, logical_turn_wait_results
+from vv_agent.kernel._records import Record, copy_json, digest
+from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLStore
-from vv_agent.kernel._store import Conflict, LeaseLost, SessionStore, StoredRecord
+from vv_agent.kernel._store import Conflict, Lease, LeaseLost, SessionStore, StoredRecord
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._tool_metadata import ToolIdempotency, ToolMetadata
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
-from vv_agent.session.content_reader import DurableContentReader, owner_scope
-from vv_agent.session.content_runtime import durable_content_reader
-from vv_agent.session.projection import (
-    SessionHydration,
-    _RetainedInboxItem,
-    hydrate_input,
-    hydrate_records,
-)
+
+SIM_HANDLER_VERSION = "sim-core-v1"
 
 
 class SimRuntimeNotReady(Exception):
@@ -100,8 +96,7 @@ class ScheduledLeaseKeeper:
         except Exception as exc:
             heartbeat.heartbeat_failed(exc)
             self.close(heartbeat)
-            if hasattr(heartbeat, "token"):
-                cancel_if_lost(heartbeat)
+            cancel_if_lost(heartbeat)
             if isinstance(exc, LeaseLost) and not isinstance(exc, HeartbeatStopped):
                 raise
         else:
@@ -121,7 +116,7 @@ def _cancellation_factory() -> Cancellation:
     return Cancellation(signal=threading.Event(), lock=threading.Lock(), child_factory=_cancellation_factory)
 
 
-class Scope(LeaseOwnership):
+class Scope(LeaseOwnership[Cancellation]):
     """Actual core ownership rules with scheduler-provided polling and cancellation."""
 
     def __init__(self, lease, runtime: CoreRuntimeAssembly, *, now_ms: int | None = None):
@@ -133,16 +128,9 @@ class Scope(LeaseOwnership):
             clock=runtime.clock,
             stop=threading.Event(),
             ready=threading.Event(),
-            lock=threading.Lock(),
-            poll_lock=threading.Lock(),
-            commit_lock=threading.Lock(),
-            latch_entry=threading.local(),
-            actor_identity=threading.get_ident,
             now_ms=now_ms,
+            token_factory=_cancellation_factory,
         )
-        self.token = _cancellation_factory()
-        self.turn_id = None
-        self.generation = None
 
     def start(self):
         self.runtime.lease_keeper.start(self)
@@ -170,11 +158,6 @@ class ScheduledHeartbeat(LeaseOwnership):
             clock=clock,
             stop=threading.Event(),
             ready=threading.Event(),
-            lock=threading.Lock(),
-            poll_lock=threading.Lock(),
-            commit_lock=threading.Lock(),
-            latch_entry=threading.local(),
-            actor_identity=threading.get_ident,
             now_ms=now_ms,
         )
 
@@ -249,6 +232,25 @@ def fold_factory() -> Fold:
     return Fold(normalize_memory_settings=normalize_memory_settings, count_messages=count_messages_tokens)
 
 
+def extend_hydrated_fold(
+    fold: Fold | None,
+    records: tuple[StoredRecord, ...],
+    hydration: SessionHydration,
+    *,
+    raw_applied_inputs: bool,
+) -> tuple[Fold, tuple[StoredRecord, ...]]:
+    """Map SimWorld's existing internal call to the shared core fold helper."""
+
+    result = hydrate_and_fold_records(
+        records,
+        fold_factory,
+        hydration,
+        base_fold=fold,
+        raw_applied_inputs=raw_applied_inputs,
+    )
+    return result.fold, result.hydrated_records
+
+
 @dataclass(frozen=True)
 class LogicalSnapshot:
     signature: tuple[Any, ...]
@@ -258,8 +260,13 @@ class LogicalSnapshot:
     definitions_by_id: dict[str, DefinitionContent]
 
 
+class ContentSignatureSource(Protocol):
+    _content_signatures: dict[str, Any]
+    _content_bodies: dict[tuple[Any, ...], bytes]
+
+
 class SimContentReader:
-    def __init__(self, reader: DurableContentReader, runtime: CoreRuntimeAssembly) -> None:
+    def __init__(self, reader: DurableContentReader, runtime: ContentSignatureSource) -> None:
         self._reader = reader
         self._runtime = runtime
 
@@ -281,49 +288,6 @@ class SimContentReader:
         body = self._reader.read(tenant_id, session_id, owner, slot, ref)
         self._runtime._content_bodies[key] = body
         return body
-
-
-def extend_hydrated_fold(
-    fold: Fold | None,
-    records: tuple[StoredRecord, ...],
-    hydration: Any,
-    *,
-    raw_applied_inputs: bool,
-) -> tuple[Fold, tuple[StoredRecord, ...]]:
-    hydrated = hydrate_records(records, hydration)
-    hydrated_by_id = {row.record.record_id: row.record for row in hydrated}
-    logical_items = {}
-    fold_records = []
-    for stored, logical in zip(records, hydrated, strict=True):
-        record = logical.record
-        if stored.record.kind == "input_applied":
-            committed = InboxItem(**stored.record._payload["input"])
-            item = InboxItem(**logical.record._payload["input"])
-            logical_items[stored.record.record_id] = _RetainedInboxItem(item, committed.encode())
-            record = replace(record, payload=record.payload | {"input": stored.record._payload["input"]})
-        fold_records.append(record)
-
-    current = fold.fork() if fold is not None else fold_factory()
-    with logical_inputs(logical_items):
-        state = current.extend(
-            fold_records,
-            consumed_inputs=logical_items.values(),
-            bodies=(row.record.encode() for row in records),
-        )
-    if raw_applied_inputs:
-        raw_by_id = {row.record.record_id: row.record for row in records if row.record.kind == "input_applied"}
-        state.applied_inputs = {
-            input_id: raw_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()
-        }
-        if state.child_completions is not None:
-            state.child_completions = {
-                key: hydrated_by_id.get(record.record_id, record) for key, record in state.child_completions.items()
-            }
-    else:
-        state.applied_inputs = {
-            input_id: hydrated_by_id.get(record.record_id, record) for input_id, record in state.applied_inputs.items()
-        }
-    return current, hydrated
 
 
 def _count(request: TokenCount) -> int:
@@ -353,7 +317,7 @@ class CoreRuntimeAssembly:
         self.ttl_ms = 15_000
         self.poll_ms = 250
         self.heartbeat_seconds = 0.25
-        self.handler_version = "sim-core-v1"
+        self.handler_version = SIM_HANDLER_VERSION
         self.model_timeout = 30.0
         self.tool_timeout = 30.0
         self.model_callback = model_callback
@@ -392,7 +356,6 @@ class CoreRuntimeAssembly:
         self._definitions = DefinitionCache()
         self._active_driver: SimDriver | None = None
         self._logical_snapshots: dict[str, LogicalSnapshot] = {}
-        self._hydrated_inputs: dict[tuple[Any, ...], InboxItem] = {}
         self.verify_frozen_definition = False
         self.approval_handle = None
         self._last_model_usage = {}
@@ -438,11 +401,12 @@ class CoreRuntimeAssembly:
         self._active_driver = driver
         return driver
 
-    def drive(self, store: SessionStore, sid: str) -> bool:
+    def drive(self, store: SessionStore, sid: str, *, lease: Lease | None = None) -> bool:
         return drive_core(
             store,
             sid,
             make_binding=lambda: self._binding(store, sid, runtime=self),
+            lease=lease,
         )
 
     def drive_factory(self, store: SessionStore, sid: str, factory: Callable[[str], Any]) -> bool:
@@ -490,12 +454,18 @@ class CoreRuntimeAssembly:
             make_factory_heartbeat=None if runtime is not None else make_factory_heartbeat,
             make_runtime=None if factory is None else lambda: factory(sid),
             factory_retry_after_ms=lambda error: error.retry_after_ms if isinstance(error, SimRuntimeNotReady) else None,
-            heartbeat_alive=lambda heartbeat: cast(ScheduledHeartbeat, heartbeat).scheduler.is_alive(heartbeat),
             make_scope=make_scope,
             make_driver=make_driver,
             after_drive=lambda selected_runtime: cast(CoreRuntimeAssembly, selected_runtime).hook("after_drive", None),
             wake_if_runnable=lambda selected_runtime: cast(CoreRuntimeAssembly, selected_runtime).world.queue.append(sid),
         )
+
+
+def _store_tenant_id(store: SessionStore) -> str:
+    tenant_id = getattr(store, "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise ValueError("Sim session store requires a non-empty tenant binding")
+    return tenant_id
 
 
 class SimDriver(CoreDriver):
@@ -522,7 +492,7 @@ class SimDriver(CoreDriver):
             hook=lambda point, record: assembly.hook(point, record),
             emit_phase=lambda _duration, _fields: None,
             content_reader=SimContentReader(
-                durable_content_reader(store, tenant_id=store.tenant_id, session_id=sid),
+                durable_content_reader(store, tenant_id=_store_tenant_id(store), session_id=sid),
                 assembly.world,
             ),
         )
@@ -556,40 +526,28 @@ class SimDriver(CoreDriver):
         *,
         guarded: bool = False,
         prepare: Callable[[Any], list[Record]] | None = None,
+        _logical_base: Fold | None = None,
     ) -> None:
         logical_state = self.state if self.content_reader is not None and self.state is not self.fold.state else None
+        if _logical_base is None and logical_state is not None:
+            snapshot = self.runtime._logical_snapshots.get(self.sid)
+            if snapshot is not None:
+                _logical_base = snapshot.fold.fork()
         record_count = len(self.records)
         if logical_state is not None:
             self.state = self.fold.state
-        parked = [record for record in records if record.kind == "turn_parked"]
-        applied = [record for record in records if record.kind == "input_applied"]
 
         def prepare_records(tx):
             return list(prepare(tx)) if prepare is not None else []
 
         try:
-            if (parked or applied) and self.content_reader is not None:
-                logical_input_items = {
-                    record.record_id: self._hydrated_input(InboxItem(**record._payload["input"])) for record in applied
-                }
-                operation_payloads = {record.record_id: record._payload for record in records if record.kind == "op_completed"}
-                logical_results = {}
-                if parked:
-                    state = logical_state or self._logical_state()
-                    for record in parked:
-                        operation = state.operations.get(record._payload["source_operation_id"])
-                        attempt = operation.attempts.get(record._payload["source_attempt"]) if operation is not None else None
-                        if attempt is not None and attempt.result is not None:
-                            logical_results[record.record_id] = attempt.result._payload["result"]
-                with (
-                    logical_turn_wait_results(logical_results),
-                    logical_inputs(logical_input_items),
-                    logical_operation_payloads(operation_payloads),
-                ):
-                    result = super().commit(records, consumed, guarded=guarded, prepare=prepare_records)
-            else:
-                result = super().commit(records, consumed, guarded=guarded, prepare=prepare_records)
-            return result
+            return super().commit(
+                records,
+                consumed,
+                guarded=guarded,
+                prepare=prepare_records,
+                _logical_base=_logical_base,
+            )
         except Conflict as exc:
             if (
                 str(exc) == "commit identity has different bytes"
@@ -609,10 +567,18 @@ class SimDriver(CoreDriver):
         cached = self.runtime._logical_snapshots.get(self.sid)
         if cached is not None and cached.signature == signature:
             return cached.fold.state
-        hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
+        hydration = SessionHydration(self.content_reader, tenant_id=_store_tenant_id(self.store), session_id=self.sid)
         prefix = cached.hydrated_records if cached is not None else ()
         if cached is not None and cached.signature[0] == signature[0][: len(prefix)]:
-            fold, hydrated = extend_hydrated_fold(cached.fold, self.records[len(prefix) :], hydration, raw_applied_inputs=True)
+            result = hydrate_and_fold_records(
+                self.records[len(prefix) :],
+                fold_factory,
+                hydration,
+                base_fold=cached.fold,
+                raw_applied_inputs=True,
+            )
+            fold = result.fold
+            hydrated = result.hydrated_records
             hydrated_records = cached.hydrated_records + hydrated
             hydrated_by_id = cached.hydrated_by_id | {row.record.record_id: row for row in hydrated}
             definitions_by_id = cached.definitions_by_id | {
@@ -621,7 +587,14 @@ class SimDriver(CoreDriver):
                 if row.record.kind == "turn_started"
             }
         else:
-            fold, hydrated_records = extend_hydrated_fold(None, self.records, hydration, raw_applied_inputs=True)
+            result = hydrate_and_fold_records(
+                self.records,
+                fold_factory,
+                hydration,
+                raw_applied_inputs=True,
+            )
+            fold = result.fold
+            hydrated_records = result.hydrated_records
             hydrated_by_id = {row.record.record_id: row for row in hydrated_records}
             definitions_by_id = {
                 row.record.record_id: _parse_definition(row.record._payload["definition"])
@@ -641,19 +614,6 @@ class SimDriver(CoreDriver):
         self._logical_state()
         snapshot = self.runtime._logical_snapshots.get(self.sid)
         return snapshot.hydrated_by_id.get(record.record_id) if snapshot is not None else None
-
-    def _hydrated_input(self, item: InboxItem) -> InboxItem:
-        signature = self.runtime.world._content_signatures.get(self.sid)
-        if signature is None:
-            signature = self.runtime.world.cached_state_signature(self.store, self.sid, self.records)
-            self.runtime.world._content_signatures[self.sid] = signature
-        key = (signature[2:], item.encode())
-        cached = self.runtime._hydrated_inputs.get(key)
-        if cached is None:
-            hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
-            cached = hydrate_input(item, hydration)
-            self.runtime._hydrated_inputs[key] = cached
-        return cached
 
     def record_content_ref(self, record: Record, slot: str):
         stored = next(
@@ -729,56 +689,6 @@ class SimDriver(CoreDriver):
         finally:
             self.state = self._logical_state() if nested else self.fold.state
 
-    @contextmanager
-    def _raw_child_verification_scope(self):
-        verify_completion = inputs.verify_completion
-
-        def verify_stored_child(store, parent_id, handle, item):
-            if item.kind == "child_result":
-                stored = store.read_input(parent_id, item.input_id)
-                if stored is not None and stored.item.kind == "child_result":
-                    item = stored.item
-            return verify_completion(store, parent_id, handle, item)
-
-        with patch.object(inputs, "verify_completion", verify_stored_child):
-            yield
-
-    @contextmanager
-    def _logical_approval_input_scope(self):
-        verify_input = _reducer._input
-
-        def verify_input_with_logical_wait(state, record, consumed):
-            payload = record._payload
-            if (
-                record.kind == "input_applied"
-                and payload["disposition"] == "applied"
-                and payload["input"]["kind"] == "approval_answer"
-            ):
-                operation_id = payload["input"]["payload"]["operation_id"]
-                attempt_number = payload["input"]["payload"]["attempt"]
-                attempt = state.operations[operation_id].attempts[attempt_number]
-                scope = attempt.wait["handle"].get("scope")
-                hydration = SessionHydration(self.content_reader, tenant_id=self.store.tenant_id, session_id=self.sid)
-                parked = next(
-                    (
-                        row
-                        for row in reversed(self.records)
-                        if row.record.kind == "op_parked"
-                        and row.record.operation_id == operation_id
-                        and row.record.attempt == attempt_number
-                    ),
-                    None,
-                )
-                if parked is not None and declared_content_ref(scope) is not None:
-                    attempt.wait = hydrate_records((parked,), hydration)[0].record.payload
-                logical_item = self._hydrated_input(InboxItem(**payload["input"]))
-                with _reducer.logical_inputs({record.record_id: logical_item}):
-                    return verify_input(state, record, consumed)
-            return verify_input(state, record, consumed)
-
-        with patch.object(_reducer, "_input", verify_input_with_logical_wait):
-            yield
-
     def task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
         return self._task()
@@ -827,7 +737,7 @@ class SimDriver(CoreDriver):
         if request in (_driver_recovery.Read.CANCELLED, inputs.InputSetting.CANCELLED):
             return self.scope.token.cancelled
         if request in (_driver_recovery.Read.RESET_TOKEN, inputs.InputSetting.RESET_TOKEN):
-            self.scope.token = _cancellation_factory()
+            self.scope.reset_token()
             return None
         if request in (_driver_recovery.Read.HANDLER_VERSION, inputs.InputSetting.HANDLER_VERSION):
             return self.runtime.handler_version
@@ -844,13 +754,15 @@ class SimDriver(CoreDriver):
         if request is _driver_recovery.Read.NEXT_DRIVE_DELAY:
             with self.scope.committing() as lease:
                 return self.store.next_drive_delay_ms(self.sid, lease=lease)
-        if isinstance(request, (_driver_recovery.Definition, inputs.CurrentDefinition)):
+        if isinstance(request, _driver_recovery.Definition | inputs.CurrentDefinition):
             task = request.start if isinstance(request, _driver_recovery.Definition) else request.task
             facts = inputs.DefinitionFacts(
                 self.runtime._definitions, self.runtime.definition_bindings(task), self.runtime.registry
             )
             if isinstance(request, _driver_recovery.Definition) and self.runtime.verify_frozen_definition:
-                start = self.state.turns[self.state.active_turn_id].start
+                active_turn_id = self.state.active_turn_id
+                assert active_turn_id is not None
+                start = self.state.turns[active_turn_id].start
                 frozen = self.hydrated_definition(start)
                 frozen_definition = {
                     "agent_name": frozen.agent_name,
@@ -907,7 +819,7 @@ class SimDriver(CoreDriver):
         if isinstance(request, inputs.ChildResult):
             return ordinary_result_for_children(self.store, request.plan, request.handles).to_dict()
         if request is inputs.InputSetting.POLL_NOW:
-            return self.scope.poll(self.store).db_now_ms
+            return self.scope.confirmed_poll().db_now_ms
         if request is inputs.InputSetting.POLL_MS:
             return self.runtime.poll_ms
         if request is inputs.InputSetting.BUDGET_LIMITS:
@@ -947,7 +859,7 @@ class SimDriver(CoreDriver):
             return None
         if isinstance(request, compaction.ModelRoute) or request is child_summary.SummaryRead.MODEL_ROUTE:
             return "scripted"
-        if isinstance(request, (compaction.CountContext, child_summary.CountSummaryPrompt)):
+        if isinstance(request, compaction.CountContext | child_summary.CountSummaryPrompt):
             messages = request.messages
             return count_messages_tokens(
                 [message.to_openai_message() for message in messages], model=self.runtime.memory_settings.get("model", "")
@@ -960,7 +872,7 @@ class SimDriver(CoreDriver):
             return _count(request)
         if isinstance(request, compaction.MicroArtifacts):
             return None
-        if isinstance(request, (compaction.BeforeCompaction, compaction.AfterCompaction)):
+        if isinstance(request, compaction.BeforeCompaction | compaction.AfterCompaction):
             return self._compaction_event(request)
         if request is child_summary.SummaryRead.PREPARE_MEMORY:
             return None
@@ -991,6 +903,15 @@ class SimDriver(CoreDriver):
                 item.item.kind == "approval_answer" and item.item.payload["request_id"] == request_id
                 for item in self.store.peek_inbox(self.sid)
             )
+        if isinstance(request, _driver_recovery.PushApprovalAnswer):
+            with self.store.atomic() as tx:
+                writer = self.content_writer(tx)
+                actor, _ = writer.service_principal("sim-host")
+                item = replace(request.item, actor=actor)
+                publication = declare_input_content(writer, item)
+                receipt = tx.push(self.sid, publication.item)
+                link_declared_input_content(writer, publication.item)
+                return receipt
         if isinstance(request, output.OutputSetting):
             return False if request is not output.OutputSetting.REPAIR_MODEL else None
         if isinstance(request, output.SerializeOutput):
@@ -1024,24 +945,18 @@ class SimDriver(CoreDriver):
                     request.budget,
                     admission_definition_digest=request.admission_definition_digest,
                 )
-                record = self.record(
-                    "turn_started",
-                    {
-                        "input_ids": [request.input_id],
-                        "definition": content.definition.to_dict(),
-                        "definition_digest": content.definition_digest,
-                        "handler_version": request.handler_version,
-                        "budget": content.budget.to_dict(),
-                        "binding": None,
-                        "generation": request.generation,
-                    },
-                    tid=request.tid,
-                )
-                object.__setattr__(
-                    record,
-                    "_sim_logical_payload",
-                    record.payload | {"definition": request.definition, "budget": request.budget},
-                )
+                payload = {
+                    "input_ids": [request.input_id],
+                    "definition": content.definition.to_dict(),
+                    "definition_digest": content.definition_digest,
+                    "handler_version": request.handler_version,
+                    "budget": content.budget.to_dict(),
+                    "binding": None,
+                    "generation": request.generation,
+                }
+                if request.requirements is not None:
+                    payload["requirements"] = request.requirements
+                record = self.record("turn_started", payload, tid=request.tid)
                 return [record]
 
             return self.commit([], guarded=True, prepare=prepare_turn_started)
@@ -1069,7 +984,7 @@ class SimDriver(CoreDriver):
         if request is _driver_dispatch.DispatchRead.HANDLER_VERSION:
             return self.runtime.handler_version
         if request is _driver_dispatch.DispatchRead.POLL_LEASE:
-            return self.scope.poll(self.store)
+            return self.scope.confirmed_poll()
         if request is _driver_dispatch.DispatchRead.CANCELLED:
             return self.scope.token.cancelled
         if isinstance(request, _driver_dispatch.BindPreparedState):
@@ -1248,7 +1163,7 @@ class SimDriver(CoreDriver):
         if request is outcomes.OutcomeRead.APPROVAL_TIMEOUT:
             return self.runtime.config.approval_timeout_seconds
         if request is outcomes.OutcomeRead.POLL_LEASE:
-            return self.scope.poll(self.store)
+            return self.scope.confirmed_poll()
         if request is outcomes.OutcomeRead.POLL_INTERVAL:
             return self.runtime.poll_ms
         raise TypeError(type(request).__name__)
@@ -1310,12 +1225,7 @@ class SimDriver(CoreDriver):
 
     def step(self):
         # Recovery retries start from hydrated values; commit still publishes the raw record.
-        with (
-            self._logical_state_scope(),
-            self._raw_child_verification_scope(),
-            self._logical_approval_input_scope(),
-            patch.object(_driver_recovery, "make_record", make_record_before_publication, create=True),
-        ):
+        with self._logical_state_scope():
             return self.run(_driver_recovery.step(self, one_turn=self.one_turn))
 
     def close(self, status, reason, result=None, *, transferred=False):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any, cast
 
 import pytest
@@ -11,6 +12,7 @@ from support import FixedModelProvider
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, MessageProcessor, OutgoingRouter, RequestId
 from vv_agent.app_server.host import DefaultAppServerHost
+from vv_agent.approval import ApprovalDecision
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
@@ -42,12 +44,47 @@ def test_app_server_approval_allow_runs_tool_and_completes_turn() -> None:
     _send(
         transport,
         server,
-        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow", "message": "ok"}},
+        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow", "reason": "ok"}},
     )
     outbound = _drain_until_turn_completed(transport)
 
     assert calls == ["ran"]
     assert _completed_status(outbound) == "completed"
+
+
+def test_explicit_automatic_approval_provider_is_preserved() -> None:
+    class AutoApprove:
+        def should_request(self, request) -> bool:
+            del request
+            return True
+
+        def decide(self, request):
+            del request
+            return ApprovalDecision.allow()
+
+    calls: list[str] = []
+    server, transport = _server_with_approval_tool(calls, approval_provider=AutoApprove())
+    _initialize(server, transport, request_id=0, client_name="test")
+    thread_id = _start_thread(server, transport, request_id=1)
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "run tool"}],
+            },
+        },
+    )
+    outbound = _drain_until_turn_completed(transport)
+    assert calls == ["ran"]
+    assert not any(message.get("method") == "approval/request" for message in outbound)
+    assert server.router.pending_server_request_count() == 0
 
 
 def test_app_server_approval_allow_session_is_preserved_in_notification() -> None:
@@ -58,7 +95,7 @@ def test_app_server_approval_allow_session_is_preserved_in_notification() -> Non
     _send(
         transport,
         server,
-        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow_session", "message": "for this session"}},
+        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow_session", "reason": "for this session"}},
     )
     outbound = _drain_until_turn_completed(transport)
 
@@ -75,7 +112,7 @@ def test_app_server_approval_deny_skips_tool_and_completes_turn() -> None:
     _send(
         transport,
         server,
-        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "deny", "message": "no"}},
+        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "deny", "reason": "no"}},
     )
     outbound = _drain_until_turn_completed(transport)
 
@@ -84,12 +121,16 @@ def test_app_server_approval_deny_skips_tool_and_completes_turn() -> None:
     assert _completed_status(outbound) == "completed"
 
 
-def test_app_server_approval_timeout_denies_without_running_tool() -> None:
+def test_app_server_approval_timeout_denies_without_running_tool(surface) -> None:
     calls: list[str] = []
-    server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=0.01)
+    server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=1)
 
     approval_request = _start_and_wait_for_approval(server, transport)
     assert approval_request["method"] == "approval/request"
+    state, _, _ = surface.store.read_state("thread_1")
+    deadline_ms = next(iter(state.waits.values()))["deadline_ms"]
+    time.sleep(max(0.0, (deadline_ms - time.time() * 1000) / 1000) + 0.02)
+    cast(Any, server.run_adapter).join()
     outbound = _drain_until_turn_completed(transport)
 
     assert calls == []
@@ -103,23 +144,21 @@ def test_app_server_approval_disconnect_resolves_at_retained_deadline(surface) -
 
     approval_request = _start_and_wait_for_approval(server, transport)
     assert approval_request["method"] == "approval/request"
-    server.router.unregister_transport("conn_1")
-
-    cast(Any, server.run_adapter).join()
     state, _, _ = surface.store.read_state("thread_1")
     wait = next(iter(state.waits.values()))
     deadline_ms = wait["deadline_ms"]
     assert isinstance(deadline_ms, int)
+    server.router.unregister_transport("conn_1")
     assert server.store.read_thread("thread_1").thread.status == "approval_wait"
-    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms - 1)
     cast(Any, server.run_adapter).recover("observer", "thread_1")
+    still_waiting, _, _ = surface.store.read_state("thread_1")
+    assert still_waiting.waits == state.waits
+    assert not any(turn.ended for turn in still_waiting.turns.values())
+
+    time.sleep(max(0.0, (deadline_ms - time.time() * 1000) / 1000) + 0.02)
     cast(Any, server.run_adapter).join()
-    assert surface.store.read_state("thread_1")[0].active_turn_id is not None
-    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
-    cast(Any, server.run_adapter).recover("observer", "thread_1")
-    cast(Any, server.run_adapter).join()
-    deadline = time.time() + 2
-    while time.time() < deadline:
+    completion_deadline = time.time() + 2
+    while time.time() < completion_deadline:
         snapshot = server.store.read_thread("thread_1")
         if snapshot.turns and snapshot.turns[-1].status == "completed":
             break
@@ -161,18 +200,21 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
         },
     )
     approval_request = _drain_until(owner, lambda message: message.get("method") == "approval/request")
+    started = _drain_until(observer, lambda message: message.get("method") == "turn/started")
     observer_before_disconnect = _drain_available(observer)
-    assert any(message.get("method") == "turn/started" for message in observer_before_disconnect)
+    assert cast(dict[str, object], started["params"])["turnId"] == thread_id + "/turn/turn_1"
     assert not any(message.get("method") == "approval/request" for message in observer_before_disconnect)
-
-    server.router.unregister_transport(owner.connection_id)
-    cast(Any, server.run_adapter).join()
-    _drain_until_turn_completed(observer, timeout=2)
     state, _, _ = surface.store.read_state(thread_id)
     deadline_ms = next(iter(state.waits.values()))["deadline_ms"]
-    surface.store.connection.create_function("session_now_ms", 0, lambda: deadline_ms)
-    cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
-    observer_after_disconnect = _drain_until_turn_completed(observer, timeout=2)
+    now_ms = [deadline_ms - 1]
+    with _controlled_session_clock(server.kernel, lambda: now_ms[0]):
+        server.router.unregister_transport(owner.connection_id)
+        cast(Any, server.run_adapter).join()
+        before_deadline = _drain_available(observer)
+        assert not any(message.get("method") == "turn/completed" for message in before_deadline)
+        now_ms[0] = deadline_ms
+        cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
+        observer_after_disconnect = _drain_until_turn_completed(observer, timeout=2)
 
     assert approval_request["method"] == "approval/request"
     assert not any(message.get("method") == "approval/request" for message in observer_after_disconnect)
@@ -235,6 +277,10 @@ def test_app_server_follow_up_routes_callback_to_driving_subscriber() -> None:
     )
 
     second_approval = _drain_until(owner, lambda message: message.get("method") == "approval/request")
+    second_params = cast(dict[str, object], second_approval["params"])
+    assert second_params["turnId"] == f"{thread_id}/turn/follow_1"
+    assert second_params["turnId"] != first_params["turnId"]
+    assert second_params["requestId"] != first_params["requestId"]
     observer_messages = _drain_available(observer)
     assert not any(message.get("method") == "approval/request" for message in observer_messages)
     _send(
@@ -267,7 +313,7 @@ def test_app_server_approval_interrupt_releases_pending_request_without_waiting_
             },
         },
     )
-    outbound = _drain_until_turn_completed(transport, timeout=2)
+    outbound = _drain_until_turn_status(transport, "failed", timeout=2)
 
     assert calls == []
     assert server.router.pending_server_request_count() == 0
@@ -289,14 +335,11 @@ def test_app_server_approval_interrupt_releases_pending_request_without_waiting_
 
 def test_app_server_approval_allow_session_can_be_resolved_by_client_request() -> None:
     calls: list[str] = []
-    server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=1)
+    server, transport = _server_with_approval_tool(calls)
 
     approval_request = _start_and_wait_for_approval(server, transport)
     approval_params = cast(dict[str, object], approval_request["params"])
-    requested = cast(dict[str, object], approval_request.get("_requested")) or _drain_until(
-        transport, lambda message: message.get("method") == "approval/requested"
-    )
-    assert cast(dict[str, object], requested["params"])["requestId"] == approval_params["requestId"]
+    requested = cast(dict[str, object] | None, approval_request.get("_requested"))
 
     _send(
         transport,
@@ -318,6 +361,10 @@ def test_app_server_approval_allow_session_can_be_resolved_by_client_request() -
     outbound = _drain_until_turn_completed(transport)
 
     assert calls == ["ran"]
+    assert server.router.pending_server_request_count() == 0
+    requested = requested or next((message for message in outbound if message.get("method") == "approval/requested"), None)
+    assert requested is not None
+    assert cast(dict[str, object], requested["params"])["requestId"] == approval_params["requestId"]
     assert any(message.get("id") == 3 and message.get("result") == {} for message in outbound)
     assert _approval_resolutions(outbound) == ["allow_session"]
     resolved = next(
@@ -373,6 +420,7 @@ def _server_with_approval_tool(
     calls: list[str],
     *,
     approval_timeout_seconds: float | None = None,
+    approval_provider=None,
 ) -> tuple[AppServer, ChannelTransport]:
     @function_tool(needs_approval=True)
     def dangerous_tool() -> str:
@@ -395,9 +443,52 @@ def _server_with_approval_tool(
             model_provider=FixedModelProvider(llm, _resolved_model()),
             max_cycles=3,
             approval_timeout_seconds=approval_timeout_seconds,
+            approval_provider=approval_provider,
         ),
     )
     return AppServer(transport=transport, host=host), transport
+
+
+@contextmanager
+def _controlled_session_clock(surface, now_ms: Callable[[], int]):
+    """Apply test database time to worker drive and heartbeat connections."""
+
+    original_open = surface.open_store
+    original_heartbeat_open = surface._heartbeat_store_factory
+
+    def configure(store) -> None:
+        raw = store
+        seen = set()
+        while id(raw) not in seen:
+            seen.add(id(raw))
+            nested = getattr(raw, "_store", None)
+            if nested is None or nested is raw:
+                break
+            raw = nested
+        connection = getattr(raw, "connection", None)
+        if connection is None:
+            raise AssertionError("drive store has no SQLite connection")
+        connection.create_function("session_now_ms", 0, now_ms)
+
+    @contextmanager
+    def open_store():
+        with surface._open_default_drive_store() as store:
+            configure(store)
+            yield store
+
+    @contextmanager
+    def heartbeat_store():
+        with original_heartbeat_open() as store:
+            configure(store)
+            yield store
+
+    surface.open_store = open_store
+    surface._heartbeat_store_factory = heartbeat_store
+    try:
+        yield
+    finally:
+        surface.open_store = original_open
+        surface._heartbeat_store_factory = original_heartbeat_open
 
 
 def _start_and_wait_for_approval(server: AppServer, transport: ChannelTransport) -> dict[str, object]:
@@ -487,6 +578,22 @@ def _drain_until_turn_completed(transport: ChannelTransport, *, timeout: float =
         message = transport.receive_outbound(timeout=max(0.0, deadline - time.monotonic()))
         outbound.append(message)
         if message.get("method") == "turn/completed":
+            return outbound
+
+
+def _drain_until_turn_status(
+    transport: ChannelTransport,
+    status: str,
+    *,
+    timeout: float = 10,
+) -> list[dict[str, object]]:
+    outbound: list[dict[str, object]] = []
+    deadline = time.monotonic() + timeout
+    while True:
+        message = transport.receive_outbound(timeout=max(0.0, deadline - time.monotonic()))
+        outbound.append(message)
+        params = message.get("params")
+        if message.get("method") == "turn/completed" and isinstance(params, dict) and params.get("status") == status:
             return outbound
 
 

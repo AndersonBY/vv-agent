@@ -52,6 +52,7 @@ module-name = "vv_agent"
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "capability(id): explicit capability ID mapped to a test node in the session kernel matrix",
     "live: tests that call real remote LLM endpoints",

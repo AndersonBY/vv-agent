@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
+from session.app_server_s1_helpers import bind_development_content
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
@@ -23,7 +25,7 @@ from vv_agent.session.projection import hydrate_record_payload
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
-PRINCIPAL = {
+PRINCIPAL: dict[str, Any] = {
     "tenant_id": "tenant-a",
     "subject_id": "trusted-ingress-user",
     "subject_kind": "user",
@@ -94,11 +96,13 @@ class _LegacyHost(AppServerHost):
 def _app_server(
     *,
     host: Any,
+    database: Path,
     principal: dict[str, Any] | None = None,
     connection_id: str = "tenant-a",
 ) -> tuple[AppServer, ChannelTransport, SQLiteStore]:
-    root_store = SQLiteStore(":memory:")
+    root_store = SQLiteStore(str(database))
     root_store.install_schema()
+    bind_development_content(root_store)
     store = root_store.for_tenant(principal["tenant_id"] if principal is not None else "tenant-a")
     transport = ChannelTransport(connection_id=connection_id)
     server = AppServer(host=host, store=store, transport=transport)
@@ -141,7 +145,9 @@ def _initialize(server: AppServer, transport: ChannelTransport) -> None:
 
 
 def _actor(server: AppServer, thread_id: str, input_id: str) -> dict[str, Any]:
-    item = server.kernel.store.read_input(thread_id, input_id).item
+    stored = server.kernel.store.read_input(thread_id, input_id)
+    assert stored is not None
+    item = stored.item
     assert item.actor is not None
     return item.actor
 
@@ -177,7 +183,7 @@ def test_trusted_principal_reaches_creation_and_all_durable_write_paths(tmp_path
         agent=agent,
         run_config=RunConfig(model_provider=provider, workspace=tmp_path),
     )
-    server, transport, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     observed: list[dict[str, Any]] = []
     try:
         _initialize(server, transport)
@@ -278,7 +284,7 @@ def test_persisted_principal_object_is_owner_hydrated_without_reencryption(tmp_p
         agent=Agent("assistant", "Answer.", model="m"),
         run_config=RunConfig(model_provider=provider, workspace=tmp_path),
     )
-    server, transport, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     try:
         _initialize(server, transport)
         thread_id = _request(
@@ -339,7 +345,7 @@ def test_processor_passes_trusted_principal_to_control_and_approval_hooks(monkey
         agent=Agent("assistant", "Answer.", model="m"),
         run_config=RunConfig(model_provider=provider, workspace=tmp_path),
     )
-    server, transport, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     submissions: list[dict[str, Any]] = []
     controls: list[dict[str, Any]] = []
     approvals: list[dict[str, Any]] = []
@@ -453,7 +459,7 @@ def test_cross_tenant_ingress_cannot_write_to_session(tmp_path) -> None:
             workspace=tmp_path,
         ),
     )
-    server, transport_a, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport_a, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     transport_b = ChannelTransport(connection_id="tenant-b")
     server.router.register_transport(transport_b)
     try:
@@ -494,7 +500,7 @@ def test_thread_start_replay_requires_exact_trusted_binding_and_no_subscription(
             workspace=tmp_path,
         ),
     )
-    server, transport_a, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport_a, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     transport_b = ChannelTransport(connection_id="user-b")
     server.router.register_transport(transport_b)
     try:
@@ -532,7 +538,7 @@ def test_cross_tenant_read_list_resume_and_subscribe_are_denied(tmp_path) -> Non
             workspace=tmp_path,
         ),
     )
-    server, transport_a, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport_a, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     transport_b = ChannelTransport(connection_id="tenant-b")
     server.router.register_transport(transport_b)
     try:
@@ -596,7 +602,7 @@ def test_fork_uses_current_principal_and_rejects_foreign_tenant_and_replay(tmp_p
             workspace=tmp_path,
         ),
     )
-    server, transport_a, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport_a, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     transport_b = ChannelTransport(connection_id="user-b")
     transport_c = ChannelTransport(connection_id="user-c")
     foreign = ChannelTransport(connection_id="tenant-b")
@@ -659,7 +665,7 @@ def test_controller_replay_requires_original_actor(tmp_path) -> None:
             workspace=tmp_path,
         ),
     )
-    server, transport_a, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport_a, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     transport_b = ChannelTransport(connection_id="user-b")
     server.router.register_transport(transport_b)
     try:
@@ -711,7 +717,7 @@ def test_malformed_principal_maps_to_invalid_params(tmp_path) -> None:
             workspace=tmp_path,
         ),
     )
-    server, transport, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     try:
         _initialize(server, transport)
         rejected = _request(server, transport, 1, "thread/list", {})
@@ -734,7 +740,7 @@ def test_legacy_host_without_resolver_keeps_local_service_principal(tmp_path) ->
     provider = ScriptedModelProvider.new("test", "m", [LLMResponse("done")])
     agent = Agent("assistant", "Answer.", model="m")
     host = _LegacyHost(agent=agent, run_config=RunConfig(model_provider=provider, workspace=tmp_path))
-    server, transport, root_store = _app_server(host=host)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite")
     try:
         _initialize(server, transport)
         thread_id = _request(
@@ -788,7 +794,7 @@ def test_client_cannot_inject_identity_fields(forged_field: str, tmp_path) -> No
             workspace=tmp_path,
         ),
     )
-    server, transport, root_store = _app_server(host=host, principal=PRINCIPAL)
+    server, transport, root_store = _app_server(host=host, database=tmp_path / "trusted.sqlite", principal=PRINCIPAL)
     try:
         _initialize(server, transport)
         rejected = _request(

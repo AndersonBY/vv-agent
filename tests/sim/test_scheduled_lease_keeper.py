@@ -109,7 +109,9 @@ def test_stop_during_committed_renewal_keeps_l2_publication_and_drains(tmp_path,
         world.advance(1000)
         scope.start()
         assert len(receipts) == 1 and receipts[0].lease.expires_at_ms > initial.expires_at_ms
-        assert scope.lease is initial and not scope.successful_ready
+        assert scope.latest_poll is receipts[-1]
+        assert scope.lease is receipts[-1].lease
+        assert scope.successful_ready
         assert not scope.lost and not scope.token.cancelled and scope.ready.is_set()
         assert not world.tasks and not world.step()
 
@@ -229,6 +231,7 @@ def renewal_case(path, monkeypatch, *, seed, mode):
         monkeypatch.setattr(scope, "heartbeat_step", step)
         monkeypatch.setattr(scope, "heartbeat_finished", finish)
         scope.start()
+        terminal_error = None
         for _ in range(10):
             if scope.lost:
                 break
@@ -238,7 +241,12 @@ def renewal_case(path, monkeypatch, *, seed, mode):
                 else:
                     assert world.step()  # A queued poll observes normal stop.
                 break
-            assert world.step()
+            try:
+                assert world.step()
+            except LeaseLost as exc:
+                assert mode == "expire"
+                terminal_error = exc
+                break
             if not scope.lost and not scope.successful_ready:
                 # SimWorld has no timers. Later renewal turns are explicit.
                 world.enqueue("renew/owner", lambda: keeper.poll(scope))
@@ -253,8 +261,9 @@ def renewal_case(path, monkeypatch, *, seed, mode):
             assert len(calls) == 2 and final["successful_ready"] and not final["lost"]
             assert final["error"] is None and final["lease_until"] > observations[0]["lease_until"]
         elif mode == "expire":
-            assert final["lost"] and final["original_error"] and final["reason"] == "lease_lost"
-            assert world.clock.monotonic() < scope.expires_deadline
+            assert terminal_error is not None and terminal_error.__cause__ is failure
+            assert final["lost"] and final["reason"] == "lease_lost"
+            assert world.clock.monotonic() >= scope.safety_deadline
             assert final["sql_lease"][2] > world.clock.now_ms()
             assert len(observations) == len(calls) + 1  # Budget rejects before another SQL attempt.
         else:

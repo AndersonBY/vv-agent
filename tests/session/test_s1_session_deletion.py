@@ -6,18 +6,19 @@ from base64 import b64decode, b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from support.s1_fixture_values import append_fixture_records, create_fixture_session, push_fixture_input, wrap_fixture_store
 
 from vv_agent.kernel._content import (
     Classification,
     ContentBindingMismatch,
     ContentLabels,
     ContentRef,
+    ContentSessionWriter,
     ContentUnavailable,
     KeyDestroyOutcome,
     KeyDestroyStatus,
@@ -30,8 +31,9 @@ from vv_agent.kernel._postgres import SCHEMA_TABLES as POSTGRES_SCHEMA_TABLES
 from vv_agent.kernel._records import InboxItem, SessionSpec
 from vv_agent.kernel._sql import LedgerIntegrityError, SessionNotLive, SQLStore
 from vv_agent.kernel._sqlite import SCHEMA_TABLES as SQLITE_SCHEMA_TABLES
-from vv_agent.kernel._store import Conflict
-from vv_agent.session.content_store import LocalKeyProvider, SQLContentStore
+from vv_agent.kernel._store import Conflict, SessionStore
+from vv_agent.session.content_runtime import SessionContentWriter
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.deletion import (
     PURGE_DELETE_TABLES,
     SESSION_DELETION_TABLES,
@@ -45,6 +47,15 @@ from .helpers import record as _record
 
 TENANT = "tenant-a"
 MASTER_KEY = b"d" * 32
+
+
+@pytest.fixture
+def key_provider(tmp_path: Path) -> Iterator[LocalKeyProvider]:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "content-keys.sqlite3")
+    try:
+        yield provider
+    finally:
+        provider.close()
 
 
 class Signer:
@@ -74,79 +85,93 @@ class Signer:
         return True
 
 
-def _ref(label: str, key_id: str = "key/contract") -> dict[str, object]:
-    value = label.encode()
-    return {
-        "content_id": f"content/{label}",
-        "mac": sha256(value).hexdigest(),
-        "size": len(value),
-        "key_id": key_id,
-        "labels": {"source": [], "classification": "internal"},
-    }
-
-
-def _principal(tenant_id: str = TENANT, subject_id: str = "user/deleter") -> Principal:
-    return Principal(
-        tenant_id,
-        subject_id,
-        "user",
-        ContentRef("content/actor", "0" * 64, 0, "key/actor", ContentLabels()),
-    )
+def _principal(
+    store: SQLiteStore,
+    session_id: str,
+    tenant_id: str = TENANT,
+    subject_id: str = "user/deleter",
+) -> Principal:
+    with store.for_tenant(TENANT).atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id=session_id)
+        attributes = writer.put_json({"role": subject_id})
+    return Principal(tenant_id, subject_id, "user", attributes)
 
 
 @contextmanager
-def _sqlite(path: Path, *, signed: bool = True) -> Iterator[tuple[SQLiteStore, Signer | None]]:
+def _sqlite(
+    path: Path,
+    provider: LocalKeyProvider,
+    *,
+    signed: bool = True,
+) -> Iterator[tuple[SQLiteStore, Signer | None]]:
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
         signer = Signer() if signed else None
         if signer is not None:
             store.configure_input_admission(signer)
+        wrap_fixture_store(store, provider)
         yield store, signer
 
 
-def _create_session(store: SQLiteStore, session_id: str, *, parent: str | None = None) -> None:
-    principal = {
-        "tenant_id": TENANT,
-        "subject_id": f"user/{session_id}",
-        "subject_kind": "user",
-        "attributes": _ref(f"actor/{session_id}"),
-    }
-    with store.for_tenant(TENANT).atomic() as tx:
-        tx.create(
-            SessionSpec(
+def _fixture_store(store: SQLiteStore, provider: LocalKeyProvider) -> SessionStore:
+    return wrap_fixture_store(store.for_tenant(TENANT), provider)
+
+
+def _create_session(
+    store: SQLiteStore,
+    provider: LocalKeyProvider,
+    session_id: str,
+    *,
+    parent: str | None = None,
+) -> None:
+    wrapped = _fixture_store(store, provider)
+    if parent is None:
+        create_fixture_session(wrapped, session_id, subject_id=f"fixture/{session_id}")
+        return
+    with wrapped.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id=session_id)
+
+        def spec(content: ContentSessionWriter) -> SessionSpec:
+            actor, _ = content.service_principal(f"fixture/{session_id}")
+            return SessionSpec(
                 session_id,
-                principal,
-                _ref(f"workspace/{session_id}"),
+                actor,
+                content.put_json(f"/tmp/{session_id}").to_dict(),
                 parent_session_id=parent,
-                parent_operation_id=f"op/{session_id}" if parent is not None else None,
-                attributes=_ref(f"attributes/{session_id}"),
-            ),
-            consumers=(),
-        )
+                parent_operation_id=f"op/{session_id}",
+                attributes=content.put_json({"seed": {"messages": [], "shared_state": {}}}).to_dict(),
+            )
+
+        writer.create_session(spec, consumers=())
 
 
-def _publish_content(store: SQLiteStore, provider: LocalKeyProvider, session_id: str) -> tuple[SQLContentStore, ContentRef]:
+def _publish_content(
+    store: SQLiteStore,
+    provider: LocalKeyProvider,
+    session_id: str,
+) -> tuple[SQLiteContentStore, ContentRef]:
     adapter = SQLiteContentStore(store, provider)
-    with store.for_tenant(TENANT).atomic():
+    with store.for_tenant(TENANT).atomic() as tx:
         ref = adapter.put(
             TENANT,
             session_id,
             f"secret:{session_id}".encode(),
             ContentLabels(classification=Classification.CONFIDENTIAL),
         )
-        adapter.link_record(TENANT, session_id, 1, ref, "workspace")
+        writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id=session_id)
+        writer.link_record(1, ref, "session.attributes.seed.messages[0]")
     return adapter, ref
 
 
-def _pending_input(store: SQLiteStore, session_id: str) -> None:
-    with store.for_tenant(TENANT).atomic() as tx:
-        tx.push(
-            session_id,
-            InboxItem("pending-input", "control", {"action": "suspend"}, actor=_principal().to_dict()),
-        )
+def _pending_input(store: SQLiteStore, provider: LocalKeyProvider, session_id: str) -> None:
+    push_fixture_input(
+        _fixture_store(store, provider),
+        session_id,
+        InboxItem("pending-input", "control", {"action": "suspend"}),
+    )
 
 
-def _append_unknown_effect(store: SQLiteStore, session_id: str) -> None:
+def _append_unknown_effect(store: SQLiteStore, provider: LocalKeyProvider, session_id: str) -> None:
     turn_id = f"{session_id}/turn"
     operation_id = f"{session_id}/operation"
     records = (
@@ -155,16 +180,7 @@ def _append_unknown_effect(store: SQLiteStore, session_id: str) -> None:
         _record("op_started", sid=session_id, tid=turn_id, oid=operation_id),
         _record("op_unknown", sid=session_id, tid=turn_id, oid=operation_id),
     )
-    lease = store.for_tenant(TENANT).acquire(session_id, owner="unknown-worker", ttl_ms=60_000)
-    assert lease is not None
-    with store.for_tenant(TENANT).atomic() as tx:
-        tx.append(
-            session_id,
-            lease=lease,
-            expected_seq=1,
-            commit_id="unknown-effect",
-            records=records,
-        )
+    append_fixture_records(_fixture_store(store, provider), session_id, records, commit_id="unknown-effect")
 
 
 def _count(store: SQLiteStore, table: str, session_id: str) -> int:
@@ -175,7 +191,7 @@ def _count(store: SQLiteStore, table: str, session_id: str) -> int:
 
 
 def _tombstone(store: SQLiteStore, session_id: str):
-    return store.for_tenant(TENANT)._tombstone(session_id)
+    return store._scoped(TENANT)._tombstone(session_id)
 
 
 @pytest.mark.parametrize(
@@ -191,15 +207,19 @@ def test_deletion_inventory_is_closed_over_backend_schema(backend: str, schema_t
     assert set(PURGE_DELETE_TABLES) == expected_session_tables - {"sk_tombstone"}
 
 
-def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, monkeypatch) -> None:
+def test_forget_fences_active_and_parked_sessions_and_retries_destroy(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     for phase in ("active", "parked"):
         path = tmp_path / f"forget-{phase}.sqlite"
-        provider = LocalKeyProvider(MASTER_KEY)
-        with _sqlite(path) as (store, signer):
+        with _sqlite(path, key_provider) as (store, signer):
             session_id = f"session-{phase}"
-            _create_session(store, session_id)
-            _pending_input(store, session_id)
-            adapter, ref = _publish_content(store, provider, session_id)
+            _create_session(store, key_provider, session_id)
+            _pending_input(store, key_provider, session_id)
+            adapter, ref = _publish_content(store, key_provider, session_id)
+            actor = _principal(store, session_id)
             store._rows(
                 "UPDATE sk_session SET phase=%s WHERE tenant_id=%s AND session_id=%s",
                 (phase, TENANT, session_id),
@@ -207,9 +227,9 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, 
             lease = store.for_tenant(TENANT).acquire(session_id, owner=f"worker-{phase}", ttl_ms=60_000)
             assert lease is not None
 
-            original_destroy = provider.destroy
+            original_destroy = key_provider.destroy
             monkeypatch.setattr(
-                provider,
+                key_provider,
                 "destroy",
                 lambda _tenant, _key: KeyDestroyOutcome(
                     False,
@@ -220,7 +240,7 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, 
             )
             deletion = SessionDeletionStore(store, adapter, signer=signer)
             with pytest.raises(KeyUnavailable):
-                deletion.forget_session(TENANT, session_id, actor=_principal())
+                deletion.forget_session(TENANT, session_id, actor=actor)
 
             state, epoch, tombstone_state = store._one(
                 "SELECT s.deletion_state,s.lease_epoch,t.state FROM sk_session s "
@@ -244,22 +264,17 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, 
             with pytest.raises(SessionNotLive), store.for_tenant(TENANT).atomic() as tx:
                 tx.push(
                     session_id,
-                    InboxItem(
-                        "late-input",
-                        "control",
-                        {"action": "cancel"},
-                        actor=_principal().to_dict(),
-                    ),
+                    InboxItem("late-input", "control", {"action": "cancel"}, actor=actor.to_dict()),
                 )
             with pytest.raises(SessionNotLive), store.for_tenant(TENANT).atomic() as tx:
                 tx.create(
                     SessionSpec(
                         f"child-{session_id}",
-                        _principal().to_dict(),
-                        _ref(f"workspace/child-{session_id}"),
+                        actor.to_dict(),
+                        actor.attributes.to_dict(),
                         parent_session_id=session_id,
                         parent_operation_id="op/child",
-                        attributes=_ref(f"attributes/child-{session_id}"),
+                        attributes=actor.attributes.to_dict(),
                     ),
                     consumers=(),
                 )
@@ -268,8 +283,8 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, 
             with pytest.raises(ContentUnavailable), store.for_tenant(TENANT).atomic():
                 adapter.put(TENANT, session_id, b"late publication", ContentLabels())
 
-            monkeypatch.setattr(provider, "destroy", original_destroy)
-            receipt = deletion.forget_session(TENANT, session_id, actor=_principal())
+            monkeypatch.setattr(key_provider, "destroy", original_destroy)
+            receipt = deletion.forget_session(TENANT, session_id, actor=actor)
             assert receipt.authenticity is DeletionAuthenticity.SIGNED
             skeleton = deletion.read_skeleton(TENANT, session_id)
             assert skeleton.records and skeleton.inputs
@@ -283,12 +298,16 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(tmp_path, 
                 adapter.get(TENANT, session_id, ref)
 
 
-def test_forget_crash_after_content_erase_resumes_pending_tombstone(tmp_path, monkeypatch) -> None:
+def test_forget_crash_after_content_erase_resumes_pending_tombstone(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "forget-crash.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "session")
-        adapter, _ref_value = _publish_content(store, provider, "session")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "session")
+        adapter, _ref_value = _publish_content(store, key_provider, "session")
+        actor = _principal(store, "session")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         original_complete = SQLStore.complete_forget
 
@@ -297,7 +316,7 @@ def test_forget_crash_after_content_erase_resumes_pending_tombstone(tmp_path, mo
 
         monkeypatch.setattr(SQLStore, "complete_forget", crash)
         with pytest.raises(RuntimeError, match="crash"):
-            deletion.forget_session(TENANT, "session", actor=_principal())
+            deletion.forget_session(TENANT, "session", actor=actor)
         assert store._one(
             "SELECT s.deletion_state,t.state FROM sk_session s JOIN sk_tombstone t "
             "ON t.tenant_id=s.tenant_id AND t.session_id=s.session_id WHERE s.session_id='session'"
@@ -306,21 +325,20 @@ def test_forget_crash_after_content_erase_resumes_pending_tombstone(tmp_path, mo
         assert _count(store, "sk_session_key", "session") == 0
 
         monkeypatch.setattr(SQLStore, "complete_forget", original_complete)
-        deletion.forget_session(TENANT, "session", actor=_principal())
-        deletion.forget_session(TENANT, "session", actor=_principal())
+        deletion.forget_session(TENANT, "session", actor=actor)
+        deletion.forget_session(TENANT, "session", actor=actor)
         assert store._one("SELECT deletion_state FROM sk_session WHERE session_id='session'") == ("forgotten",)
         assert store._one("SELECT state FROM sk_tombstone WHERE session_id='session'") == ("complete",)
 
 
-def test_unknown_effect_is_fenced_but_retained_for_skeleton(tmp_path) -> None:
+def test_unknown_effect_is_fenced_but_retained_for_skeleton(tmp_path, key_provider: LocalKeyProvider) -> None:
     path = tmp_path / "unknown-effect.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "unknown")
-        _append_unknown_effect(store, "unknown")
-        adapter, _ref_value = _publish_content(store, provider, "unknown")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "unknown")
+        _append_unknown_effect(store, key_provider, "unknown")
+        adapter, _ref_value = _publish_content(store, key_provider, "unknown")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
-        receipt = deletion.forget_session(TENANT, "unknown", actor=_principal())
+        receipt = deletion.forget_session(TENANT, "unknown", actor=_principal(store, "unknown"))
         assert receipt.remote_effect_state == "unknown"
         with pytest.raises(SessionNotLive):
             store.for_tenant(TENANT).read("unknown")
@@ -334,18 +352,19 @@ def test_unknown_effect_is_fenced_but_retained_for_skeleton(tmp_path) -> None:
         ]
 
 
-def test_forget_cascades_tombstones_and_content_over_the_entire_scope(tmp_path) -> None:
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(tmp_path / "forget-scope.sqlite") as (store, signer):
+def test_forget_cascades_tombstones_and_content_over_the_entire_scope(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
+    with _sqlite(tmp_path / "forget-scope.sqlite", key_provider) as (store, signer):
         assert signer is not None
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "grandchild", parent="child")
-        adapter, child_ref = _publish_content(store, provider, "child")
-        adapter, grandchild_ref = _publish_content(store, provider, "grandchild")
-        with store.for_tenant(TENANT).atomic():
-            actor_ref = adapter.put(TENANT, "root", b"provider actor", ContentLabels())
-        actor = Principal(TENANT, "user/deleter", "user", actor_ref)
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "grandchild", parent="child")
+        adapter, child_ref = _publish_content(store, key_provider, "child")
+        adapter, grandchild_ref = _publish_content(store, key_provider, "grandchild")
+        actor = _principal(store, "root")
+        actor_ref = actor.attributes
         deletion = SessionDeletionStore(store, adapter, signer=signer)
 
         receipt = deletion.forget_session(TENANT, "root", actor=actor)
@@ -383,17 +402,21 @@ def test_forget_cascades_tombstones_and_content_over_the_entire_scope(tmp_path) 
             deletion.verify_tombstones(TENANT, "other")
 
 
-def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(tmp_path) -> None:
+def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "purge.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "grandchild", parent="child")
-        _pending_input(store, "child")
-        adapter, ref = _publish_content(store, provider, "grandchild")
+    with _sqlite(path, key_provider) as (store, signer):
+        assert signer is not None
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "grandchild", parent="child")
+        _pending_input(store, key_provider, "child")
+        adapter, ref = _publish_content(store, key_provider, "grandchild")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
-        receipt = deletion.purge_session(TENANT, "root", actor=_principal())
+        actor = _principal(store, "root")
+        receipt = deletion.purge_session(TENANT, "root", actor=actor)
         assert set(receipt.session_ids) == {"root", "child", "grandchild"}
         tombstones = deletion.verify_tombstones(TENANT, "root")
         assert {item.session_id for item in tombstones} == {"root", "child", "grandchild"}
@@ -411,7 +434,7 @@ def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(tmp_p
         with pytest.raises(ContentUnavailable):
             adapter.get(TENANT, "grandchild", ref)
 
-        repeated = deletion.purge_session(TENANT, "root", actor=_principal())
+        repeated = deletion.purge_session(TENANT, "root", actor=actor)
         assert set(repeated.session_ids) == {"root", "child", "grandchild"}
         signature = store._one("SELECT signature FROM sk_tombstone WHERE session_id='child'")[0]
         store._rows(
@@ -422,19 +445,22 @@ def test_purge_cascades_child_first_and_retains_only_verifiable_tombstones(tmp_p
             deletion.verify_tombstones(TENANT, "root")
 
 
-def test_missing_signer_fails_before_fence_and_unsigned_mode_is_explicitly_weak(tmp_path) -> None:
+def test_missing_signer_fails_before_fence_and_unsigned_mode_is_explicitly_weak(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "unsigned.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path, signed=False) as (store, _signer):
-        _create_session(store, "session")
-        adapter, _ref_value = _publish_content(store, provider, "session")
+    with _sqlite(path, key_provider, signed=False) as (store, _signer):
+        _create_session(store, key_provider, "session")
+        adapter, _ref_value = _publish_content(store, key_provider, "session")
+        actor = _principal(store, "session")
 
         with pytest.raises(DeletionSignerUnavailable):
-            SessionDeletionStore(store, adapter).forget_session(TENANT, "session", actor=_principal())
+            SessionDeletionStore(store, adapter).forget_session(TENANT, "session", actor=actor)
         assert store._one("SELECT deletion_state FROM sk_session WHERE session_id='session'") == ("live",)
 
         deletion = SessionDeletionStore(store, adapter, allow_unsigned=True)
-        receipt = deletion.forget_session(TENANT, "session", actor=_principal())
+        receipt = deletion.forget_session(TENANT, "session", actor=actor)
         assert receipt.authenticity is DeletionAuthenticity.HASH_ONLY
         tombstone = deletion.verify_tombstones(TENANT, "session")[0]
         assert tombstone.key_id == "hash-only/sha256"
@@ -447,17 +473,16 @@ def test_missing_signer_fails_before_fence_and_unsigned_mode_is_explicitly_weak(
             deletion.verify_tombstones(TENANT, "session")
 
 
-def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path) -> None:
+def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path, key_provider: LocalKeyProvider) -> None:
     path = tmp_path / "tenant.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "session")
-        adapter, _ref_value = _publish_content(store, provider, "session")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "session")
+        adapter, _ref_value = _publish_content(store, key_provider, "session")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         with pytest.raises(ContentBindingMismatch):
-            deletion.forget_session(TENANT, "session", actor=_principal("tenant-b"))
+            deletion.forget_session(TENANT, "session", actor=_principal(store, "session", "tenant-b"))
         with pytest.raises(Conflict):
-            deletion.forget_session("tenant-b", "session", actor=_principal("tenant-b"))
+            deletion.forget_session("tenant-b", "session", actor=_principal(store, "session", "tenant-b"))
         assert store._one(
             "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id='session'",
             (TENANT,),
@@ -468,16 +493,16 @@ def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path) -> None:
         ) == (0,)
 
 
-def test_child_forget_then_parent_forget_cascades_three_levels(tmp_path) -> None:
+def test_child_forget_then_parent_forget_cascades_three_levels(tmp_path, key_provider: LocalKeyProvider) -> None:
     path = tmp_path / "child-before-parent-forget.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    retention = _principal(subject_id="service/retention")
-    compliance = _principal(subject_id="service/compliance")
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "grandchild", parent="child")
-        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+    with _sqlite(path, key_provider) as (store, signer):
+        assert signer is not None
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "grandchild", parent="child")
+        retention = _principal(store, "root", subject_id="service/retention")
+        compliance = _principal(store, "root", subject_id="service/compliance")
+        adapter, _ref_value = _publish_content(store, key_provider, "grandchild")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
 
         child_receipt = deletion.forget_session(TENANT, "child", actor=retention)
@@ -499,15 +524,17 @@ def test_child_forget_then_parent_forget_cascades_three_levels(tmp_path) -> None
         assert signer.verify(child_tombstone.key_id, _tombstone_message(child_tombstone), b64decode(child_tombstone.signature))
 
 
-def test_retention_forget_then_compliance_admin_purge_is_accepted(tmp_path) -> None:
+def test_retention_forget_then_compliance_admin_purge_is_accepted(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "different-actors.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    retention = _principal(subject_id="service/retention")
-    compliance = _principal(subject_id="service/compliance")
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        adapter, _ref_value = _publish_content(store, provider, "child")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        retention = _principal(store, "root", subject_id="service/retention")
+        compliance = _principal(store, "root", subject_id="service/compliance")
+        adapter, _ref_value = _publish_content(store, key_provider, "child")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
 
         forgotten = deletion.forget_session(TENANT, "root", actor=retention)
@@ -521,16 +548,18 @@ def test_retention_forget_then_compliance_admin_purge_is_accepted(tmp_path) -> N
         assert all(item.state is TombstoneState.COMPLETE for item in tombstones)
 
 
-def test_child_forget_then_parent_purge_preserves_descendant_tombstone_evidence(tmp_path) -> None:
+def test_child_forget_then_parent_purge_preserves_descendant_tombstone_evidence(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "child-before-parent-purge.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    retention = _principal(subject_id="service/retention")
-    compliance = _principal(subject_id="service/compliance")
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "grandchild", parent="child")
-        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "grandchild", parent="child")
+        retention = _principal(store, "root", subject_id="service/retention")
+        compliance = _principal(store, "root", subject_id="service/compliance")
+        adapter, _ref_value = _publish_content(store, key_provider, "grandchild")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         child_forget = deletion.forget_session(TENANT, "child", actor=retention)
         child_tombstone = _tombstone(store, "child")
@@ -546,21 +575,25 @@ def test_child_forget_then_parent_purge_preserves_descendant_tombstone_evidence(
         assert retained["child"].actor == compliance
 
 
-def test_repeated_forget_reuses_complete_tombstones_without_destroying_again(tmp_path, monkeypatch) -> None:
+def test_repeated_forget_reuses_complete_tombstones_without_destroying_again(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "repeat-forget.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    actor = _principal()
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "session")
-        adapter, _ref_value = _publish_content(store, provider, "session")
+    with _sqlite(path, key_provider) as (store, signer):
+        assert signer is not None
+        _create_session(store, key_provider, "session")
+        actor = _principal(store, "session")
+        adapter, _ref_value = _publish_content(store, key_provider, "session")
         calls: list[str] = []
-        original_destroy = provider.destroy
+        original_destroy = key_provider.destroy
 
         def counted_destroy(tenant_id: str, key_id: str):
             calls.append(key_id)
             return original_destroy(tenant_id, key_id)
 
-        monkeypatch.setattr(provider, "destroy", counted_destroy)
+        monkeypatch.setattr(key_provider, "destroy", counted_destroy)
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         first = deletion.forget_session(TENANT, "session", actor=actor)
         first_tombstone = _tombstone(store, "session")
@@ -574,13 +607,15 @@ def test_repeated_forget_reuses_complete_tombstones_without_destroying_again(tmp
         assert first_tombstone.signature == second_tombstone.signature
 
 
-def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(tmp_path) -> None:
+def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(
+    tmp_path,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "external-cleanup.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        adapter, ref = _publish_content(store, provider, "child")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        adapter, ref = _publish_content(store, key_provider, "child")
         store._rows(
             "UPDATE sk_content SET ciphertext=NULL,object_locator=%s WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
             (b"remote://content/child", TENANT, "child", ref.content_id),
@@ -595,7 +630,7 @@ def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(tmp_
         adapter.set_object_locator_cleaner(cleaner)
         deletion = SessionDeletionStore(store, adapter, signer=signer)
 
-        retention = _principal(subject_id="service/retention")
+        retention = _principal(store, "root", subject_id="service/retention")
         with pytest.raises(RuntimeError, match="outcome unknown"):
             deletion.forget_session(TENANT, "root", actor=retention)
         pending = store._rows(
@@ -612,39 +647,51 @@ def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(tmp_
         assert all(item.state is TombstoneState.COMPLETE for item in deletion.verify_tombstones(TENANT, "root"))
 
 
-def test_incomplete_locked_scope_is_rejected_before_content_erasure(tmp_path, monkeypatch) -> None:
+def test_incomplete_locked_scope_is_rejected_before_content_erasure(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "incomplete-scope.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "grandchild", parent="child")
-        adapter, _ref_value = _publish_content(store, provider, "grandchild")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "grandchild", parent="child")
+        adapter, _ref_value = _publish_content(store, key_provider, "grandchild")
         original_begin = SQLStore.begin_forget
 
         def incomplete_scope(store: SQLStore, *args, **kwargs):
             scope = original_begin(store, *args, **kwargs)
             return tuple(session_id for session_id in scope if session_id != "grandchild")
 
+        session_ids = ("root", "child", "grandchild")
+        content_tables = ("sk_session_key", "sk_content", "sk_content_link")
+        actor = _principal(store, "root")
+        before_counts = {
+            (session_id, table): _count(store, table, session_id) for session_id in session_ids for table in content_tables
+        }
+        assert before_counts[("grandchild", "sk_content")] > 1
+
         monkeypatch.setattr(SQLStore, "begin_forget", incomplete_scope)
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         with pytest.raises(LedgerIntegrityError, match="root descendant inventory"):
-            deletion.forget_session(TENANT, "root", actor=_principal())
-        assert store._one(
-            "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id='grandchild'",
-            (TENANT,),
-        ) == (1,)
+            deletion.forget_session(TENANT, "root", actor=actor)
+        after_counts = {
+            (session_id, table): _count(store, table, session_id) for session_id in session_ids for table in content_tables
+        }
+        assert after_counts == before_counts
 
 
-def test_signed_tombstone_with_cross_scope_root_is_rejected(tmp_path) -> None:
+def test_signed_tombstone_with_cross_scope_root_is_rejected(tmp_path, key_provider: LocalKeyProvider) -> None:
     path = tmp_path / "forged-scope.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        adapter, _ref_value = _publish_content(store, provider, "child")
+    with _sqlite(path, key_provider) as (store, signer):
+        assert signer is not None
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        adapter, _ref_value = _publish_content(store, key_provider, "child")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
-        deletion.forget_session(TENANT, "child", actor=_principal(subject_id="service/retention"))
+        retention = _principal(store, "root", subject_id="service/retention")
+        deletion.forget_session(TENANT, "child", actor=retention)
         tombstone = _tombstone(store, "child")
         assert tombstone is not None
         forged_unsigned = replace(tombstone, scope_root_session_id="unrelated")
@@ -672,14 +719,16 @@ def test_signed_tombstone_with_cross_scope_root_is_rejected(tmp_path) -> None:
             )
 
 
-def test_signed_tombstone_with_wrong_head_is_rejected(tmp_path) -> None:
+def test_signed_tombstone_with_wrong_head_is_rejected(tmp_path, key_provider: LocalKeyProvider) -> None:
     path = tmp_path / "forged-head.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "session")
-        adapter, _ref_value = _publish_content(store, provider, "session")
+    with _sqlite(path, key_provider) as (store, signer):
+        assert signer is not None
+        _create_session(store, key_provider, "session")
+        adapter, _ref_value = _publish_content(store, key_provider, "session")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
-        deletion.forget_session(TENANT, "session", actor=_principal())
+        deletion_actor = _principal(store, "session")
+        compliance = _principal(store, "session", subject_id="service/compliance")
+        deletion.forget_session(TENANT, "session", actor=deletion_actor)
         tombstone = _tombstone(store, "session")
         assert tombstone is not None
         forged_unsigned = replace(tombstone, final_seq=tombstone.final_seq + 1)
@@ -693,17 +742,20 @@ def test_signed_tombstone_with_wrong_head_is_rejected(tmp_path) -> None:
         )
 
         with pytest.raises(LedgerIntegrityError, match="final head"):
-            deletion.purge_session(TENANT, "session", actor=_principal(subject_id="service/compliance"))
+            deletion.purge_session(TENANT, "session", actor=compliance)
 
 
-def test_scope_validation_uses_one_root_bounded_query(tmp_path, monkeypatch) -> None:
+def test_scope_validation_uses_one_root_bounded_query(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "bounded-query.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        _create_session(store, "child", parent="root")
-        _create_session(store, "unrelated")
-        adapter, _ref_value = _publish_content(store, provider, "child")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        _create_session(store, key_provider, "child", parent="root")
+        _create_session(store, key_provider, "unrelated")
+        adapter, _ref_value = _publish_content(store, key_provider, "child")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         calls: list[str] = []
         original_rows = store._rows
@@ -726,12 +778,15 @@ def test_scope_validation_uses_one_root_bounded_query(tmp_path, monkeypatch) -> 
         assert "WITH RECURSIVE deletion_scope" in calls[0]
 
 
-def test_deletion_table_counts_are_batched_across_scope_members(tmp_path, monkeypatch) -> None:
+def test_deletion_table_counts_are_batched_across_scope_members(
+    tmp_path,
+    monkeypatch,
+    key_provider: LocalKeyProvider,
+) -> None:
     path = tmp_path / "batched-counts.sqlite"
-    provider = LocalKeyProvider(MASTER_KEY)
-    with _sqlite(path) as (store, signer):
-        _create_session(store, "root")
-        adapter, _ref_value = _publish_content(store, provider, "root")
+    with _sqlite(path, key_provider) as (store, signer):
+        _create_session(store, key_provider, "root")
+        adapter, _ref_value = _publish_content(store, key_provider, "root")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
         calls: list[str] = []
         original_rows = store._rows

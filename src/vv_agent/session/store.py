@@ -1,5 +1,6 @@
 """Actual core session receipts, leases, errors and store protocols."""
 
+from vv_agent.kernel._store import ClaimedWork as ClaimedWork
 from vv_agent.kernel._store import CommitReceipt as CommitReceipt
 from vv_agent.kernel._store import Conflict as Conflict
 from vv_agent.kernel._store import ConsumerBatch as ConsumerBatch

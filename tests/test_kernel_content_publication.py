@@ -19,6 +19,8 @@ from vv_agent.kernel._content_publication import (
     publish_record_content,
     publish_turn_started,
 )
+from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSessionContentWriter
+from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record, SessionSpec, digest, make_record, record_identity
@@ -27,7 +29,7 @@ from vv_agent.kernel._store import Conflict
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.content_runtime import SessionContentWriter
-from vv_agent.session.content_store import LocalKeyProvider, SQLContentStore
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.kernel import _Driver
 from vv_agent.session.records import InboxItem
 from vv_agent.session.sqlite import SQLiteStore
@@ -88,6 +90,9 @@ class _Writer:
 
     def service_principal(self, subject_id, *, attributes=None):
         raise AssertionError("unexpected service_principal")
+
+    def link_input(self, input_id, ref, slot):
+        raise AssertionError("unexpected link_input")
 
     def link_input_actor(self, input_id, ref):
         raise AssertionError("unexpected link_input_actor")
@@ -361,7 +366,7 @@ def test_link_failure_rolls_back_record_key_content_and_links(tmp_path, monkeypa
         def fail_link(self, tenant_id, session_id, record_seq, ref, slot):
             raise RuntimeError("forced link failure")
 
-        monkeypatch.setattr(SQLContentStore, "link_record", fail_link)
+        monkeypatch.setattr(CoreSQLContentStore, "link_record", fail_link)
 
         def prepare(tx):
             content = publish_turn_started(
@@ -392,6 +397,8 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
         store.install_schema()
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {})
+        with store.atomic() as tx:
+            sessions._push_in_transaction(tx, "s", InboxItem("initial", "user", {"content": "work"}))
         agent = Agent("kernel", "Work.", model="scripted")
         runtime = sessions.runtime(
             agent,
@@ -404,39 +411,66 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
         lease = sessions.store.acquire("s", owner="op-rollback-test", ttl_ms=15_000)
         assert lease is not None
         driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+        assert _recovery_phase.run(driver, inputs.apply_input(driver, one_turn=False))
+        assert _recovery_phase.run(driver, inputs.start_turn(driver))
+        turn_id = driver.state.active_turn_id
+        assert turn_id is not None
+
+        result = {"content": "done", "tool_calls": []}
+        request = {"id": "call", "name": "tool", "arguments": {}}
+        tool = {"name": "tool"}
+        budget_admission = {}
+        operation_id = "operation/transaction"
+        plan_payload = {
+            "op_kind": "tool",
+            "purpose": None,
+            "request": request,
+            "request_digest": digest(request),
+            "context_version": "1",
+            "dependencies": [],
+            "tool": tool,
+            "idempotency_key": None,
+            "budget_admission": budget_admission,
+            "not_before_ms": None,
+            "provider_binding": None,
+            "consumed_unknowns": [],
+            "policy_decision": None,
+        }
+        plan = Record(
+            record_id=record_identity("op_planned", "s", turn_id, operation_id, 1, plan_payload),
+            kind="op_planned",
+            session_id="s",
+            turn_id=turn_id,
+            operation_id=operation_id,
+            attempt=1,
+            payload=plan_payload,
+        )
+        driver.commit([plan], guarded=True)
+        published_plan = next(row.record for row in driver.records if row.record.kind == "op_planned")
+        request_digest = published_plan._payload["request_digest"]
+        started = driver.record(
+            "op_started",
+            {
+                "dispatch_id": "dispatch",
+                "authorization_version": "v1",
+                "epoch": 1,
+                "mode": "sync",
+            },
+            published_plan,
+        )
+        driver.commit([started], guarded=True)
+
+        def fail_append(self, *args, **kwargs):
+            raise RuntimeError("forced op append failure")
+
         before = {
             table: store._one(
                 f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
                 ("default", "s"),
             )[0]
-            for table in ("sk_record", "sk_commit", "sk_content", "sk_content_link")
+            for table in ("sk_record", "sk_commit", "sk_session_key", "sk_content", "sk_content_link")
         }
-
-        def fail_append(self, *args, **kwargs):
-            raise RuntimeError("forced op append failure")
-
         monkeypatch.setattr(SQLSessionTx, "append", fail_append)
-        result = {"content": "done", "tool_calls": []}
-        plan = _plain_record(
-            "op_planned",
-            {
-                "op_kind": "tool",
-                "purpose": None,
-                "request": _ref("plan-request").to_dict(),
-                "request_digest": digest({"request": True}),
-                "context_version": "1",
-                "dependencies": [],
-                "tool": _ref("plan-tool").to_dict(),
-                "idempotency_key": None,
-                "budget_admission": _ref("plan-budget").to_dict(),
-                "not_before_ms": None,
-                "provider_binding": None,
-                "consumed_unknowns": [],
-                "policy_decision": None,
-            },
-            suffix="transaction",
-            session_id="s",
-        )
         completed = driver.record(
             "op_completed",
             {
@@ -447,11 +481,11 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
                 "evidence": ["synchronous-return"],
                 "execution_started": True,
                 "context": "normal",
-                "request_digest": digest({"request": True}),
+                "request_digest": request_digest,
                 "provider_binding": None,
                 "policy_decision": None,
             },
-            plan,
+            published_plan,
         )
 
         with pytest.raises(RuntimeError, match="forced op append failure"):
@@ -465,20 +499,26 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
             for table in before
         }
         assert after == before
-        assert [row.record.kind for row in driver.records] == ["session_created"]
+        assert [row.record.kind for row in driver.records] == [
+            "session_created",
+            "input_applied",
+            "turn_started",
+            "op_planned",
+            "op_started",
+        ]
 
 
 def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monkeypatch) -> None:
     path = tmp_path / "replay.sqlite"
     provider = LocalKeyProvider(MASTER_KEY)
     puts: list[object] = []
-    put_json = SessionContentWriter.put_json
+    put_json = CoreSessionContentWriter.put_json
 
     def record_put(self, value, *, labels=...):
         puts.append(deepcopy(value))
         return put_json(self, value) if labels is ... else put_json(self, value, labels=labels)
 
-    monkeypatch.setattr(SessionContentWriter, "put_json", record_put)
+    monkeypatch.setattr(CoreSessionContentWriter, "put_json", record_put)
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
         sessions = SessionDriver(store=store, content_key_provider=provider)

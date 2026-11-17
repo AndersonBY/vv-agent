@@ -74,7 +74,6 @@ def _definition() -> dict[str, Any]:
         "model_binding": {
             "backend": "scripted",
             "model": "scripted",
-            "endpoints": [],
             "context_length": None,
             "max_output_tokens": None,
         },
