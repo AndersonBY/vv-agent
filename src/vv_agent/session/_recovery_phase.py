@@ -178,7 +178,7 @@ class _Host:
 
             return driver.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, inputs.CommitInput):
-            return driver.commit(request.records, (request.input_id,), guarded=True)
+            return driver.commit(request.records, request.input_ids, guarded=True)
         if isinstance(request, inputs.CompileTurn):
             return driver.runtime.compile(request.content, request.turn_id, seed=request.seed, control=request.control)
         if isinstance(request, inputs.ResolveModelSelection):

@@ -29,6 +29,7 @@ from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.delegation import assemble as assemble_child_specs
 from vv_agent.session.projection import SessionHydration, hydrate_records
 from vv_agent.session.records import InboxItem, Record
+from vv_agent.session.result import project_result
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
@@ -513,7 +514,7 @@ def test_steer_held_fact_matches_real_core_apply_input(one_turn, target_tid, gen
         pending.close()
 
 
-@pytest.mark.parametrize("entry", ["runner", "interactive"])
+@pytest.mark.parametrize("entry", ["runner", "interactive", "app_server"])
 def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, tmp_path, monkeypatch, entry):
     assemble = assemble_child_specs
     stale_input_count = 255
@@ -524,20 +525,31 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         driver = SessionDriver(store=store, content_key_provider=fixture_key_provider())
         admitted, rendered, observed = [], [], []
+        accepted = YieldProvider()
         original_runtime = driver.runtime
 
-        def on_yield(*args):
-            rendered.append(args)
-            raise AssertionError("a terminal result ordered before steer must not emit a yield receipt")
+        def on_yield(plan, handles, reason):
+            assert reason == "steer"
+            rendered.append((plan, handles, reason))
+            return ToolExecutionResult(plan._payload["request"]["id"], "Yielded local observation")
+
+        accepted.on_yield = on_yield
 
         def runtime(*args, **kwargs):
             value = original_runtime(*args, **kwargs)
+            value.poll_ms = 60_000
+            if declared:
+                value.providers["child_task"] = accepted
+            claim_store = kwargs.get("store")
+            if claim_store is None:
+                # AppServer registers a pre-admission definition shell before the worker's store exists.
+                return value
 
             def admit(plan):
-                state, _, _ = driver._read_state(plan.session_id)
+                state, _, _ = driver._read_state(plan.session_id, claim_store)
                 task = state.turns[plan.turn_id].start.task()
-                context = value.context(task, plan, CancellationToken(), store=store, session_id=plan.session_id)
-                specs = cast(list[ChildSession], assemble(value, plan, context, task, store))
+                context = value.context(task, plan, CancellationToken(), store=claim_store, session_id=plan.session_id)
+                specs = cast(list[ChildSession], assemble(value, plan, context, task, claim_store))
                 admitted.extend(replace(child, yield_on_steer=declared) for child in specs)
                 return admitted
 
@@ -553,20 +565,28 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
             return LLMResponse("parent done")
 
         child = Agent("worker", "Work.", model="m", tools=[wait_child])
-        agent = Agent("parent", "Delegate.", model="m", tools=[child.as_tool()])
+        agent = Agent("parent", "Delegate.", model="m", tools=[child.as_tool(), child_task])
         provider = ScriptedModelProvider.from_steps(
             "test",
             "m",
             [
-                LLMResponse("", [ToolCall("child-call", "worker", {"task_description": "work"})]),
+                LLMResponse(
+                    "",
+                    [
+                        ToolCall("child-call", "worker", {"task_description": "work"}),
+                        *([ToolCall("provider-call", "child_task", {})] if declared else []),
+                    ],
+                ),
                 LLMResponse("", [ToolCall("wait", "wait_child", {})]),
                 LLMResponse("child done"),
                 finish,
             ],
         )
         config = RunConfig(model_provider=provider, workspace=tmp_path)
+        server = None
         with monkeypatch.context() as patch:
             patch.setattr("vv_agent.session.surfaces.SessionDriver", lambda *args, **kwargs: driver)
+            patch.setattr("vv_agent.session.app_server.SessionDriver", lambda *args, **kwargs: driver)
             patch.setattr(driver, "runtime", runtime)
             try:
                 if entry == "runner":
@@ -576,20 +596,81 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
 
                     def resume():
                         return Runner.resume(sid, tid)
-                else:
+                elif entry == "interactive":
                     client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
                     session = client.create_session(agent=agent)
                     assert session.prompt("go", auto_follow_up=False).status == AgentStatus.WAIT_USER
                     sid = session.session_id
                     tid = store.read_state(sid)[0].active_turn_id
                     resume = session.continue_run
+                else:
+                    transport = ChannelTransport(connection_id="local-test", outbound_capacity=10000)
+                    server = AppServer(
+                        transport=transport,
+                        store=store,
+                        host=DefaultAppServerHost(
+                            agent=agent,
+                            run_config=RunConfig(model_provider=provider, workspace=tmp_path),
+                        ),
+                    )
+                    assert server.kernel is driver
+                    identity = 0
+
+                    def rpc(method, params):
+                        nonlocal identity
+                        identity += 1
+                        server.processor.process_message(
+                            transport.connection_id,
+                            {"jsonrpc": "2.0", "id": identity, "method": method, "params": params},
+                        )
+                        while True:
+                            wire = transport.receive_outbound(timeout=10)
+                            if wire.get("id") == identity:
+                                assert "result" in wire, wire
+                                return wire["result"]
+
+                    rpc("initialize", {"clientInfo": {"name": "local-test"}})
+                    server.processor.process_message(transport.connection_id, {"jsonrpc": "2.0", "method": "initialized"})
+                    sid = f"local-thread-{'declared' if declared else 'undeclared'}"
+                    rpc("thread/start", {"inputId": sid})
+                    tid = rpc(
+                        "turn/start",
+                        {
+                            "threadId": sid,
+                            "inputId": "initial",
+                            "expectedTurnId": None,
+                            "input": [{"type": "text", "text": "go"}],
+                        },
+                    )["turnId"]
+                    deadline = monotonic() + 10
+                    while monotonic() < deadline:
+                        app_state = store.read_state(sid)[0]
+                        if app_state.waits:
+                            tid = app_state.active_turn_id or tid
+                            break
+                        sleep(0.02)
+                    else:
+                        raise AssertionError("AppServer worker did not reach the declared wait")
+
+                    def resume():
+                        rpc("turn/resume", {"threadId": sid, "turnId": tid})
+                        server.run_adapter.join()
+                        return project_result(driver.store, sid, tid)
 
                 _, records, before = store.read_state(sid)
                 parked = next(r.record for r in records if r.record.kind == "op_parked")
                 assert parked.payload.get("yield_on_steer", False) is declared
                 assert len(admitted) == 1
-                projection = driver._runtime_view(sid)
-                child_sid, _, wait = driver.waits(sid, projection)[0]
+                deadline = monotonic() + 10
+                while monotonic() < deadline:
+                    projection = driver._runtime_view(sid)
+                    waits = driver.waits(sid, projection)
+                    if waits:
+                        child_sid, _, wait = waits[0]
+                        break
+                    sleep(0.02)
+                else:
+                    raise AssertionError("declared child wait was not observable")
                 target = InteractionReplyTarget.from_dict(
                     {
                         k: wait["interaction"][k]
@@ -612,6 +693,8 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                 assert not store.is_runnable(sid)
                 actor = driver._session_principal(sid).to_dict()
                 actor_ref = ContentRef.from_dict(actor["attributes"])
+                transaction_id = cast(Any, driver.store)._root._transaction_id
+                atomic_write_ids: dict[str, object] = {}
                 with driver.store.atomic() as tx:
                     writer = SessionContentWriter.bind(tx, tenant_id=driver.tenant_id, session_id=sid)
                     driver._push_in_transaction(
@@ -620,6 +703,7 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                         InboxItem("steer", "steer", {"content": "Change direction now"}, tid, 0),
                         actor=actor,
                     )
+                    atomic_write_ids["steer"] = transaction_id()
                     template = driver._prepare_item(
                         sid,
                         InboxItem("stale-template", "follow_up", {"content": "old"}, "stale-turn", 0),
@@ -632,28 +716,52 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                         tx.push(sid, item)
                         writer.link_input_content(input_id, content_ref)
                         writer.link_input_actor(input_id, actor_ref)
-                    assert child_delivery(driver.store, tx, child_sid) > 0
+                        atomic_write_ids[f"stale/{index}"] = transaction_id()
+
+                    def record_delivery(point):
+                        if point == "after_parent_inbox":
+                            atomic_write_ids["child_delivery"] = transaction_id()
+
+                    assert child_delivery(driver.store, tx, child_sid, hook=record_delivery) > 0
+                assert set(atomic_write_ids) == {"steer", "child_delivery", *[f"stale/{i}" for i in range(stale_input_count)]}
+                assert len(set(atomic_write_ids.values())) == 1
                 patch.setattr(driver, "_deliver_child_session", original_deliver)
                 _, _, watermark = store.read_state(sid)
+                first_page = store.peek_inbox(sid, through_input_seq=watermark, limit=page_limit - 1)
                 page = store.peek_inbox(sid, through_input_seq=watermark, limit=page_limit)
                 assert watermark == before + page_limit
+                assert len(first_page) == page_limit - 1
+                assert first_page[-1].item.input_id == f"stale-{stale_input_count - 1}"
                 assert len(page) == page_limit
                 assert [item.item.input_id for item in page[:-1]] == [
                     "steer",
                     *[f"stale-{i}" for i in range(stale_input_count)],
                 ]
                 assert page[-1].item.kind == "child_result"
+                with driver.store.atomic() as tx:
+                    assert child_delivery(driver.store, tx, child_sid) == 0
+                assert [item.item.input_id for item in store.peek_inbox(sid, limit=page_limit)] == [
+                    item.item.input_id for item in page
+                ]
                 assert resume().status == AgentStatus.COMPLETED
                 state, records, _ = store.read_state(sid)
                 assert state.active_turn_id is None
-                assert not any(r.record.payload.get("yielded_by") for r in records)
-                assert not rendered
+                yielded = [
+                    r for r in records if r.record.kind == "op_completed" and r.record.payload.get("yielded_by") == "steer"
+                ]
+                if declared:
+                    assert yielded
+                    assert len(rendered) == 1
+                else:
+                    assert not yielded
+                    assert not rendered
                 assert len(observed) == 1
                 assert any("Change direction now" in str(m.content) for m in observed[0].messages)
                 assert not store.peek_inbox(sid)
                 consumed = [
                     (
                         r.seq,
+                        r.commit_id,
                         r.record.payload["input"]["input_id"],
                         r.record.payload["disposition"],
                     )
@@ -661,26 +769,40 @@ def test_local_declaration_preserves_inbox_paging_and_consumption_order(store, t
                     if r.record.kind == "input_applied"
                     and r.record.payload["input"]["input_id"] in {i.item.input_id for i in page}
                 ]
-                stale_consumed = [
-                    (seq, identity, disposition) for seq, identity, disposition in consumed if identity.startswith("stale-")
-                ]
-                assert [identity for _, identity, _ in stale_consumed] == [f"stale-{i}" for i in range(stale_input_count)]
-                assert [seq for seq, _, _ in stale_consumed] == sorted(seq for seq, _, _ in stale_consumed)
-                assert all(disposition == "rejected" for _, _, disposition in stale_consumed)
+                stale_consumed = [row for row in consumed if row[2].startswith("stale-")]
+                assert [identity for _, _, identity, _ in stale_consumed] == [f"stale-{i}" for i in range(stale_input_count)]
+                assert [seq for seq, _, _, _ in stale_consumed] == sorted(seq for seq, _, _, _ in stale_consumed)
+                assert all(disposition == "rejected" for _, _, _, disposition in stale_consumed)
                 child_consumed = [
-                    (seq, disposition) for seq, identity, disposition in consumed if identity == page[-1].item.input_id
+                    (seq, commit_id, disposition)
+                    for seq, commit_id, identity, disposition in consumed
+                    if identity == page[-1].item.input_id
                 ]
-                steer_consumed = [(seq, disposition) for seq, identity, disposition in consumed if identity == "steer"]
+                steer_consumed = [
+                    (seq, commit_id, disposition) for seq, commit_id, identity, disposition in consumed if identity == "steer"
+                ]
                 assert len(child_consumed) == len(steer_consumed) == 1
+                assert len(consumed) == len({identity for _, _, identity, _ in consumed}) == page_limit
+                if declared:
+                    receipt_commit_ids = {r.commit_id for r in yielded}
+                    assert len(receipt_commit_ids) == 1
+                    yielded_commit_id = next(iter(receipt_commit_ids))
+                    assert steer_consumed[0][1] == yielded_commit_id
+                    assert child_consumed[0][1] == steer_consumed[0][1]
+                assert all(commit_id for _, commit_id, _, _ in consumed)
+                assert len({commit_id for _, commit_id, _ in child_consumed}) == 1
+                assert len({commit_id for _, commit_id, _ in steer_consumed}) == 1
                 assert child_consumed[0][0] < steer_consumed[0][0]
-                assert child_consumed[0][1] == steer_consumed[0][1] == "applied"
+                assert child_consumed[0][2] == steer_consumed[0][2] == "applied"
                 return (
-                    tuple((identity, disposition) for _, identity, disposition in stale_consumed),
-                    child_consumed[0][1],
-                    steer_consumed[0][1],
+                    tuple((identity, disposition) for _, _, identity, disposition in stale_consumed),
+                    child_consumed[0][2],
+                    steer_consumed[0][2],
                     child_consumed[0][0] < steer_consumed[0][0],
                 )
             finally:
+                if server is not None:
+                    server.run_adapter.close()
                 driver.close()
 
     baseline = exercise(False)

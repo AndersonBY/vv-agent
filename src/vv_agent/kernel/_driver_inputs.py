@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
@@ -53,6 +53,26 @@ class InputSetting(Enum):
 class CommitInput:
     records: list[Record]
     input_id: str
+    additional_input_ids: tuple[str, ...] = ()
+
+    @property
+    def input_ids(self) -> tuple[str, ...]:
+        return (self.input_id, *self.additional_input_ids)
+
+
+class _BatchDriverView:
+    """Expose an uncommitted logical child completion to existing outcome generation."""
+
+    __slots__ = ("_driver", "content_reader", "fold", "state")
+
+    def __init__(self, driver: CoreDriver, *, content_reader) -> None:
+        self._driver = driver
+        self.state = driver.state
+        self.fold = driver.fold
+        self.content_reader = content_reader
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._driver, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +330,74 @@ def _steer_held_in_state(
     )
 
 
+def _steer_after_child(
+    self: CoreDriver,
+    *,
+    child_item: InboxItem,
+    child_receipt: Record,
+    child_extra: list[Record],
+    steer_item: InboxItem,
+    stored_steer,
+    one_turn: bool,
+) -> Generator[object, Any, tuple[Record, list[Record]] | None]:
+    original_state, original_fold = self.state, self.fold
+    provisional = self.fold.fork()
+    state = provisional.state
+    state.applied_inputs[child_item.input_id] = child_receipt
+    if state.child_completions is None:
+        state.child_completions = {}
+    key = (child_item.payload["operation_id"], child_item.payload["attempt"], child_item.payload["session_id"])
+    state.child_completions[key] = child_receipt
+    provisional.consumed[child_item.input_id] = child_item
+    for child_record in child_extra:
+        if child_record.kind != "op_completed":
+            continue
+        assert child_record.operation_id is not None and child_record.attempt is not None
+        provisional._own_operation(child_record.operation_id)
+        operation = state.operations[child_record.operation_id]
+        attempt = operation.attempts[child_record.attempt]
+        attempt.state = "completed"
+        attempt.result = child_record
+        attempt.context = child_record._payload["context"]
+        attempt.wait = None
+        operation.selected_attempt = child_record.attempt
+    try:
+        self.state, self.fold = provisional.state, provisional
+        cancelled = yield InputSetting.CANCELLED
+        yielding = _steer_yield_plan_in_state(
+            self.state,
+            steer_item,
+            one_turn=one_turn,
+            cancelled=cancelled,
+        )
+        if not yielding:
+            return None
+        from . import _driver_outcomes as outcomes
+
+        extra = []
+        for attempt in yielding:
+            view = _BatchDriverView(self, content_reader=None if attempt.child_handle else self.content_reader)
+            extra.extend((yield from outcomes.yield_results_steps(cast(CoreDriver, view), [attempt], steer_item)))
+        raw_steer = stored_steer.item
+        applied = self.record(
+            "input_applied",
+            {
+                "input": raw_steer.to_dict(),
+                "input_digest": raw_steer.digest,
+                "input_proof": stored_input_proof(stored_steer),
+                "disposition": "applied",
+                "reason": None,
+                "target_operation_id": None,
+                "target_wait_id": None,
+                "position": "before_model",
+            },
+            tid=self.state.active_turn_id,
+        )
+        return applied, extra
+    finally:
+        self.state, self.fold = original_state, original_fold
+
+
 def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
     inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark)
     # At one captured watermark, authenticated child terminals win over steering.
@@ -318,7 +406,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
         if len(inputs) == 256 and self.watermark > 256:
             inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark, limit=self.watermark)
         inputs = sorted(inputs, key=lambda stored: stored.item.kind != "child_result")
-    for stored in inputs:
+    for index, stored in enumerate(inputs):
         item, extra, disposition, reason, target, wait = stored.item, [], "applied", None, None, None
         logical_item = hydrate_input(self, item) if self.content_reader is not None else item
         tid = self.state.active_turn_id
@@ -649,6 +737,33 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
         )
         if logical_item.kind == "model_selection" and disposition == "applied" and logical_item.payload["selection"] is not None:
             applied = replace(applied, payload=applied._payload | {"model_binding": selection_binding})
+        if (
+            declared_wait
+            and logical_item.kind == "child_result"
+            and disposition == "applied"
+            and (reason == "batch member completed" or any(record.kind == "op_completed" for record in extra))
+            and index + 1 < len(inputs)
+            and inputs[index + 1].item.kind == "steer"
+        ):
+            steer_stored = inputs[index + 1]
+            steer_item = hydrate_input(self, steer_stored.item) if self.content_reader is not None else steer_stored.item
+            batch = yield from _steer_after_child(
+                self,
+                child_item=item,
+                child_receipt=replace(applied, payload=applied._payload | {"input": logical_item.to_dict()}),
+                child_extra=extra,
+                steer_item=steer_item,
+                stored_steer=steer_stored,
+                one_turn=one_turn,
+            )
+            if batch is not None:
+                steer_applied, steer_extra = batch
+                yield CommitInput(
+                    [applied, *extra, steer_applied, *steer_extra],
+                    item.input_id,
+                    (steer_item.input_id,),
+                )
+                return True
         yield CommitInput([applied, *extra], item.input_id)
         return True
     return False

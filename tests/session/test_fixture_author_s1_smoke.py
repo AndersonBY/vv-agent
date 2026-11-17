@@ -5,7 +5,7 @@ from __future__ import annotations
 import runpy
 from pathlib import Path
 
-from vv_agent.events import ModelCallCompletedEvent
+from vv_agent.events import ModelCallCompletedEvent, ModelCallFailedEvent
 from vv_agent.kernel._content import (
     INPUT_ACTOR_ATTRIBUTES,
     INPUT_CONTENT,
@@ -15,6 +15,7 @@ from vv_agent.kernel._content import (
 )
 from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
+from vv_agent.session.result import project_result
 from vv_agent.types import AgentStatus, CompletionReason
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session_kernel_fixtures.py"
@@ -245,5 +246,99 @@ def test_fixture_author_endpoint_routing_uses_hydrated_s1_plans() -> None:
         assert b'"model":"selected"' not in joined
         assert b'"endpoint_order":["A","B"]' not in joined
         assert b'"done"' not in joined
+    finally:
+        fixtures.kernel.close()
+
+
+def test_fixture_author_model_selection_hydrates_one_s1_snapshot() -> None:
+    fixtures = AUTHOR["Fixtures"]()
+    session_id = "model_selection"
+    try:
+        fixtures.model_selection()
+
+        assert len(fixtures.semantics) == 1
+        case = fixtures.semantics[0]
+        assert case["case"] == "model_selection_mid_session_retry"
+        assert case["session_id"] == session_id
+        assert case["models"] == ["m", "m", "B"]
+        assert case["billable_models"] == ["m", "m", "B"]
+        assert case["retry_request_unchanged"] is True
+        assert len(fixtures.invalid) == 1
+        assert fixtures.invalid[0]["rejection_class"] == "model_selection_input_id_conflict"
+        assert fixtures.invalid[0]["session_id"] == session_id
+
+        raw_store = fixtures.kernel._root_store
+        snapshot = fixtures.kernel._read_state(session_id)
+        state, rows, _ = snapshot
+        assert state.active_turn_id is None
+        hydration = hydration_for_session_store(fixtures.kernel.store, session_id)
+        hydrated = [(row, hydrate_record_payload(row, hydration)) for row in rows]
+        plans = [
+            (row, payload) for row, payload in hydrated if row.record.kind == "op_planned" and payload["purpose"] == "primary"
+        ]
+        assert [payload["request"]["model"] for _, payload in plans] == ["m", "m", "B"]
+        assert plans[0][1]["request"] == plans[1][1]["request"]
+        assert plans[2][1]["request"]["route"] == {"backend_type": "anthropic"}
+        assert plans[2][1]["request"]["model_settings"] == {
+            "reasoning": {"effort": "high"},
+            "max_tokens": 1024,
+            "retry": {"max_attempts": 1, "backoff_seconds": 0},
+        }
+        assert all(declared_content_ref(row.record.payload["request"]) is not None for row, _ in plans)
+        assert all(row.record.feature_level == 1 for row, _ in plans)
+
+        selection_row, selection_payload = next(
+            (row, payload)
+            for row, payload in hydrated
+            if row.record.kind == "input_applied" and payload["input"]["input_id"] == "select-B"
+        )
+        selection = {
+            "model": "B",
+            "model_settings": {"reasoning": {"effort": "high"}, "max_tokens": 1024},
+            "route": {"backend_type": "anthropic"},
+        }
+        assert selection_row.record.feature_level == 1
+        assert selection_payload["input"]["payload"] == {"selection": selection}
+        assert selection_payload["model_binding"]["model"] == "B"
+        assert declared_content_ref(selection_row.record.payload["input"]["payload"]["selection"]) is not None
+        assert declared_content_ref(case["selection_record"]["payload"]["input"]["payload"]["selection"]) is not None
+
+        model_calls = [
+            event
+            for event in project_records(rows, hydration=hydration)
+            if isinstance(event, (ModelCallCompletedEvent, ModelCallFailedEvent))
+        ]
+        assert [event.model for event in model_calls] == ["m", "m", "B"]
+        assert [event.backend for event in model_calls] == ["scripted", "scripted", "anthropic"]
+        ledger_calls = project_result(
+            fixtures.kernel.store,
+            session_id,
+            next(reversed(state.turns)),
+            runtime=fixtures.runtimes[session_id],
+            snapshot=snapshot,
+        ).token_usage.model_calls
+        assert case["calls"] == [call.to_dict() for call in ledger_calls]
+
+        stored_selection = fixtures.inbox[(session_id, "select-B")]
+        assert declared_content_ref(stored_selection.payload["selection"]) is not None
+        raw_inbox = raw_store._one(
+            "SELECT body FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            ("default", session_id, "select-B"),
+        )[0]
+        raw_bodies = [
+            body
+            for (body,) in raw_store._rows(
+                "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                ("default", session_id),
+            )
+        ]
+        raw_records = b"".join(raw_bodies)
+        assert raw_inbox == stored_selection.encode()
+        assert [row.record.encode() for row in rows] == raw_bodies
+        for raw in (raw_inbox, raw_records):
+            assert b'"model":"B"' not in raw
+            assert b'"backend_type":"anthropic"' not in raw
+            assert b'"effort":"high"' not in raw
+            assert b'"B done"' not in raw
     finally:
         fixtures.kernel.close()

@@ -174,8 +174,14 @@ def test_undeclared_foreground_wait_keeps_steer_pending(store, database):
 
 @pytest.mark.parametrize("completed_first", [False, True])
 def test_same_watermark_child_terminal_precedes_steer(store, database, completed_first):
+    seen_handles = []
+
+    def render(plan, handles, reason):
+        seen_handles.append(handles)
+        return ToolExecutionResult(plan.payload["request"]["id"], "Child and steer observed")
+
     start(store)
-    rt, observed = waiting_runtime(store, database)
+    rt, observed = waiting_runtime(store, database, count=2, callback=render)
     drive(store, "s", runtime=rt)
     complete(store, database, "yield-child-0")
     if completed_first:
@@ -184,11 +190,81 @@ def test_same_watermark_child_terminal_precedes_steer(store, database, completed
     else:
         steer(store)
         deliver(store, "yield-child-0")
+    push_fixture_input(store, "s", InboxItem("stale", "user", {"content": "stale"}, "s/turn/other", 0))
     drive(store, "s", runtime=rt)
     assert len(observed) == 1
-    assert all("yielded_by" not in r.record.payload for r in rows(store, kind="op_completed"))
-    inputs = [r.record.payload["input"]["kind"] for r in rows(store, kind="input_applied")]
-    assert inputs.index("child_result") < inputs.index("steer")
+    child_applied = next(
+        r for r in hydrated_rows(store, kind="input_applied") if r.record.payload["input"]["kind"] == "child_result"
+    )
+    steer_applied = next(r for r in rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "steer")
+    yielded = [r for r in rows(store, kind="op_completed") if r.record.payload.get("yielded_by") == "steer"]
+    stale = next(r for r in hydrated_rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "stale")
+    assert child_applied.record.payload["reason"] == "batch member completed"
+    assert len(yielded) == 1
+    assert {child_applied.commit_id, steer_applied.commit_id, yielded[0].commit_id} == {steer_applied.commit_id}
+    assert child_applied.seq < steer_applied.seq < stale.seq
+    assert stale.record.payload["disposition"] == "rejected"
+    assert stale.commit_id != steer_applied.commit_id
+    assert len(seen_handles) == 1
+    assert [handle["status"] for handle in seen_handles[0]] == ["completed", "running"]
+    assert seen_handles[0][0]["result"] == "yield-child-0 done"
+
+
+def test_complete_child_batch_returns_before_steer_without_yield(store, database):
+    start(store)
+    rt, observed = waiting_runtime(store, database, count=2)
+    drive(store, "s", runtime=rt)
+    for sid in ("yield-child-0", "yield-child-1"):
+        complete(store, database, sid)
+        deliver(store, sid)
+    steer(store)
+    drive(store, "s", runtime=rt)
+    assert len(observed) == 1
+    child_inputs = [r for r in rows(store, kind="input_applied") if r.record.payload["input"]["kind"] == "child_result"]
+    assert len(child_inputs) == 2
+    assert len({r.commit_id for r in child_inputs}) == 2
+    assert not any("yielded_by" in r.record.payload for r in rows(store, kind="op_completed"))
+
+
+def test_same_watermark_completed_child_extra_joins_steer_commit(store, database):
+    from vv_agent.tools.function import function_tool
+
+    @function_tool
+    def provider_task() -> str:
+        raise AssertionError("provider owns provider_task")
+
+    start(store)
+    rt, observed = waiting_runtime(store, database)
+    rt.agent.tools.append(provider_task)
+    rt.providers["provider_task"] = YieldProvider()
+    rt.llm.steps[0] = LLMResponse(
+        "",
+        [
+            ToolCall("child-call", "child_task", {}),
+            ToolCall("provider-call", "provider_task", {}),
+        ],
+    )
+    drive(store, "s", runtime=rt)
+    complete(store, database, "yield-child-0")
+    deliver(store, "yield-child-0")
+    steer(store)
+    push_fixture_input(store, "s", InboxItem("stale", "user", {"content": "stale"}, "s/turn/other", 0))
+    drive(store, "s", runtime=rt)
+    assert len(observed) == 1
+
+    child_input = next(r for r in rows(store, kind="input_applied") if r.record.payload["input"]["kind"] == "child_result")
+    child_completion = next(
+        r for r in rows(store, kind="op_completed") if r.record.operation_id == child_input.record.payload["target_operation_id"]
+    )
+    steer_input = next(r for r in rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "steer")
+    yielded = next(r for r in rows(store, kind="op_completed") if r.record.payload.get("yielded_by") == "steer")
+    stale = next(r for r in hydrated_rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "stale")
+    assert {child_input.commit_id, child_completion.commit_id, steer_input.commit_id, yielded.commit_id} == {
+        steer_input.commit_id
+    }
+    assert child_input.seq < child_completion.seq < steer_input.seq < yielded.seq < stale.seq
+    assert stale.record.payload["disposition"] == "rejected"
+    assert stale.commit_id != steer_input.commit_id
 
 
 @pytest.mark.parametrize("raises", [False, True])
@@ -439,6 +515,22 @@ def yield_crash_worker(database, pipe, point, provider_wait):
         drive(store, "s", runtime=rt)
 
 
+def child_batch_yield_crash_worker(database, pipe, point):
+    from .conftest import open_store
+
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store, fixture_key_provider())
+        rt, _ = waiting_runtime(store, database, count=2)
+
+        def hook(at, record):
+            if at == point and record and record.kind == "op_completed" and "yielded_by" in record.payload:
+                pipe.send("yield-cut")
+                pipe.recv()
+
+        rt.hook = hook
+        drive(store, "s", runtime=rt)
+
+
 @pytest.mark.persistent_store
 @pytest.mark.parametrize("point", ["before_commit", "after_commit"])
 @pytest.mark.parametrize("provider_wait", [False, True])
@@ -492,6 +584,60 @@ def test_process_kill_around_yield_commit_restores_both_or_neither(store, databa
         assert len(receipts) == 1
         applied = next(r for r in rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "steer")
         assert applied.commit_id == receipts[0].commit_id
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(10)
+        parent.close()
+
+
+@pytest.mark.persistent_store
+@pytest.mark.parametrize("point", ["before_commit", "after_commit"])
+def test_process_kill_around_child_steer_commit_replays_once(store, database, point):
+    import multiprocessing
+
+    from .test_recovery_matrix import force_expire
+
+    start(store)
+    rt, _ = waiting_runtime(store, database, count=2)
+    drive(store, "s", runtime=rt)
+    complete(store, database, "yield-child-0")
+    deliver(store, "yield-child-0")
+    steer(store)
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=child_batch_yield_crash_worker, args=(database, child, point))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(20)
+        assert parent.recv() == "yield-cut"
+        process.kill()
+        process.join(10)
+        assert process.exitcode == -9
+        print("CHILD_YIELD_KILL", {"point": point, "exit": process.exitcode})
+        state = read_state(store, "s")[0]
+        assert ("steer" in state.applied_inputs) == (point == "after_commit")
+        assert any(i.item.input_id == "steer" for i in store.peek_inbox("s")) == (point == "before_commit")
+        force_expire(database)
+        callbacks = []
+
+        def render(plan, handles, reason):
+            callbacks.append(reason)
+            return ToolExecutionResult(plan.payload["request"]["id"], "Restored child observation")
+
+        resumed, observed = waiting_runtime(store, database, count=2, declared=False, callback=render)
+        resumed.llm.steps.pop(0)
+        drive(store, "s", runtime=resumed)
+        assert len(observed) == 1
+        assert callbacks == (["steer"] if point == "before_commit" else [])
+        child_applied = next(
+            r for r in hydrated_rows(store, kind="input_applied") if r.record.payload["input"]["kind"] == "child_result"
+        )
+        steer_applied = next(r for r in rows(store, kind="input_applied") if r.record.payload["input"]["input_id"] == "steer")
+        yielded = [r for r in rows(store, kind="op_completed") if r.record.payload.get("yielded_by") == "steer"]
+        assert len(yielded) == 1
+        assert {child_applied.commit_id, steer_applied.commit_id, yielded[0].commit_id} == {steer_applied.commit_id}
     finally:
         if process.is_alive():
             process.kill()

@@ -373,6 +373,8 @@ class Fixtures:
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
 
     def model_selection(self):
+        from vv_agent.events import ModelCallCompletedEvent, ModelCallFailedEvent
+
         sid = "model_selection"
         selection = {
             "model": "B",
@@ -414,20 +416,58 @@ class Fixtures:
             )
 
         rt.model_resolver = resolve
-        self.run(sid)
-        assert calls == ["m", "m", "B"], calls
-        rows = self.kernel.store.read_state(sid)[1]
-        plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record.payload["purpose"] == "primary"]
-        assert plans[0].payload["request"] == plans[1].payload["request"]
-        assert plans[2].payload["request"]["route"] == selection["route"]
-        assert [c.backend for c in self.result(sid).token_usage.model_calls] == [
-            rt.resolved.backend,
-            rt.resolved.backend,
-            "anthropic",
-        ]
-        assert self.push(sid, selected).replayed
+
+        class StopAfterUnknown(BaseException):
+            pass
+
+        def stop_after_unknown(point, record):
+            if point == "after_commit" and record is not None and record.kind == "op_unknown":
+                raise StopAfterUnknown
+
+        rt.hook = stop_after_unknown
         try:
-            self.kernel.push(sid, replace(selected, payload={"selection": None}))
+            self.run(sid)
+        except StopAfterUnknown:
+            rt.hook = lambda _point, _record: None
+            self.run(sid)
+        else:
+            rt.hook = lambda _point, _record: None
+        assert calls == ["m", "m", "B"], calls
+        snapshot = self.kernel._read_state(sid)
+        state, source_records, _ = snapshot
+        hydration = hydration_for_session_store(self.kernel.store, sid)
+        records = [(row.record, hydrate_record_payload(row, hydration)) for row in source_records]
+        plans = [
+            (record, payload) for record, payload in records if record.kind == "op_planned" and payload["purpose"] == "primary"
+        ]
+        assert plans[0][1]["request"] == plans[1][1]["request"]
+        assert plans[2][1]["request"]["route"] == selection["route"]
+        model_events = [
+            event
+            for event in project_records(source_records, hydration=hydration)
+            if isinstance(event, (ModelCallCompletedEvent, ModelCallFailedEvent))
+        ]
+        assert [(event.model, event.backend) for event in model_events] == [
+            ("m", rt.resolved.backend),
+            ("m", rt.resolved.backend),
+            ("B", "anthropic"),
+        ]
+        model_calls = project_result(
+            self.kernel.store,
+            sid,
+            next(reversed(state.turns)),
+            runtime=rt,
+            snapshot=snapshot,
+        ).token_usage.model_calls
+        selection_record = next(
+            record
+            for record in source_records
+            if record.record.kind == "input_applied" and record.record.payload["input"]["input_id"] == "select-B"
+        )
+        assert self.push(sid, selected).replayed
+        stored_selected = self.inbox[(sid, selected.input_id)]
+        try:
+            self.kernel.push(sid, replace(stored_selected, payload={"selection": None}))
         except Conflict:
             pass
         else:
@@ -439,7 +479,7 @@ class Fixtures:
                 "layer": "input_conflict",
                 "reason": "input_id bytes conflict",
                 "audit_record_id": "input/select-B/applied",
-                **facts(replace(selected, payload={"selection": None}).encode()),
+                **facts(replace(stored_selected, payload={"selection": None}).encode()),
             }
         )
         self.semantics.append(
@@ -447,13 +487,13 @@ class Fixtures:
                 "case": "model_selection_mid_session_retry",
                 "session_id": sid,
                 "models": calls,
-                "plan_ids": [p.record_id for p in plans],
-                "plans": [p.to_dict() for p in plans],
-                "selection_record": self.state(sid).applied_inputs["select-B"].to_dict(),
-                "calls": [c.to_dict() for c in self.result(sid).token_usage.model_calls],
+                "plan_ids": [record.record_id for record, _ in plans],
+                "plans": [record.to_dict() for record, _ in plans],
+                "selection_record": selection_record.record.to_dict(),
+                "calls": [call.to_dict() for call in model_calls],
                 "retry_request_unchanged": True,
                 "route": selection["route"],
-                "billable_models": [c.model for c in self.result(sid).token_usage.model_calls],
+                "billable_models": [call.model for call in model_calls],
             }
         )
 
