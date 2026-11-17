@@ -13,6 +13,7 @@ from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import publish_session_created_content
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.model import ModelError, ModelRef, ScriptedModelProvider
 from vv_agent.session.compaction import manager_for
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import _Driver, _Scope, drive
@@ -20,6 +21,7 @@ from vv_agent.session.projection import hydrate_record_payload, hydration_for_se
 from vv_agent.session.records import InboxItem, RecordError, SessionSpec
 from vv_agent.session.result import project_result
 from vv_agent.session.store import Conflict
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -29,6 +31,7 @@ from .helpers import (
     create_fixture_session,
     fixture_child_spec,
     fixture_content_reader,
+    fixture_key_provider,
     principal,
     push_fixture_input,
     wrap_fixture_store,
@@ -776,6 +779,166 @@ def test_level_one_unresolvable_selection_keeps_later_valid_input_admissible(sto
     assert hydrated["reason"] == "model_selection_unresolvable"
     assert state.applied_inputs["valid"].payload["disposition"] == "applied"
     assert [plan.payload["request"]["model"] for plan in plans(store)] == ["scripted", "B"]
+
+
+class ExactModelProvider(ScriptedModelProvider):
+    def resolve(self, model: ModelRef):
+        if model.model_name not in {"scripted", "B"}:
+            raise ModelError("unknown model")
+        return super().resolve(model)
+
+
+@pytest.mark.capability("model-selection")
+@pytest.mark.sqlite_file
+def test_level_two_session_driver_typed_null_restores_base_and_next_valid_selection(store, database):
+    rt, selected = routed(
+        database,
+        [LLMResponse("initial"), LLMResponse("base"), LLMResponse("base again")],
+        [LLMResponse("selected"), LLMResponse("selected again")],
+        store=store,
+    )
+    start(store, rt)
+    drive(store, "s", runtime=rt)
+
+    provider_requests: list[str] = []
+
+    class RecordingProvider(ExactModelProvider):
+        def resolve(self, model: ModelRef):
+            provider_requests.append(model.model_name)
+            return super().resolve(model)
+
+    rt.config.model_provider = RecordingProvider(
+        backend="anthropic",
+        default_model="scripted",
+        llm=rt.llm,
+        context_length=128_000,
+        max_output_tokens=16_384,
+    ).with_token_limits(8192, 2048)
+    runtime_requests: list[dict[str, Any]] = []
+    runtime_resolver = rt.model_resolver
+    assert runtime_resolver is not None
+
+    def resolve(request):
+        runtime_requests.append(request)
+        if request["model"] == "B" and request["route"] == {}:
+            return selected, replace(
+                rt.resolved,
+                backend="anthropic",
+                model_id="B",
+                requested_model="B",
+                selected_model="B",
+                context_length=8192,
+                max_output_tokens=2048,
+            )
+        return runtime_resolver(request)
+
+    rt.model_resolver = resolve
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=(rt.handler_version,),
+        capabilities=_worker_capabilities(rt, (SELECTION,)),
+    )
+    try:
+        driver._register_runtime("s", rt, armed=True)
+        provider_requests.clear()
+
+        tables = ("sk_inbox", "sk_record", "sk_content", "sk_content_link")
+        counts_before = tuple(
+            store._one(f"SELECT COUNT(*) FROM {table} WHERE tenant_id='default' AND session_id='s'")[0] for table in tables
+        )
+        with pytest.raises(ModelError, match="unknown model"):
+            driver.push("s", InboxItem("unknown", "model_selection", {"selection": {"model": "unknown", "route": {}}}))
+        counts_after = tuple(
+            store._one(f"SELECT COUNT(*) FROM {table} WHERE tenant_id='default' AND session_id='s'")[0] for table in tables
+        )
+        assert counts_after == counts_before
+        assert store.read_input("s", "unknown") is None
+
+        driver.push("s", InboxItem("select", "model_selection", {"selection": {"model": "B", "route": {}}}))
+        driver.push("s", InboxItem("next", "user", {"content": "use selected"}))
+        drive(store, "s", runtime=rt)
+        selected_state, selected_records, _ = store.read_state("s")
+        selected_payload = hydrate_record_payload(
+            next(
+                row
+                for row in selected_records
+                if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select"
+            ),
+            hydration_for_session_store(store, "s"),
+        )
+        assert selected_state.model_selection is not None, selected_payload
+        assert selected_payload["model_binding"]["model"] == "B"
+
+        driver.push("s", InboxItem("clear", "model_selection", {"selection": None}))
+        driver.push("s", InboxItem("after-clear", "user", {"content": "after clear"}))
+        drive(store, "s", runtime=rt)
+        cleared_state, records, _ = store.read_state("s")
+        assert cleared_state.model_selection is None
+        clear_record = next(
+            row for row in records if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "clear"
+        )
+        clear_payload = hydrate_record_payload(clear_record, hydration_for_session_store(store, "s"))
+        assert clear_payload["disposition"] == "applied"
+        assert clear_payload["input"]["payload"] == {"selection": None}
+        assert "model_binding" not in clear_payload
+
+        driver.push("s", InboxItem("select-again", "model_selection", {"selection": {"model": "B", "route": {}}}))
+        driver.push("s", InboxItem("after-valid", "user", {"content": "use selected again"}))
+        drive(store, "s", runtime=rt)
+        final_state, final_records, _ = store.read_state("s")
+        assert final_state.model_selection is not None
+        final_payload = hydrate_record_payload(
+            next(
+                row
+                for row in final_records
+                if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select-again"
+            ),
+            hydration_for_session_store(store, "s"),
+        )
+        assert final_payload["model_binding"]["model"] == "B"
+        assert [plan.payload["request"]["model"] for plan in plans(store)] == ["scripted", "B", "scripted", "B"]
+        assert runtime_requests
+        assert all(request["model"] is not None for request in runtime_requests)
+        assert provider_requests == ["unknown", "B", "B"]
+
+        clear_input = store.read_input("s", "clear")
+        assert clear_input is not None
+        assert clear_input.item.feature_level == 2
+        assert clear_input.item.requirements == {
+            "level": 2,
+            "handler_version": rt.handler_version,
+            "capabilities": [],
+        }
+
+        raw_inbox = b"".join(
+            body
+            for (body,) in store._rows(
+                "SELECT body FROM sk_inbox WHERE tenant_id='default' AND session_id='s' ORDER BY input_seq"
+            )
+        )
+        raw_records = b"".join(
+            body
+            for (body,) in store._rows("SELECT body FROM sk_record WHERE tenant_id='default' AND session_id='s' ORDER BY seq")
+        )
+        encrypted_content = b"".join(
+            ciphertext
+            for (ciphertext,) in store._rows(
+                "SELECT ciphertext FROM sk_content WHERE tenant_id='default' AND session_id='s' ORDER BY content_id"
+            )
+        )
+        for raw in (raw_inbox, raw_records):
+            assert b'"selection":{"model":"B"' not in raw
+            assert b"after clear" not in raw
+            assert b"use selected again" not in raw
+        for plaintext in (b'"model":"B"', b"after clear", b"use selected again"):
+            assert plaintext not in encrypted_content
+        assert not any(
+            record.record.kind == "op_unknown" for record in records if record.record.turn_id == clear_record.record.turn_id
+        )
+    finally:
+        driver.close()
 
 
 @pytest.mark.capability("model-selection")

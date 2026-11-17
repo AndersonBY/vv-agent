@@ -462,6 +462,7 @@ class Fixtures:
 
         sid = "endpoint-routing"
         routes = {"m": ["B"], "selected": ["A", "B"]}
+        selection = {"model": "selected", "route": {}}
         calls, preferences = [], []
 
         class HostOrder(VvLlmClient):
@@ -480,39 +481,62 @@ class Fixtures:
             if (
                 point == "after_commit"
                 and record.kind == "op_planned"
+                and record.payload["op_kind"] == "model"
+                and record.payload["purpose"] == "primary"
+                and record.turn_id == f"{sid}/turn/followup"
                 and routes["selected"] == ["A", "B"]
-                and record.payload["request"].get("model") == "selected"
             ):
                 routes["selected"] = ["C", "B"]
+            elif (
+                point == "after_commit"
+                and record.kind == "op_completed"
+                and record.turn_id == f"{sid}/turn/followup"
+                and record.payload["execution_started"] is False
+                and routes["selected"] == ["C", "B"]
+            ):
+                routes["selected"] = ["B"]
 
         rt.hook = remove
 
         def complete(current, request):
             calls.append(current.endpoint_targets[0].endpoint_id)
-            if len(calls) == 1:
-                self.push(sid, InboxItem("select", "model_selection", {"selection": {"model": "selected", "route": {}}}))
-                return LLMResponse("", [ToolCall("echo", "echo", {"text": "continue"})], raw={"usage": USAGE})
-            return LLMResponse("done", raw={"usage": USAGE})
+            return LLMResponse("done" if request.model == "selected" else "first", raw={"usage": USAGE})
 
         with patch.object(VvLlmClient, "complete", complete):
             self.run(sid)
-        records = [r.record for r in self.kernel.store.read_state(sid)[1]]
-        plans = [r for r in records if r.kind == "op_planned" and r.payload["op_kind"] == "model"]
-        missing = next(
-            r for r in records if r.kind == "op_completed" and r.payload["result"].get("error_code") == "endpoint_unavailable"
+            self.push(sid, InboxItem("select", "model_selection", {"selection": selection}))
+            self.push(sid, InboxItem("followup", "user", {"content": "continue"}))
+            self.run(sid)
+        _, source_records, _ = self.kernel._read_state(sid)
+        hydration = hydration_for_session_store(self.kernel.store, sid)
+        records = [(row.record, hydrate_record_payload(row, hydration)) for row in source_records]
+        plans = [payload for record, payload in records if record.kind == "op_planned" and payload["op_kind"] == "model"]
+        selected_plans = [payload for payload in plans if payload["request"]["model"] == "selected"]
+        missing_record, missing = next(
+            (record, payload)
+            for record, payload in records
+            if record.kind == "op_completed" and payload["result"].get("error_code") == "endpoint_unavailable"
         )
-        assert calls == ["B", "C"] and preferences == [None, "B", "B"]
-        assert plans[1].payload["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
-        assert not missing.payload["execution_started"] and missing.payload["usage"] == {} and missing.payload["evidence"] == []
-        assert not any(r.kind == "op_unknown" for r in records)
-        assert self.result(sid).final_output == "done"
+        terminal = next(
+            payload for record, payload in records if record.kind == "turn_ended" and record.turn_id == f"{sid}/turn/followup"
+        )
+        assert calls == ["B", "B"] and preferences == [None, "B", "B"]
+        assert selected_plans[0]["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
+        assert not missing["execution_started"] and missing["usage"] == {} and missing["evidence"] == []
+        assert not any(
+            record.kind == "op_unknown"
+            and record.operation_id == missing_record.operation_id
+            and record.attempt == missing_record.attempt
+            for record, _ in records
+        )
+        assert terminal["status"] == "completed" and terminal["result"] == "done"
         self.semantics.append(
             {
                 "case": "endpoint_routing",
                 "session_id": sid,
                 "calls": calls,
                 "preferences": preferences,
-                "missing": missing.to_dict(),
+                "missing": missing_record.to_dict(),
             }
         )
 

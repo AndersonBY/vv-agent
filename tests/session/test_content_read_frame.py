@@ -17,7 +17,15 @@ from vv_agent.kernel._boundary_hydration import (
     hydrate_session_input,
     hydrate_session_records,
 )
-from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, KeyDestroyStatus, WrappedDataKey
+from vv_agent.kernel._content import (
+    Classification,
+    ContentLabels,
+    ContentRef,
+    ContentUnavailable,
+    KeyDestroyStatus,
+    Principal,
+    WrappedDataKey,
+)
 from vv_agent.kernel._content import KeyUnavailable as BackendKeyUnavailable
 from vv_agent.kernel._content_reader import DurableContentReader, input_owner, record_owner
 from vv_agent.kernel._content_runtime import (
@@ -31,9 +39,12 @@ from vv_agent.session.content_runtime import (
     SessionContentWriter,
     bind_content_runtime,
     durable_content_reader,
+    durable_content_store,
 )
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
+from vv_agent.session.deletion import SessionDeletionStore
 from vv_agent.session.records import InboxItem, digest
+from vv_agent.session.sqlite import SQLiteStore
 
 from .helpers import append_fixture_records, create_fixture_session, push_fixture_input
 from .helpers import record as fixture_record
@@ -149,6 +160,27 @@ def _link_values(store, values: dict[str, Any]) -> dict[str, ContentRef]:
             writer.link_record(1, ref, slot)
             refs[slot] = ref
     return refs
+
+
+def _delete_session_from_other_connection(
+    *,
+    path: Path,
+    tenant_id: str,
+    provider: CountingProvider,
+    cipher: CountingCipher,
+    ref: ContentRef,
+    operation: str,
+) -> None:
+    with SQLiteStore.standalone(str(path)) as deleting_store:
+        bind_content_runtime(deleting_store, key_provider=provider, cipher=cipher)
+        durable = durable_content_store(deleting_store)
+        assert isinstance(durable, _ValidatedDurableContentStore)
+        deletion = SessionDeletionStore(deleting_store, durable._durable, allow_unsigned=True)
+        actor = Principal(tenant_id, "fixture/deleter", "user", ref)
+        if operation == "forget":
+            deletion.forget_session(tenant_id, SESSION, actor=actor)
+        else:
+            deletion.purge_session(tenant_id, SESSION, actor=actor)
 
 
 def _track_snapshots(reader: DurableContentReader, provider: CountingProvider, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -470,6 +502,109 @@ def test_frame_rejects_wrong_key_and_detects_key_destroy_between_independent_cal
         )
     with reader._read_frame(record_seqs=(1,)) as frame_reader, pytest.raises(MissingContentLink):
         frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[1]", other)
+
+
+@pytest.mark.sqlite_file
+@pytest.mark.parametrize("deletion_operation", ("forget", "purge"))
+def test_frame_fails_closed_when_another_connection_deletes_cached_session(
+    content_setup,
+    tmp_path: Path,
+    deletion_operation: str,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "forget-me"}})["request.messages[0]"]
+
+    with reader._read_frame(record_seqs=(1,)) as frame_reader:
+        assert isinstance(frame_reader._store, _ValidatedContentFrame)
+        frame = frame_reader._store._frame
+        assert (
+            frame.assert_link(
+                store.tenant_id,
+                SESSION,
+                ref,
+                "request.messages[0]",
+                record_seq=1,
+            )
+            == ref
+        )
+        assert json.loads(frame.get(store.tenant_id, SESSION, ref)) == {"body": "forget-me"}
+        with pytest.raises(MissingContentLink):
+            frame_reader.read(store.tenant_id, SESSION, record_owner(2), "request.messages[0]", ref)
+        with pytest.raises(MissingContentLink):
+            frame_reader.read("other-tenant", SESSION, record_owner(1), "request.messages[0]", ref)
+        assert frame.get(store.tenant_id, SESSION, ref) == b'{"body":"forget-me"}'
+
+        _delete_session_from_other_connection(
+            path=tmp_path / "session.sqlite",
+            tenant_id=store.tenant_id,
+            provider=provider,
+            cipher=cipher,
+            ref=ref,
+            operation=deletion_operation,
+        )
+
+        with pytest.raises(ContentUnavailable):
+            frame.assert_link(
+                store.tenant_id,
+                SESSION,
+                ref,
+                "request.messages[0]",
+                record_seq=1,
+            )
+        with pytest.raises(ContentUnavailable):
+            frame.get(store.tenant_id, SESSION, ref)
+        with pytest.raises(MissingContentLink):
+            frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[0]", ref)
+
+    with reader._read_frame(record_seqs=(1,)) as frame_reader, pytest.raises(MissingContentLink):
+        frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[0]", ref)
+
+
+@pytest.mark.sqlite_file
+def test_get_rechecks_lifecycle_after_decrypt_before_caching_plaintext(
+    content_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "raced"}})["request.messages[0]"]
+    original_decrypt = cipher.decrypt
+    phases: list[str] = []
+
+    def decrypt_then_delete(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        assert provider.snapshot_depth == 0, "SQL snapshots must not cover decryption"
+        phases.append("decrypt")
+        plaintext = original_decrypt(key, nonce, ciphertext, aad)
+        _delete_session_from_other_connection(
+            path=tmp_path / "session.sqlite",
+            tenant_id=store.tenant_id,
+            provider=provider,
+            cipher=cipher,
+            ref=ref,
+            operation="forget",
+        )
+        phases.append("deleted")
+        return plaintext
+
+    monkeypatch.setattr(cipher, "decrypt", decrypt_then_delete)
+    _track_snapshots(reader, provider, monkeypatch)
+    with reader._read_frame(record_seqs=(1,)) as frame_reader:
+        assert isinstance(frame_reader._store, _ValidatedContentFrame)
+        frame = frame_reader._store._frame
+        original_lifecycle = frame._require_current_lifecycle
+
+        def tracked_lifecycle() -> None:
+            phases.append(f"lifecycle:{provider.snapshot_depth}")
+            original_lifecycle()
+
+        monkeypatch.setattr(frame, "_require_current_lifecycle", tracked_lifecycle)
+        with pytest.raises(ContentUnavailable):
+            frame.get(store.tenant_id, SESSION, ref)
+        assert phases == ["lifecycle:1", "decrypt", "deleted", "lifecycle:1"]
+        assert frame._plaintext == {}
+        assert frame._data_key is None
+        with pytest.raises(ContentUnavailable):
+            frame.get(store.tenant_id, SESSION, ref)
 
 
 def test_frame_and_direct_read_agree_empty_ciphertext_is_integrity_failure(content_setup, store_backend: str) -> None:

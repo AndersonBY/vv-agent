@@ -2367,16 +2367,24 @@ class SessionDriver:
         if session_requirements.level == 1 or item.kind not in {"user", "follow_up", "model_selection"}:
             return item
         if item.kind == "model_selection":
+            selection = item.payload["selection"]
             if registration is None:
                 registration, _ = self._runtime_lineage(self.store, sid)
-            provider = registration.config.model_provider
-            if provider is None:
-                raise Conflict("model selection requires the trusted session model provider")
-            requirements = static_model_selection_requirements(
-                item.payload["selection"],
-                resolve_model=lambda selection: resolve_model_selection(provider, selection),
-                handler_version=session_requirements.handler_version or registration.handler_version,
-            )
+            if selection is None:
+                requirements = SessionRequirements(
+                    level=2,
+                    handler_version=session_requirements.handler_version or registration.handler_version,
+                    capabilities=(),
+                )
+            else:
+                provider = registration.config.model_provider
+                if provider is None:
+                    raise Conflict("model selection requires the trusted session model provider")
+                requirements = static_model_selection_requirements(
+                    selection,
+                    resolve_model=lambda value: resolve_model_selection(provider, value),
+                    handler_version=session_requirements.handler_version or registration.handler_version,
+                )
         else:
             requirements = session_requirements
         return replace(item, feature_level=2, requirements=requirements)

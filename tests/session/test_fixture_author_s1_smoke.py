@@ -171,3 +171,79 @@ def test_fixture_author_provider_usage_hydrates_raw_s1_once() -> None:
         assert not streams
     finally:
         fixtures.kernel.close()
+
+
+def test_fixture_author_endpoint_routing_uses_hydrated_s1_plans() -> None:
+    fixtures = AUTHOR["Fixtures"]()
+    session_id = "endpoint-routing"
+    try:
+        fixtures.endpoint_routing()
+
+        assert len(fixtures.semantics) == 1
+        case = fixtures.semantics[0]
+        assert case["case"] == "endpoint_routing"
+        assert case["session_id"] == session_id
+        assert case["calls"] == ["B", "B"]
+        assert case["preferences"] == [None, "B", "B"]
+        raw_store = fixtures.kernel._root_store
+        _, rows, _ = fixtures.kernel._read_state(session_id)
+        hydration = hydration_for_session_store(fixtures.kernel.store, session_id)
+        hydrated = [(row, hydrate_record_payload(row, hydration)) for row in rows]
+
+        applied = next(
+            payload
+            for row, payload in hydrated
+            if row.record.kind == "input_applied" and payload["input"]["input_id"] == "select"
+        )
+        assert applied["disposition"] == "applied"
+        assert applied["model_binding"]["model"] == "selected"
+
+        selected_plans = [
+            (row, payload)
+            for row, payload in hydrated
+            if row.record.kind == "op_planned" and payload["op_kind"] == "model" and payload["request"]["model"] == "selected"
+        ]
+        assert selected_plans
+        selected_request = selected_plans[0][1]["request"]
+        assert selected_request["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
+        assert selected_request["metadata"]["vv_session"]["model_binding"]["model"] == "selected"
+        retry_request = selected_plans[-1][1]["request"]
+        assert retry_request["metadata"]["vv_session"]["endpoint_order"] == ["B"]
+
+        raw_plan = selected_plans[0][0].record
+        assert declared_content_ref(raw_plan.payload["request"]) is not None
+        unavailable = next(
+            (row, payload)
+            for row, payload in hydrated
+            if row.record.kind == "op_completed" and payload["result"].get("error_code") == "endpoint_unavailable"
+        )
+        assert case["missing"]["record_id"] == unavailable[0].record.record_id
+        assert unavailable[1]["execution_started"] is False
+        assert unavailable[1]["usage"] == {}
+        assert unavailable[1]["evidence"] == []
+        assert not any(
+            row.record.kind == "op_unknown"
+            and row.record.operation_id == unavailable[0].record.operation_id
+            and row.record.attempt == unavailable[0].record.attempt
+            for row, _ in hydrated
+        )
+        terminal = next(
+            payload
+            for row, payload in hydrated
+            if row.record.kind == "turn_ended" and row.record.turn_id == f"{session_id}/turn/followup"
+        )
+        assert terminal["status"] == "completed" and terminal["result"] == "done"
+
+        raw_bodies = [
+            body
+            for (body,) in raw_store._rows(
+                "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                ("default", session_id),
+            )
+        ]
+        joined = b"".join(raw_bodies)
+        assert b'"model":"selected"' not in joined
+        assert b'"endpoint_order":["A","B"]' not in joined
+        assert b'"done"' not in joined
+    finally:
+        fixtures.kernel.close()

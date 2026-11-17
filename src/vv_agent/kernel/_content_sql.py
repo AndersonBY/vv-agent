@@ -232,6 +232,7 @@ class _ContentReadFrame:
         *,
         tenant_id: str,
         session_id: str,
+        backend: _SQLContentBackend,
         live_row: tuple[Any, ...] | None,
         key_row: tuple[Any, ...] | None,
         link_rows: Iterable[tuple[Any, ...]],
@@ -242,6 +243,7 @@ class _ContentReadFrame:
     ) -> None:
         self.tenant_id = _text(tenant_id, "tenant_id")
         self.session_id = _text(session_id, "session_id")
+        self._backend = backend
         self._live_row = live_row
         self._key_row = key_row
         self._links: dict[tuple[str, int | str, str], str] = {}
@@ -267,11 +269,52 @@ class _ContentReadFrame:
         if (tenant_id, session_id) != (self.tenant_id, self.session_id):
             raise ContentBindingMismatch("content frame binding does not match")
 
-    def _require_live(self) -> None:
-        if self._live_row is None:
+    def _require_current_lifecycle(self) -> None:
+        try:
+            row = self._backend.fetchone(
+                "SELECT s.deletion_state,k.key_id,k.provider_id,k.wrapped_key,k.state "
+                "FROM sk_session s LEFT JOIN sk_session_key k "
+                "ON k.tenant_id=s.tenant_id AND k.session_id=s.session_id "
+                "WHERE s.tenant_id={p} AND s.session_id={p}",
+                (self.tenant_id, self.session_id),
+            )
+        except BaseException:
+            self.close()
+            raise
+        if row is None or self._live_row is None:
+            self.close()
             raise ContentUnavailable("content session is unavailable")
-        if self._live_row[0] != "live":
+        if row[0] != "live" or self._live_row[0] != "live":
+            self.close()
             raise ContentUnavailable("content session is fenced for deletion")
+        if self._key_row is None or row[1:] != self._key_row:
+            self.close()
+            raise KeyUnavailable("session data key changed during content read")
+        if row[4] != SessionKeyState.ACTIVE.value:
+            self.close()
+            raise KeyUnavailable("session data key is not active")
+
+    @contextmanager
+    def _authorization_snapshot(self) -> Iterator[None]:
+        """Hold one SQL snapshot across lifecycle authorization and content return."""
+
+        read_snapshot = getattr(self._backend, "read_snapshot", None)
+        if not callable(read_snapshot):
+            self.close()
+            raise RuntimeError("content backend does not provide a read snapshot")
+        body_error: BaseException | None = None
+        try:
+            with read_snapshot():
+                self._require_current_lifecycle()
+                try:
+                    yield
+                except BaseException as exc:
+                    body_error = exc
+                    raise
+        except BaseException as exc:
+            if exc is not body_error:
+                self.close()
+            raise
 
     def _active_session_key(self) -> SessionKeyRecord:
         key = self._session_key
@@ -295,7 +338,6 @@ class _ContentReadFrame:
         self._require_binding(tenant_id, session_id)
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
-        self._require_live()
         key = self._active_session_key()
         parsed = self._parsed_content.get(ref.content_id)
         if parsed is None:
@@ -329,20 +371,23 @@ class _ContentReadFrame:
         self._require_binding(tenant_id, session_id)
         slot = _link_slot(slot)
         owner_column, owner = _owner_identity(record_seq=record_seq, input_id=input_id)
-        self._validated_content(tenant_id, session_id, ref)
-        if self._links.get((owner_column, owner, slot)) != ref.content_id:
-            raise ContentUnavailable("content link is unavailable")
-        return ref
+        with self._authorization_snapshot():
+            self._validated_content(tenant_id, session_id, ref)
+            if self._links.get((owner_column, owner, slot)) != ref.content_id:
+                raise ContentUnavailable("content link is unavailable")
+            return ref
 
     def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes:
-        key, _state, nonce, ciphertext, locator = self._validated_content(tenant_id, session_id, ref)
-        if locator is not None or ciphertext is None:
-            raise ContentUnavailable("content ciphertext is unavailable")
-        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
-            raise ContentIntegrityError("content metadata or ciphertext is malformed")
-        cached = self._plaintext.get(ref)
-        if cached is not None:
-            return cached
+        with self._authorization_snapshot():
+            key, _state, nonce, ciphertext, locator = self._validated_content(tenant_id, session_id, ref)
+            if locator is not None or ciphertext is None:
+                raise ContentUnavailable("content ciphertext is unavailable")
+            if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
+                raise ContentIntegrityError("content metadata or ciphertext is malformed")
+            cached = self._plaintext.get(ref)
+            if cached is not None:
+                return cached
+
         if self._data_key is None:
             data_key = self._key_provider.unwrap(
                 tenant_id,
@@ -371,8 +416,23 @@ class _ContentReadFrame:
         actual_mac = _content_mac(self._data_key, tenant_id, session_id, plaintext)
         if not hmac.compare_digest(actual_mac, ref.mac):
             raise ContentIntegrityError("content failed HMAC authentication")
-        self._plaintext[ref] = plaintext
-        return plaintext
+        with self._authorization_snapshot():
+            current_key, current_state, current_nonce, current_ciphertext, current_locator = self._validated_content(
+                tenant_id,
+                session_id,
+                ref,
+            )
+            if (current_key, current_state, current_nonce, current_ciphertext, current_locator) != (
+                key,
+                _state,
+                nonce,
+                ciphertext,
+                locator,
+            ):
+                self.close()
+                raise ContentBindingMismatch("content changed during decryption")
+            self._plaintext[ref] = plaintext
+            return plaintext
 
     def close(self) -> None:
         self._session_key = None
@@ -530,6 +590,7 @@ class CoreSQLContentStore:
         frame = _ContentReadFrame(
             tenant_id=tenant_id,
             session_id=session_id,
+            backend=self._backend,
             live_row=live_row,
             key_row=key_row,
             link_rows=link_rows,
