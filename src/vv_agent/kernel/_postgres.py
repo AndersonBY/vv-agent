@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
-SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v1"
-# Update this digest with intentional DDL changes and contract review.
-SCHEMA_FINGERPRINT = "f75229408d171de21a92b0ccc24d6806d5651af74084f5ae0b30141085c8c472"
+SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v2"
+# Update this digest with intentional DDL or fingerprint-shape changes and contract review.
+SCHEMA_FINGERPRINT = "f407bb0222d374caacd1ceeb24e69580055447fd34856b0928a851fb88c728ac"
 RLS_ISOLATION = "explicit-tenant-credentials"
 RLS_INSTALL_REASON = "The base DDL is unisolated. Runtime tenant access requires install_tenant_rls() and tenant_standalone()."
 RLS_SHARED_GATEWAY_REASON = (
@@ -380,7 +380,11 @@ def _catalog_manifest(connection: Connection[Any]) -> dict[str, list[tuple[Any, 
 
 def _schema_fingerprint(connection: Connection[Any]) -> str:
     with _read_only_probe(connection):
-        material = {"version": SCHEMA_FINGERPRINT_VERSION, "catalog": _catalog_manifest(connection)}
+        catalog = _catalog_manifest(connection)
+        # PostgreSQL 18 exposes column NOT NULL as validated pg_constraint rows;
+        # columns.attnotnull already carries that semantic on every supported version.
+        catalog["constraints"] = [row for row in catalog["constraints"] if row[2] != "n" or not row[6]]
+        material = {"version": SCHEMA_FINGERPRINT_VERSION, "catalog": catalog}
         encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
         return sha256(encoded).hexdigest()
 
