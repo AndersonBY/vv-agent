@@ -5,11 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from dataclasses import dataclass, replace
 from enum import Enum
-from types import SimpleNamespace
-from typing import Any, cast
-
-from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.sub_agents import create_sub_task
+from typing import Any
 
 from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
@@ -17,7 +13,7 @@ from ._canonical_json import canonical_json_bytes
 from ._child_store import PENDING_CHILD_COMPLETION, ChildCompletion, child_handles, result_from_completions, verify_completion
 from ._content_publication import declared_content_ref
 from ._definition import DefinitionBindings, DefinitionCache
-from ._driver import CoreDriver
+from ._driver import ConfiguredChildResultProjector, CoreDriver
 from ._execution_values import AgentStatus, AgentTask, SubTaskOutcome
 from ._message_values import Message
 from ._provider_outcomes import (
@@ -855,7 +851,13 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
     delegation = sdk if isinstance(sdk, dict) else None
     if any(completion.from_parent_copy for completion in completions):
         plan = self.hydrate_plan(a.execution_plan) if self.content_reader is not None else a.execution_plan
-        result = result_for_parent_copies(plan, handles, completions, delegation).to_dict()
+        result = result_for_parent_copies(
+            plan,
+            handles,
+            completions,
+            delegation,
+            configured_projector=self._project_configured_child_results,
+        ).to_dict()
     else:
         result = yield ChildResult(a.execution_plan, handles)
     if a.result:
@@ -885,11 +887,72 @@ def _completion_text(completion: ChildCompletion) -> str:
     return completion.result if isinstance(completion.result, str) else str(completion.result)
 
 
+def _configured_result_without_projector(
+    plan: Record,
+    outcomes: list[SubTaskOutcome],
+) -> ToolExecutionResult:
+    """Project direct kernel callers; runtime drivers inject the tool-layer envelope."""
+
+    tool_call_id = plan._payload["request"]["id"]
+    if len(outcomes) == 1:
+        payload = outcomes[0].to_dict()
+        if outcomes[0].status == AgentStatus.COMPLETED:
+            return ToolExecutionResult(
+                tool_call_id=tool_call_id,
+                content=canonical_json_bytes(payload).decode("utf-8"),
+                metadata=payload,
+            )
+        error_code = outcomes[0].error_code or (
+            "sub_task_wait_user" if outcomes[0].status == AgentStatus.WAIT_USER else "sub_task_failed"
+        )
+        payload["error_code"] = error_code
+        return ToolExecutionResult(
+            tool_call_id=tool_call_id,
+            status_code=ToolResultStatus.ERROR,
+            error_code=error_code,
+            content=canonical_json_bytes(payload).decode("utf-8"),
+            metadata=payload,
+        )
+
+    completed = 0
+    results = []
+    for index, outcome in enumerate(outcomes):
+        if outcome.status == AgentStatus.COMPLETED:
+            completed += 1
+        results.append(outcome.to_dict() | {"index": index})
+    details = {
+        "summary": {"total": len(outcomes), "completed": completed, "failed": len(outcomes) - completed},
+        "results": results,
+        "wait_for_completion": True,
+    }
+    if completed:
+        return ToolExecutionResult(
+            tool_call_id=tool_call_id,
+            content=canonical_json_bytes(details).decode("utf-8"),
+            metadata=details,
+        )
+    payload = {
+        "ok": False,
+        "error": "All batch sub-tasks failed",
+        "error_code": "create_sub_task_batch_failed",
+        "details": details,
+    }
+    return ToolExecutionResult(
+        tool_call_id=tool_call_id,
+        status_code=ToolResultStatus.ERROR,
+        error_code="create_sub_task_batch_failed",
+        content=canonical_json_bytes(payload).decode("utf-8"),
+        metadata=payload,
+    )
+
+
 def result_for_parent_copies(
     plan: Record,
     handles: list[dict[str, Any]],
     completions: list[ChildCompletion] | tuple[ChildCompletion, ...],
     delegation: dict[str, Any] | None,
+    *,
+    configured_projector: ConfiguredChildResultProjector | None = None,
 ) -> ToolExecutionResult:
     """Project admitted copies through the SDK envelope frozen at parent admission."""
 
@@ -912,15 +975,9 @@ def result_for_parent_copies(
             )
             for handle, completion in zip(handles, completions, strict=True)
         ]
-        values = iter(outcomes)
-        context = SimpleNamespace(
-            sub_task_runner=lambda _request: next(values), run_context=None, ctx=None, tool_call_id="", workspace_backend=None
-        )
-        result = create_sub_task(
-            cast(ToolContext, context), copy_json(plan._payload["request"]["arguments"]) | {"wait_for_completion": True}
-        )
-        result.tool_call_id = plan._payload["request"]["id"]
-        return result
+        if configured_projector is None:
+            return _configured_result_without_projector(plan, outcomes)
+        return configured_projector(plan, outcomes, delegation)
     completion = completions[0]
     status = _completion_status(completion)
     final_output = _completion_text(completion)

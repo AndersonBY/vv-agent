@@ -24,6 +24,7 @@ from vv_agent.session.providers import (
     lookup_provider,
 )
 from vv_agent.tools.orchestrator import ToolOrchestrator
+from vv_agent.types import ToolExecutionResult
 
 TENANT = "tenant-a"
 SESSION = "session/a"
@@ -54,20 +55,25 @@ def _binding(
 
 
 def _result(binding: LookupBinding, status: LookupStatus) -> ProviderLookupResult:
+    handle = {
+        "kind": "provider",
+        "provider": binding.provider_id,
+        "job_id": f"job:{binding.operation_id}",
+        "operation_id": binding.operation_id,
+        "attempt": binding.attempt,
+        "request_digest": binding.request_digest,
+        "evidence": ["registry:present"],
+        "query_ref": f"query:{binding.operation_id}",
+        "cancel_ref": f"cancel:{binding.operation_id}",
+    }
     outcomes: dict[LookupStatus, tuple[Any, tuple[str, ...]]] = {
         LookupStatus.NOT_STARTED: (None, ("registry:absent",)),
         LookupStatus.RUNNING: (
-            Accepted(
-                handle={
-                    "operation_id": binding.operation_id,
-                    "attempt": binding.attempt,
-                    "request_digest": binding.request_digest,
-                }
-            ),
+            Accepted(handle),
             ("registry:present",),
         ),
         LookupStatus.EXITED: (
-            Definitive(result={}, evidence=("registry:exited",), usage={}),
+            Definitive(result=ToolExecutionResult("call-1", "terminal").to_dict(), evidence=("registry:exited",), usage={}),
             ("registry:exited",),
         ),
         LookupStatus.UNKNOWN: (Unknown("registry unavailable"), ("registry:unavailable",)),

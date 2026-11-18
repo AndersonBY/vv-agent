@@ -20,8 +20,12 @@ from vv_agent.kernel._canonical_json import (
     validate_sha256,
 )
 from vv_agent.kernel._content import KeyProvider, WrappedDataKey
+from vv_agent.kernel._provider_outcomes import (
+    ProviderResultInvalid,
+    validate_lookup_provider_result,
+)
 
-from .providers import Accepted, Definitive, Outcome, Unknown
+from .providers import Outcome
 
 _EXECUTION_IDENTITY_DOMAIN = "vv-agent/S1/execution-identity"
 _COMMAND_DIGEST_DOMAIN = "vv-agent/S1/command-digest"
@@ -604,38 +608,13 @@ def command_digest(
     return hmac.new(data_key, framing, sha256).hexdigest()
 
 
-def _validate_accepted_handle(binding: LookupBinding, outcome: Accepted) -> None:
-    if type(outcome.handle) is not dict or type(outcome.yield_on_steer) is not bool:
-        raise InvalidProviderLookupResult("running lookup requires a valid Accepted handle")
-    for field_name, expected in (
-        ("operation_id", binding.operation_id),
-        ("attempt", binding.attempt),
-        ("request_digest", binding.request_digest),
-    ):
-        if outcome.handle.get(field_name) != expected:
-            raise InvalidProviderLookupResult(f"running lookup handle {field_name} does not match the binding")
-    _canonical_json(outcome.handle, "Accepted.handle", InvalidProviderLookupResult)
-
-
-def _validate_definitive(outcome: Definitive) -> None:
-    if type(outcome.result) is not dict or type(outcome.usage) is not dict:
-        raise InvalidProviderLookupResult("exited lookup requires a Definitive result and usage object")
-    if not isinstance(outcome.evidence, tuple) or not outcome.evidence:
-        raise InvalidProviderLookupResult("exited lookup requires Definitive evidence")
-    _evidence(outcome.evidence, "Definitive.evidence", InvalidProviderLookupResult)
-    if outcome.shared_state is not None and type(outcome.shared_state) is not dict:
-        raise InvalidProviderLookupResult("Definitive.shared_state must be an object or null")
-    _canonical_json(outcome.result, "Definitive.result", InvalidProviderLookupResult)
-    _canonical_json(outcome.usage, "Definitive.usage", InvalidProviderLookupResult)
-    _canonical_json(outcome.shared_state, "Definitive.shared_state", InvalidProviderLookupResult)
-
-
 @dataclass(frozen=True, slots=True)
 class ProviderLookupResult:
     binding: LookupBinding
     status: LookupStatus
     outcome: Outcome | None
     evidence: tuple[str, ...]
+    feature_level: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.binding, LookupBinding):
@@ -645,21 +624,19 @@ class ProviderLookupResult:
         except (TypeError, ValueError) as exc:
             raise InvalidProviderLookupResult("lookup status is not recognized") from exc
         evidence = _evidence(self.evidence, "lookup evidence", InvalidProviderLookupResult)
-        if status is LookupStatus.NOT_STARTED:
-            if self.outcome is not None:
-                raise InvalidProviderLookupResult("not_started lookup cannot carry an execution outcome")
-        elif status is LookupStatus.RUNNING:
-            if not isinstance(self.outcome, Accepted):
-                raise InvalidProviderLookupResult("running lookup requires Accepted")
-            _validate_accepted_handle(self.binding, self.outcome)
-        elif status is LookupStatus.EXITED:
-            if not isinstance(self.outcome, Definitive):
-                raise InvalidProviderLookupResult("exited lookup requires Definitive")
-            _validate_definitive(self.outcome)
-        else:
-            if not isinstance(self.outcome, Unknown):
-                raise InvalidProviderLookupResult("unknown lookup requires Unknown")
-            _identifier(self.outcome.reason, "Unknown.reason", InvalidProviderLookupResult)
+        if type(self.feature_level) is not int or self.feature_level not in {1, 2, 3}:
+            raise InvalidProviderLookupResult("lookup feature level is not supported")
+        try:
+            validate_lookup_provider_result(
+                self.binding,
+                status.value,
+                self.outcome,
+                evidence,
+                feature_level=self.feature_level,
+            )
+        except ProviderResultInvalid as exc:
+            detail = str(exc.__cause__) if exc.__cause__ is not None else str(exc)
+            raise InvalidProviderLookupResult(detail) from exc
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "evidence", evidence)
 
