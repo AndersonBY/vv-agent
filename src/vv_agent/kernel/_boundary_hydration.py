@@ -21,6 +21,7 @@ from ._content import KeyUnavailable as BackendKeyUnavailable
 from ._content_publication import (
     _MISSING,
     _REFERENCE_DIGESTS,
+    PROVIDER_LOOKUP,
     NestedContentSlot,
     _content_slot_specs,
     _expand_nested_slots,
@@ -271,6 +272,19 @@ def hydrate_session_input_payload(
 
     payload = copy_json(item.payload)
     owner = f"input:{item.input_id}"
+    if item.feature_level == 3 and item.kind == "provider_evidence":
+        try:
+            ref = declared_content_ref(payload.get(PROVIDER_LOOKUP))
+        except ValueError as exc:
+            raise TypedSchemaFailure(f"{owner}/{PROVIDER_LOOKUP} contains a malformed ContentRef") from exc
+        if ref is None:
+            raise TypedSchemaFailure(f"{owner}/{PROVIDER_LOOKUP} requires a ContentRef")
+        if hydration is None:
+            raise MissingContentLink(f"{owner}/{PROVIDER_LOOKUP} requires a content hydration reader")
+        lookup = hydration.read(owner, PROVIDER_LOOKUP, ref)
+        validate_provider_lookup_evidence(item, lookup, session_id=hydration.session_id)
+        payload[PROVIDER_LOOKUP] = lookup
+        return payload
     for content_slot in input_content_slots(item.kind):
         try:
             value = _path_get(payload, content_slot.path)
@@ -312,8 +326,6 @@ def _hydrate_session_input(
     """Hydrate one input through an already owner-bound local reader."""
 
     payload = hydrate_session_input_payload(item, hydration)
-    if item.feature_level == 3 and item.kind == "provider_evidence":
-        validate_provider_lookup_evidence(item, payload["provider_lookup"])
     actor = copy_json(item.actor)
     if include_actor_attributes and actor is not None:
         attributes = _path_get(actor, ("attributes",))

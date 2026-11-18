@@ -134,23 +134,19 @@ def _validate_level_3_environment(environment: dict[str, Any]) -> None:
         raise RecordError("capabilities_digest does not match the environment binding")
 
 
-def _stable_operation_key(record: Record) -> str:
-    if record.operation_id is None or record.attempt is None:
-        raise RecordError("operation and attempt are required")
-    return f"{record.session_id}/{record.operation_id}"
-
-
 def _validate_execution_identity(record: Record) -> None:
     identity = record.payload["execution_identity"]
     for field_name in ("operation_key", "tenant_id", "environment_id", "session_id", "operation_id"):
         _validate_identifier(identity[field_name], field_name)
-    if record.operation_id is None or identity["session_id"] != record.session_id:
+    if identity["session_id"] != record.session_id:
         raise RecordError("execution identity session does not match the record envelope")
     if identity["operation_id"] != record.operation_id:
         raise RecordError("execution identity operation does not match the record envelope")
-    expected_key = _stable_operation_key(record)
+    expected_key = f"{record.session_id}/{record.operation_id}"
     if identity["operation_key"] != expected_key:
         raise RecordError("execution identity operation_key does not match the stable framing")
+    if record.payload["idempotency_key"] != expected_key:
+        raise RecordError("planned idempotency_key does not match the stable operation key")
     expected_execution_id = execution_id_for_values(identity["tenant_id"], identity["environment_id"], expected_key)
     if identity["execution_id"] != expected_execution_id:
         raise RecordError("execution identity execution_id does not match its stable inputs")
@@ -158,13 +154,13 @@ def _validate_execution_identity(record: Record) -> None:
 
 def _validate_level_3_op_prepared(record: Record) -> None:
     payload = record.payload
-    expected_key = _stable_operation_key(record)
+    expected_key = f"{record.session_id}/{record.operation_id}"
     if payload["idempotency_key"] != expected_key:
         raise RecordError("prepared idempotency_key does not match the stable operation key")
     _validate_identifier(payload["provider_binding"], "provider_binding")
 
 
-def validate_provider_lookup_evidence(item: InboxItem, lookup: dict[str, Any]) -> None:
+def validate_provider_lookup_evidence(item: InboxItem, lookup: dict[str, Any], *, session_id: str) -> None:
     """Validate decrypted lookup evidence against its retained inbox envelope."""
 
     validate(lookup, PROVIDER_LOOKUP_RESULT, canonical=False)
@@ -174,6 +170,8 @@ def validate_provider_lookup_evidence(item: InboxItem, lookup: dict[str, Any]) -
         _validate_identifier(binding[field_name], field_name)
     if item.actor is None or binding["tenant_id"] != item.actor["tenant_id"]:
         raise RecordError("provider lookup tenant does not match the inbox actor")
+    if binding["session_id"] != session_id:
+        raise RecordError("provider lookup session does not match the inbox owner")
     if any(binding[key] != payload[key] for key in ("operation_id", "attempt", "request_digest")):
         raise RecordError("provider lookup binding does not match provider_evidence")
     expected_key = f"{binding['session_id']}/{binding['operation_id']}"
@@ -217,10 +215,12 @@ def validate_provider_lookup_evidence(item: InboxItem, lookup: dict[str, Any]) -
             )
         ):
             raise RecordError("provider lookup handle does not match the authenticated binding")
-        if not set(handle["evidence"]).issubset(lookup["evidence"]):
+        if not handle["evidence"] or not set(handle["evidence"]).issubset(lookup["evidence"]):
             raise RecordError("provider lookup lost acceptance evidence")
-    if outcome_kind == "Definitive" and not set(outcome["evidence"]).issubset(lookup["evidence"]):
+    if outcome_kind == "Definitive" and (not outcome["evidence"] or not set(outcome["evidence"]).issubset(lookup["evidence"])):
         raise RecordError("provider lookup lost terminal evidence")
+    if outcome_kind == "Unknown" and not outcome["reason"].strip():
+        raise RecordError("provider lookup reason is empty")
 
 
 def copy_json(value: Any) -> Any:
@@ -475,11 +475,6 @@ class InboxItem:
                     raise RecordError("model_selection requirements may contain model capabilities only")
             elif requirements.handler_version is None and not requirements.capabilities:
                 raise RecordError("null-handler requirements need an explicit family capability")
-        elif self.feature_level == 3:
-            if self.requirements is not None:
-                raise RecordError("level-3 inbox items cannot contain requirements")
-        else:
-            raise RecordError("unsupported inbox feature level")
 
     def encode(self) -> bytes:
         value = self.to_dict()

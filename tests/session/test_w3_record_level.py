@@ -12,7 +12,12 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
-from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_input, hydrate_session_records
+from vv_agent.kernel._boundary_hydration import (
+    SessionHydration,
+    hydrate_session_input,
+    hydrate_session_input_payload,
+    hydrate_session_records,
+)
 from vv_agent.kernel._content_publication import (
     link_declared_record_content,
     make_retained_record_before_publication,
@@ -20,7 +25,7 @@ from vv_agent.kernel._content_publication import (
     resolve_record_content_links,
 )
 from vv_agent.kernel._content_runtime import SessionContentWriter
-from vv_agent.kernel._hydration import MissingContentLink
+from vv_agent.kernel._hydration import MissingContentLink, TypedSchemaFailure
 from vv_agent.kernel._records import InboxItem, Record, RecordError, digest, make_record, validate_provider_lookup_evidence
 from vv_agent.kernel._sql import UnsupportedFeatureLevel, stored_input_proof
 from vv_agent.session.content_store import LocalKeyProvider
@@ -255,6 +260,15 @@ def test_level_3_op_planned_only_accepts_tool_operations() -> None:
         _encode_mutation(wire)
 
 
+@pytest.mark.parametrize("key", [None, "other-key"])
+def test_level_3_op_planned_requires_the_stable_key(key: str | None) -> None:
+    w3 = _fixture(_contract_source(), "execution_worker_w3.json")
+    wire = _op_planned(w3).to_dict()
+    wire["payload"]["idempotency_key"] = key
+    with pytest.raises(RecordError, match="planned idempotency_key"):
+        _encode_mutation(wire)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -307,9 +321,11 @@ def test_provider_lookup_status_and_outcome_follow_canonical_four_states(name: s
     result = next(vector["result"] for vector in w3["lookup_results"] if vector["result"]["status"] == name)
 
     item = _lookup_item(result)
-    validate_provider_lookup_evidence(_lookup_wire_item(result), item.payload["provider_lookup"])
+    validate_provider_lookup_evidence(_lookup_wire_item(result), item.payload["provider_lookup"], session_id=_SESSION)
     with pytest.raises(RecordError, match="invalid session schema"):
         item.encode()
+    with pytest.raises(TypedSchemaFailure, match="requires a ContentRef"):
+        hydrate_session_input_payload(item, None)
 
 
 @pytest.mark.parametrize(
@@ -334,7 +350,7 @@ def test_provider_lookup_rejects_mismatched_status_and_outcome(source_status: st
     logical = item.payload["provider_lookup"] | {"outcome": deepcopy(replacement)}
 
     with pytest.raises(RecordError, match="requires"):
-        validate_provider_lookup_evidence(item, logical)
+        validate_provider_lookup_evidence(item, logical, session_id=_SESSION)
 
 
 def test_provider_lookup_closed_fields_and_binding_are_enforced() -> None:
@@ -344,11 +360,29 @@ def test_provider_lookup_closed_fields_and_binding_are_enforced() -> None:
 
     lookup = item.payload["provider_lookup"]
     with pytest.raises(RecordError, match="invalid session schema"):
-        validate_provider_lookup_evidence(item, lookup | {"unknown": True})
+        validate_provider_lookup_evidence(item, lookup | {"unknown": True}, session_id=_SESSION)
 
     wrong_operation = lookup | {"binding": lookup["binding"] | {"operation_id": "other-operation"}}
     with pytest.raises(RecordError, match="binding does not match"):
-        validate_provider_lookup_evidence(item, wrong_operation)
+        validate_provider_lookup_evidence(item, wrong_operation, session_id=_SESSION)
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome_path", "value", "message"),
+    [
+        ("running", ("handle", "evidence"), [], "lost acceptance evidence"),
+        ("exited", ("evidence",), [], "lost terminal evidence"),
+        ("unknown", ("reason",), " ", "reason is empty"),
+    ],
+)
+def test_provider_lookup_outcome_requires_its_own_evidence(status, outcome_path, value, message) -> None:
+    w3 = _fixture(_contract_source(), "execution_worker_w3.json")
+    result = next(vector["result"] for vector in w3["lookup_results"] if vector["result"]["status"] == status)
+    outcome = result["outcome"]
+    target = outcome["handle"] if outcome_path[0] == "handle" else outcome
+    target[outcome_path[-1]] = value
+    with pytest.raises(RecordError, match=message):
+        validate_provider_lookup_evidence(_lookup_wire_item(result), result, session_id=_SESSION)
 
 
 def test_canonical_execution_fixture_and_identity_algorithm_cross_validate() -> None:
@@ -369,8 +403,27 @@ def test_canonical_execution_fixture_and_identity_algorithm_cross_validate() -> 
             == identity["execution_id"]
         )
 
-    for vector in w3["lookup_results"]:
-        validate_provider_lookup_evidence(_lookup_wire_item(vector["result"]), vector["result"])
+
+def test_decrypted_lookup_must_name_the_session_that_owns_the_inbox(tmp_path: Path) -> None:
+    w3 = _fixture(_contract_source(), "execution_worker_w3.json")
+    result = next(vector["result"] for vector in w3["lookup_results"] if vector["result"]["status"] == "not_started")
+    binding = result["binding"]
+    wrong_key = f"other-session/{binding['operation_id']}"
+    binding.update(
+        session_id="other-session",
+        idempotency_key=wrong_key,
+        execution_id=execution_id_for(_TENANT, binding["environment_id"], wrong_key),
+    )
+    database = _publish_provider_lookup(tmp_path, result)
+    provider = LocalKeyProvider(_MASTER_KEY, state_path=tmp_path / "provider-lookup-keys.sqlite3")
+    with SQLiteStore.standalone(str(database)) as raw_store:
+        raw_store.configure_input_admission(allow_unsigned=True)
+        raw_store.configure_reader(level=3)
+        with closing(SessionDriver(store=raw_store, tenant_id=_TENANT, content_key_provider=provider, worker_level=3)) as driver:
+            item = driver.store.peek_inbox(_SESSION)[0].item
+            hydration = SessionHydration.from_store(driver.store, tenant_id=_TENANT, session_id=_SESSION)
+            with pytest.raises(RecordError, match="lookup session does not match"):
+                hydrate_session_input_payload(item, hydration)
 
 
 def test_provider_lookup_reopens_through_original_inbox_owner_and_slot(tmp_path: Path) -> None:
