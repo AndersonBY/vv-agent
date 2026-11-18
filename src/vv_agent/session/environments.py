@@ -6,11 +6,9 @@ values that an environment/provider adapter must freeze before it starts work.
 
 from __future__ import annotations
 
-import hmac
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from hashlib import sha256
 from typing import Any
 
 from vv_agent.kernel._canonical_json import (
@@ -19,7 +17,6 @@ from vv_agent.kernel._canonical_json import (
     canonical_json_sha256,
     validate_sha256,
 )
-from vv_agent.kernel._content import KeyProvider, WrappedDataKey
 from vv_agent.kernel._execution_values import execution_id_for_values
 from vv_agent.kernel._provider_outcomes import (
     ProviderResultInvalid,
@@ -27,9 +24,6 @@ from vv_agent.kernel._provider_outcomes import (
 )
 
 from .providers import Outcome
-
-_COMMAND_DIGEST_DOMAIN = "vv-agent/S1/command-digest"
-_FRAMING_VERSION = 1
 
 
 class EnvironmentContractError(ValueError):
@@ -44,10 +38,6 @@ class InvalidEnvironmentCapabilities(EnvironmentContractError):
 
 class InvalidLookupBinding(EnvironmentContractError):
     code = "invalid_lookup_binding"
-
-
-class InvalidCommandDigest(EnvironmentContractError):
-    code = "invalid_command_digest"
 
 
 class InvalidProviderLookupResult(EnvironmentContractError):
@@ -518,87 +508,6 @@ class LookupBinding:
             raise InvalidLookupBinding("lookup binding does not match the committed operation binding")
 
 
-def command_digest_framing(
-    *,
-    tenant_id: str,
-    session_id: str,
-    command_spec: Mapping[str, Any],
-    environment: EnvironmentCapabilities,
-    operational_policy: Mapping[str, Any],
-) -> bytes:
-    """Encode only stable command/environment inputs for session-keyed HMAC."""
-    tenant_id = _identifier(tenant_id, "tenant_id", InvalidCommandDigest)
-    session_id = _identifier(session_id, "session_id", InvalidCommandDigest)
-    if not isinstance(environment, EnvironmentCapabilities):
-        raise InvalidCommandDigest("environment must be EnvironmentCapabilities")
-    if type(command_spec) is not dict:
-        raise InvalidCommandDigest("command_spec must be a stable command object")
-    policy = _closed_mapping(
-        operational_policy,
-        {"network_policy_digest", "isolation_policy_digest"},
-        InvalidCommandDigest,
-        "operational_policy",
-    )
-    _canonical_json(command_spec, "command_spec", InvalidCommandDigest)
-    policy = {
-        "network_policy_digest": _digest(
-            policy["network_policy_digest"],
-            "operational_policy.network_policy_digest",
-            InvalidCommandDigest,
-        ),
-        "isolation_policy_digest": _digest(
-            policy["isolation_policy_digest"],
-            "operational_policy.isolation_policy_digest",
-            InvalidCommandDigest,
-        ),
-    }
-    return canonical_json_bytes(
-        {
-            "domain": _COMMAND_DIGEST_DOMAIN,
-            "framing_version": _FRAMING_VERSION,
-            "purpose": "stable-command",
-            "tenant_id": tenant_id,
-            "session_id": session_id,
-            "command_spec": command_spec,
-            "environment": environment.to_dict(),
-            "operational_policy": policy,
-        },
-        "command digest framing",
-    )
-
-
-def command_digest(
-    *,
-    tenant_id: str,
-    session_id: str,
-    command_spec: Mapping[str, Any],
-    environment: EnvironmentCapabilities,
-    operational_policy: Mapping[str, Any],
-    key_provider: KeyProvider,
-    wrapped_key: WrappedDataKey,
-) -> str:
-    """Compute the stable command fingerprint with the session data key.
-
-    The provider unwraps the session-bound data key and this function applies
-    HMAC-SHA-256. Callers cannot substitute a plaintext command hash.
-    """
-    if not isinstance(wrapped_key, WrappedDataKey):
-        raise InvalidCommandDigest("wrapped_key must be WrappedDataKey")
-    if wrapped_key.tenant_id != tenant_id or wrapped_key.session_id != session_id:
-        raise InvalidCommandDigest("wrapped_key is not bound to the command tenant and session")
-    framing = command_digest_framing(
-        tenant_id=tenant_id,
-        session_id=session_id,
-        command_spec=command_spec,
-        environment=environment,
-        operational_policy=operational_policy,
-    )
-    data_key = key_provider.unwrap(tenant_id, session_id, wrapped_key)
-    if type(data_key) is not bytes or len(data_key) < 32:
-        raise InvalidCommandDigest("key provider must return a session key of at least 32 bytes")
-    return hmac.new(data_key, framing, sha256).hexdigest()
-
-
 @dataclass(frozen=True, slots=True)
 class ProviderLookupResult:
     binding: LookupBinding
@@ -639,7 +548,6 @@ class ProviderLookupResult:
 __all__ = [
     "EnvironmentCapabilities",
     "EnvironmentContractError",
-    "InvalidCommandDigest",
     "InvalidEnvironmentCapabilities",
     "InvalidLookupBinding",
     "InvalidProviderLookupResult",
@@ -648,8 +556,6 @@ __all__ = [
     "LookupStatus",
     "NetworkMode",
     "ProviderLookupResult",
-    "command_digest",
-    "command_digest_framing",
     "execution_id_for",
     "stable_operation_key",
 ]

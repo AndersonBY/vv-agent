@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import cast
 
 import pytest
 
+from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.kernel._child_store import ChildSession, create_child
 from vv_agent.kernel._content import (
     Classification,
@@ -18,6 +20,7 @@ from vv_agent.kernel._content import (
     ContentSessionWriter,
     ContentUnavailable,
     ExportLineKind,
+    KeyDestroyOutcome,
     KeyDestroyStatus,
     KeyUnavailable,
     WrappedDataKey,
@@ -31,11 +34,13 @@ from vv_agent.session.content_runtime import (
     _DeferredContentBackend,
 )
 from vv_agent.session.content_store import ContentExportRef, LocalKeyProvider, _content_aad
+from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode, NetworkMode
 from vv_agent.session.postgres import PostgresContentStore, PostgresStore
 from vv_agent.session.records import InboxItem, Record, SessionSpec
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 
+from .conftest import open_store
 from .helpers import principal
 
 MASTER_KEY = b"r" * 32
@@ -106,6 +111,235 @@ def _create_empty_session(
         writer.create_session(lambda content: _session_spec(content, session_id), consumers=())
 
 
+def _command_facts() -> tuple[dict[str, object], EnvironmentCapabilities, dict[str, str]]:
+    environment = EnvironmentCapabilities.create(
+        environment_id="environment/command-digest",
+        generation=3,
+        isolation=IsolationMode.CONTAINER,
+        network=NetworkMode.ALLOWLIST,
+        enforces_network_policy=True,
+        enforces_resource_limits=True,
+        persistent=True,
+        environment_capabilities=("command.execute", "filesystem.workspace", "network.allowlist"),
+        network_policy_ref_digest="1" * 64,
+        isolation_policy_ref_digest="2" * 64,
+    )
+    command = {
+        "argv": ["printf", "hello"],
+        "command_text": None,
+        "cwd": "/workspace",
+        "limits": {"output_bytes": 65536, "wall_time_ms": 30000},
+        "secret_ref_names": [],
+        "stdin_base64": None,
+        "stdin_mode": "none",
+    }
+    policy = {
+        "network_policy_digest": canonical_json_sha256({"egress": ["api.example.com:443"]}),
+        "isolation_policy_digest": canonical_json_sha256({"cpu_millis": 1000, "memory_mib": 256}),
+    }
+    return command, environment, policy
+
+
+class _FixtureKeyProvider:
+    provider_id = "synthetic-w3-fixture-v1"
+
+    def __init__(self, data_key: bytes, key_id: str) -> None:
+        self.data_key = data_key
+        self.key_id = key_id
+        self.generate_calls = 0
+        self.unwrap_calls = 0
+
+    def _require_binding(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> None:
+        if (wrapped_key.tenant_id, wrapped_key.session_id, wrapped_key.key_id) != (tenant_id, session_id, self.key_id):
+            raise KeyUnavailable("synthetic fixture key is not bound to the requested session")
+
+    def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
+        self.generate_calls += 1
+        return WrappedDataKey(tenant_id, session_id, self.key_id, b"synthetic-wrapped-fixture-key")
+
+    def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
+        self._require_binding(tenant_id, session_id, wrapped_key)
+        self.unwrap_calls += 1
+        return self.data_key
+
+    def restore_data_key(self, wrapped_key: WrappedDataKey) -> None:
+        self._require_binding(wrapped_key.tenant_id, wrapped_key.session_id, wrapped_key)
+
+    def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
+        raise AssertionError("command digest must not destroy the session key")
+
+
+def test_writer_command_digest_matches_canonical_fixture_inside_caller_transaction(tmp_path: Path) -> None:
+    source = os.environ.get("VV_AGENT_CONTRACT_SOURCE")
+    if not source:
+        pytest.skip("VV_AGENT_CONTRACT_SOURCE is not configured")
+    contract = json.loads((Path(source) / "fixtures/execution_worker_w3.json").read_text(encoding="utf-8"))
+    vector = contract["command_digest_vectors"][0]
+    preparation = contract["preparation_binding"]
+    provider = _FixtureKeyProvider(base64.b64decode(vector["session_data_key_base64"]), vector["session_data_key_id"])
+    environment = EnvironmentCapabilities.from_dict(vector["environment"])
+    with open_store(tmp_path / "canonical-command-digest.sqlite") as store:
+        store.install_schema()
+        with store.for_tenant(vector["tenant_id"]).atomic() as tx:
+            writer = SessionContentWriter(
+                tx=tx,
+                tenant_id=vector["tenant_id"],
+                session_id=vector["session_id"],
+                key_provider=provider,
+            )
+            writer.create_session(lambda content: _session_spec(content, vector["session_id"]), consumers=())
+            unwraps_before = provider.unwrap_calls
+
+            first = writer.command_digest(
+                command_spec=vector["command_spec"],
+                environment=environment.to_dict(),
+                operational_policy=vector["operational_policy"],
+            )
+            second = writer.command_digest(
+                command_spec=vector["command_spec"],
+                environment=environment.to_dict(),
+                operational_policy=vector["operational_policy"],
+            )
+            prepared = writer.command_digest(
+                command_spec=preparation["hook_patched_command_spec"],
+                environment=environment.to_dict(),
+                operational_policy=vector["operational_policy"],
+            )
+            other_policy = writer.command_digest(
+                command_spec=vector["command_spec"],
+                environment=environment.to_dict(),
+                operational_policy=vector["operational_policy"] | {"network_policy_digest": "0" * 64},
+            )
+            with pytest.raises(ValueError, match="closed object"):
+                writer.command_digest(
+                    command_spec=vector["command_spec"],
+                    environment=environment.to_dict(),
+                    operational_policy=vector["operational_policy"] | {"attempt": "2"},
+                )
+
+            assert store._one(
+                "SELECT key_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s",
+                (vector["tenant_id"], vector["session_id"]),
+            ) == (vector["session_data_key_id"], "active")
+            assert first == second == vector["command_digest"]
+            assert prepared == preparation["prepared_command_digest"]
+            assert other_policy != first
+            assert provider.unwrap_calls == unwraps_before + 4
+            assert provider.generate_calls == 1
+        with pytest.raises(RuntimeError, match="open transaction"):
+            writer.command_digest(
+                command_spec=vector["command_spec"],
+                environment=environment.to_dict(),
+                operational_policy=vector["operational_policy"],
+            )
+
+
+def test_writer_command_digest_reuses_existing_transaction_and_rejects_scope_substitution(tmp_path: Path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "command-digest-keys.sqlite3")
+    command, environment, policy = _command_facts()
+    with open_store(tmp_path / "command-digest-scope.sqlite") as store:
+        store.install_schema()
+        _create_empty_session(store, provider, session_id="session-a")
+        _create_empty_session(store, provider, session_id="session-b")
+        _create_empty_session(store, provider, tenant_id="tenant-b", session_id="session-a")
+
+        with store.atomic() as tx:
+            writer = SessionContentWriter(tx=tx, tenant_id="default", session_id="session-a", key_provider=provider)
+            first = writer.command_digest(command_spec=command, environment=environment.to_dict(), operational_policy=policy)
+            assert first == writer.command_digest(
+                command_spec=command,
+                environment=environment.to_dict(),
+                operational_policy=policy,
+            )
+
+        with store.atomic() as tx:
+            other_session = SessionContentWriter(
+                tx=tx,
+                tenant_id="default",
+                session_id="session-b",
+                key_provider=provider,
+            )
+            other_session_digest = other_session.command_digest(
+                command_spec=command,
+                environment=environment.to_dict(),
+                operational_policy=policy,
+            )
+        assert first != other_session_digest
+
+        with store.for_tenant("tenant-b").atomic() as tx:
+            other_tenant = SessionContentWriter(
+                tx=tx,
+                tenant_id="tenant-b",
+                session_id="session-a",
+                key_provider=provider,
+            )
+            other_tenant_digest = other_tenant.command_digest(
+                command_spec=command,
+                environment=environment.to_dict(),
+                operational_policy=policy,
+            )
+        assert first != other_tenant_digest
+
+        with store.for_tenant("tenant-b").atomic() as tx:
+            cross_tenant = SessionContentWriter(
+                tx=tx,
+                tenant_id="tenant-b",
+                session_id="session-b",
+                key_provider=provider,
+            )
+            with pytest.raises(ContentUnavailable):
+                cross_tenant.command_digest(
+                    command_spec=command,
+                    environment=environment.to_dict(),
+                    operational_policy=policy,
+                )
+
+        with pytest.raises(RuntimeError, match="open transaction"):
+            writer.command_digest(command_spec=command, environment=environment.to_dict(), operational_policy=policy)
+
+
+def test_writer_command_digest_fails_closed_for_missing_forgotten_and_inactive_keys(tmp_path: Path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "command-digest-unavailable-keys.sqlite3")
+    command, environment, policy = _command_facts()
+    with open_store(tmp_path / "command-digest-unavailable.sqlite") as store:
+        store.install_schema()
+        for session_id in ("missing-key", "forgotten", "inactive-key", "destroyed-provider-key", "foreign-provider"):
+            _create_empty_session(store, provider, session_id=session_id)
+
+        store._rows("DELETE FROM sk_session_key WHERE tenant_id=%s AND session_id=%s", ("default", "missing-key"))
+        store._rows(
+            "UPDATE sk_session SET deletion_state='forgetting' WHERE tenant_id=%s AND session_id=%s",
+            ("default", "forgotten"),
+        )
+        store._rows(
+            "UPDATE sk_session_key SET state='destroying' WHERE tenant_id=%s AND session_id=%s",
+            ("default", "inactive-key"),
+        )
+        (destroyed_key_id,) = store._one(
+            "SELECT key_id FROM sk_session_key WHERE tenant_id=%s AND session_id=%s",
+            ("default", "destroyed-provider-key"),
+        )
+        assert provider.destroy("default", destroyed_key_id).status is KeyDestroyStatus.DESTROYED
+        foreign_provider = LocalKeyProvider(b"s" * 32, state_path=tmp_path / "foreign-command-digest-keys.sqlite3")
+
+        cases = (
+            ("missing-key", provider, ContentUnavailable),
+            ("forgotten", provider, ContentUnavailable),
+            ("inactive-key", provider, KeyUnavailable),
+            ("destroyed-provider-key", provider, KeyUnavailable),
+            ("foreign-provider", foreign_provider, KeyUnavailable),
+        )
+        for session_id, selected_provider, error in cases:
+            with store.atomic() as tx, pytest.raises(error):
+                writer = SessionContentWriter(
+                    tx=tx,
+                    tenant_id="default",
+                    session_id=session_id,
+                    key_provider=selected_provider,
+                )
+                writer.command_digest(command_spec=command, environment=environment.to_dict(), operational_policy=policy)
+
+
 def test_deferred_content_backend_rejects_unrecognized_admission_sql() -> None:
     backend = SimpleNamespace(lock_clause="")
     deferred = _DeferredContentBackend(backend, tenant_id="default", session_id="session-a")
@@ -117,9 +351,9 @@ def test_deferred_content_backend_rejects_unrecognized_admission_sql() -> None:
 
 
 def test_sqlite_ingress_persists_key_content_links_and_reopens(tmp_path: Path) -> None:
-    path = str(tmp_path / "content.sqlite")
+    path = tmp_path / "content.sqlite"
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(path) as store:
+    with open_store(path) as store:
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=provider)
         driver.create("session-a", "/workspace", {"purpose": "content-runtime-test"})
@@ -145,7 +379,7 @@ def test_sqlite_ingress_persists_key_content_links_and_reopens(tmp_path: Path) -
         driver.close()
 
     recovered_provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(path) as recovered:
+    with open_store(path) as recovered:
         recovered_input = recovered.read_input("session-a", "input-a")
         assert recovered_input is not None
         recovered_item = recovered_input.item
@@ -159,7 +393,7 @@ def test_sqlite_ingress_persists_key_content_links_and_reopens(tmp_path: Path) -
 def test_local_key_destroy_is_durable_across_provider_instances(tmp_path: Path) -> None:
     state_path = tmp_path / "local-key-state.sqlite3"
     provider = LocalKeyProvider(MASTER_KEY, state_path=state_path)
-    with SQLiteStore.standalone(str(tmp_path / "key-lifecycle.sqlite")) as store:
+    with open_store(tmp_path / "key-lifecycle.sqlite") as store:
         store.install_schema()
         _create_empty_session(store, provider)
         with store.atomic() as tx:
@@ -183,7 +417,7 @@ def test_local_key_destroy_is_durable_across_provider_instances(tmp_path: Path) 
     assert "unavailable" in rejected.stderr
 
     with (
-        SQLiteStore.standalone(str(tmp_path / "key-lifecycle.sqlite")) as reopened,
+        open_store(tmp_path / "key-lifecycle.sqlite") as reopened,
         reopened.atomic() as tx,
         pytest.raises(KeyUnavailable),
     ):
@@ -192,7 +426,7 @@ def test_local_key_destroy_is_durable_across_provider_instances(tmp_path: Path) 
 
 def test_sql_content_export_lines_hydrate_only_explicit_references(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "export-key-state.sqlite3")
-    with SQLiteStore.standalone(str(tmp_path / "export-content.sqlite")) as store:
+    with open_store(tmp_path / "export-content.sqlite") as store:
         store.install_schema()
         _create_empty_session(store, provider)
         with store.atomic() as tx:
@@ -246,7 +480,7 @@ def test_sql_content_export_lines_hydrate_only_explicit_references(tmp_path: Pat
 
 def test_sql_content_export_requires_the_persisted_owner_and_slot(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "export-binding-keys.sqlite3")
-    with SQLiteStore.standalone(str(tmp_path / "export-binding.sqlite")) as store:
+    with open_store(tmp_path / "export-binding.sqlite") as store:
         store.install_schema()
         _create_empty_session(store, provider)
         _create_empty_session(store, provider, session_id="session-b")
@@ -291,7 +525,7 @@ def test_sql_content_export_requires_the_persisted_owner_and_slot(tmp_path: Path
 
 def test_content_mac_and_aad_bind_tenant_and_session(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "aad-key-state.sqlite3")
-    with SQLiteStore.standalone(str(tmp_path / "aad.sqlite")) as store:
+    with open_store(tmp_path / "aad.sqlite") as store:
         store.install_schema()
         for tenant_id, session_id in (
             ("default", "session-a"),
@@ -348,7 +582,7 @@ def test_content_mac_and_aad_bind_tenant_and_session(tmp_path: Path) -> None:
 
 def test_external_content_cleanup_requires_capability_and_remains_retryable(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "object-key-state.sqlite3")
-    with SQLiteStore.standalone(str(tmp_path / "object-cleanup.sqlite")) as store:
+    with open_store(tmp_path / "object-cleanup.sqlite") as store:
         store.install_schema()
         _create_empty_session(store, provider)
         with store.atomic() as tx:
@@ -404,7 +638,7 @@ def test_external_content_cleanup_requires_capability_and_remains_retryable(tmp_
 
 def test_garbage_collection_cleans_external_objects_before_removing_pending_rows(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "gc-object-keys.sqlite3")
-    with SQLiteStore.standalone(str(tmp_path / "gc-object.sqlite")) as store:
+    with open_store(tmp_path / "gc-object.sqlite") as store:
         store.install_schema()
         _create_empty_session(store, provider)
         with store.atomic() as tx:
@@ -477,7 +711,7 @@ def test_garbage_collection_external_locator_retry_on_each_sql_backend(store, tm
 
 def test_content_rejects_cross_tenant_and_cross_session_reads(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "isolation.sqlite")) as store:
+    with open_store(tmp_path / "isolation.sqlite") as store:
         store.install_schema()
         with store.atomic() as tx:
             writer = SessionContentWriter(
@@ -496,7 +730,7 @@ def test_content_rejects_cross_tenant_and_cross_session_reads(tmp_path: Path) ->
 
 def test_create_and_push_rollback_leave_no_session_key_content_or_link(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "rollback.sqlite")) as store:
+    with open_store(tmp_path / "rollback.sqlite") as store:
         store.install_schema()
         with pytest.raises(RuntimeError, match="rollback"), store.atomic() as tx:
             writer = SessionContentWriter(
@@ -531,7 +765,7 @@ def test_writer_without_bound_key_provider_fails_closed(tmp_path: Path) -> None:
 
 def test_app_server_thread_creation_publishes_real_creation_content(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "app-server.sqlite")) as store:
+    with open_store(tmp_path / "app-server.sqlite") as store:
         store.install_schema()
         kernel = SessionDriver(store=store, content_key_provider=provider)
         threads = _KernelThreadStore(kernel)
@@ -561,7 +795,7 @@ def test_app_server_thread_creation_publishes_real_creation_content(tmp_path: Pa
 
 def test_app_server_projects_wire_input_from_the_real_input_link(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "app-server-input.sqlite")) as store:
+    with open_store(tmp_path / "app-server-input.sqlite") as store:
         store.install_schema()
         kernel = SessionDriver(store=store, content_key_provider=provider)
         threads = _KernelThreadStore(kernel)
@@ -587,7 +821,7 @@ def test_app_server_projects_wire_input_from_the_real_input_link(tmp_path: Path)
 
 def test_child_admission_copies_parent_content_into_child_key_and_links(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "child.sqlite")) as store:
+    with open_store(tmp_path / "child.sqlite") as store:
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=provider)
         driver.create("parent", "/workspace", {"seed": {}})
@@ -658,7 +892,7 @@ def test_child_admission_copies_parent_content_into_child_key_and_links(tmp_path
 
 def test_child_admission_rejects_transaction_without_content_capability(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(tmp_path / "child-capability.sqlite")) as store:
+    with open_store(tmp_path / "child-capability.sqlite") as store:
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=provider)
         driver.create("parent", "/workspace", {"seed": {}})
