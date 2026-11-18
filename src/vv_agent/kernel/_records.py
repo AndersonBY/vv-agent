@@ -11,7 +11,7 @@ from hashlib import sha256
 from typing import Any
 
 from vv_agent.kernel._canonical_json import _stdlib_compatible, canonical_json_bytes, utf16_sort_key
-from vv_agent.kernel._execution_values import AgentTask
+from vv_agent.kernel._execution_values import AgentTask, execution_id_for_values
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._model_settings import ResponseFormat
 from vv_agent.kernel._record_codec import RecordError, _load, validate
@@ -22,13 +22,18 @@ from vv_agent.kernel._record_schema import (
     INPUT_PAYLOADS,
     INPUT_SCHEMA,
     INPUT_SCHEMA_LEVEL_2,
+    INPUT_SCHEMA_LEVEL_3,
+    OP_PLANNED_LEVEL_3,
     PAYLOADS,
     PRINCIPAL,
+    PROVIDER_EVIDENCE_LEVEL_3,
     RECORD_ITEM_SCHEMA,
     RECORD_SCHEMA,
     RECORD_SCHEMA_LEVEL_2,
+    RECORD_SCHEMA_LEVEL_3,
     SEED_POLICIES,
     SESSION_CREATED_LEVEL_2,
+    TURN_STARTED_LEVEL_3,
 )
 from vv_agent.kernel._record_schema import CHILD_ADMISSION as CHILD_ADMISSION
 from vv_agent.kernel._requirements import (
@@ -84,6 +89,120 @@ def _validate_ref(value: Any, label: str) -> None:
         validate(value, CONTENT_REF, canonical=False)
     except RecordError as exc:
         raise RecordError(f"{label} requires a ContentRef produced by the content store") from exc
+
+
+def _validate_identifier(value: str, label: str) -> None:
+    if not value or value != value.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise RecordError(f"{label} must be a non-empty identifier without surrounding whitespace or controls")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise RecordError(f"{label} must be valid UTF-8 text") from exc
+
+
+def _validate_level_3_environment(environment: dict[str, Any]) -> None:
+    _validate_identifier(environment["environment_id"], "environment_id")
+    capabilities = environment["environment_capabilities"]
+    if capabilities != sorted(capabilities) or len(capabilities) != len(set(capabilities)):
+        raise RecordError("environment capabilities must be sorted and unique")
+    for capability in capabilities:
+        _validate_identifier(capability, "environment capability")
+    if environment["network"] != "open" and not environment["enforces_network_policy"]:
+        raise RecordError("level-3 network policy must be enforced")
+    capabilities_digest = environment["capabilities_digest"]
+    if capabilities_digest is None:
+        return
+    preimage = {
+        key: environment[key]
+        for key in (
+            "environment_id",
+            "generation",
+            "isolation",
+            "network",
+            "enforces_network_policy",
+            "enforces_resource_limits",
+            "persistent",
+            "environment_capabilities",
+            "network_policy_ref_digest",
+            "isolation_policy_ref_digest",
+        )
+    }
+    expected = sha256(canonical_json_bytes(preimage, "environment capabilities")).hexdigest()
+    if capabilities_digest != expected:
+        raise RecordError("capabilities_digest does not match the environment binding")
+
+
+def _validate_execution_identity(record: Record) -> None:
+    identity = record.payload["execution_identity"]
+    for field_name in ("operation_key", "tenant_id", "environment_id", "session_id", "operation_id"):
+        _validate_identifier(identity[field_name], field_name)
+    if record.operation_id is None or identity["session_id"] != record.session_id:
+        raise RecordError("execution identity session does not match the record envelope")
+    if identity["operation_id"] != record.operation_id:
+        raise RecordError("execution identity operation does not match the record envelope")
+    expected_key = f"{record.session_id}/{record.operation_id}"
+    if identity["operation_key"] != expected_key:
+        raise RecordError("execution identity operation_key does not match the stable framing")
+    expected_execution_id = execution_id_for_values(identity["tenant_id"], identity["environment_id"], expected_key)
+    if identity["execution_id"] != expected_execution_id:
+        raise RecordError("execution identity execution_id does not match its stable inputs")
+
+
+def _validate_provider_evidence(item: InboxItem) -> None:
+    payload = item.payload
+    lookup = payload["lookup"]
+    binding = lookup["binding"]
+    for field_name in ("tenant_id", "session_id", "operation_id", "idempotency_key", "environment_id", "provider_id"):
+        _validate_identifier(binding[field_name], field_name)
+    if item.actor is None or binding["tenant_id"] != item.actor["tenant_id"]:
+        raise RecordError("provider lookup tenant does not match the inbox actor")
+    if any(binding[key] != payload[key] for key in ("operation_id", "attempt", "request_digest")):
+        raise RecordError("provider lookup binding does not match provider_evidence")
+    expected_key = f"{binding['session_id']}/{binding['operation_id']}"
+    if binding["idempotency_key"] != expected_key:
+        raise RecordError("provider lookup idempotency_key does not match the stable operation key")
+    expected_execution_id = execution_id_for_values(
+        binding["tenant_id"],
+        binding["environment_id"],
+        expected_key,
+    )
+    if binding["execution_id"] != expected_execution_id:
+        raise RecordError("provider lookup execution_id does not match its stable inputs")
+    if not lookup["evidence"] or any(not value.strip() for value in lookup["evidence"]):
+        raise RecordError("provider lookup evidence is incomplete")
+
+    status = lookup["status"]
+    outcome = lookup["outcome"]
+    expected_kind = {
+        "not_started": None,
+        "running": "Accepted",
+        "exited": "Definitive",
+        "unknown": "Unknown",
+    }[status]
+    outcome_kind = None if outcome is None else outcome["kind"]
+    if outcome_kind != expected_kind:
+        raise RecordError(f"provider lookup {status} requires {expected_kind or 'no outcome'}")
+    if outcome_kind == "Accepted":
+        handle = outcome["handle"]
+        expected_handle = binding | {"provider": binding["provider_id"]}
+        if any(
+            handle[key] != expected_handle[key]
+            for key in (
+                "provider",
+                "operation_id",
+                "attempt",
+                "request_digest",
+                "execution_id",
+                "command_digest",
+                "environment_id",
+                "generation",
+            )
+        ):
+            raise RecordError("provider lookup handle does not match the authenticated binding")
+        if not set(handle["evidence"]).issubset(lookup["evidence"]):
+            raise RecordError("provider lookup lost acceptance evidence")
+    if outcome_kind == "Definitive" and not set(outcome["evidence"]).issubset(lookup["evidence"]):
+        raise RecordError("provider lookup lost terminal evidence")
 
 
 def copy_json(value: Any) -> Any:
@@ -311,9 +430,14 @@ class InboxItem:
     def _validate(self, value: dict[str, Any]) -> None:
         if self.actor is None:
             raise RecordError("S1 actor requires a closed Principal")
-        schema = INPUT_SCHEMA_LEVEL_2 if self.feature_level == 2 else INPUT_SCHEMA
+        schemas = {1: INPUT_SCHEMA, 2: INPUT_SCHEMA_LEVEL_2, 3: INPUT_SCHEMA_LEVEL_3}
+        try:
+            schema = schemas[self.feature_level]
+        except KeyError as exc:
+            raise RecordError("unsupported inbox feature level") from exc
         validate(value, schema, canonical=False)
-        validate(self.payload, INPUT_PAYLOADS[self.kind], canonical=False)
+        payload_schema = PROVIDER_EVIDENCE_LEVEL_3 if self.feature_level == 3 else INPUT_PAYLOADS[self.kind]
+        validate(self.payload, payload_schema, canonical=False)
         validate(self.actor, PRINCIPAL, canonical=False)
         _validate_content_refs(value)
         _validate_admission_proof(self.admission_proof)
@@ -333,6 +457,10 @@ class InboxItem:
                     raise RecordError("model_selection requirements may contain model capabilities only")
             elif requirements.handler_version is None and not requirements.capabilities:
                 raise RecordError("null-handler requirements need an explicit family capability")
+        elif self.feature_level == 3:
+            if self.requirements is not None:
+                raise RecordError("level-3 inbox items cannot contain requirements")
+            _validate_provider_evidence(self)
         else:
             raise RecordError("unsupported inbox feature level")
 
@@ -469,9 +597,21 @@ class Record:
         object.__setattr__(self, "_message_cache_id", id(messages))
 
     def _validate(self, value: dict[str, Any], messages: _MessageCache | None = None) -> dict[str, bytes]:
-        level_schema = RECORD_SCHEMA_LEVEL_2 if self.feature_level == 2 else RECORD_SCHEMA
+        level_schemas = {1: RECORD_SCHEMA, 2: RECORD_SCHEMA_LEVEL_2, 3: RECORD_SCHEMA_LEVEL_3}
+        try:
+            level_schema = level_schemas[self.feature_level]
+        except KeyError as exc:
+            raise RecordError("unsupported record feature level") from exc
         validate(value, level_schema, canonical=False)
-        payload_schema = SESSION_CREATED_LEVEL_2 if self.feature_level == 2 else PAYLOADS[self.kind]
+        if self.feature_level == 2:
+            payload_schema = SESSION_CREATED_LEVEL_2
+        elif self.feature_level == 3:
+            payload_schema = {
+                "turn_started": TURN_STARTED_LEVEL_3,
+                "op_planned": OP_PLANNED_LEVEL_3,
+            }[self.kind]
+        else:
+            payload_schema = PAYLOADS[self.kind]
         validate(self.payload, payload_schema, canonical=False)
         _validate_content_refs(value)
         op = self.kind.startswith("op_")
@@ -536,10 +676,14 @@ class Record:
                     raise RecordError("environment capabilities are not sorted")
                 if len(capabilities) != len(set(capabilities)):
                     raise RecordError("environment capabilities contain duplicates")
+                if self.feature_level == 3:
+                    _validate_level_3_environment(environment)
         if self.kind == "boundary_recorded":
             validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
+        if self.feature_level == 3 and self.kind == "op_planned":
+            _validate_execution_identity(self)
         return {}
 
     def encode(self) -> bytes:
@@ -599,9 +743,13 @@ def make_record(
 ) -> Record:
     if kind not in PAYLOADS:
         raise RecordError("unknown record kind")
+    if feature_level not in {1, 2, 3}:
+        raise RecordError("unsupported record feature level")
     payload = copy_json(payload)
     if feature_level == 2 and kind != "session_created":
         raise RecordError("record feature level 2 is limited to session_created")
+    if feature_level == 3 and kind not in {"turn_started", "op_planned"}:
+        raise RecordError("record feature level 3 is limited to turn_started and op_planned")
     if bootstrap is not None:
         if feature_level != 2 or kind != "session_created":
             raise RecordError("bootstrap is limited to level-2 session_created records")
@@ -619,7 +767,15 @@ def make_record(
         payload.setdefault("environment", None)
     elif kind in {"op_planned", "op_prepared", "op_completed"}:
         payload.setdefault("policy_decision", None)
-    payload_schema = SESSION_CREATED_LEVEL_2 if feature_level == 2 else PAYLOADS[kind]
+    if feature_level == 2:
+        payload_schema = SESSION_CREATED_LEVEL_2
+    elif feature_level == 3:
+        payload_schema = {
+            "turn_started": TURN_STARTED_LEVEL_3,
+            "op_planned": OP_PLANNED_LEVEL_3,
+        }[kind]
+    else:
+        payload_schema = PAYLOADS[kind]
     validate(payload, payload_schema, canonical=False)
     record = Record(
         record_identity(kind, session_id, turn_id, operation_id, attempt, payload),

@@ -137,6 +137,29 @@ ENVIRONMENT_BINDING = nullable(
         operational_policy=nullable(CONTENT_REF),
     )
 )
+EXECUTION_ENVIRONMENT_BINDING = closed(
+    descriptor=CONTENT_REF,
+    environment_id=TEXT,
+    generation=NAT,
+    isolation=enum("none", "container", "microvm"),
+    network=enum("open", "allowlist", "none"),
+    enforces_network_policy=BOOL,
+    enforces_resource_limits=BOOL,
+    persistent=BOOL,
+    environment_capabilities=STRINGS,
+    capabilities_digest=NULLABLE_HASH,
+    network_policy_ref_digest=NULLABLE_HASH,
+    isolation_policy_ref_digest=NULLABLE_HASH,
+    operational_policy=CONTENT_REF,
+)
+EXECUTION_IDENTITY = closed(
+    operation_key=TEXT,
+    tenant_id=TEXT,
+    environment_id=TEXT,
+    session_id=TEXT,
+    operation_id=TEXT,
+    execution_id=HASH,
+)
 RESULT_ID = closed(operation_id=TEXT, attempt=POS)
 DELIVERY_TARGET = closed(session_id=TEXT, turn_id=TEXT, generation=NAT, operation_id=TEXT, attempt=POS)
 CHILD_IDENTITY = closed(session_id=TEXT, turn_id=TEXT, generation=NAT)
@@ -151,6 +174,56 @@ PROVIDER_HANDLE = closed(
     evidence=CONTENT_REF,
     query_ref=nullable(CONTENT_REF),
     cancel_ref=nullable(CONTENT_REF),
+)
+PROVIDER_LOOKUP_BINDING = closed(
+    tenant_id=TEXT,
+    session_id=TEXT,
+    operation_id=TEXT,
+    attempt=POS,
+    request_digest=HASH,
+    idempotency_key=TEXT,
+    execution_id=HASH,
+    command_digest=HASH,
+    environment_id=TEXT,
+    generation=NAT,
+    provider_id=TEXT,
+)
+PROVIDER_LOOKUP_HANDLE = closed(
+    kind={"const": "provider"},
+    provider=TEXT,
+    job_id=TEXT,
+    operation_id=TEXT,
+    attempt=POS,
+    request_digest=HASH,
+    execution_id=HASH,
+    command_digest=HASH,
+    environment_id=TEXT,
+    generation=NAT,
+    evidence=STRINGS,
+    query_ref=NULLABLE_TEXT,
+    cancel_ref=NULLABLE_TEXT,
+)
+PROVIDER_LOOKUP_OUTCOME = nullable(
+    {
+        "oneOf": [
+            closed(kind={"const": "Accepted"}, handle=PROVIDER_LOOKUP_HANDLE, yield_on_steer=BOOL),
+            closed(
+                kind={"const": "Definitive"},
+                result=ANY_OBJECT,
+                usage=ANY_OBJECT,
+                shared_state=nullable(ANY_OBJECT),
+                evidence=STRINGS,
+            ),
+            closed(kind={"const": "Unknown"}, reason=TEXT),
+        ]
+    }
+)
+PROVIDER_LOOKUP_RESULT = closed(
+    schema_version={"const": "vv-agent.provider-lookup.v1"},
+    status=enum("not_started", "running", "exited", "unknown"),
+    binding=PROVIDER_LOOKUP_BINDING,
+    outcome=PROVIDER_LOOKUP_OUTCOME,
+    evidence=STRINGS,
 )
 APPROVAL_HANDLE = closed(kind={"const": "approval"}, request_id=TEXT, request_digest=HASH, scope=CONTENT_REF)
 USER_HANDLE = closed(kind={"const": "user"}, interaction_id=TEXT, question=CONTENT_REF)
@@ -352,6 +425,12 @@ INPUT_PAYLOADS = {
 for name in ("reason", "metadata", "policy_digest", "rule_id", "expires_ms"):
     INPUT_PAYLOADS["approval_answer"]["required"].remove(name)
 INPUT_PAYLOADS["provider_evidence"]["required"].remove("yield_on_steer")
+PROVIDER_EVIDENCE_LEVEL_3 = closed(
+    operation_id=TEXT,
+    attempt=POS,
+    request_digest=HASH,
+    lookup=PROVIDER_LOOKUP_RESULT,
+)
 
 INPUT_SCHEMA = closed(
     schema_version={"const": "S1"},
@@ -379,7 +458,19 @@ INPUT_SCHEMA_LEVEL_2 = closed(
     requirements=REQUIREMENTS,
     payload=ANY_OBJECT,
 )
-INBOX_ITEM_SCHEMA = {"oneOf": [INPUT_SCHEMA, INPUT_SCHEMA_LEVEL_2]}
+INPUT_SCHEMA_LEVEL_3 = closed(
+    schema_version={"const": "S1"},
+    feature_level={"const": 3, "type": "integer"},
+    actor=PRINCIPAL,
+    admission_proof=ADMISSION_PROOF,
+    input_id=TEXT,
+    kind=enum("provider_evidence"),
+    target_turn_id=NULLABLE_TEXT,
+    generation=nullable(NAT),
+    available_ms=NAT,
+    payload=ANY_OBJECT,
+)
+INBOX_ITEM_SCHEMA = {"oneOf": [INPUT_SCHEMA, INPUT_SCHEMA_LEVEL_2, INPUT_SCHEMA_LEVEL_3]}
 
 PAYLOADS = {
     "session_created": closed(
@@ -531,6 +622,37 @@ for name in ("usage_counts", "yielded_by"):
     PAYLOADS["op_completed"]["required"].remove(name)
 PAYLOADS["context_compacted"]["required"].remove("micro_usage")
 
+TURN_STARTED_LEVEL_3 = closed(
+    input_ids=STRINGS,
+    definition=CONTENT_REF,
+    definition_digest=HASH,
+    handler_version=TEXT,
+    budget=CONTENT_REF,
+    binding=NULLABLE_TEXT,
+    generation=NAT,
+    policy_digest=NULLABLE_HASH,
+    requirements=REQUIREMENTS,
+    tokenizer_binding=TOKENIZER_BINDING,
+    environment=EXECUTION_ENVIRONMENT_BINDING,
+)
+OP_PLANNED_LEVEL_3 = closed(
+    op_kind=enum("tool"),
+    purpose={"type": "null"},
+    request=CONTENT_REF,
+    request_digest=HASH,
+    context_version=TEXT,
+    dependencies=STRINGS,
+    tool=nullable(CONTENT_REF),
+    idempotency_key=NULLABLE_TEXT,
+    budget_admission=CONTENT_REF,
+    not_before_ms=NULLABLE_NAT,
+    provider_binding=NULLABLE_TEXT,
+    consumed_unknowns=array(RESULT_ID),
+    policy_decision=POLICY_DECISION,
+    execution_identity=EXECUTION_IDENTITY,
+    command_digest=HASH,
+)
+
 RECORD_SCHEMA = closed(
     schema_version={"const": "S1"},
     feature_level={"const": 1, "type": "integer"},
@@ -554,14 +676,27 @@ RECORD_SCHEMA_LEVEL_2 = closed(
     attempt=nullable(POS),
     payload=ANY_OBJECT,
 )
-RECORD_ITEM_SCHEMA = {"oneOf": [RECORD_SCHEMA, RECORD_SCHEMA_LEVEL_2]}
+RECORD_SCHEMA_LEVEL_3 = closed(
+    schema_version={"const": "S1"},
+    feature_level={"const": 3, "type": "integer"},
+    record_id=TEXT,
+    kind=enum("turn_started", "op_planned"),
+    session_id=TEXT,
+    turn_id=NULLABLE_TEXT,
+    operation_id=NULLABLE_TEXT,
+    attempt=nullable(POS),
+    payload=ANY_OBJECT,
+)
+RECORD_ITEM_SCHEMA = {"oneOf": [RECORD_SCHEMA, RECORD_SCHEMA_LEVEL_2, RECORD_SCHEMA_LEVEL_3]}
 
 SCHEMAS = (
     RECORD_SCHEMA,
     RECORD_SCHEMA_LEVEL_2,
+    RECORD_SCHEMA_LEVEL_3,
     RECORD_ITEM_SCHEMA,
     INPUT_SCHEMA,
     INPUT_SCHEMA_LEVEL_2,
+    INPUT_SCHEMA_LEVEL_3,
     INBOX_ITEM_SCHEMA,
     CONTENT_LABELS,
     CONTENT_REF,
@@ -577,6 +712,15 @@ SCHEMAS = (
     REQUIREMENTS,
     SESSION_CREATED_LEVEL_2,
     ENVIRONMENT_BINDING,
+    EXECUTION_ENVIRONMENT_BINDING,
+    EXECUTION_IDENTITY,
+    PROVIDER_LOOKUP_BINDING,
+    PROVIDER_LOOKUP_HANDLE,
+    PROVIDER_LOOKUP_OUTCOME,
+    PROVIDER_LOOKUP_RESULT,
+    PROVIDER_EVIDENCE_LEVEL_3,
+    TURN_STARTED_LEVEL_3,
+    OP_PLANNED_LEVEL_3,
     RESULT_ID,
     CHILD_ADMISSION,
     APP_SERVER_ATTRIBUTES,

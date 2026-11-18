@@ -20,6 +20,7 @@ from vv_agent.kernel._canonical_json import (
     validate_sha256,
 )
 from vv_agent.kernel._content import KeyProvider, WrappedDataKey
+from vv_agent.kernel._execution_values import execution_id_for_values
 from vv_agent.kernel._provider_outcomes import (
     ProviderResultInvalid,
     validate_lookup_provider_result,
@@ -27,7 +28,6 @@ from vv_agent.kernel._provider_outcomes import (
 
 from .providers import Outcome
 
-_EXECUTION_IDENTITY_DOMAIN = "vv-agent/S1/execution-identity"
 _COMMAND_DIGEST_DOMAIN = "vv-agent/S1/command-digest"
 _FRAMING_VERSION = 1
 
@@ -187,16 +187,7 @@ def execution_id_for(
     tenant_id = _identifier(tenant_id, "tenant_id", InvalidLookupBinding)
     environment_id = _identifier(environment_id, "environment_id", InvalidLookupBinding)
     operation_key = _identifier(operation_key, "operation_key", InvalidLookupBinding)
-    return canonical_json_sha256(
-        {
-            "domain": _EXECUTION_IDENTITY_DOMAIN,
-            "framing_version": _FRAMING_VERSION,
-            "operation_key": operation_key,
-            "tenant_id": tenant_id,
-            "environment_id": environment_id,
-        },
-        "execution identity",
-    )
+    return execution_id_for_values(tenant_id, environment_id, operation_key)
 
 
 _ENVIRONMENT_FIELDS = {

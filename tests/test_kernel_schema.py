@@ -192,12 +192,22 @@ def test_contract_41_logical_schema_has_closed_s1_shapes():
     assert _record_schema.INBOX_ITEM_SCHEMA["oneOf"] == [
         _record_schema.INPUT_SCHEMA,
         _record_schema.INPUT_SCHEMA_LEVEL_2,
+        _record_schema.INPUT_SCHEMA_LEVEL_3,
     ]
     assert _record_schema.RECORD_ITEM_SCHEMA["oneOf"] == [
         _record_schema.RECORD_SCHEMA,
         _record_schema.RECORD_SCHEMA_LEVEL_2,
+        _record_schema.RECORD_SCHEMA_LEVEL_3,
     ]
     assert _record_schema.RECORD_SCHEMA_LEVEL_2["properties"]["kind"] == {"type": "string", "enum": ["session_created"]}
+    assert _record_schema.RECORD_SCHEMA_LEVEL_3["properties"]["kind"] == {
+        "type": "string",
+        "enum": ["turn_started", "op_planned"],
+    }
+    assert _record_schema.INPUT_SCHEMA_LEVEL_3["properties"]["kind"] == {
+        "type": "string",
+        "enum": ["provider_evidence"],
+    }
     assert _record_schema.SESSION_CREATED_LEVEL_2["properties"]["bootstrap"] is _record_schema.REQUIREMENTS
     assert "bootstrap" not in _record_schema.PAYLOADS["session_created"]["properties"]
     assert _record_schema.PRINCIPAL["properties"]["subject_kind"]["enum"] == ["user", "service", "agent"]
