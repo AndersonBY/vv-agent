@@ -181,6 +181,14 @@ def switch(store, runtime, selection=SELECTION, input_id="select", sid="s"):
     return push_fixture_input(store, sid, item)
 
 
+def hydrated_applied_input(store, input_id, sid="s"):
+    _state, records, _ = store.read_state(sid)
+    record = next(
+        row for row in records if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == input_id
+    )
+    return hydrate_record_payload(record, hydration_for_session_store(store, sid))
+
+
 def routed(database, steps_a, steps_b=(), *, store, sid="s", tools=(echo,), worker_selections=(SELECTION,), **kwargs):
     kwargs.setdefault("content_reader", fixture_content_reader(store, sid))
     rt = runtime(database, steps_a, list(tools), **kwargs)
@@ -846,21 +854,26 @@ def test_level_two_session_driver_typed_null_restores_base_and_next_valid_select
         driver._register_runtime("s", rt, armed=True)
         provider_requests.clear()
 
-        tables = ("sk_inbox", "sk_record", "sk_content", "sk_content_link")
-        counts_before = tuple(
-            store._one(f"SELECT COUNT(*) FROM {table} WHERE tenant_id='default' AND session_id='s'")[0] for table in tables
+        driver.push("s", InboxItem("unknown", "model_selection", {"selection": {"model": "unknown", "route": {}}}))
+        unknown_input = store.read_input("s", "unknown")
+        assert unknown_input is not None
+        assert unknown_input.item.requirements == {
+            "level": 2,
+            "handler_version": rt.handler_version,
+            "capabilities": [],
+        }
+        assert store.worker_supports.accepts(
+            level=2,
+            handler_version=rt.handler_version,
+            capabilities=(),
         )
-        with pytest.raises(ModelError, match="unknown model"):
-            driver.push("s", InboxItem("unknown", "model_selection", {"selection": {"model": "unknown", "route": {}}}))
-        counts_after = tuple(
-            store._one(f"SELECT COUNT(*) FROM {table} WHERE tenant_id='default' AND session_id='s'")[0] for table in tables
-        )
-        assert counts_after == counts_before
-        assert store.read_input("s", "unknown") is None
 
         driver.push("s", InboxItem("select", "model_selection", {"selection": {"model": "B", "route": {}}}))
         driver.push("s", InboxItem("next", "user", {"content": "use selected"}))
         drive(store, "s", runtime=rt)
+        unknown_payload = hydrated_applied_input(store, "unknown")
+        assert unknown_payload["disposition"] == "rejected"
+        assert unknown_payload["reason"] == "model_selection_unresolvable"
         selected_state, selected_records, _ = store.read_state("s")
         selected_payload = hydrate_record_payload(
             next(
@@ -1439,6 +1452,141 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
         assert thread.turns[-1].result.get("finalOutput") == "selected client", thread.turns[-1].result
         assert calls == ["default", "selected"]
         assert any(request["model"] == "selected" and request.get("route") == selection["route"] for request in resolved_requests)
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_app_server_unknown_selection_is_admitted_then_rejected_by_holder(store, tmp_path):
+    from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
+    from vv_agent.run_config import RunConfig
+
+    calls = []
+    default_provider = ScriptedModelProvider.from_callback(
+        "default-backend",
+        "default",
+        lambda request: pytest.fail(f"unexpected default model call: {request.model}"),
+    )
+    selected_provider = ScriptedModelProvider.from_callback(
+        "selected-backend",
+        "selected",
+        lambda request: calls.append(request.model) or LLMResponse("selected client"),
+    )
+    later_provider = ScriptedModelProvider.from_callback(
+        "later-backend",
+        "later",
+        lambda request: calls.append(request.model) or LLMResponse("later client"),
+    )
+    providers = {"selected": selected_provider, "later": later_provider}
+
+    class RoutedHost(DefaultAppServerHost):
+        def resolve_model(self, request):
+            provider = providers.get(request["model"])
+            if provider is None or request.get("route") != {}:
+                raise ModelError("unknown model or route")
+            resolved = provider.resolve(ModelRef.named(request["model"]))
+            return provider.client(resolved), resolved
+
+    agent = Agent("test", "Answer.", model="default")
+    config = RunConfig(model_provider=default_provider, workspace=tmp_path)
+    host = RoutedHost(agent=agent, run_config=config)
+    bootstrap = static_session_requirements(agent, config, level=2, handler_version="1")
+    selected_requirements = static_model_selection_requirements(
+        {"model": "selected", "route": {}},
+        resolve_model=host.resolve_model,
+        handler_version="1",
+    )
+    later_requirements = static_model_selection_requirements(
+        {"model": "later", "route": {}},
+        resolve_model=host.resolve_model,
+        handler_version="1",
+    )
+    capabilities = tuple(
+        sorted(set(bootstrap.capabilities) | set(selected_requirements.capabilities) | set(later_requirements.capabilities))
+    )
+    store.configure_worker(level=2, handler_versions=("1",), capabilities=capabilities)
+
+    transport = ChannelTransport(connection_id="test", outbound_capacity=10_000)
+    server = AppServer(transport=transport, store=store, host=host)
+
+    def send(identity, method, params):
+        server.processor.process_message("test", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params})
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    def select(identity, input_id, model):
+        wire = send(
+            identity,
+            "thread/model/select",
+            {
+                "threadId": "thread",
+                "inputId": input_id,
+                "selection": {"model": model, "route": {}},
+            },
+        )
+        assert wire["result"] == {"threadId": "thread", "inputId": input_id, "accepted": True}
+
+    expected_turn_id = None
+
+    def turn(identity, input_id, text):
+        nonlocal expected_turn_id
+        wire = send(
+            identity,
+            "turn/start",
+            {
+                "threadId": "thread",
+                "inputId": input_id,
+                "expectedTurnId": expected_turn_id,
+                "input": [{"type": "text", "text": text}],
+            },
+        )
+        assert "result" in wire, wire
+        server.run_adapter.join()
+        thread = server.store.read_thread("thread")
+        expected_turn_id = thread.turns[-1].turn_id
+        return thread
+
+    try:
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        server.kernel._next_session_requirements = bootstrap
+        server.kernel.create(
+            "thread",
+            str(tmp_path),
+            {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}},
+        )
+        server.kernel._ensure_static_worker_support(level=2, capabilities=capabilities)
+        assert "result" in send(0, "initialize", {"clientInfo": {"name": "test"}})
+
+        select(1, "initial-selection", "selected")
+        thread = turn(2, "initial-turn", "use selected")
+        assert thread.turns[-1].result.get("finalOutput") == "selected client"
+        selected_state = store.read_state("thread")[0]
+        assert selected_state.model_selection is not None
+        previous_selection = selected_state.model_selection.encode()
+
+        select(3, "unknown-selection", "unknown")
+        unknown_input = store.read_input("thread", "unknown-selection")
+        assert unknown_input is not None
+        assert unknown_input.item.feature_level == 2
+        assert unknown_input.item.requirements == {"level": 2, "handler_version": "1", "capabilities": []}
+        assert store.worker_supports.accepts(level=2, handler_version="1", capabilities=())
+        server.run_adapter.join()
+        rejected = hydrated_applied_input(store, "unknown-selection", "thread")
+        assert rejected["disposition"] == "rejected"
+        assert rejected["reason"] == "model_selection_unresolvable"
+        rejected_state = store.read_state("thread")[0]
+        assert rejected_state.model_selection is not None
+        assert rejected_state.model_selection.encode() == previous_selection
+
+        thread = turn(4, "after-unknown", "keep selected")
+        assert thread.turns[-1].result.get("finalOutput") == "selected client"
+
+        select(5, "later-selection", "later")
+        thread = turn(6, "after-later", "use later")
+        assert thread.turns[-1].result.get("finalOutput") == "later client"
+        assert calls == ["selected", "selected", "later"]
     finally:
         server.run_adapter.join()
         server.kernel.close()

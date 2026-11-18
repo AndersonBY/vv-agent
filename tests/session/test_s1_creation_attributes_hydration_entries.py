@@ -22,6 +22,13 @@ from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import _Driver
 from vv_agent.session.replay import list_events
 
+APP_SERVER_PRINCIPAL = {
+    "tenant_id": "default",
+    "subject_id": "app-server",
+    "subject_kind": "service",
+    "attributes": {"role": "app-server"},
+}
+
 
 def _send(server: AppServer, transport: ChannelTransport, request_id: int | str, method: str, params: dict) -> dict:
     server.processor.process_message(
@@ -69,6 +76,7 @@ def test_list_events_hydrates_s1_app_server_creation_and_cursor(surface) -> None
             "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
             "seed": {"messages": [seed_message.to_dict()], "shared_state": shared_state},
         },
+        principal=APP_SERVER_PRINCIPAL,
     )
 
     creation = surface.store.read("thread", limit=1).records[0].record
@@ -169,6 +177,7 @@ def test_thread_start_recovers_s1_frozen_app_server_context(surface, monkeypatch
             "app_server_context": frozen,
             "seed": {"messages": [], "shared_state": {}},
         },
+        principal=APP_SERVER_PRINCIPAL,
     )
     transport = ChannelTransport(connection_id="test", outbound_capacity=100)
     server = AppServer(
@@ -188,7 +197,13 @@ def test_thread_start_recovers_s1_frozen_app_server_context(surface, monkeypatch
     monkeypatch.setattr(server.run_adapter._store, "create_thread_receipt", capture_receipt)
 
     _send(server, transport, 0, "initialize", {"clientInfo": {"name": "test"}})
-    _send(server, transport, 1, "thread/start", {"inputId": "thread", "agentKey": "default"})
+    _send(
+        server,
+        transport,
+        1,
+        "thread/start",
+        {"inputId": "thread", "agentKey": "default", "metadata": {"frozen": True}},
+    )
 
     creation = surface.store.read("thread", limit=1).records[0].record
     ContentRef.from_dict(creation._payload["attributes"])

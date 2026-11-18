@@ -56,7 +56,7 @@ from vv_agent.kernel._sql import (
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted
 from vv_agent.memory import MemoryManager
-from vv_agent.model import resolve_model_selection, resolve_run_model
+from vv_agent.model import ModelError, resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig, effective_run_config
 from vv_agent.run_handle import RunHandle
@@ -2563,11 +2563,17 @@ class SessionDriver:
         if selection is None:
             return SessionRequirements(level=2, handler_version=handler_version, capabilities=())
         assert resolve_model is not None
-        return static_model_selection_requirements(
-            selection,
-            resolve_model=resolve_model,
-            handler_version=handler_version,
-        )
+        try:
+            return static_model_selection_requirements(
+                selection,
+                resolve_model=resolve_model,
+                handler_version=handler_version,
+            )
+        except (ModelError, ValueError):
+            # Admission records selection commands before a holder resolves them.
+            # Unknown or unauthorized choices therefore need a claimable bound;
+            # apply records the stable rejection without changing the selection.
+            return SessionRequirements(level=2, handler_version=handler_version, capabilities=())
 
     def push(
         self,

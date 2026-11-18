@@ -28,14 +28,17 @@ from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._records import InboxItem
 from vv_agent.kernel._requirements import SessionRequirements
-from vv_agent.kernel._sql import InputAdmissionProofError, UnsupportedFeatureLevel
+from vv_agent.kernel._sql import InputAdmissionProofError, LedgerIntegrityError, UnsupportedFeatureLevel
 from vv_agent.session.content_runtime import SESSION_ATTRIBUTES, SessionContentWriter
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
 from vv_agent.session.export import export_session
 from vv_agent.session.fork import fork_thread
+from vv_agent.session.postgres import PostgresContentStore
 from vv_agent.session.records import Record, SessionSpec, make_record
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
+
+from .conftest import Database, open_store
 
 MASTER_KEY = b"k" * 32
 
@@ -51,6 +54,9 @@ class _Signer:
     def __init__(self) -> None:
         self.key = Ed25519PrivateKey.generate()
         self.key_id = "ledger-key-a"
+        self.bind_calls = 0
+        self.sign_calls = 0
+        self.verify_calls = 0
 
     def bind_key(self):
         signer = self
@@ -60,11 +66,14 @@ class _Signer:
 
             @staticmethod
             def sign(message: bytes) -> bytes:
+                signer.sign_calls += 1
                 return signer.key.sign(message)
 
+        self.bind_calls += 1
         return Bound()
 
     def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
+        self.verify_calls += 1
         if key_id != self.key_id:
             return False
         try:
@@ -74,13 +83,12 @@ class _Signer:
         return True
 
 
-def _signed_driver(tmp_path, mutation: str):
-    store = SQLiteStore.standalone(str(tmp_path / f"{mutation}.sqlite"))
-    return store
+def _signed_driver(database: Database):
+    return open_store(database)
 
 
-def _start_signed(tmp_path, mutation: str = "input", *, requirements: SessionRequirements | None = None):
-    stack = _signed_driver(tmp_path, mutation)
+def _start_signed(database: Database, *, requirements: SessionRequirements | None = None):
+    stack = _signed_driver(database)
     store = stack.__enter__()
     store.install_schema()
     signer = _Signer()
@@ -114,8 +122,120 @@ def _input(mutation: str) -> InboxItem:
     return InboxItem("input", "user", {"content": "trusted input"})
 
 
-def test_signed_admission_is_stored_deduped_and_copied_exactly(tmp_path):
-    stack, store, driver, signer = _start_signed(tmp_path)
+def _tamper_input(mutation: str) -> InboxItem:
+    if mutation == "control":
+        return _input("control")
+    if mutation.startswith("approval_"):
+        return InboxItem(
+            "input",
+            "approval_answer",
+            {
+                "operation_id": "operation/guarded",
+                "attempt": 1,
+                "request_id": "request/guarded",
+                "request_digest": "a" * 64,
+                "decision": "approve",
+                "scope": {"tool": "guarded"},
+            },
+        )
+    if mutation.startswith("request_"):
+        return InboxItem(
+            "input",
+            "provider_result",
+            {
+                "operation_id": "operation/provider",
+                "attempt": 1,
+                "request_digest": "a" * 64,
+                "provider_binding": "provider/original",
+                "result": {"status": "ok"},
+                "usage": {"tokens": 1},
+                "evidence": {"receipt": "original"},
+            },
+        )
+    return _input("user")
+
+
+def _tamper_signed_input(store, mutation: str) -> None:
+    body, *_, signature, _signed_ms = store._rows(
+        "SELECT body,input_seq,received_ms,digest,admission_key_id,admission_signature,admission_signed_ms "
+        "FROM sk_inbox WHERE input_id='input'"
+    )[0]
+    item = InboxItem.parse(body)
+    changed = None
+    if mutation == "actor":
+        assert item.actor is not None
+        changed = replace(item, actor=item.actor | {"subject_id": "forged"})
+    elif mutation == "control":
+        changed = replace(item, payload={"action": "cancel"})
+    elif mutation == "approval_operation":
+        changed = replace(item, payload=item.payload | {"operation_id": "operation/forged"})
+    elif mutation == "approval_request_id":
+        changed = replace(item, payload=item.payload | {"request_id": "request/forged"})
+    elif mutation == "approval_request_digest":
+        changed = replace(item, payload=item.payload | {"request_digest": "b" * 64})
+    elif mutation == "request_operation":
+        changed = replace(item, payload=item.payload | {"operation_id": "operation/forged"})
+    elif mutation == "request_digest":
+        changed = replace(item, payload=item.payload | {"request_digest": "b" * 64})
+    elif mutation == "request_provider_binding":
+        changed = replace(item, payload=item.payload | {"provider_binding": "provider/forged"})
+    elif mutation == "target":
+        changed = replace(item, target_turn_id="session/turn/forged")
+    elif mutation == "generation":
+        changed = replace(item, generation=99)
+    elif mutation == "body":
+        changed = replace(
+            item,
+            payload=item.payload | {"content": item.payload["content"] | {"content_id": "content/test/forged-body"}},
+        )
+
+    if changed is not None:
+        changed_body = changed.encode()
+        store._rows(
+            "UPDATE sk_inbox SET body=%s,digest=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (changed_body, sha256(changed_body).hexdigest(), store.tenant_id, "session", "input"),
+        )
+    elif mutation == "input_seq":
+        store._rows(
+            "UPDATE sk_inbox SET input_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (2, store.tenant_id, "session", "input"),
+        )
+    elif mutation == "received_ms":
+        store._rows(
+            "UPDATE sk_inbox SET received_ms=received_ms+1 WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (store.tenant_id, "session", "input"),
+        )
+    elif mutation == "proof_swap":
+        forged = bytes([signature[0] ^ 1]) + bytes(signature[1:])
+        store._rows(
+            "UPDATE sk_inbox SET admission_signature=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (forged, store.tenant_id, "session", "input"),
+        )
+    elif mutation == "proof_missing":
+        store._rows(
+            "UPDATE sk_inbox SET admission_key_id=NULL,admission_signature=NULL,admission_signed_ms=NULL "
+            "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (store.tenant_id, "session", "input"),
+        )
+    else:
+        raise AssertionError(f"unknown tamper mutation: {mutation}")
+
+
+def _ledger_snapshot(store) -> tuple[tuple[int, int], list[tuple]]:
+    session_counters = store._one(
+        "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+        (store.tenant_id, "session"),
+    )
+    records = store._rows(
+        "SELECT seq,record_id,digest FROM sk_record WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+        (store.tenant_id, "session"),
+    )
+    return session_counters, records
+
+
+def test_signed_admission_is_stored_deduped_and_copied_exactly(database, store_backend):
+    del store_backend
+    stack, store, driver, signer = _start_signed(database)
     try:
         first = driver.push("session", _input("user"))
         stored = store.read_input("session", "input")
@@ -164,55 +284,47 @@ def test_explicit_unsigned_local_admission_keeps_null_proof(tmp_path):
 
 @pytest.mark.parametrize(
     "mutation",
-    ["actor", "control", "target", "generation", "input_seq", "received_ms", "proof", "missing_proof"],
+    [
+        "actor",
+        "control",
+        "approval_operation",
+        "approval_request_id",
+        "approval_request_digest",
+        "request_operation",
+        "request_digest",
+        "request_provider_binding",
+        "target",
+        "generation",
+        "body",
+        "input_seq",
+        "received_ms",
+        "proof_swap",
+        "proof_missing",
+    ],
 )
-def test_signed_admission_tampering_fails_before_content_read(tmp_path, monkeypatch, mutation):
-    stack, store, driver, _signer = _start_signed(tmp_path, mutation)
+def test_signed_admission_tampering_fails_before_consumption(database, store_backend, monkeypatch, mutation):
+    del store_backend
+    stack, store, driver, signer = _start_signed(database)
     try:
-        driver.push("session", _input(mutation))
-        body, _seq, _received, _digest, _key_id, signature, _signed_ms = store._rows(
-            "SELECT body,input_seq,received_ms,digest,admission_key_id,admission_signature,admission_signed_ms FROM sk_inbox"
-        )[0]
-        item = InboxItem.parse(body)
-        if mutation == "actor":
-            assert item.actor is not None
-            item = replace(item, actor=item.actor | {"subject_id": "forged"})
-        elif mutation == "control":
-            item = replace(item, payload={"action": "cancel"})
-        elif mutation == "target":
-            item = replace(item, target_turn_id="forged-turn")
-        elif mutation == "generation":
-            item = replace(item, generation=99)
-        if mutation in {"actor", "control", "target", "generation"}:
-            changed = item.encode()
-            store.connection.execute(
-                "UPDATE sk_inbox SET body=?,digest=? WHERE input_id='input'",
-                (changed, sha256(changed).hexdigest()),
-            )
-        elif mutation == "input_seq":
-            store.connection.execute("UPDATE sk_inbox SET input_seq=2 WHERE input_id='input'")
-        elif mutation == "received_ms":
-            store.connection.execute("UPDATE sk_inbox SET received_ms=received_ms+1 WHERE input_id='input'")
-        elif mutation == "proof":
-            store.connection.execute(
-                "UPDATE sk_inbox SET admission_signature=? WHERE input_id='input'",
-                (bytes([signature[0] ^ 1]) + signature[1:],),
-            )
-        elif mutation == "missing_proof":
-            store.connection.execute(
-                "UPDATE sk_inbox SET admission_key_id=NULL,admission_signature=NULL,admission_signed_ms=NULL "
-                "WHERE input_id='input'"
-            )
-        store.connection.commit()
+        driver.push("session", _tamper_input(mutation))
+        _tamper_signed_input(store, mutation)
 
         def fail_get(*_args, **_kwargs):
             raise AssertionError("content decryption must not start for tampered admission")
 
         monkeypatch.setattr(SQLiteContentStore, "get", fail_get)
-        ledger_before = store._rows("SELECT count(*) FROM sk_record")[0][0]
-        with pytest.raises(InputAdmissionProofError):
+        monkeypatch.setattr(PostgresContentStore, "get", fail_get)
+        ledger_before = _ledger_snapshot(store)
+        binds_before = signer.bind_calls
+        signs_before = signer.sign_calls
+        verifies_before = signer.verify_calls
+        with pytest.raises((InputAdmissionProofError, LedgerIntegrityError)):
             store.peek_inbox("session", ready_only=False)
-        assert store._rows("SELECT count(*) FROM sk_record")[0][0] == ledger_before
+        assert signer.bind_calls == binds_before
+        assert signer.sign_calls == signs_before
+        if mutation not in {"proof_missing", "input_seq"}:
+            assert signer.verify_calls > verifies_before
+        assert _ledger_snapshot(store) == ledger_before
     finally:
         stack.__exit__(None, None, None)
 
@@ -289,7 +401,7 @@ def _child_plan(session_id: str, operation_id: str) -> Record:
 
 def test_signed_content_child_uses_sql_admission_level_checkpoint_and_nested_links(tmp_path):
     requirements = SessionRequirements(2, "1", ())
-    stack, store, _driver, signer = _start_signed(tmp_path, "signed-child", requirements=requirements)
+    stack, store, _driver, signer = _start_signed(tmp_path / "signed-child.sqlite", requirements=requirements)
     try:
         parent = store.read("session", limit=1).records[0].record
         admission = {
