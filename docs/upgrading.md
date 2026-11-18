@@ -108,6 +108,16 @@ mode establish only hash consistency; they do not establish database tamper
 resistance, historical authenticity or input identity/approval attribution.
 Signed evidence cannot be exported in that hash-only mode.
 
+The `vv-agent ledger verify` command exposes the local SQLite hash-only path.
+It requires `--session` or `--tenant` and only proceeds without an independent
+`expected_head` when `--allow-unsigned` is explicit. The CLI has no verifier or
+KMS credential loader, so signed verification fails closed with an
+unconfigured-verifier diagnostic. Before selecting hash-only mode it scans only
+the target sessions and rejects any checkpoint or admission proof with
+`signed_evidence_requires_host_verifier`. A tenant run is scoped to that tenant.
+An exact expected head can establish suffix completeness for one session;
+without it the JSON result reports `suffix_completeness: false`.
+
 `SessionDeletionStore` provides explicit, fenced forget and purge operations
 with cascading tombstones and key/content destruction, but the runtime does not
 schedule retention or expose an implicit public deletion operation. Callers

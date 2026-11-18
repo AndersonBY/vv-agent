@@ -676,6 +676,43 @@ Signed evidence cannot be exported under that mode. Export with a verifier that
 holds the relevant historical public keys; current writes use the active key
 identifier returned by the signer binding.
 
+### CLI verification
+
+The local SQLite verifier is an explicit hash-only inspection path:
+
+```bash
+vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned
+vv-agent ledger verify --sqlite ./sessions.sqlite --tenant TENANT_ID --allow-unsigned
+vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned \
+  --expected-head SEQ,DIGEST
+```
+
+`--session` reads the default tenant. `--tenant` enumerates only live sessions
+visible through that tenant-bound store. The command never scans other tenants.
+`--expected-head` is valid only with one session. The digest is a lowercase
+SHA-256 value and must match that session's head exactly.
+
+Before enabling `--allow-unsigned`, the command performs a read-only metadata
+check for checkpoints or admission proofs in every target session. If any are
+present, it returns `signed_evidence_requires_host_verifier`, exits nonzero,
+and does not configure hash-only mode or run ledger verification. A host with
+the appropriate verifier must use its configured store to verify that evidence.
+
+The command emits JSON on every executable verification attempt. Its checked
+scope and observed heads identify what was read; `authenticity` is `hash-only`,
+and `error` preserves the first ledger or input-proof failure. Exit status is
+zero only when every requested session verifies, one when verification fails,
+and two for command-line usage errors. Without `--expected-head`,
+`suffix_completeness` is always false because the database cannot prove that a
+valid signed tail was not removed. An exact expected head sets it to true after
+verification succeeds.
+
+The CLI has no safe verifier or KMS credential loader. Without
+`--allow-unsigned` it fails closed with an unconfigured-verifier error instead of
+claiming a signed result. Hosts that need signature verification must perform it
+through their configured store, signer and retained public-key material; this
+CLI does not add a second unsigned fallback or signing path.
+
 ## What to keep in your own database
 
 The session store is an execution ledger. Its records are readable only by the

@@ -4,9 +4,11 @@ import argparse
 import json
 import math
 import os
+import sqlite3
 import sys
 import uuid
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -18,9 +20,13 @@ from vv_agent.app_server.host import DefaultAppServerHost, model_summary
 from vv_agent.app_server.schema import generate_json_schema, generate_typescript
 from vv_agent.config import ConfigError, ResolvedModelConfig
 from vv_agent.events import DiagnosticEvent, RunEvent
+from vv_agent.kernel._content import ContentBindingMismatch
+from vv_agent.kernel._sql import InputAdmissionProofError, LedgerIntegrityError, SessionNotLive
+from vv_agent.kernel._store import DEFAULT_TENANT_ID, Conflict
 from vv_agent.model import ModelRef, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import AgentResult, AgentTask
 
 _MAX_U32 = (1 << 32) - 1
@@ -28,6 +34,8 @@ _APP_SERVER_DEFAULT_TIMEOUT_SECONDS = 90.0
 _APP_SERVER_APPROVAL_TIMEOUT_SECONDS = 30.0
 _APP_SERVER_DEFAULT_WORKSPACE = Path("./workspace")
 _APP_SERVER_DEFAULT_MAX_CYCLES = 80
+_LEDGER_OUTPUT_VERSION = 1
+_LEDGER_SESSION_PAGE_SIZE = 256
 
 
 class _AppServerCliError(ValueError):
@@ -50,6 +58,15 @@ class _StoreUnique(argparse.Action):
         if hasattr(namespace, self.dest):
             parser.error(f"argument {option_string}: may only be specified once")
         setattr(namespace, self.dest, values)
+
+
+class _LedgerCliUsageError(ValueError):
+    pass
+
+
+class _LedgerArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise _LedgerCliUsageError(f"{self.format_usage().rstrip()}\n{self.prog}: error: {message}")
 
 
 class _TaskCliUsageError(ValueError):
@@ -92,6 +109,29 @@ def _parse_app_server_timeout(value: str) -> float:
     if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
     return parsed
+
+
+def _parse_ledger_sqlite_path(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    if value == ":memory:":
+        raise argparse.ArgumentTypeError("must be a SQLite file path")
+    return Path(value)
+
+
+def _parse_ledger_expected_head(value: str) -> tuple[int, str]:
+    seq_text, separator, digest = value.partition(",")
+    if not separator or not seq_text or not digest:
+        raise argparse.ArgumentTypeError("must use SEQ,DIGEST")
+    try:
+        seq = int(seq_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("sequence must be a non-negative integer") from exc
+    if seq < 0:
+        raise argparse.ArgumentTypeError("sequence must be a non-negative integer")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise argparse.ArgumentTypeError("digest must be 64 lowercase hexadecimal characters")
+    return seq, digest
 
 
 def _build_app_server_parser() -> _AppServerArgumentParser:
@@ -209,14 +249,233 @@ def _build_app_server_host(
     )
 
 
+def _build_ledger_verify_parser() -> _LedgerArgumentParser:
+    parser = _LedgerArgumentParser(
+        prog="vv-agent ledger verify",
+        description="Verify a local S1 SQLite ledger in explicit hash-only mode.",
+    )
+    parser.add_argument(
+        "--sqlite",
+        required=True,
+        type=_parse_ledger_sqlite_path,
+        help="Path to an existing S1 SQLite session store",
+    )
+    scope = parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument(
+        "--session",
+        default=argparse.SUPPRESS,
+        action=_StoreUnique,
+        type=_parse_non_blank_app_server_value,
+        help="Session ID in the default tenant",
+    )
+    scope.add_argument(
+        "--tenant",
+        default=argparse.SUPPRESS,
+        action=_StoreUnique,
+        type=_parse_non_blank_app_server_value,
+        help="Verify every live session visible through this tenant binding",
+    )
+    parser.add_argument(
+        "--expected-head",
+        default=argparse.SUPPRESS,
+        action=_StoreUnique,
+        type=_parse_ledger_expected_head,
+        metavar="SEQ,DIGEST",
+        help="Independent trusted head anchor; valid only with --session",
+    )
+    parser.add_argument(
+        "--allow-unsigned",
+        action="store_true",
+        help="Allow local hash-only verification only when the target scope has no signed evidence",
+    )
+    return parser
+
+
+def _parse_ledger_verify_args(argv: list[str]) -> argparse.Namespace:
+    parser = _build_ledger_verify_parser()
+    args = parser.parse_args(argv)
+    if hasattr(args, "tenant") and hasattr(args, "expected_head"):
+        parser.error("--expected-head requires --session and cannot be used with --tenant")
+    return args
+
+
+def _ledger_result_payload(args: argparse.Namespace) -> dict[str, Any]:
+    session_id = getattr(args, "session", None)
+    tenant_id = getattr(args, "tenant", None) or DEFAULT_TENANT_ID
+    expected_present = hasattr(args, "expected_head")
+    authenticity = "hash-only" if args.allow_unsigned else "signed"
+    if session_id is None:
+        checked_scope: dict[str, Any] = {
+            "kind": "tenant",
+            "tenant_id": tenant_id,
+            "session_count": None,
+            "sessions_verified": 0,
+        }
+    else:
+        checked_scope = {
+            "kind": "session",
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "session_count": 1,
+            "sessions_verified": 0,
+        }
+    return {
+        "schema_version": _LEDGER_OUTPUT_VERSION,
+        "command": "ledger.verify",
+        "ok": False,
+        "backend": "sqlite",
+        "checked_scope": checked_scope,
+        "observed_heads": [],
+        "authenticity": authenticity,
+        "expected_head_present": expected_present,
+        "suffix_completeness": False,
+        "error": None,
+    }
+
+
+def _ledger_error_object(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, ContentBindingMismatch):
+        return {"code": "expected_head_mismatch", "message": message}
+    if isinstance(exc, InputAdmissionProofError):
+        return {"code": "input_proof_error", "message": message}
+    if isinstance(exc, LedgerIntegrityError):
+        return {"code": "ledger_integrity_error", "message": message}
+    if isinstance(exc, SessionNotLive):
+        return {"code": "session_not_live", "message": message}
+    if isinstance(exc, Conflict):
+        code = "session_not_found" if message == "session or cursor not found" else "ledger_conflict"
+        return {"code": code, "message": message}
+    if isinstance(exc, sqlite3.Error):
+        return {"code": "store_unavailable", "message": "SQLite store cannot be opened or read"}
+    if isinstance(exc, OSError):
+        return {"code": "store_unavailable", "message": "SQLite store cannot be opened or read"}
+    if isinstance(exc, ValueError):
+        return {"code": "store_incompatible", "message": message}
+    return {
+        "code": "ledger_verification_failed",
+        "message": f"ledger verification failed with {type(exc).__name__}",
+    }
+
+
+def _ledger_observed_head(store: Any, session_id: str) -> dict[str, Any]:
+    row = store._head(session_id)
+    seq = row[0]
+    return {
+        "session_id": session_id,
+        "seq": seq,
+        "digest": store._chain_anchor(session_id, seq),
+    }
+
+
+def _tenant_sessions(store: Any) -> tuple[str, ...]:
+    sessions: list[str] = []
+    after: str | None = None
+    while True:
+        page = store.list_sessions(limit=_LEDGER_SESSION_PAGE_SIZE, after=after)
+        sessions.extend(page)
+        if len(page) < _LEDGER_SESSION_PAGE_SIZE:
+            return tuple(sessions)
+        after = page[-1]
+
+
+def _has_signed_evidence(store: Any, sessions: tuple[str, ...]) -> bool:
+    for session_id in sessions:
+        row = store._rows(
+            "SELECT EXISTS(SELECT 1 FROM sk_checkpoint WHERE tenant_id=%s AND session_id=%s) "
+            "OR EXISTS(SELECT 1 FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND "
+            "(admission_key_id IS NOT NULL OR admission_signature IS NOT NULL OR admission_signed_ms IS NOT NULL))",
+            (store.tenant_id, session_id, store.tenant_id, session_id),
+        )
+        if bool(row[0][0]):
+            return True
+    return False
+
+
+def _populate_ledger_verification(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    path = args.sqlite
+    if not path.is_file():
+        payload["error"] = {
+            "code": "store_not_found",
+            "message": "SQLite store path does not identify an existing file",
+        }
+        return
+
+    tenant_id = payload["checked_scope"]["tenant_id"]
+    session_id = getattr(args, "session", None)
+    expected_head = getattr(args, "expected_head", None)
+    with SQLiteStore.standalone(str(path)) as root:
+        store = root.for_tenant(tenant_id)
+        sessions = (session_id,) if session_id is not None else _tenant_sessions(store)
+        payload["checked_scope"]["session_count"] = len(sessions)
+        if _has_signed_evidence(store, sessions):
+            payload["authenticity"] = "signed"
+            payload["error"] = {
+                "code": "signed_evidence_requires_host_verifier",
+                "message": (
+                    "signed ledger evidence was detected; a host-configured verifier is required and hash-only "
+                    "verification was not performed"
+                ),
+            }
+            return
+
+        root.configure_input_admission(allow_unsigned=True)
+
+        for current_session_id in sessions:
+            try:
+                seq, digest = store.verify_ledger(
+                    current_session_id,
+                    expected_head=expected_head if current_session_id == session_id else None,
+                )
+            except Exception as exc:
+                payload["error"] = _ledger_error_object(exc)
+                with suppress(Exception):
+                    payload["observed_heads"].append(_ledger_observed_head(store, current_session_id))
+                return
+            payload["observed_heads"].append(
+                {
+                    "session_id": current_session_id,
+                    "seq": seq,
+                    "digest": digest,
+                }
+            )
+            payload["checked_scope"]["sessions_verified"] += 1
+
+
+def _run_ledger_cli(argv: list[str]) -> int:
+    if not argv or argv[0] != "verify":
+        raise _LedgerCliUsageError("Supported ledger command: vv-agent ledger verify")
+    args = _parse_ledger_verify_args(argv[1:])
+    payload = _ledger_result_payload(args)
+    if not args.allow_unsigned:
+        payload["error"] = {
+            "code": "unconfigured_verifier",
+            "message": (
+                "signed ledger verification requires a host-configured verifier; this CLI does not load verifier "
+                "or KMS credentials. Use --allow-unsigned only for local SQLite hash-only verification."
+            ),
+        }
+    else:
+        try:
+            _populate_ledger_verification(args, payload)
+        except Exception as exc:
+            payload["error"] = _ledger_error_object(exc)
+
+    payload["ok"] = payload["error"] is None
+    payload["suffix_completeness"] = payload["ok"] and payload["expected_head_present"]
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if payload["ok"] else 1
+
+
 def _print_top_level_help() -> None:
     parser = argparse.ArgumentParser(
         prog="vv-agent",
-        description="Run an agent task, host the App Server, or use App Server debug utilities.",
+        description="Run an agent task, host the App Server, verify a ledger, or use debug utilities.",
         epilog=(
             "Commands:\n"
             "  app-server   Run stdio App Server or generate protocol bindings.\n"
-            "  debug        Run App Server debug utilities.\n\n"
+            "  debug        Run App Server debug utilities.\n"
+            "  ledger       Verify a local S1 SQLite ledger.\n\n"
             "Task mode keeps the existing top-level --prompt interface."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -459,6 +718,14 @@ def _main(args: list[str]) -> int:
     if args and args[0] == "debug":
         _run_debug_cli(args[1:])
         return 0
+    if args and args[0] == "ledger":
+        try:
+            return _run_ledger_cli(args[1:])
+        except _LedgerCliUsageError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            return 130
     return _run_task_cli(args)
 
 
