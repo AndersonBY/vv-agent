@@ -15,6 +15,7 @@ import psycopg
 from psycopg import sql
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from tests.session.helpers import record
 from tests.session.test_capacity import seed_history
