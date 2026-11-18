@@ -26,6 +26,17 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> None:
         time.sleep(0.005)
 
 
+def _heartbeat_for(path, session_id, *, ttl_ms: int, heartbeat_seconds: float) -> _LeaseHeartbeat:
+    with SQLiteStore.standalone(str(path)) as store:
+        store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
+        create_fixture_session(wrap_fixture_store(store), session_id, consumers=())
+        lease = store.acquire(session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
+        assert lease is not None
+        heartbeat_store = store.heartbeat_store_factory()
+    return _LeaseHeartbeat(lease, heartbeat_store, ttl_ms, heartbeat_seconds)
+
+
 @pytest.mark.sqlite_file
 def test_slow_renewal_barrier_case_does_not_starve_foreground_writer(tmp_path, monkeypatch):
     """A deterministic barrier places renewal work inside the interval."""
@@ -116,6 +127,69 @@ def test_slow_renewal_barrier_case_does_not_starve_foreground_writer(tmp_path, m
         if worker is not None:
             worker.join(2)
         heartbeat.close()
+
+
+@pytest.mark.sqlite_file
+def test_locked_sqlite_retry_does_not_starve_other_registrations(tmp_path, monkeypatch):
+    heartbeat_seconds = 0.04
+    blocked_database = tmp_path / "blocked.sqlite"
+    peer_databases = (tmp_path / "peer-b.sqlite", tmp_path / "peer-c.sqlite")
+    blocked = _heartbeat_for(blocked_database, "blocked", ttl_ms=60_000, heartbeat_seconds=heartbeat_seconds)
+    peers = [
+        _heartbeat_for(path, session_id, ttl_ms=4_000, heartbeat_seconds=heartbeat_seconds)
+        for path, session_id in zip(peer_databases, ("peer-b", "peer-c"), strict=True)
+    ]
+    blocked_attempted = threading.Event()
+    peer_renewed = [threading.Event(), threading.Event()]
+    renew = SQLiteStore.renew
+
+    def observed(self, lease, *, ttl_ms):
+        if self.path == str(blocked_database):
+            blocked_attempted.set()
+        elif blocked_attempted.is_set():
+            for index, path in enumerate(peer_databases):
+                if self.path == str(path):
+                    peer_renewed[index].set()
+        return renew(self, lease, ttl_ms=ttl_ms)
+
+    monkeypatch.setattr(SQLiteStore, "renew", observed)
+    try:
+        for peer in peers:
+            peer.start()
+        assert all(peer.ready.wait(3) and peer.successful_ready for peer in peers)
+
+        with SQLiteStore.standalone(str(blocked_database)) as locker:
+            locker.connection.execute("BEGIN IMMEDIATE")
+            blocked.start()
+            try:
+                assert blocked_attempted.wait(1), "blocked registration did not enter renewal retry"
+                for renewed in peer_renewed:
+                    assert renewed.wait(1), "a peer registration did not renew while another file retried its lock"
+                assert all(peer.successful_ready and not peer.lost for peer in peers)
+            finally:
+                locker.connection.execute("ROLLBACK")
+    finally:
+        for heartbeat in (blocked, *peers):
+            heartbeat.close()
+
+
+@pytest.mark.sqlite_file
+def test_sqlite_anchor_select_is_not_blocked_by_begin_immediate(tmp_path):
+    database = tmp_path / "anchor-read.sqlite"
+    with SQLiteStore.standalone(str(database)) as store:
+        store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
+        create_fixture_session(wrap_fixture_store(store), "s", consumers=())
+
+    with SQLiteStore.standalone(str(database)) as locker:
+        locker.connection.execute("BEGIN IMMEDIATE")
+        try:
+            with SQLiteStore.standalone(str(database)) as heartbeat_store:
+                started = time.monotonic()
+                assert heartbeat_store._now() > 0
+                assert time.monotonic() - started < 0.5
+        finally:
+            locker.connection.execute("ROLLBACK")
 
 
 def test_finished_callback_can_reenter_close_without_waiting_on_itself(tmp_path, monkeypatch):

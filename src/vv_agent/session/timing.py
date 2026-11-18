@@ -55,6 +55,7 @@ class _LeaseRegistration:
     in_flight: bool = False
     closing: bool = False
     finished: bool = False
+    worker: threading.Thread | None = None
     store_context: AbstractContextManager[SessionStore] | None = None
     store: SessionStore | None = None
     close_error: Exception | None = None
@@ -76,25 +77,32 @@ class _SharedLeaseKeeper:
                 return
             registration = _LeaseRegistration(heartbeat, heartbeat.clock.monotonic())
             self._registrations[key] = registration
+            registration.worker = threading.Thread(
+                target=self._run_worker,
+                args=(registration,),
+                daemon=True,
+                name="session-heartbeat",
+            )
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(
                     target=self._run,
                     daemon=True,
-                    name="session-heartbeat",
+                    name="session-heartbeat-scheduler",
                 )
                 self._thread.start()
             if heartbeat.stop.is_set():
                 registration.closing = True
+            registration.worker.start()
             self._condition.notify_all()
 
     def close(self, heartbeat: _LeaseHeartbeat) -> None:
         key = id(heartbeat)
-        reentrant = threading.current_thread() is self._thread
         registration: _LeaseRegistration | None
         with self._condition:
             registration = self._registrations.get(key)
             if registration is None:
                 return
+            reentrant = threading.current_thread() is registration.worker
             registration.closing = True
             registration.next_due = float("inf")
             self._condition.notify_all()
@@ -117,42 +125,57 @@ class _SharedLeaseKeeper:
 
     def _run(self) -> None:
         while True:
-            finish: _LeaseRegistration | None = None
             with self._condition:
-                closing = next(
-                    (
-                        registration
-                        for registration in self._registrations.values()
-                        if registration.closing and not registration.in_flight
-                    ),
-                    None,
-                )
-                if closing is not None:
-                    registration = closing
-                    registration.in_flight = True
-                    finish = registration
-                else:
-                    active = [registration for registration in self._registrations.values() if not registration.closing]
-                    if not active:
-                        self._thread = None
-                        self._condition.notify_all()
-                        return
-                    registration = min(active, key=lambda item: item.next_due)
-                    now = registration.heartbeat.clock.monotonic()
+                if not self._registrations:
+                    self._thread = None
+                    self._condition.notify_all()
+                    return
+                active = [registration for registration in self._registrations.values() if not registration.closing]
+                if not active:
+                    self._thread = None
+                    self._condition.notify_all()
+                    return
+                next_wait: float | None = None
+                dispatched = False
+                stopped = False
+                for registration in active:
+                    if registration.in_flight:
+                        continue
                     if registration.heartbeat.stop.is_set():
                         registration.closing = True
+                        stopped = True
+                        continue
+                    wait = registration.next_due - registration.heartbeat.clock.monotonic()
+                    if wait <= 0:
                         registration.in_flight = True
-                        finish = registration
-                    else:
-                        wait = registration.next_due - now
-                        if wait > 0:
-                            self._condition.wait(wait)
-                            continue
-                        registration.in_flight = True
-            if finish is not None:
-                self._finish(finish, notify_finished=True)
-                continue
-            self._renew(registration)
+                        dispatched = True
+                    elif next_wait is None or wait < next_wait:
+                        next_wait = wait
+                if dispatched or stopped:
+                    self._condition.notify_all()
+                    continue
+                self._condition.wait(next_wait)
+
+    def _run_worker(self, registration: _LeaseRegistration) -> None:
+        while True:
+            with self._condition:
+                if registration.finished:
+                    return
+                while not registration.closing and not registration.in_flight:
+                    self._condition.wait()
+                finishing = registration.closing
+            if finishing:
+                self._finish(registration, notify_finished=True)
+                return
+            try:
+                self._renew(registration)
+            except Exception as exc:
+                with self._condition:
+                    if registration.close_error is None:
+                        registration.close_error = exc
+                    registration.closing = True
+                self._finish(registration, notify_finished=False)
+                return
 
     def _renew(self, registration: _LeaseRegistration) -> None:
         heartbeat = registration.heartbeat
@@ -188,7 +211,7 @@ class _SharedLeaseKeeper:
         store_context = registration.store_context
         registration.store_context = None
         registration.store = None
-        error: Exception | None = None
+        error = registration.close_error
         if store_context is not None:
             try:
                 store_context.__exit__(None, None, None)
