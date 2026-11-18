@@ -10,8 +10,9 @@ from pathlib import Path
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.kernel import _driver_inputs as inputs
+from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_stored_record
 from vv_agent.kernel._content import ContentRef, ContentSessionWriter
-from vv_agent.kernel._content_publication import publish_turn_started
+from vv_agent.kernel._content_publication import make_record_before_publication, publish_turn_started
 from vv_agent.kernel._hydration import reference_digest
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
@@ -29,6 +30,7 @@ MASTER_KEY = b"k" * 32
 def _driver(path: Path, provider: LocalKeyProvider, *, attributes: dict | None = None) -> Iterator[tuple]:
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", attributes or {})
         sessions.push("s", InboxItem("i", "user", {"content": "do work"}))
@@ -82,6 +84,9 @@ def test_turn_started_is_ref_only_links_and_reopens(tmp_path: Path) -> None:
         assert payload["generation"] == 0
         assert payload["requirements"] == {"level": 1, "handler_version": "1", "capabilities": []}
         assert payload["definition_digest"] == reference_digest(definition)
+        assert payload["environment"] is None
+        assert driver.record_content_ref(stored.record, "environment_descriptor") is None
+        assert driver.record_content_ref(stored.record, "environment_operational_policy") is None
         assert "do work" not in stored.record.encode().decode()
 
         body = json.loads(
@@ -102,6 +107,8 @@ def test_turn_started_is_ref_only_links_and_reopens(tmp_path: Path) -> None:
             budget=budget,
             definition_digest=payload["definition_digest"],
         )
+        hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id="s")
+        assert hydrate_session_stored_record(stored, hydration).record.payload["environment"] is None
         before_replay = {
             table: store._one(
                 f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id=%s",
@@ -143,6 +150,7 @@ def test_turn_started_is_ref_only_links_and_reopens(tmp_path: Path) -> None:
 
     reopened_provider = provider
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=reopened, content_key_provider=reopened_provider)
         agent = Agent("kernel", "Work.", model="scripted")
         runtime = sessions.runtime(
@@ -166,11 +174,66 @@ def test_turn_started_is_ref_only_links_and_reopens(tmp_path: Path) -> None:
         )
 
 
+def test_turn_environment_content_hydrates_through_nested_paths(tmp_path: Path) -> None:
+    provider = LocalKeyProvider(MASTER_KEY)
+    path = tmp_path / "environment-producer.sqlite"
+    with _driver(path, provider) as opened:
+        store, _, runtime, driver = opened
+        assert _recovery_phase.run(driver, inputs.apply_input(driver, one_turn=False))
+
+        task = runtime.compile("do work", "s/turn/i", seed=None, control=False)
+        definition = runtime.definition(task)
+        environment = {
+            "descriptor": {"kind": "local", "route": "sandbox"},
+            "environment_capabilities": [],
+            "capabilities_digest": None,
+            "network_policy_ref_digest": None,
+            "isolation_policy_ref_digest": None,
+            "operational_policy": {"network": "allow"},
+        }
+        turn = make_record_before_publication(
+            "turn_started",
+            session_id="s",
+            turn_id="s/turn/i",
+            payload={
+                "input_ids": ["i"],
+                "definition": definition,
+                "definition_digest": digest(definition),
+                "handler_version": "1",
+                "budget": RunBudgetLimits().to_dict(),
+                "binding": None,
+                "generation": 0,
+                "environment": environment,
+            },
+        )
+        driver.commit([turn])
+
+        stored = driver.records[-1]
+        payload = stored.record.payload
+        descriptor = ContentRef.from_dict(payload["environment"]["descriptor"])
+        policy = ContentRef.from_dict(payload["environment"]["operational_policy"])
+        assert driver.record_content_ref(stored.record, "environment_descriptor") == descriptor
+        assert driver.record_content_ref(stored.record, "environment_operational_policy") == policy
+        assert driver.hydrate_record_field(stored.record, "environment_descriptor", descriptor) == environment["descriptor"]
+        assert (
+            driver.hydrate_record_field(stored.record, "environment_operational_policy", policy)
+            == environment["operational_policy"]
+        )
+
+        hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id="s")
+        hydrated = hydrate_session_stored_record(stored, hydration).record
+        assert hydrated.payload["environment"] == environment
+        encoded = stored.record.encode().decode()
+        assert '"route":"sandbox"' not in encoded
+        assert '"network":"allow"' not in encoded
+
+
 def test_plain_child_admission_is_published_once_in_the_turn_transaction(tmp_path: Path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
     path = tmp_path / "child.sqlite"
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         agent = Agent("kernel", "Work.", model="scripted")
         runtime = sessions.runtime(

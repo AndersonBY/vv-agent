@@ -75,6 +75,7 @@ class _SessionState:
     command_digest: str | None = None
     idempotency_key: str | None = None
     binding: LookupBinding | None = None
+    lookup_evidence: tuple[str, ...] = ()
     lock: Any = field(default_factory=RLock)
     done: Event = field(default_factory=Event)
 
@@ -358,7 +359,13 @@ class BackgroundSessionManager:
             binding=binding,
         )
 
-    def lookup(self, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+    def lookup(
+        self,
+        execution_id: str,
+        binding: LookupBinding,
+        *,
+        feature_level: int = 1,
+    ) -> ProviderLookupResult:
         """Look up one trusted local execution without adopting a process by PID."""
         self._validate_binding(binding)
         if binding.execution_id != execution_id:
@@ -371,6 +378,7 @@ class BackgroundSessionManager:
                 LookupStatus.UNKNOWN,
                 Unknown("process-local execution registry is unavailable"),
                 ("process-local:registry-unavailable",),
+                feature_level=feature_level,
             )
         session = self._get(session_id)
         if session is None:
@@ -379,35 +387,55 @@ class BackgroundSessionManager:
                 LookupStatus.UNKNOWN,
                 Unknown("process-local execution state is unavailable"),
                 ("process-local:session-missing",),
+                feature_level=feature_level,
             )
         if session.binding is None or self._stable_binding_fields(session.binding) != self._stable_binding_fields(binding):
             raise InvalidLookupBinding("lookup binding does not match the committed execution binding")
         with session.lock:
             self._advance(session)
             if session.status == "running":
-                outcome = Accepted(self._accepted_handle(session_id, binding))
                 status = LookupStatus.RUNNING
                 evidence = (f"process-local:{session_id}:running",)
+                session.lookup_evidence = evidence
+                outcome = Accepted(self._accepted_handle(session_id, binding, evidence, feature_level))
             elif session.status in _TERMINAL_STATUSES:
                 observation = replace(session)
-                result = self._snapshot(observation)
+                from vv_agent.tools.handlers.background import background_command_result
+
+                result = background_command_result(self._snapshot(observation))
+                result.tool_call_id = observation.artifact_tool_call_id
                 status = LookupStatus.EXITED
+                accepted_handle = self._accepted_handle(
+                    session_id,
+                    binding,
+                    (f"process-local:{session_id}:running",),
+                    feature_level,
+                )
+                accepted_evidence = tuple(accepted_handle["evidence"])
+                retained_evidence = session.lookup_evidence or accepted_evidence
+                evidence = tuple(dict.fromkeys((*retained_evidence, f"process-local:{session_id}:terminal")))
                 outcome = Definitive(
-                    result=result,
-                    evidence=(f"process-local:{session_id}:terminal",),
+                    result=result.to_dict(),
+                    evidence=evidence,
                     usage={},
                 )
-                evidence = tuple(outcome.evidence)
             else:
                 status = LookupStatus.UNKNOWN
                 outcome = Unknown("process status does not prove a running or terminal execution")
                 evidence = (f"process-local:{session_id}:{session.status}",)
-        return ProviderLookupResult(binding, status, outcome, evidence)
+        return ProviderLookupResult(binding, status, outcome, evidence, feature_level=feature_level)
 
     @staticmethod
-    def _accepted_handle(session_id: str, binding: LookupBinding) -> dict[str, Any]:
-        return {
-            "session_id": session_id,
+    def _accepted_handle(
+        session_id: str,
+        binding: LookupBinding,
+        evidence: tuple[str, ...],
+        feature_level: int,
+    ) -> dict[str, Any]:
+        handle = {
+            "kind": "provider",
+            "provider": binding.provider_id,
+            "job_id": session_id,
             "operation_id": binding.operation_id,
             "attempt": binding.attempt,
             "request_digest": binding.request_digest,
@@ -415,8 +443,14 @@ class BackgroundSessionManager:
             "command_digest": binding.command_digest,
             "environment_id": binding.environment_id,
             "generation": binding.generation,
-            "provider_id": binding.provider_id,
+            "query_ref": f"process-local:{session_id}:check",
+            "cancel_ref": f"process-local:{session_id}:stop",
+            "evidence": list(evidence),
         }
+        if feature_level != 3:
+            for field_name in ("execution_id", "command_digest", "environment_id", "generation"):
+                handle.pop(field_name)
+        return handle
 
     def _get(self, session_id: str) -> _SessionState | None:
         with self._lock:

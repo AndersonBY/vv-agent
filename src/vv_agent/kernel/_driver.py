@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import replace
 from typing import Any, Protocol
@@ -18,7 +18,7 @@ from vv_agent.kernel._content_publication import (
     require_record_link_writer,
     resolve_record_content_links,
 )
-from vv_agent.kernel._execution_values import AgentTask
+from vv_agent.kernel._execution_values import AgentTask, SubTaskOutcome
 from vv_agent.kernel._hydration import (
     ContentReader,
     DefinitionContent,
@@ -30,11 +30,21 @@ from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, LeasePoll, SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._tool_values import ToolExecutionResult
+
+ConfiguredChildResultProjector = Callable[
+    [Record, Sequence[SubTaskOutcome], Mapping[str, Any]],
+    ToolExecutionResult,
+]
+
+_TURN_ENVIRONMENT_CONTENT_SLOTS = frozenset({"environment_descriptor", "environment_operational_policy"})
 
 _RECORD_CONTENT_PATHS: dict[tuple[str, str], tuple[str, ...]] = {
     ("session_created", SESSION_ATTRIBUTES): ("attributes",),
     ("turn_started", "definition"): ("definition",),
     ("turn_started", "budget"): ("budget",),
+    ("turn_started", "environment_descriptor"): ("environment", "descriptor"),
+    ("turn_started", "environment_operational_policy"): ("environment", "operational_policy"),
     ("input_applied", "input_reason"): ("reason",),
     ("op_planned", "request"): ("request",),
     ("op_planned", "tool"): ("tool",),
@@ -98,12 +108,14 @@ class CoreDriver:
         emit_phase: Callable[[float, dict[str, Any]], None],
         content_reader: ContentReader | None = None,
         expected_head: SessionHead | tuple[int, str] | None = None,
+        project_configured_child_results: ConfiguredChildResultProjector | None = None,
     ) -> None:
         self.store, self.sid, self.scope = store, sid, scope
         self._fold_factory, self._clock = fold_factory, clock
         self._observe_cost, self._hook, self._emit_phase = observe_cost, hook, emit_phase
         self.content_reader = content_reader
         self._expected_head = expected_head
+        self._project_configured_child_results = project_configured_child_results
         self._hydrators: dict[int, SessionHydrator] = {}
         self.load_state()
         self.polled: set[tuple[str, int]] = set()
@@ -269,6 +281,12 @@ class CoreDriver:
             path = _RECORD_CONTENT_PATHS[(record.kind, slot)]
         except KeyError:
             raise RecordError(f"unknown content slot for {record.kind}: {slot}") from None
+        if (
+            record.kind == "turn_started"
+            and slot in _TURN_ENVIRONMENT_CONTENT_SLOTS
+            and record._payload.get("environment") is None
+        ):
+            return None
         value: Any = record._payload
         for part in path:
             if type(value) is not dict or part not in value:

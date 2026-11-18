@@ -11,6 +11,7 @@ from vv_agent.kernel._provider_outcomes import Outcome as Outcome
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid as ProviderResultInvalid
 from vv_agent.kernel._provider_outcomes import Unknown as Unknown
 from vv_agent.kernel._provider_outcomes import validate_acceptance as validate_acceptance
+from vv_agent.kernel._provider_outcomes import validate_lookup_provider_result
 from vv_agent.kernel._provider_outcomes import validate_provider_result as validate_provider_result
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools.base import ToolContext
@@ -49,7 +50,13 @@ def _validate_lookup_call(execution_id: str, binding: LookupBinding) -> None:
         raise InvalidProviderLookupResult("lookup execution_id does not match the authenticated binding")
 
 
-def lookup_provider(provider: object, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+def lookup_provider(
+    provider: object,
+    execution_id: str,
+    binding: LookupBinding,
+    *,
+    feature_level: int = 1,
+) -> ProviderLookupResult:
     """Call a provider lookup capability and bind its evidence to the caller's lookup request."""
     from .environments import InvalidLookupBinding, InvalidProviderLookupResult, ProviderLookupResult
 
@@ -64,6 +71,18 @@ def lookup_provider(provider: object, execution_id: str, binding: LookupBinding)
         result.assert_matches(binding)
     except InvalidLookupBinding as exc:
         raise InvalidProviderLookupResult("provider lookup result does not match the authenticated binding") from exc
+    try:
+        validate_lookup_provider_result(
+            result.binding,
+            result.status.value,
+            result.outcome,
+            result.evidence,
+            feature_level=feature_level,
+        )
+    except ProviderResultInvalid as exc:
+        raise InvalidProviderLookupResult("provider lookup result is invalid") from exc
+    if result.feature_level != feature_level:
+        raise InvalidProviderLookupResult("provider lookup feature level does not match the caller")
     return result
 
 
@@ -124,7 +143,7 @@ class FunctionProvider:
     def authenticate(self, item: InboxItem, plan: Record) -> bool:
         return False  # Ordinary handlers cannot authenticate an external callback.
 
-    def lookup(self, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+    def lookup(self, execution_id: str, binding: LookupBinding, *, feature_level: int = 1) -> ProviderLookupResult:
         from .environments import LookupStatus, ProviderLookupResult
 
         _validate_lookup_call(execution_id, binding)
@@ -133,4 +152,5 @@ class FunctionProvider:
             LookupStatus.UNKNOWN,
             Unknown("synchronous function provider has no persistent execution registry"),
             ("function-provider-no-registry",),
+            feature_level=feature_level,
         )

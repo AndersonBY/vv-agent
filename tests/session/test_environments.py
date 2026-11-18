@@ -27,6 +27,7 @@ from vv_agent.session.environments import (
     stable_operation_key,
 )
 from vv_agent.session.providers import Accepted, Definitive, Unknown
+from vv_agent.types import ToolExecutionResult
 
 TENANT = "tenant-a"
 SESSION = "session/a"
@@ -84,6 +85,20 @@ def _binding(
         generation=generation,
         provider_id=provider_id,
     )
+
+
+def _provider_handle(binding: LookupBinding) -> dict[str, Any]:
+    return {
+        "kind": "provider",
+        "provider": binding.provider_id,
+        "job_id": f"job:{binding.operation_id}",
+        "operation_id": binding.operation_id,
+        "attempt": binding.attempt,
+        "request_digest": binding.request_digest,
+        "evidence": ["registry:present"],
+        "query_ref": f"query:{binding.operation_id}",
+        "cancel_ref": f"cancel:{binding.operation_id}",
+    }
 
 
 class _SessionKeyProvider:
@@ -394,19 +409,13 @@ def test_provider_lookup_reuses_provider_outcomes_and_validates_state() -> None:
     running = ProviderLookupResult(
         binding,
         LookupStatus.RUNNING,
-        Accepted(
-            handle={
-                "operation_id": binding.operation_id,
-                "attempt": binding.attempt,
-                "request_digest": binding.request_digest,
-            }
-        ),
+        Accepted(_provider_handle(binding)),
         ("registry:present",),
     )
     exited = ProviderLookupResult(
         binding,
         LookupStatus.EXITED,
-        Definitive(result={}, evidence=("registry:exited",), usage={}),
+        Definitive(ToolExecutionResult("call-1", "terminal").to_dict(), evidence=("registry:exited",), usage={}),
         ("registry:exited",),
     )
     unknown = ProviderLookupResult(
@@ -441,16 +450,12 @@ def test_provider_lookup_rejects_status_outcome_mismatch(status: Any, outcome: A
 
 def test_provider_lookup_rejects_handle_attempt_substitution() -> None:
     binding = _binding()
-    with pytest.raises(InvalidProviderLookupResult, match="attempt"):
+    handle = _provider_handle(binding)
+    handle["attempt"] = binding.attempt + 1
+    with pytest.raises(InvalidProviderLookupResult, match="provider_result_invalid"):
         ProviderLookupResult(
             binding,
             LookupStatus.RUNNING,
-            Accepted(
-                handle={
-                    "operation_id": binding.operation_id,
-                    "attempt": binding.attempt + 1,
-                    "request_digest": binding.request_digest,
-                }
-            ),
+            Accepted(handle),
             ("registry:present",),
         )

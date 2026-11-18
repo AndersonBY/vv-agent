@@ -7,7 +7,8 @@ from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
 from dataclasses import replace
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.constants import SUB_TASK_STATUS_TOOL_NAME
@@ -19,10 +20,14 @@ from vv_agent.kernel._cancellation import Cancellation
 from vv_agent.kernel._content import ContentRef, SessionHead
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
+from vv_agent.kernel._execution_values import SubTaskOutcome
 from vv_agent.kernel._hydration import DefinitionContent
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._reducer import Fold as CoreFold
 from vv_agent.kernel._reducer import logical_operation_payloads
+from vv_agent.kernel._tool_values import ToolExecutionResult
+from vv_agent.tools.base import ToolContext
+from vv_agent.tools.handlers.sub_agents import create_sub_task
 from vv_agent.types import AgentTask, Message
 
 from . import _drive_phase, _driver_dispatch, _driver_inputs, _driver_planning, _driver_recovery
@@ -70,6 +75,29 @@ def _is_content_ref(value: Any) -> bool:
     return True
 
 
+def _project_configured_child_results(
+    plan: Record,
+    outcomes: list[SubTaskOutcome] | tuple[SubTaskOutcome, ...],
+    delegation: dict[str, Any],
+) -> ToolExecutionResult:
+    del delegation
+    values = iter(outcomes)
+    context = SimpleNamespace(
+        sub_task_runner=lambda _request: next(values),
+        sub_task_manager=None,
+        run_context=None,
+        ctx=None,
+        tool_call_id="",
+        workspace_backend=None,
+    )
+    result = create_sub_task(
+        cast(ToolContext, context),
+        copy_json(plan._payload["request"]["arguments"]) | {"wait_for_completion": True},
+    )
+    result.tool_call_id = plan._payload["request"]["id"]
+    return result
+
+
 class _Driver(CoreDriver):
     scope: _Scope
 
@@ -114,6 +142,7 @@ class _Driver(CoreDriver):
             emit_phase=emit_phase,
             content_reader=runtime.content_reader,
             expected_head=expected_head,
+            project_configured_child_results=_project_configured_child_results,
         )
 
     def load_state(self) -> None:

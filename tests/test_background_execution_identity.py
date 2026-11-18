@@ -3,11 +3,13 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from vv_agent.kernel._canonical_json import canonical_json_sha256
+from vv_agent.kernel._provider_outcomes import validate_provider_result
 from vv_agent.runtime import background_sessions as background_runtime
 from vv_agent.runtime.local_environment import LocalEnvironment
 from vv_agent.runtime.processes import CapturedProcess
@@ -22,6 +24,7 @@ from vv_agent.session.environments import (
     stable_operation_key,
 )
 from vv_agent.session.providers import Accepted, Definitive, Unknown
+from vv_agent.types import ToolExecutionResult
 
 TENANT = "tenant-a"
 SESSION = "session/a"
@@ -133,7 +136,38 @@ def test_start_reuses_stable_execution_across_attempts_and_rejects_changed_comma
     assert isinstance(running.outcome, Accepted)
     assert running.outcome.handle["attempt"] == retry_binding.attempt
     assert running.outcome.handle["request_digest"] == retry_binding.request_digest
-    assert running.outcome.handle["session_id"] == session_id
+    assert running.outcome.handle["job_id"] == session_id
+    assert set(running.outcome.handle) == {
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "evidence",
+        "query_ref",
+        "cancel_ref",
+    }
+
+    level_three = manager.lookup(first_binding.execution_id, retry_binding, feature_level=3)
+    assert level_three.status is LookupStatus.RUNNING
+    assert isinstance(level_three.outcome, Accepted)
+    assert set(level_three.outcome.handle) == {
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "evidence",
+        "query_ref",
+        "cancel_ref",
+    }
+    assert level_three.outcome.handle["execution_id"] == retry_binding.execution_id
 
     with pytest.raises(background_runtime.BackgroundExecutionConflict, match="different command"):
         manager.start(command="echo changed", cwd=tmp_path, binding=_binding(command_digest="4" * 64))
@@ -381,7 +415,18 @@ def test_terminal_process_maps_to_definitive_execution_result(tmp_path: Path, mo
     process = _FakeProcess()
     manager, environment = _manager(tmp_path, process, monkeypatch)
     binding = _binding()
-    session_id = manager.start(command="echo stable", cwd=tmp_path, binding=binding)
+    monkeypatch.setattr(background_runtime, "process_tree_is_running", lambda process: True)
+    session_id = manager.start(
+        command="echo stable",
+        cwd=tmp_path,
+        binding=binding,
+        artifact_tool_call_id="call-1",
+    )
+    accepted = manager.lookup(binding.execution_id, binding)
+    assert accepted.status is LookupStatus.RUNNING
+    assert isinstance(accepted.outcome, Accepted)
+    accepted_evidence = tuple(accepted.outcome.handle["evidence"])
+
     process.returncode = 0
     monkeypatch.setattr(background_runtime, "process_tree_is_running", lambda process: False)
 
@@ -389,10 +434,23 @@ def test_terminal_process_maps_to_definitive_execution_result(tmp_path: Path, mo
 
     assert result.status is LookupStatus.EXITED
     assert isinstance(result.outcome, Definitive)
-    assert result.outcome.result["session_id"] == session_id
-    assert result.outcome.result["status"] == "completed"
-    assert result.outcome.result["exit_code"] == 0
-    assert "terminal output" in result.outcome.result["output"]
+    assert set(accepted_evidence).issubset(result.outcome.evidence)
+    assert set(accepted_evidence).issubset(result.evidence)
+    tool_result = ToolExecutionResult.from_dict(result.outcome.result)
+    assert tool_result.tool_call_id == "call-1"
+    assert tool_result.metadata["session_id"] == session_id
+    assert tool_result.metadata["status"] == "completed"
+    assert tool_result.metadata["exit_code"] == 0
+    assert "terminal output" in tool_result.content
+    validate_provider_result(
+        SimpleNamespace(
+            feature_level=3,
+            operation_id=binding.operation_id,
+            attempt=binding.attempt,
+            _payload={"op_kind": "tool", "request": {"id": "call-1"}},
+        ),
+        result.outcome,
+    )
 
     duplicate_session_id = manager.start(command="echo stable", cwd=tmp_path, binding=binding)
     assert duplicate_session_id == session_id

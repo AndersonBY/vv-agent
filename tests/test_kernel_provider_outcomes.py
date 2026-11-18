@@ -1,27 +1,35 @@
 """Pure receipt checks retain validation order, causes and actual facade identity."""
 
-import json
 import subprocess
 import sys
 import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from vv_agent.kernel import _provider_outcomes as core
 from vv_agent.kernel import _tool_result_checks as checks
-from vv_agent.kernel._records import Record
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool_plan():
-    history = json.loads((_ROOT / "tests/session/fixtures/step_cost_release_histories.json").read_text())[-1]
-    records = [Record.parse(body.encode()) for body in history["records"]]
-    return next(r for r in records if r.kind == "op_planned" and r._payload["op_kind"] == "tool")
+    return SimpleNamespace(
+        feature_level=1,
+        session_id="session/tool",
+        operation_id="operation/tool",
+        attempt=1,
+        _payload={
+            "op_kind": "tool",
+            "provider_binding": "provider/test",
+            "request_digest": "2" * 64,
+            "request": {"id": "call/tool"},
+        },
+    )
 
 
 def _handle(plan):
@@ -46,6 +54,7 @@ def test_receipt_core_imports_and_validates_without_outer_dependencies(tmp_path,
         import json
         import sys
         from pathlib import Path
+        from types import SimpleNamespace
 
         root, layer = Path(sys.argv[1]), sys.argv[2]
         sys.path.insert(0, str(root / "src"))
@@ -81,10 +90,18 @@ def test_receipt_core_imports_and_validates_without_outer_dependencies(tmp_path,
         checks.validate_output_body(ToolExecutionResult.from_dict(bounded))
         if layer == "provider":
             from vv_agent.kernel import _provider_outcomes as core
-            from vv_agent.kernel._records import Record
-            history = json.loads((root / "tests/session/fixtures/step_cost_release_histories.json").read_text())[-1]
-            records = [Record.parse(body.encode()) for body in history["records"]]
-            plan = next(r for r in records if r.kind == "op_planned" and r._payload["op_kind"] == "tool")
+            plan = SimpleNamespace(
+                feature_level=1,
+                session_id="session/tool",
+                operation_id="operation/tool",
+                attempt=1,
+                _payload={
+                    "op_kind": "tool",
+                    "provider_binding": "provider/test",
+                    "request_digest": "2" * 64,
+                    "request": {"id": "call/tool"},
+                },
+            )
             handle = dict(kind="provider", provider=plan._payload["provider_binding"], job_id="receipt",
                           operation_id=plan.operation_id, attempt=plan.attempt,
                           request_digest=plan._payload["request_digest"], evidence="accepted",
@@ -184,7 +201,7 @@ def test_receipt_validation_order_and_nested_causes():
     cause = caught.value.__cause__
     assert type(cause) is core.ProviderResultInvalid
     assert type(cause.__cause__) is ValueError
-    assert str(cause.__cause__) == "provider handle mismatch"
+    assert str(cause.__cause__) == "provider handle operation_id mismatch"
 
 
 def test_acceptance_handle_failure_precedes_declaration_failure():
@@ -193,7 +210,7 @@ def test_acceptance_handle_failure_precedes_declaration_failure():
     invalid_flag: Any = 1
     with pytest.raises(core.ProviderResultInvalid) as caught:
         core.validate_acceptance(plan, core.Accepted(handle | {"operation_id": "wrong"}, invalid_flag))
-    assert str(caught.value.__cause__) == "provider handle mismatch"
+    assert str(caught.value.__cause__) == "provider handle operation_id mismatch"
     with pytest.raises(core.ProviderResultInvalid) as caught:
         core.validate_acceptance(plan, core.Accepted(handle, invalid_flag))
     assert caught.value.__cause__ is None
