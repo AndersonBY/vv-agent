@@ -156,7 +156,7 @@ def heartbeat_for(
 
 
 @pytest.mark.sqlite_file
-def test_default_thread_keeper_shares_scheduler_and_closes_scopes_independently(tmp_path, monkeypatch):
+def test_default_thread_keeper_has_one_worker_per_registration_and_closes_independently(tmp_path, monkeypatch):
     path = tmp_path / "shared.sqlite"
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
@@ -193,9 +193,9 @@ def test_default_thread_keeper_shares_scheduler_and_closes_scopes_independently(
             scope.start()
         wait_until(lambda: all(scope.successful_ready and scope.latest_poll is not None for scope in scopes))
 
-        assert len(set(opened_threads)) == 1
+        assert len(set(opened_threads)) == len(scopes)
         assert threading.get_ident() not in opened_threads
-        scheduler_thread = opened_threads[0]
+        worker_threads = tuple(opened_threads)
         assert len(opened_connections) == len(scopes)
         assert len(set(opened_connections)) == len(scopes)
         initial_opened_connections = tuple(opened_connections)
@@ -220,8 +220,8 @@ def test_default_thread_keeper_shares_scheduler_and_closes_scopes_independently(
         scopes[1].close()
         scopes[2].close()
         assert opened_connections == list(initial_opened_connections)
-        assert closed_threads == [scheduler_thread] * len(scopes)
-        wait_until(lambda: scheduler_thread not in {thread.ident for thread in threading.enumerate()})
+        assert sorted(closed_threads) == sorted(worker_threads)
+        wait_until(lambda: not (set(worker_threads) & {thread.ident for thread in threading.enumerate()}))
 
         with open_store(path) as store:
             assert store.release(scopes[2].lease)
@@ -388,7 +388,7 @@ def test_public_kernel_three_agents_share_keeper_across_model_cycles(tmp_path, m
         assert model_calls == {session_id: 2 for session_id in session_ids}
         assert lock_held.is_set() and lock_seen.is_set()
         assert lock_failures
-        assert len(heartbeat_threads) == 1
+        assert len(heartbeat_threads) == len(session_ids)
         assert threading.get_ident() not in heartbeat_threads
         assert not ({id(store.connection) for store in stores} & heartbeat_connections)
     finally:
