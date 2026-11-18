@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
+from vv_agent.kernel._content import KeyUnavailable
 from vv_agent.kernel._lease_scope import Clock, Signal
 from vv_agent.kernel._sql import SQLStore, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
 from vv_agent.kernel._store import Lease, LeaseLost, LeasePoll, SequenceConflict, SessionStore, StoredRecord
@@ -17,9 +18,13 @@ FACTORY_HEARTBEAT_SECONDS = 0.25
 _TYPED_HEARTBEAT_FAILURES = (UnsupportedFeatureLevel, UnsupportedWorkerCapabilities)
 
 
-class DriveRuntime(Protocol):
+class DriveRuntimeCore(Protocol):
     ttl_ms: int
     poll_ms: int
+
+
+class DriveRuntime(DriveRuntimeCore, Protocol):
+    _key_unavailable: bool
 
 
 class DriveHeartbeat(Protocol):
@@ -49,20 +54,32 @@ class DriveStep(Protocol):
     def step(self) -> bool: ...
 
 
+def _set_key_unavailable(runtime: DriveRuntimeCore, unavailable: bool) -> None:
+    with suppress(AttributeError):
+        setattr(runtime, "_key_unavailable", unavailable)  # noqa: B010 - third-party runtimes may omit writable state.
+
+
+def _consume_key_unavailable(runtime: DriveRuntimeCore) -> bool:
+    unavailable = bool(getattr(runtime, "_key_unavailable", False))
+    if unavailable:
+        _set_key_unavailable(runtime, False)
+    return unavailable
+
+
 @dataclass(frozen=True, slots=True)
 class DriveBinding:
     """Objects and callbacks external to the core algorithm."""
 
     clock: Clock
     ttl_ms: int
-    runtime: DriveRuntime | None
+    runtime: DriveRuntimeCore | None
     make_factory_heartbeat: Callable[[Lease, int], DriveHeartbeat] | None
-    make_runtime: Callable[[], DriveRuntime] | None
+    make_runtime: Callable[[], DriveRuntimeCore] | None
     factory_retry_after_ms: Callable[[Exception], int | None]
-    make_scope: Callable[[Lease, DriveRuntime], DriveLeaseScope]
-    make_driver: Callable[[SessionStore, str, DriveRuntime, DriveLeaseScope], DriveStep]
-    after_drive: Callable[[DriveRuntime], None]
-    wake_if_runnable: Callable[[DriveRuntime], None]
+    make_scope: Callable[[Lease, DriveRuntimeCore], DriveLeaseScope]
+    make_driver: Callable[[SessionStore, str, DriveRuntimeCore, DriveLeaseScope], DriveStep]
+    after_drive: Callable[[DriveRuntimeCore], None]
+    wake_if_runnable: Callable[[DriveRuntimeCore], None]
 
 
 def _defer_after_error(store: SessionStore, lease: Lease, retry_after_ms: int, error: Exception) -> None:
@@ -220,10 +237,17 @@ def drive_core(
             raise LeaseLost("runtime heartbeat lost ownership") from scope.heartbeat_error
         driver = binding.make_driver(store, session_id, runtime, scope)
         while not scope.lost:
+            _set_key_unavailable(runtime, False)
             try:
                 if not driver.step():
+                    key_unavailable = _consume_key_unavailable(runtime)
                     with ExitStack() as latch:
-                        if isinstance(store, SQLStore):
+                        if key_unavailable:
+                            store.defer_drive(
+                                latch.enter_context(scope.committing()),
+                                retry_after_ms=failure_backoff_ms,
+                            )
+                        elif isinstance(store, SQLStore):
                             store._defer_idle_drive(
                                 scope.lease,
                                 poll_ms=runtime.poll_ms,
@@ -253,13 +277,16 @@ def drive_core(
                 pass
             else:
                 scope_close_succeeded = True
+        key_unavailable = isinstance(exc, KeyUnavailable)
         if (
-            scheduled
+            (scheduled or key_unavailable)
             and (scope is None or scope_close_succeeded)
             and isinstance(exc, Exception)
             and not _is_typed_heartbeat_failure(exc)
         ):
             _defer_after_error(store, scope.lease if scope is not None else lease, failure_backoff_ms, exc)
+            if key_unavailable:
+                return True
         raise
     finally:
         if scope is None or scope_close_succeeded:

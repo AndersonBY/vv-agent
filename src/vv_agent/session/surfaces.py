@@ -32,6 +32,7 @@ from vv_agent.kernel._content import (
     ContentRef,
     ContentUnavailable,
     KeyProvider,
+    KeyUnavailable,
     Principal,
 )
 from vv_agent.kernel._content_publication import (
@@ -41,6 +42,7 @@ from vv_agent.kernel._content_publication import (
 )
 from vv_agent.kernel._driver_inputs import _pending_batch_in_state, _steer_held_in_state
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
+from vv_agent.kernel._postgres import _bind_tenant_context
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.kernel._requirements import (
     SessionRequirements,
@@ -52,6 +54,7 @@ from vv_agent.kernel._sql import (
     UnsupportedFeatureLevel,
     UnsupportedWorkerCapabilities,
     _RoutingCache,
+    _TenantSQLStore,
 )
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted
@@ -68,6 +71,7 @@ from .children import child_delivery, child_handles
 from .content_runtime import (
     INPUT_CONTENT,
     SessionContentWriter,
+    _ContentSessionStoreAdapter,
     bind_content_key_provider,
     content_key_provider_for,
     content_runtime_binding_for,
@@ -332,11 +336,21 @@ class _IngressAttributes(dict[str, Any]):
     """Mark host ingress attributes as plaintext across mapping-only assembly layers."""
 
 
+def _tenant_bound_sql_store(store: SessionStore) -> SessionStore:
+    """Unwrap content decoration without discarding the tenant-bound SQL facade."""
+
+    if isinstance(store, _ContentSessionStoreAdapter):
+        store = store._store
+    if isinstance(store, _TenantSQLStore):
+        return cast(SessionStore, store._bound)
+    return store
+
+
 @contextmanager
 def _read_snapshot(store: SessionStore) -> Iterator[None]:
     """Hold one read-only SQL snapshot without blocking a driving writer."""
 
-    concrete = getattr(store, "_root", store)
+    concrete = _tenant_bound_sql_store(store)
     if isinstance(concrete, CoreSQLiteStore):
         connection = concrete.connection
         with concrete._connection_lock:
@@ -359,10 +373,13 @@ def _read_snapshot(store: SessionStore) -> Iterator[None]:
         connection = concrete.connection
         with concrete._connection_lock:
             if connection.info.transaction_status != TransactionStatus.IDLE:
+                if connection.info.transaction_status == TransactionStatus.INTRANS:
+                    _bind_tenant_context(connection, concrete.tenant_context_id)
                 yield
                 return
             with connection.transaction():
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                _bind_tenant_context(connection, concrete.tenant_context_id)
                 yield
         return
     with store.atomic():
@@ -372,7 +389,7 @@ def _read_snapshot(store: SessionStore) -> Iterator[None]:
 def _drive_flags_in_snapshot(store: SessionStore, sid: str) -> tuple[bool, bool]:
     """Return current runnability and pending schedule from one SQL snapshot."""
 
-    concrete = getattr(store, "_root", store)
+    concrete = _tenant_bound_sql_store(store)
     if not isinstance(concrete, (CoreSQLiteStore, CorePostgresStore)):
         return store.is_runnable(sid), False
     candidate_predicate, worker_params = concrete._worker_candidate_predicate()
@@ -1639,6 +1656,36 @@ class SessionDriver:
                                 jitter=retry_jitter,
                             ),
                         )
+            elif isinstance(exc, KeyUnavailable):
+                progressed = after_head > before_head
+                prior = None if progressed else failure
+                attempts = 1 if prior is None else prior.attempts + 1
+                first_cause = exc if prior is None else prior.error
+                retry_attempts, retry_base, retry_cap, retry_jitter = self._lease_retry_policy(
+                    registration,
+                    runtime,
+                )
+                self._errors[session_id] = _SessionFailure(
+                    tid,
+                    first_cause,
+                    attempts,
+                    after_head,
+                    False,
+                    retry_attempts,
+                    retry_base,
+                    retry_cap,
+                    retry_jitter,
+                )
+                with suppress(LeaseLost):
+                    store.defer_drive(
+                        lease,
+                        retry_after_ms=self._lease_retry_delay_ms(
+                            attempts + 1,
+                            base_seconds=retry_base,
+                            cap_seconds=retry_cap,
+                            jitter=retry_jitter,
+                        ),
+                    )
             else:
                 # DriveCore already raises the original factory exception from
                 # its backoff failure. Preserve identity and the existing cause

@@ -1085,11 +1085,13 @@ class _PostgresContentBackend:
         *,
         credential_tenant_id: str | None = None,
         tenant_context_id: str | None = None,
+        runtime_mode: RuntimeMode = "unbound-internal",
     ) -> None:
         self.connection = connection
         self.connection_lock = connection_lock
         self.credential_tenant_id = credential_tenant_id
         self.tenant_context_id = tenant_context_id
+        self.runtime_mode = runtime_mode
 
     @contextmanager
     def _serialized(self) -> Iterator[None]:
@@ -1158,6 +1160,7 @@ class _PostgresContentBackend:
         with self._serialized():
             if self.connection.info.transaction_status != TransactionStatus.INTRANS:
                 raise RuntimeError("durable content writes require the caller's outer session transaction")
+            _bind_tenant_context(self.connection, self.tenant_context_id)
 
     def now_ms(self) -> int:
         row = self.fetchone(f"SELECT {CLOCK}")
@@ -1181,6 +1184,7 @@ class CorePostgresContentStore(CoreSQLContentStore):
         connection_lock: RLock | None = None
         credential_tenant_id: str | None = None
         tenant_context_id: str | None = None
+        runtime_mode: RuntimeMode = "unbound-internal"
         if isinstance(source, SQLSessionTx):
             if not isinstance(source.store, PostgresStore):
                 raise TypeError("PostgresContentStore transaction must belong to PostgresStore")
@@ -1188,6 +1192,7 @@ class CorePostgresContentStore(CoreSQLContentStore):
             connection_lock = source.store._connection_lock
             credential_tenant_id = source.store.credential_tenant_id
             tenant_context_id = source.store.tenant_context_id
+            runtime_mode = source.store.runtime_mode
         elif isinstance(source, _TenantSQLStore):
             bound = source._bound
             if not isinstance(bound, PostgresStore):
@@ -1196,20 +1201,28 @@ class CorePostgresContentStore(CoreSQLContentStore):
             connection_lock = bound._connection_lock
             credential_tenant_id = bound.credential_tenant_id
             tenant_context_id = bound.tenant_context_id
+            runtime_mode = bound.runtime_mode
         else:
             if isinstance(source, PostgresStore):
                 connection = cast(Any, source.connection)
                 connection_lock = source._connection_lock
                 credential_tenant_id = source.credential_tenant_id
                 tenant_context_id = source.tenant_context_id
+                runtime_mode = source.runtime_mode
             else:
                 connection = cast(Any, source)
+                binding = _read_runtime_binding(connection, allow_unbound_internal=True)
+                runtime_mode = binding.mode
+                if binding.mode == "tenant":
+                    credential_tenant_id = binding.tenant_id
+                    tenant_context_id = binding.tenant_id
         super().__init__(
             _PostgresContentBackend(
                 connection,
                 connection_lock,
                 credential_tenant_id=credential_tenant_id,
                 tenant_context_id=tenant_context_id,
+                runtime_mode=runtime_mode,
             ),
             key_provider,
             cipher,

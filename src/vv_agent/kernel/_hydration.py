@@ -21,15 +21,13 @@ from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
     ContentBindingMismatch,
     ContentRef,
+    KeyUnavailable,
 )
 from ._content import (
     ContentIntegrityError as _BackendContentIntegrityError,
 )
 from ._content import (
     ContentUnavailable as _BackendContentUnavailable,
-)
-from ._content import (
-    KeyUnavailable as _BackendKeyUnavailable,
 )
 from ._execution_values import AgentTask
 from ._message_values import Message
@@ -47,10 +45,6 @@ class MissingContent(HydrationError):
 
 class MissingContentLink(HydrationError):
     """The tenant/session/owner/slot link is absent or does not name this ref."""
-
-
-class KeyUnavailable(HydrationError):
-    """The session key is unavailable and hydration may be retried later."""
 
 
 class IntegrityFailure(HydrationError):
@@ -293,8 +287,6 @@ def _parse_messages(value: Any) -> list[Message]:
 def _translate_backend_error(exc: Exception) -> HydrationError:
     if isinstance(exc, _BackendContentUnavailable):
         return MissingContent("content is unavailable")
-    if isinstance(exc, _BackendKeyUnavailable):
-        return KeyUnavailable("session content key is unavailable")
     if isinstance(exc, _BackendContentIntegrityError):
         return IntegrityFailure("content failed integrity validation")
     if isinstance(exc, ContentBindingMismatch):
@@ -352,7 +344,6 @@ class SessionHydrator:
             raise
         except (
             _BackendContentUnavailable,
-            _BackendKeyUnavailable,
             _BackendContentIntegrityError,
             ContentBindingMismatch,
         ) as exc:

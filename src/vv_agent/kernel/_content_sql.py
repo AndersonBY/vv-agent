@@ -570,6 +570,16 @@ class CoreSQLContentStore:
     def _require_transaction(self) -> None:
         self._backend.require_transaction()
 
+    def _assert_backend_tenant_context(self, tenant_id: str) -> None:
+        """Reject a tenant switch when the durable backend carries a bound identity."""
+
+        bound_tenant = getattr(self._backend, "tenant_context_id", None)
+        runtime_mode = getattr(self._backend, "runtime_mode", "unbound-internal")
+        if bound_tenant is None and runtime_mode != "unbound-internal":
+            raise ContentBindingMismatch("content backend transaction is not tenant-bound")
+        if bound_tenant is not None and bound_tenant != tenant_id:
+            raise ContentBindingMismatch("content backend is bound to another tenant")
+
     def _require_live(self, tenant_id: str, session_id: str) -> None:
         row = self._backend.fetchone(
             "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}",
@@ -1278,6 +1288,7 @@ class CoreSQLContentStore:
                 raise KeyUnavailable("session data key is unavailable; content was not deleted")
             return
 
+        self._assert_backend_tenant_context(tenant_id)
         key = self._session_key(tenant_id, session_id)
         if key.provider_id != self._provider_id:
             raise KeyUnavailable("session data key provider does not match")

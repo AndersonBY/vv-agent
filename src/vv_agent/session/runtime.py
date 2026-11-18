@@ -332,6 +332,7 @@ class Runtime:
     invoker: Invoker = field(default_factory=ThreadInvoker)
     _dynamic_enablement_turn_id: str | None = field(default=None, init=False, repr=False)
     _requirements_bound: SessionRequirements | None = field(default=None, init=False, repr=False)
+    _key_unavailable: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if (

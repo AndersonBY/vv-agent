@@ -15,7 +15,7 @@ from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLSessionTx, SQLStore
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _TenantSQLStore
 from vv_agent.kernel._store import SessionStore
 
 SCHEMA_VERSION = 4
@@ -351,9 +351,18 @@ class SQLiteStore(SQLStore):
 class _SQLiteContentBackend:
     lock_clause = ""
 
-    def __init__(self, connection: sqlite3.Connection, connection_lock: RLock | None) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        connection_lock: RLock | None,
+        *,
+        tenant_context_id: str | None = None,
+        runtime_mode: str = "unbound-internal",
+    ) -> None:
         self.connection = connection
         self.connection_lock = connection_lock
+        self.tenant_context_id = tenant_context_id
+        self.runtime_mode = runtime_mode
 
     @contextmanager
     def _serialized(self) -> Iterator[None]:
@@ -420,7 +429,7 @@ class CoreSQLiteContentStore(CoreSQLContentStore):
 
     def __init__(
         self,
-        source: SQLiteStore | SQLSessionTx | sqlite3.Connection,
+        source: SQLiteStore | _TenantSQLStore | SQLSessionTx | sqlite3.Connection,
         key_provider: KeyProvider,
         cipher: ContentCipher,
         *,
@@ -428,19 +437,40 @@ class CoreSQLiteContentStore(CoreSQLContentStore):
     ) -> None:
         connection: Any
         connection_lock: RLock | None = None
+        tenant_context_id: str | None = None
+        runtime_mode = "unbound-internal"
         if isinstance(source, SQLSessionTx):
             if not isinstance(source.store, SQLiteStore):
                 raise TypeError("SQLiteContentStore transaction must belong to SQLiteStore")
             connection = source.store.connection
             connection_lock = source.store._connection_lock
+            if source.store._root_store is not None:
+                tenant_context_id = source.store.tenant_id
+                runtime_mode = "tenant"
+        elif isinstance(source, _TenantSQLStore):
+            bound = source._bound
+            if not isinstance(bound, SQLiteStore):
+                raise TypeError("SQLiteContentStore tenant view must belong to SQLiteStore")
+            connection = bound.connection
+            connection_lock = bound._connection_lock
+            tenant_context_id = source.tenant_id
+            runtime_mode = "tenant"
         else:
             connection = source.connection if isinstance(source, SQLiteStore) else source
             if isinstance(source, SQLiteStore):
                 connection_lock = source._connection_lock
+                if source._root_store is not None:
+                    tenant_context_id = source.tenant_id
+                    runtime_mode = "tenant"
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("SQLiteContentStore requires a SQLite connection or SQLiteStore")
         super().__init__(
-            _SQLiteContentBackend(connection, connection_lock),
+            _SQLiteContentBackend(
+                connection,
+                connection_lock,
+                tenant_context_id=tenant_context_id,
+                runtime_mode=runtime_mode,
+            ),
             key_provider,
             cipher,
             provider_id=provider_id,

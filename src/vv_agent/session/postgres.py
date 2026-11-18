@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from vv_agent.kernel._content import KeyProvider
 from vv_agent.kernel._postgres import CLOCK as CLOCK
@@ -12,6 +12,7 @@ from vv_agent.kernel._postgres import DDL as DDL
 from vv_agent.kernel._postgres import UNBOUND_INTERNAL_BINDING, CorePostgresContentStore, RuntimeBinding, _read_runtime_binding
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import _connection_conninfo as _connection_conninfo
+from vv_agent.kernel._sql import LedgerIntegrityError, _level
 
 from .content_store import AESGCMCipher
 from .reducer import Fold
@@ -19,6 +20,9 @@ from .sql import SQLSessionTx, SQLStore
 
 if TYPE_CHECKING:
     from psycopg import Connection
+
+
+_SETTINGS_LOCK_VIEW = "vv_settings_ceiling"
 
 
 class PostgresStore(CorePostgresStore, SQLStore):
@@ -48,6 +52,67 @@ class PostgresStore(CorePostgresStore, SQLStore):
         if credential_tenant is not None and tenant_id != credential_tenant:
             raise ValueError("tenant-isolated PostgreSQL stores cannot be routed to another tenant")
         return super().for_tenant(tenant_id)
+
+    def install_schema(self) -> None:
+        super().install_schema()
+        self._ensure_settings_lock_view()
+
+    def _install_runtime_role(
+        self,
+        *,
+        role: str,
+        password: str,
+        mode: Literal["tenant", "worker", "shared-gateway"],
+        tenant_id: str | None,
+    ):
+        self._ensure_settings_lock_view()
+        installed = super()._install_runtime_role(
+            role=role,
+            password=password,
+            mode=mode,
+            tenant_id=tenant_id,
+        )
+        self._grant_settings_lock(role)
+        return installed
+
+    def _ensure_settings_lock_view(self) -> None:
+        from psycopg import sql
+
+        view = sql.Identifier(_SETTINGS_LOCK_VIEW)
+        with self._transaction():
+            self._execute(
+                sql.SQL(
+                    "CREATE OR REPLACE VIEW {} AS "
+                    "SELECT singleton,storage_major,write_level,1::integer AS lock_token "
+                    "FROM sk_settings WHERE singleton=1"
+                ).format(view)
+            )
+            self._execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM PUBLIC").format(view))
+
+    def _grant_settings_lock(self, role: str) -> None:
+        from psycopg import sql
+
+        view = sql.Identifier(_SETTINGS_LOCK_VIEW)
+        runtime_role = sql.Identifier(role)
+        with self._transaction():
+            self._execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM {}").format(view, runtime_role))
+            self._execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(view, runtime_role))
+            # FOR SHARE requires an UPDATE privilege even though the lock does not write.
+            # This view column is constant, so PostgreSQL rejects attempts to update it.
+            self._execute(sql.SQL("GRANT UPDATE (lock_token) ON TABLE {} TO {}").format(view, runtime_role))
+
+    def _write_ceiling(self) -> int:
+        if self.runtime_mode != "unbound-internal":
+            # FOR SHARE requires UPDATE privilege even though it does not write. Use the
+            # base relation where that privilege already exists, otherwise the owner-defined
+            # view supplies the lock without granting runtime roles a writable settings column.
+            can_lock_base = self._one("SELECT has_table_privilege(current_user,'sk_settings','UPDATE')")[0]
+            relation = "sk_settings" if can_lock_base else _SETTINGS_LOCK_VIEW
+            rows = self._rows(f"SELECT storage_major,write_level FROM {relation} WHERE singleton=1 FOR SHARE")
+            if len(rows) != 1 or rows[0][0] != "S1":
+                raise LedgerIntegrityError("settings do not identify an S1 store")
+            return _level(rows[0][1], "write_level")
+        return super()._write_ceiling()
 
     @classmethod
     @contextmanager

@@ -6,13 +6,13 @@ import math
 from collections.abc import Callable
 from typing import cast
 
-from vv_agent.kernel._content import SessionHead
+from vv_agent.kernel._content import KeyUnavailable, SessionHead
 from vv_agent.kernel._drive import (
     FACTORY_HEARTBEAT_SECONDS,
     FACTORY_LEASE_TTL_MS,
     DriveBinding,
     DriveLeaseScope,
-    DriveRuntime,
+    DriveRuntimeCore,
     DriveStep,
     drive_core,
 )
@@ -21,6 +21,19 @@ from ._driver_scope import _LeaseHeartbeat, _Scope
 from .runtime import Runtime, RuntimeNotReady
 from .store import Lease, LeaseLost, SessionStore
 from .timing import Clock, LeaseKeeper, SystemClock, ThreadLeaseKeeper
+
+
+class _KeyUnavailableTrackingReader:
+    def __init__(self, reader, runtime: Runtime) -> None:
+        self.reader = reader
+        self.runtime = runtime
+
+    def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref):
+        try:
+            return self.reader.read(tenant_id, session_id, owner, slot, ref)
+        except KeyUnavailable:
+            self.runtime._key_unavailable = True
+            raise
 
 
 def _lease_anchor_now_ms(store: SessionStore, session_id: str, lease: Lease, clock: Clock) -> int:
@@ -75,7 +88,7 @@ def drive_with_runtime(
                 now_ms=now_ms,
             )
 
-        def make_scope(lease: Lease, selected: DriveRuntime) -> _Scope:
+        def make_scope(lease: Lease, selected: DriveRuntimeCore) -> _Scope:
             selected_runtime = cast(Runtime, selected)
             return _Scope(
                 lease,
@@ -84,14 +97,24 @@ def drive_with_runtime(
             )
 
         def make_driver(
-            selected_store: SessionStore, selected_session_id: str, selected: DriveRuntime, scope: DriveLeaseScope
+            selected_store: SessionStore, selected_session_id: str, selected: DriveRuntimeCore, scope: DriveLeaseScope
         ) -> DriveStep:
             from .kernel import _Driver
 
+            selected_runtime = cast(Runtime, selected)
+            selected_runtime._key_unavailable = False
+            if selected_runtime.content_reader is not None and not isinstance(
+                selected_runtime.content_reader,
+                _KeyUnavailableTrackingReader,
+            ):
+                selected_runtime.content_reader = _KeyUnavailableTrackingReader(
+                    selected_runtime.content_reader,
+                    selected_runtime,
+                )
             driver = _Driver(
                 selected_store,
                 selected_session_id,
-                cast(Runtime, selected),
+                selected_runtime,
                 cast(_Scope, scope),
                 one_turn=one_turn,
                 expected_head=expected_head,
@@ -99,14 +122,16 @@ def drive_with_runtime(
             driver.polled.update(initial_polled or ())
             return cast(DriveStep, driver)
 
-        def after_drive(selected: DriveRuntime) -> None:
+        def after_drive(selected: DriveRuntimeCore) -> None:
             cast(Runtime, selected).hook("after_drive", None)
 
-        def wake_if_runnable(selected: DriveRuntime) -> None:
+        def wake_if_runnable(selected: DriveRuntimeCore) -> None:
             cast(Runtime, selected).wake(session_id)
 
         def factory_retry_after_ms(error: Exception) -> int | None:
-            return error.retry_after_ms if isinstance(error, RuntimeNotReady) else None
+            if isinstance(error, RuntimeNotReady):
+                return error.retry_after_ms
+            return failure_backoff_ms if isinstance(error, KeyUnavailable) else None
 
         return DriveBinding(
             clock=selected_clock,
