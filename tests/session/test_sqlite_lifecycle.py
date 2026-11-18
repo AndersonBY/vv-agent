@@ -20,6 +20,7 @@ from .test_recovery_matrix import records_of, runtime, start
 def no_wait_heartbeat_store(database, *, clock=None):
     with SQLiteStore.standalone(str(database), clock=clock) as store:
         # Keep lock-contention tests within the heartbeat retry budget.
+        store.configure_input_admission(allow_unsigned=True)
         store.connection.execute("PRAGMA busy_timeout=0")
         yield store
 
@@ -122,7 +123,9 @@ def test_file_heartbeat_recovers_from_sqlite_lock_without_duplicate_model_call(s
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(drive, wrapped, "s", runtime=rt)
         try:
-            assert write_lock_held.wait(5)
+            if not write_lock_held.wait(5):
+                future.result(timeout=0)
+            assert write_lock_held.is_set()
             assert retried.wait(5)
             assert model_calls == [1]
         finally:
