@@ -15,7 +15,7 @@ from uuid import uuid4
 from vv_agent.kernel._store import ProjectionConsumers, WorkKind
 
 from .store import Lease, LeaseLost, SessionStore
-from .supervisor import tick
+from .supervisor import _tick
 
 
 class DriveCallback(Protocol):
@@ -414,7 +414,7 @@ class LocalWorker:
                 future.add_done_callback(self._future_done)
 
         try:
-            tick(
+            _tick(
                 store,
                 dispatch_claimed=dispatch_claimed,
                 project=project,

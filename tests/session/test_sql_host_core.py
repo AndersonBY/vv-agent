@@ -11,7 +11,7 @@ from vv_agent.session.children import ChildSession, ChildTool, InvalidChildBatch
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.sql import SQLSessionTx
 from vv_agent.session.store import LeaseLost, SequenceConflict
-from vv_agent.session.supervisor import tick
+from vv_agent.session.supervisor import _tick
 
 from .conftest import open_store
 from .helpers import fixture_child_spec, read_fixture_state, wrap_fixture_store
@@ -22,9 +22,12 @@ from .test_recovery_matrix import start
 class HostPostgresStore(PostgresStore):
     """Django-style raw connection property, without superclass initialization."""
 
-    def __init__(self, raw):
+    def __init__(self, raw, *, runtime_binding=None, **kwargs):
+        del kwargs
         self.raw = raw
         self._connection_lock = RLock()
+        if runtime_binding is not None:
+            self._runtime_binding = runtime_binding
 
     @property
     def connection(self):
@@ -33,7 +36,9 @@ class HostPostgresStore(PostgresStore):
 
 @pytest.fixture
 def store(store):
-    return wrap_fixture_store(store)
+    wrapped = wrap_fixture_store(store)
+    wrapped._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    return wrapped
 
 
 def rows(store, sid="s", kind=None):
@@ -43,6 +48,7 @@ def rows(store, sid="s", kind=None):
 @pytest.mark.postgres
 def test_public_drive_and_dispatch_tick_preserve_host_instance(store, database, monkeypatch):
     raw_host = HostPostgresStore(store.connection)
+    raw_host.configure_input_admission(allow_unsigned=True)
     host = wrap_fixture_store(raw_host)
     assert "connection" not in vars(host)
     epochs, claimed_epochs, peeks, observations = [], [], [], []
@@ -87,7 +93,7 @@ def test_public_drive_and_dispatch_tick_preserve_host_instance(store, database, 
                 tx.ack(batch)
 
     assert (
-        tick(
+        _tick(
             host,
             dispatch_claimed=lambda sid, lease: dispatched.append(sid),
             runtime=forbidden,
@@ -119,6 +125,7 @@ def test_child_admission_business_and_session_increment_is_atomic(store, databas
     import psycopg
 
     raw_host = HostPostgresStore(store.connection)
+    raw_host.configure_input_admission(allow_unsigned=True)
     host = wrap_fixture_store(raw_host)
     host._rows("CREATE TABLE allowed (id integer PRIMARY KEY)")
     host._rows("INSERT INTO allowed VALUES (1)")

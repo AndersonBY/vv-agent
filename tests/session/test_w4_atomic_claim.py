@@ -27,7 +27,7 @@ from vv_agent.session.records import SessionSpec
 from vv_agent.session.runtime import RuntimeNotReady
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Lease, LeaseLost, LeasePoll, SessionStore
-from vv_agent.session.supervisor import tick
+from vv_agent.session.supervisor import _tick, tick
 from vv_agent.session.worker import LocalWorker, WorkerSupport
 
 from .helpers import content_ref, item, principal, record, wrap_fixture_store
@@ -551,7 +551,7 @@ def test_supervisor_claims_next_drive_only_after_previous_lease_is_finished(stor
         store.defer_drive(lease, retry_after_ms=250)
         store.release(lease)
 
-    assert tick(store, project=lambda _sid, _consumer: None, dispatch_claimed=dispatch_claimed, page_size=2) == 2
+    assert _tick(store, project=lambda _sid, _consumer: None, dispatch_claimed=dispatch_claimed, page_size=2) == 2
     assert seen == ["page-a", "page-b"]
     assert observed_epochs == [(1, 0), (1, 1)]
 
@@ -1409,7 +1409,7 @@ def test_supervisor_claim_path_passes_original_lease(store, database: str) -> No
         store.defer_drive(lease, retry_after_ms=250)
         store.release(lease)
 
-    assert tick(store, project=lambda _sid, _consumer: None, dispatch_claimed=dispatch_claimed, page_size=1) == 1
+    assert _tick(store, project=lambda _sid, _consumer: None, dispatch_claimed=dispatch_claimed, page_size=1) == 1
     assert len(seen) == 1
     selected_session_id, lease = seen[0]
     assert selected_session_id == session_id

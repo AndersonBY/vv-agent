@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from threading import Event, current_thread
 from time import monotonic, sleep
@@ -21,10 +21,12 @@ from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.providers import Accepted
 from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import RuntimeNotReady, static_model_selection_requirements
-from vv_agent.session.supervisor import tick
+from vv_agent.session.supervisor import _tick
 from vv_agent.session.surfaces import SessionDriver, _SessionFailure
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolExecutionResult
+
+from .conftest import open_store
 
 pytestmark = pytest.mark.sqlite_file
 
@@ -32,18 +34,30 @@ MASTER_KEY = b"w" * 32
 
 
 @contextmanager
+def _temporary_store(database: Path, *, write_level: int) -> Iterator[Any]:
+    with open_store(database) as store:
+        store.install_schema()
+        if write_level > 1:
+            store._rows("UPDATE sk_settings SET write_level=%s WHERE singleton=1", (write_level,))
+        yield store
+
+
+@contextmanager
 def _temporary_driver(tmp_path: Path, name: str, *, worker_level: int = 1) -> Iterator[SessionDriver]:
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / f"{name}-keys.sqlite3")
-    driver = SessionDriver(
-        tmp_path / f"{name}.sqlite",
-        content_key_provider=provider,
-        worker_level=worker_level,
-        handler_versions=("1",),
-    )
     try:
-        yield driver
+        with _temporary_store(tmp_path / f"{name}.sqlite", write_level=worker_level) as store:
+            driver = SessionDriver(
+                store=store,
+                content_key_provider=provider,
+                worker_level=worker_level,
+                handler_versions=("1",),
+            )
+            try:
+                yield driver
+            finally:
+                driver.close()
     finally:
-        driver.close()
         provider.close()
 
 
@@ -417,7 +431,7 @@ def test_pre_core_sqlite_lock_defers_before_release_and_recovers_without_model_r
 
         _force_due(driver, sid)
         with driver._open_drive_store() as claim_store:
-            claimed = tick(
+            claimed = _tick(
                 claim_store,
                 project=lambda *_args: None,
                 dispatch_claimed=lambda session_id, claimed_lease: driver._drive_worker_session(
@@ -885,14 +899,15 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
         "healthy_external_wait": healthy_provider,
     }
 
+    stores = ExitStack()
     first = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
     )
     second = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
@@ -973,7 +988,7 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
 
         _force_due(first, sid)
         with first._open_drive_store() as claim_store:
-            claimed = tick(
+            claimed = _tick(
                 claim_store,
                 project=lambda *_args: None,
                 dispatch_claimed=lambda session_id, lease: first._drive_worker_session(
@@ -993,6 +1008,7 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
     finally:
         second.close()
         first.close()
+        stores.close()
         key_provider.close()
 
 
@@ -1014,8 +1030,9 @@ def test_provider_query_error_fences_only_the_failing_same_batch_operation(tmp_p
             )
         ],
     )
+    stores = ExitStack()
     driver = SessionDriver(
-        tmp_path / f"{sid}.sqlite",
+        store=stores.enter_context(_temporary_store(tmp_path / f"{sid}.sqlite", write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
@@ -1101,6 +1118,7 @@ def test_provider_query_error_fences_only_the_failing_same_batch_operation(tmp_p
         assert healthy_state.waits[healthy_key]["handle"]["kind"] == "provider"
     finally:
         driver.close()
+        stores.close()
         key_provider.close()
 
 
@@ -1159,14 +1177,15 @@ def test_provider_failure_observer_reconciles_remote_terminal_without_local_clai
     agent = Agent("provider", "Wait externally.", model="m", tools=[external_wait])
     config = RunConfig(model_provider=model)
     providers = {"external_wait": provider}
+    stores = ExitStack()
     first = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
     )
     second = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
@@ -1246,6 +1265,7 @@ def test_provider_failure_observer_reconciles_remote_terminal_without_local_clai
     finally:
         second.close()
         first.close()
+        stores.close()
         key_provider.close()
 
 
@@ -1279,14 +1299,15 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
         "external_wait": old_provider,
         "replacement_external_wait": new_provider,
     }
+    stores = ExitStack()
     first = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
     )
     writer = SessionDriver(
-        database,
+        store=stores.enter_context(_temporary_store(database, write_level=2)),
         content_key_provider=key_provider,
         worker_level=2,
         handler_versions=("1",),
@@ -1336,7 +1357,7 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
 
         _force_due(first, sid)
         with first._open_drive_store() as claim_store:
-            claimed = tick(
+            claimed = _tick(
                 claim_store,
                 project=lambda *_args: None,
                 dispatch_claimed=lambda session_id, lease: first._drive_worker_session(
@@ -1353,7 +1374,7 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
             assert new_provider.handle
             _force_due(first, sid)
             with first._open_drive_store() as claim_store:
-                claimed = tick(
+                claimed = _tick(
                     claim_store,
                     project=lambda *_args: None,
                     dispatch_claimed=lambda session_id, lease: first._drive_worker_session(
@@ -1380,6 +1401,7 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
     finally:
         writer.close()
         first.close()
+        stores.close()
         key_provider.close()
 
 
