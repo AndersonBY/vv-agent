@@ -201,10 +201,10 @@ A direct host queue uses its own scanner and transport instead of the
 `LocalWorker` coordinator. Each `drive` call receives that queue task's store,
 and its runtime closure binds callbacks to the same store on the worker thread.
 
-Lease renewal is not another executor. `ThreadLeaseKeeper` registers heartbeats
-with the process-wide scheduler. Each registration opens one independent
-heartbeat connection on first renewal, reuses it for the registration lifetime,
-and closes it when renewal stops. A heartbeat for runtime-factory preparation
+Each `ThreadLeaseKeeper` registration schedules renewal on its own thread.
+That thread opens one independent heartbeat connection on first renewal,
+reuses it for the registration lifetime, and closes it when renewal stops.
+A heartbeat for runtime-factory preparation
 starts at 60 seconds (`FACTORY_LEASE_TTL_MS`) and renews every 250 ms
 (`FACTORY_HEARTBEAT_SECONDS`). The runtime's own TTL applies before execution.
 A lost lease or changed epoch prevents use of the factory result, and every
@@ -471,11 +471,9 @@ transaction. It must not wait for the drive that consumes that input, start an
 independent native transaction, or leave work relying on an external side
 effect. Wake the target session only after commit.
 
-Lease renewal runs on the process-owned `ThreadLeaseKeeper` thread and uses one
-independent heartbeat store and connection for that registration. The drive
-callback keeps ownership of its foreground store on the drive thread. Database
-owner, epoch and expiry checks fence append, defer and release; the keeper never
-shares the foreground connection or grants write authority.
+Lease renewal uses the registration's heartbeat thread and connection. The
+drive callback owns its foreground store on the drive thread. Database owner,
+epoch and expiry checks fence append, defer and release.
 
 Do not drive or poll while holding a host outer write transaction. It can hold
 database rows needed by independent renewal, and leaving a savepoint does not

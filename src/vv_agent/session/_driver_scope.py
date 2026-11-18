@@ -110,9 +110,6 @@ class _SQLiteLockRetryingStore:
             finally:
                 with suppress(sqlite3.Error):
                     connection.execute(f"PRAGMA busy_timeout={configured_busy_timeout_ms}")
-            if self.clock.monotonic() >= safety_deadline:
-                self.heartbeat.lost = True
-                raise LeaseLost("heartbeat reached the lease safety deadline")
             return poll
 
 

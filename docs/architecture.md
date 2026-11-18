@@ -81,11 +81,11 @@ entry points use the same algorithms. `session/_recovery_phase.py` and
 `session/_driver_dispatch.py` supply SDK observations and effects while those
 phase generators are suspended. One driver owns the retained state.
 
-`ThreadLeaseKeeper` multiplexes heartbeat registrations on one process-wide
-scheduler thread. A registration opens one independent heartbeat connection,
-reuses it for every renewal in that registration, and closes it when the
-registration ends. Lease epoch and expiry checks in the database fence
-append, defer and release operations; the keeper controls renewal liveness.
+`ThreadLeaseKeeper` tracks active heartbeat registrations in the process.
+Each registration schedules its own renewals on a thread that opens, reuses,
+and closes its heartbeat connection. A blocked renewal cannot delay another
+registration. The database checks lease epoch and expiry before append, defer,
+and release.
 
 Importing `vv_agent`, its session stores or the App Server does not load model
 provider SDKs. The `VvLlmClient` and `EndpointTarget` exports load the `vv-llm`

@@ -62,12 +62,11 @@ class _LeaseRegistration:
 
 
 class _SharedLeaseKeeper:
-    """Multiplex lease renewals on one process-wide scheduler thread."""
+    """Track independently scheduled lease renewals in one process keeper."""
 
     def __init__(self) -> None:
         self._condition = threading.Condition(threading.Lock())
         self._registrations: dict[int, _LeaseRegistration] = {}
-        self._thread: threading.Thread | None = None
 
     def start(self, heartbeat: _LeaseHeartbeat) -> None:
         key = id(heartbeat)
@@ -83,17 +82,9 @@ class _SharedLeaseKeeper:
                 daemon=True,
                 name="session-heartbeat",
             )
-            if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(
-                    target=self._run,
-                    daemon=True,
-                    name="session-heartbeat-scheduler",
-                )
-                self._thread.start()
             if heartbeat.stop.is_set():
                 registration.closing = True
             registration.worker.start()
-            self._condition.notify_all()
 
     def close(self, heartbeat: _LeaseHeartbeat) -> None:
         key = id(heartbeat)
@@ -123,47 +114,21 @@ class _SharedLeaseKeeper:
             registration = self._registrations.get(id(heartbeat))
             return registration is not None and (registration.in_flight or registration.closing)
 
-    def _run(self) -> None:
-        while True:
-            with self._condition:
-                if not self._registrations:
-                    self._thread = None
-                    self._condition.notify_all()
-                    return
-                active = [registration for registration in self._registrations.values() if not registration.closing]
-                if not active:
-                    self._thread = None
-                    self._condition.notify_all()
-                    return
-                next_wait: float | None = None
-                dispatched = False
-                stopped = False
-                for registration in active:
-                    if registration.in_flight:
-                        continue
-                    if registration.heartbeat.stop.is_set():
-                        registration.closing = True
-                        stopped = True
-                        continue
-                    wait = registration.next_due - registration.heartbeat.clock.monotonic()
-                    if wait <= 0:
-                        registration.in_flight = True
-                        dispatched = True
-                    elif next_wait is None or wait < next_wait:
-                        next_wait = wait
-                if dispatched or stopped:
-                    self._condition.notify_all()
-                    continue
-                self._condition.wait(next_wait)
-
     def _run_worker(self, registration: _LeaseRegistration) -> None:
         while True:
             with self._condition:
                 if registration.finished:
                     return
-                while not registration.closing and not registration.in_flight:
-                    self._condition.wait()
-                finishing = registration.closing
+                if registration.closing or registration.heartbeat.stop.is_set():
+                    registration.closing = True
+                    finishing = True
+                else:
+                    wait = registration.next_due - registration.heartbeat.clock.monotonic()
+                    if wait > 0:
+                        self._condition.wait(wait)
+                        continue
+                    registration.in_flight = True
+                    finishing = False
             if finishing:
                 self._finish(registration, notify_finished=True)
                 return
@@ -236,7 +201,7 @@ _PROCESS_LEASE_KEEPER = _SharedLeaseKeeper()
 
 
 class ThreadLeaseKeeper:
-    """Share one daemon scheduler across every default runtime in this process."""
+    """Share independently running heartbeat workers across this process."""
 
     def __init__(self) -> None:
         self._shared = _PROCESS_LEASE_KEEPER

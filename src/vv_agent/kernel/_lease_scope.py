@@ -206,8 +206,14 @@ class LeaseOwnership[TokenT: CancellationSink]:
         if self.stop.is_set():
             raise HeartbeatStopped("heartbeat stopped")
         lease = self.lease
+        safety_deadline = self.safety_deadline if self._confirmed is not None or self._db_anchor_deadline is not None else None
         started = self.clock.monotonic()
         poll = store.renew(lease, ttl_ms=self.ttl_ms)
+        # A response held past the pre-renew safety bound cannot restore local
+        # ownership confidence, even when its database receipt remains valid.
+        if safety_deadline is not None and self.clock.monotonic() >= safety_deadline:
+            self.lost = True
+            raise LeaseLost("heartbeat reached the lease safety deadline")
         if (poll.lease.session_id, poll.lease.owner, poll.lease.epoch, poll.lease.tenant_id) != (
             lease.session_id,
             lease.owner,
