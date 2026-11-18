@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, RLock, Thread
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.runtime.local_environment import ExecutionEnvironmentPort, LocalEnvironment
@@ -18,6 +18,13 @@ from vv_agent.runtime.processes import (
     start_captured_process,
 )
 from vv_agent.runtime.shell import prepare_shell_execution
+from vv_agent.session.environments import (
+    InvalidLookupBinding,
+    LookupBinding,
+    LookupStatus,
+    ProviderLookupResult,
+)
+from vv_agent.session.providers import Accepted, Definitive, Unknown
 from vv_agent.types import ToolArtifactRef
 from vv_agent.workspace.artifacts import (
     BoundedTextPreview,
@@ -31,6 +38,12 @@ if TYPE_CHECKING:
 _WATCH_POLL_INTERVAL_SECONDS = 0.05
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "stopped"})
 BackgroundSessionListener = Callable[[dict[str, Any]], None]
+
+
+class BackgroundExecutionConflict(InvalidLookupBinding):
+    """An idempotency key is already bound to a different execution identity."""
+
+    code = "background_execution_conflict"
 
 
 @dataclass(slots=True)
@@ -58,7 +71,11 @@ class _SessionState:
     artifact_backend: WorkspaceBackend | None = None
     artifact_task_id: str = ""
     artifact_tool_call_id: str = ""
-    lock: Any = field(default_factory=Lock)
+    execution_id: str | None = None
+    command_digest: str | None = None
+    idempotency_key: str | None = None
+    binding: LookupBinding | None = None
+    lock: Any = field(default_factory=RLock)
     done: Event = field(default_factory=Event)
 
 
@@ -67,8 +84,57 @@ class BackgroundSessionManager:
 
     def __init__(self, environment: ExecutionEnvironmentPort | None = None) -> None:
         self._sessions: dict[str, _SessionState] = {}
-        self._lock = Lock()
-        self._environment = environment
+        self._identity_sessions: dict[tuple[str, str], str] = {}
+        self._lock = RLock()
+        self._environment = environment or LocalEnvironment(process_starter=start_captured_process)
+
+    @staticmethod
+    def _new_session_id() -> str:
+        return f"bg_{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def _stable_binding_fields(binding: LookupBinding) -> tuple[Any, ...]:
+        """Return the operation binding that must remain immutable across attempts."""
+        return (
+            binding.tenant_id,
+            binding.session_id,
+            binding.operation_id,
+            binding.idempotency_key,
+            binding.execution_id,
+            binding.command_digest,
+            binding.environment_id,
+            binding.generation,
+            binding.provider_id,
+        )
+
+    @staticmethod
+    def _require_binding(binding: object) -> LookupBinding:
+        if not isinstance(binding, LookupBinding):
+            raise InvalidLookupBinding("binding must be a frozen LookupBinding")
+        return binding
+
+    def _validate_binding(self, binding: LookupBinding) -> None:
+        binding = self._require_binding(binding)
+        capabilities = self._environment.capabilities
+        if binding.environment_id != capabilities.environment_id or binding.generation != capabilities.generation:
+            raise InvalidLookupBinding("lookup binding does not match the manager environment")
+        provider_id = getattr(self._environment, "provider_id", None)
+        if provider_id is not None and binding.provider_id != provider_id:
+            raise InvalidLookupBinding("lookup binding does not match the manager provider")
+
+    def _existing_session_id_locked(self, binding: LookupBinding) -> str | None:
+        key = (binding.tenant_id, binding.idempotency_key)
+        session_id = self._identity_sessions.get(key)
+        if session_id is None:
+            return None
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise BackgroundExecutionConflict(
+                "execution identity conflicts with lost process-local session state; refusing to start another process"
+            )
+        if session.binding is None or self._stable_binding_fields(session.binding) != self._stable_binding_fields(binding):
+            raise BackgroundExecutionConflict("idempotency key is already bound to a different command or environment identity")
+        return session_id
 
     def _register_session(
         self,
@@ -85,10 +151,14 @@ class BackgroundSessionManager:
         artifact_backend: WorkspaceBackend | None = None,
         artifact_task_id: str = "",
         artifact_tool_call_id: str = "",
+        binding: LookupBinding | None = None,
+        session_id: str | None = None,
     ) -> str:
         if timeout_seconds is not None and (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400):
             raise ValueError("timeout_seconds must be an integer from 1 through 86400")
-        session_id = f"bg_{uuid.uuid4().hex[:12]}"
+        if binding is not None:
+            binding = self._require_binding(binding)
+        session_id = self._new_session_id() if session_id is None else session_id
         session = _SessionState(
             session_id=session_id,
             command=command,
@@ -103,9 +173,20 @@ class BackgroundSessionManager:
             artifact_backend=artifact_backend,
             artifact_task_id=artifact_task_id,
             artifact_tool_call_id=artifact_tool_call_id,
+            execution_id=None if binding is None else binding.execution_id,
+            command_digest=None if binding is None else binding.command_digest,
+            idempotency_key=None if binding is None else binding.idempotency_key,
+            binding=binding,
         )
         with self._lock:
+            if binding is not None:
+                existing_session_id = self._existing_session_id_locked(binding)
+                if existing_session_id is not None:
+                    return existing_session_id
+                self._validate_binding(binding)
             self._sessions[session_id] = session
+            if binding is not None:
+                self._identity_sessions[(binding.tenant_id, binding.idempotency_key)] = session_id
         self._start_watch_thread(session_id)
         return session_id
 
@@ -125,9 +206,12 @@ class BackgroundSessionManager:
         artifact_backend: WorkspaceBackend | None = None,
         artifact_task_id: str = "",
         artifact_tool_call_id: str = "",
+        binding: LookupBinding | None = None,
     ) -> str:
         if timeout_seconds is not None and (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400):
             raise ValueError("timeout_seconds must be an integer from 1 through 86400")
+        if binding is not None:
+            binding = self._require_binding(binding)
         shell_command, prepared_stdin = prepare_shell_execution(
             command,
             auto_confirm=auto_confirm,
@@ -135,8 +219,37 @@ class BackgroundSessionManager:
             shell=shell,
             windows_shell_priority=windows_shell_priority,
         )
-        environment = self._environment or LocalEnvironment(process_starter=start_captured_process)
-        started = environment.start_process(shell_command, cwd=cwd, stdin_text=prepared_stdin, env=env)
+        if binding is not None:
+            # Reserve the logical execution before process creation so concurrent
+            # duplicate starts cannot spawn a second process.
+            with self._lock:
+                existing_session_id = self._existing_session_id_locked(binding)
+                if existing_session_id is not None:
+                    return existing_session_id
+                self._validate_binding(binding)
+                started = self._environment.start_process(
+                    shell_command,
+                    cwd=cwd,
+                    stdin_text=prepared_stdin,
+                    env=env,
+                )
+                return self._register_session(
+                    command=command,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    process=started.process,
+                    output_path=started.output_path,
+                    shell=shell,
+                    started_at=started.started_at,
+                    owner_task_id=owner_task_id,
+                    owner_workspace=owner_workspace,
+                    artifact_backend=artifact_backend,
+                    artifact_task_id=artifact_task_id,
+                    artifact_tool_call_id=artifact_tool_call_id,
+                    binding=binding,
+                    session_id=self._new_session_id(),
+                )
+        started = self._environment.start_process(shell_command, cwd=cwd, stdin_text=prepared_stdin, env=env)
         return self.adopt_running_process(
             command=command,
             cwd=cwd,
@@ -167,6 +280,7 @@ class BackgroundSessionManager:
         artifact_backend: WorkspaceBackend | None = None,
         artifact_task_id: str = "",
         artifact_tool_call_id: str = "",
+        binding: LookupBinding | None = None,
     ) -> str:
         return self._register_session(
             command=command,
@@ -181,7 +295,68 @@ class BackgroundSessionManager:
             artifact_backend=artifact_backend,
             artifact_task_id=artifact_task_id,
             artifact_tool_call_id=artifact_tool_call_id,
+            binding=binding,
         )
+
+    def lookup(self, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+        """Look up one trusted local execution without adopting a process by PID."""
+        self._validate_binding(binding)
+        if binding.execution_id != execution_id:
+            raise InvalidLookupBinding("execution_id does not match the authenticated lookup binding")
+        with self._lock:
+            session_id = self._identity_sessions.get((binding.tenant_id, binding.idempotency_key))
+        if session_id is None:
+            return ProviderLookupResult(
+                binding,
+                LookupStatus.UNKNOWN,
+                Unknown("process-local execution registry is unavailable"),
+                ("process-local:registry-unavailable",),
+            )
+        session = self._get(session_id)
+        if session is None:
+            return ProviderLookupResult(
+                binding,
+                LookupStatus.UNKNOWN,
+                Unknown("process-local execution state is unavailable"),
+                ("process-local:session-missing",),
+            )
+        if session.binding is None or self._stable_binding_fields(session.binding) != self._stable_binding_fields(binding):
+            raise InvalidLookupBinding("lookup binding does not match the committed execution binding")
+        with session.lock:
+            self._advance(session)
+            if session.status == "running":
+                outcome = Accepted(self._accepted_handle(session_id, binding))
+                status = LookupStatus.RUNNING
+                evidence = (f"process-local:{session_id}:running",)
+            elif session.status in _TERMINAL_STATUSES:
+                observation = replace(session)
+                result = self._snapshot(observation)
+                status = LookupStatus.EXITED
+                outcome = Definitive(
+                    result=result,
+                    evidence=(f"process-local:{session_id}:terminal",),
+                    usage={},
+                )
+                evidence = tuple(outcome.evidence)
+            else:
+                status = LookupStatus.UNKNOWN
+                outcome = Unknown("process status does not prove a running or terminal execution")
+                evidence = (f"process-local:{session_id}:{session.status}",)
+        return ProviderLookupResult(binding, status, outcome, evidence)
+
+    @staticmethod
+    def _accepted_handle(session_id: str, binding: LookupBinding) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "operation_id": binding.operation_id,
+            "attempt": binding.attempt,
+            "request_digest": binding.request_digest,
+            "execution_id": binding.execution_id,
+            "command_digest": binding.command_digest,
+            "environment_id": binding.environment_id,
+            "generation": binding.generation,
+            "provider_id": binding.provider_id,
+        }
 
     def _get(self, session_id: str) -> _SessionState | None:
         with self._lock:

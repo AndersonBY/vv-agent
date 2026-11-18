@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vv_agent.kernel import _driver_dispatch as dispatch
 from vv_agent.kernel._provider_outcomes import Accepted as Accepted
@@ -20,12 +20,51 @@ from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
 
 from .records import InboxItem, Record
 
+if TYPE_CHECKING:
+    from .environments import LookupBinding, ProviderLookupResult
+
 
 class Provider(Protocol):
     def submit(self, plan: Record, *, context: ToolContext) -> Outcome: ...
     def query(self, handle: dict[str, Any]) -> Outcome: ...
     def cancel(self, handle: dict[str, Any]) -> Outcome: ...
     def authenticate(self, item: InboxItem, plan: Record) -> bool: ...
+
+
+class ProviderLookupPort(Protocol):
+    """Authenticated recovery lookup for providers with durable executions."""
+
+    def lookup(self, execution_id: str, binding: LookupBinding) -> ProviderLookupResult: ...
+
+
+LookupProvider = ProviderLookupPort
+
+
+def _validate_lookup_call(execution_id: str, binding: LookupBinding) -> None:
+    from .environments import InvalidProviderLookupResult, LookupBinding
+
+    if not isinstance(binding, LookupBinding):
+        raise InvalidProviderLookupResult("lookup requires a complete LookupBinding")
+    if not isinstance(execution_id, str) or execution_id != binding.execution_id:
+        raise InvalidProviderLookupResult("lookup execution_id does not match the authenticated binding")
+
+
+def lookup_provider(provider: object, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+    """Call a provider lookup capability and bind its evidence to the caller's lookup request."""
+    from .environments import InvalidLookupBinding, InvalidProviderLookupResult, ProviderLookupResult
+
+    _validate_lookup_call(execution_id, binding)
+    lookup = getattr(provider, "lookup", None)
+    if not callable(lookup):
+        raise InvalidProviderLookupResult("provider does not support authenticated lookup")
+    result = lookup(execution_id, binding)
+    if not isinstance(result, ProviderLookupResult):
+        raise InvalidProviderLookupResult("provider lookup must return ProviderLookupResult")
+    try:
+        result.assert_matches(binding)
+    except InvalidLookupBinding as exc:
+        raise InvalidProviderLookupResult("provider lookup result does not match the authenticated binding") from exc
+    return result
 
 
 class DispatchReady(BaseException):
@@ -84,3 +123,14 @@ class FunctionProvider:
 
     def authenticate(self, item: InboxItem, plan: Record) -> bool:
         return False  # Ordinary handlers cannot authenticate an external callback.
+
+    def lookup(self, execution_id: str, binding: LookupBinding) -> ProviderLookupResult:
+        from .environments import LookupStatus, ProviderLookupResult
+
+        _validate_lookup_call(execution_id, binding)
+        return ProviderLookupResult(
+            binding,
+            LookupStatus.UNKNOWN,
+            Unknown("synchronous function provider has no persistent execution registry"),
+            ("function-provider-no-registry",),
+        )
