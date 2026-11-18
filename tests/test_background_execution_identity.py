@@ -76,6 +76,7 @@ def _binding(
     request: Any = 1,
     command_digest: str = COMMAND_DIGEST,
     provider_id: str = PROVIDER,
+    environment_id: str = ENVIRONMENT,
 ) -> LookupBinding:
     operation_key = stable_operation_key(SESSION, OPERATION)
     return LookupBinding(
@@ -85,9 +86,9 @@ def _binding(
         attempt=attempt,
         request_digest=canonical_json_sha256(request),
         idempotency_key=operation_key,
-        execution_id=execution_id_for(TENANT, ENVIRONMENT, operation_key),
+        execution_id=execution_id_for(TENANT, environment_id, operation_key),
         command_digest=command_digest,
-        environment_id=ENVIRONMENT,
+        environment_id=environment_id,
         generation=0,
         provider_id=provider_id,
     )
@@ -128,7 +129,32 @@ def test_start_reuses_stable_execution_across_attempts_and_rejects_changed_comma
 
     with pytest.raises(background_runtime.BackgroundExecutionConflict, match="different command"):
         manager.start(command="echo changed", cwd=tmp_path, binding=_binding(command_digest="4" * 64))
+    with pytest.raises(background_runtime.BackgroundExecutionConflict, match="different command"):
+        manager.start(command="echo stable", cwd=tmp_path, binding=_binding(environment_id="environment/b"))
     assert environment.starts == 1
+
+
+def test_adopt_running_process_accepts_and_saves_frozen_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, _ = _manager(tmp_path, _FakeProcess(), monkeypatch)
+    process = _FakeProcess()
+    binding = _binding()
+    output_path = tmp_path / "adopted.log"
+    output_path.write_text("adopted output\n", encoding="utf-8")
+
+    session_id = manager.adopt_running_process(
+        command="echo adopted",
+        cwd=tmp_path,
+        timeout_seconds=5,
+        process=cast(subprocess.Popen[str], process),
+        output_path=output_path,
+        binding=binding,
+    )
+
+    state = manager._sessions[session_id]
+    assert state.execution_id == binding.execution_id
+    assert state.command_digest == binding.command_digest
+    assert state.idempotency_key == binding.idempotency_key
+    assert state.binding == binding
 
 
 def test_lookup_rejects_binding_and_execution_mismatches_without_touching_process(
@@ -162,11 +188,14 @@ def test_process_local_loss_returns_unknown_without_process_adoption(tmp_path: P
     assert isinstance(result.outcome, Unknown)
     assert "execution state is unavailable" in result.outcome.reason
     assert environment.starts == 1
+    with pytest.raises(background_runtime.BackgroundExecutionConflict, match="lost process-local session state"):
+        manager.start(command="echo stable", cwd=tmp_path, binding=binding)
+    assert environment.starts == 1
 
 
 def test_terminal_process_maps_to_definitive_execution_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     process = _FakeProcess()
-    manager, _ = _manager(tmp_path, process, monkeypatch)
+    manager, environment = _manager(tmp_path, process, monkeypatch)
     binding = _binding()
     session_id = manager.start(command="echo stable", cwd=tmp_path, binding=binding)
     process.returncode = 0
@@ -180,3 +209,7 @@ def test_terminal_process_maps_to_definitive_execution_result(tmp_path: Path, mo
     assert result.outcome.result["status"] == "completed"
     assert result.outcome.result["exit_code"] == 0
     assert "terminal output" in result.outcome.result["output"]
+
+    duplicate_session_id = manager.start(command="echo stable", cwd=tmp_path, binding=binding)
+    assert duplicate_session_id == session_id
+    assert environment.starts == 1
