@@ -24,6 +24,7 @@ from vv_agent.kernel._content_publication import (
 from vv_agent.kernel._cycles import project_cycles, turn_result_prefix
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput
+from vv_agent.kernel._requirements import normalize_requirements
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._usage import project_model_usage
 from vv_agent.runtime.lifecycle import AfterCycleHookManager
@@ -33,11 +34,18 @@ from . import compaction, memory
 from . import output as output_host
 from ._driver_scope import _invoke
 from .delegation import result_for_children
-from .runtime import _is_vv_endpoint_client
+from .runtime import InvalidTrustedEnvironmentBinding, _is_vv_endpoint_client
 from .tool_results import prepare_tool_resources, project_tool_content
 
 if TYPE_CHECKING:
     from .kernel import _Driver
+
+
+def _bootstrap_level(driver: _Driver) -> int:
+    created = driver.records[0].record
+    if created.feature_level != 2:
+        return 1
+    return normalize_requirements(created._payload["bootstrap"]).level
 
 
 class _Host:
@@ -154,6 +162,12 @@ class _Host:
         if isinstance(request, CommitRecords):
             return driver.commit(request.records, guarded=True)
         if isinstance(request, inputs.PublishTurnStarted):
+            environment = driver.runtime.turn_environment_binding()
+            bootstrap_level = _bootstrap_level(driver)
+            if bootstrap_level >= 3 and environment is None:
+                raise InvalidTrustedEnvironmentBinding("level-3 session bootstrap requires a trusted environment binding")
+            if bootstrap_level < 3 and environment is not None:
+                raise InvalidTrustedEnvironmentBinding("trusted environment binding requires a level-3 session bootstrap")
 
             def prepare_turn_started(tx):
                 writer = driver.content_writer(tx)
@@ -172,9 +186,21 @@ class _Host:
                     "binding": None,
                     "generation": request.generation,
                 }
+                if environment is not None:
+                    environment_payload = environment.capabilities.to_dict()
+                    environment_payload["descriptor"] = writer.put_json(environment.descriptor).to_dict()
+                    environment_payload["operational_policy"] = writer.put_json(environment.operational_policy).to_dict()
+                    payload["environment"] = environment_payload
                 if request.requirements is not None:
                     payload["requirements"] = request.requirements
-                return [driver.record("turn_started", payload, tid=request.tid)]
+                return [
+                    driver.record(
+                        "turn_started",
+                        payload,
+                        tid=request.tid,
+                        feature_level=3 if environment is not None else 1,
+                    )
+                ]
 
             return driver.commit([], guarded=True, prepare=prepare_turn_started)
         if isinstance(request, inputs.CommitInput):

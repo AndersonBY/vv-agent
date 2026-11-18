@@ -125,6 +125,26 @@ def retry_request_identity(request: dict[str, Any]) -> str:
     return digest(value)
 
 
+def _require_level_3_plan_binding(
+    turn: Turn,
+    payload: dict[str, Any],
+    tenant_id: str,
+) -> None:
+    require(turn.start.feature_level == 3, "level-3 plan requires a level-3 turn")
+    environment = turn.start._payload["environment"]
+    require(type(environment) is dict, "level-3 plan requires a trusted turn environment")
+    identity = payload["execution_identity"]
+    require(
+        identity["environment_id"] == environment["environment_id"],
+        "execution identity changed turn environment",
+    )
+    require(identity["tenant_id"] == tenant_id, "execution identity changed session tenant")
+    require(
+        isinstance(payload["provider_binding"], str) and bool(payload["provider_binding"]),
+        "level-3 plan requires a provider",
+    )
+
+
 def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]) -> None:
     p = record._payload
     item = InboxItem(**p["input"])
@@ -269,7 +289,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
         attempt.approval_answer = record
 
 
-def _plan(state: ExecutionState, record: Record) -> None:
+def _plan(state: ExecutionState, record: Record, *, tenant_id: str) -> None:
     logical_payloads = _LOGICAL_OPERATION_PAYLOADS.get() or {}
     p, oid, tid, number = (
         logical_payloads.get(record.record_id, record._payload),
@@ -285,6 +305,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
         "plan after cancel/suspend/close/wait",
     )
     op = state.operations.get(oid)
+    if record.feature_level == 3:
+        _require_level_3_plan_binding(turn, p, tenant_id)
     if op is None:
         require(number == 1, "first attempt must be 1")
         op = Operation(tid, p["op_kind"])
@@ -316,6 +338,7 @@ def _plan(state: ExecutionState, record: Record) -> None:
         )
         require(rejection_retry or op.selected_attempt is None, "retry after adopted result")
         previous_payload = logical_payloads.get(previous.plan.record_id, previous.plan._payload)
+        require(record.feature_level == previous.plan.feature_level, "retry changed level-3 plan format")
         current_retained = _is_retained(p["request"], "retry request contains a malformed ContentRef")
         previous_retained = _is_retained(previous_payload["request"], "previous retry request contains a malformed ContentRef")
         require(current_retained == previous_retained, "retry mixes retained and hydrated request")
@@ -380,6 +403,16 @@ def _operation(state: ExecutionState, record: Record) -> None:
     execution_plan_payload = logical_payloads.get(attempt.execution_plan.record_id, attempt.execution_plan._payload)
     if record.kind == "op_prepared":
         require(op.kind != "model" and attempt.state == "planned" and attempt.prepared is None, "invalid hook preparation")
+        plan_payload = logical_payloads.get(attempt.plan.record_id, attempt.plan._payload)
+        if attempt.plan.feature_level == 3 or record.feature_level == 3:
+            require(
+                attempt.plan.feature_level == record.feature_level == 3,
+                "level-3 preparation does not match its plan",
+            )
+            require(
+                p["provider_binding"] == plan_payload["provider_binding"],
+                "preparation changed provider",
+            )
         require(
             op.turn_id == state.active_turn_id and not turn.cancelled and not turn.suspended, "prepare outside executable turn"
         )
@@ -414,6 +447,8 @@ def _operation(state: ExecutionState, record: Record) -> None:
         require(number == max(op.attempts) and op.selected_attempt is None, "superseded dispatch")
         ready = attempt.state == "planned" or (attempt.state == "parked" and attempt.approval in {"approve", "allow_session"})
         require(ready, "start requires plan or approved before-dispatch wait")
+        if attempt.plan.feature_level == 3:
+            require(attempt.prepared is not None, "level-3 dispatch requires preparation")
         require(
             all(state.operations[dep].state == "completed" for dep in attempt.plan._payload["dependencies"]),
             "unfinished dependency",
@@ -1036,7 +1071,7 @@ class Fold:
                 self._own_operation(record.operation_id)
                 for ref in p["consumed_unknowns"]:
                     self._own_operation(ref["operation_id"])
-                _plan(state, record)
+                _plan(state, record, tenant_id=history[0].record._payload["principal"]["tenant_id"])
             elif kind.startswith("op_"):
                 self._own_operation(record.operation_id)
                 _operation(state, record)

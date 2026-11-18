@@ -16,11 +16,19 @@ from ._call_context import CompiledCallFacts
 from ._child_store import ChildSession, InvalidChildBatch, create_child
 from ._child_summary import child_summary
 from ._driver import CoreDriver
-from ._driver_planning import plan as plan_steps
+from ._driver_planning import (
+    InvalidW3Command,
+    assert_prepared_command_identity,
+    committed_command_plan,
+    is_w3_command_plan,
+)
+from ._driver_planning import (
+    plan as plan_steps,
+)
 from ._execution_values import AgentTask
 from ._interactions import InteractionError, user_interaction
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, Unknown, validate_acceptance
-from ._records import InboxItem, Record, copy_json, digest, inherited_seed_policies
+from ._records import InboxItem, Record, copy_json, inherited_seed_policies
 from ._state import Attempt
 from ._store import SequenceConflict, SessionTx
 from ._token_count import _StopIterationTransport
@@ -87,6 +95,11 @@ class PrepareModel:
 
 @dataclass(frozen=True, slots=True)
 class SelectProvider:
+    plan: Record
+
+
+@dataclass(frozen=True, slots=True)
+class ValidateW3CommandProvider:
     plan: Record
 
 
@@ -220,6 +233,18 @@ def _approval_answer_payload(driver: CoreDriver, record: Record) -> dict[str, An
     return hydrate_input(driver, InboxItem(**record._payload["input"])).payload
 
 
+def _stop_level_three_retry(record: Record) -> Record:
+    """Keep recovery evidence while level-3 lookup/resubmit wiring is deferred."""
+
+    payload = copy_json(record._payload)
+    observation = dict(payload["observation"])
+    observation["retryable"] = False
+    payload["observation"] = observation
+    payload["retry"] = "stop"
+    payload["retry_at_ms"] = None
+    return replace(record, payload=payload)
+
+
 def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
@@ -342,6 +367,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         stored_plan = attempt.execution_plan
         plan = driver.hydrate_plan(stored_plan)
         kind = plan._payload["op_kind"]
+        w3_command = kind != "model" and is_w3_command_plan(driver, plan)
         assert driver.state.active_turn_id is not None
         task = _task(driver) if kind == "model" and not (yield DispatchRead.HAS_HOOKS) else _task(driver, copy=True)
         yield PrepareContext(task, plan, attempt.approval in {"approve", "allow_session"})
@@ -357,8 +383,12 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 .get("vv_session", {})
                 .get("cycle_index", (yield DispatchRead.CONTEXT_CYCLE))
             )
-        if kind != "model" and (yield DispatchRead.HAS_HOOKS) and attempt.prepared is None:
+        if w3_command:
+            yield ValidateW3CommandProvider(plan)
+        if kind != "model" and attempt.prepared is None and (w3_command or (yield DispatchRead.HAS_HOOKS)):
             patched, short = yield BeforeTool(task, ToolCall.from_dict(plan.payload["request"]))
+            if w3_command:
+                assert_prepared_command_identity(driver, plan, patched)
             start = driver.state.turns[plan.turn_id or ""].start
             capabilities = driver.hydrated_definition(start).capabilities
             prepared = yield from plan_steps(
@@ -369,21 +399,27 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 dependencies=plan._payload["dependencies"],
                 capability=capabilities.get(patched.name, {}),
             )
+            if w3_command and prepared._payload["provider_binding"] != plan._payload["provider_binding"]:
+                raise InvalidW3Command("level-3 command changed provider during preparation")
+            prepared_tool = capabilities.get(patched.name, {})
             yield CommitDispatch(
                 [
                     driver.record(
                         "op_prepared",
                         {
-                            "request": patched.to_dict(),
-                            "request_digest": digest(patched.to_dict()),
-                            "tool": prepared._payload["tool"],
+                            "request": prepared._payload["request"],
+                            "request_digest": prepared._payload["request_digest"],
+                            "tool": prepared_tool,
                             "op_kind": prepared._payload["op_kind"],
                             "provider_binding": prepared._payload["provider_binding"],
                             "idempotency_key": prepared._payload["idempotency_key"],
                             "hook_result": short.to_dict() if short else None,
                             "shared_state": (yield DispatchRead.DURABLE_CONTEXT),
+                            "policy_decision": None,
+                            **({"command_digest": None} if w3_command else {}),
                         },
                         plan,
+                        feature_level=3 if w3_command else 1,
                     )
                 ],
                 guarded=True,
@@ -560,9 +596,15 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                 yield AdmitChildren([*budget_records, started], plan, summary, child_specs, stored_plan)
                 return
         yield CommitDispatch([*budget_records, started], guarded=True)
-        yield DispatchHook("before_external_call", plan)
+        hook_plan = plan
+        if w3_command:
+            plan = committed_command_plan(driver, started)
+            hook_plan = replace(plan, payload=copy_json(plan._payload))
+        yield DispatchHook("before_external_call", hook_plan)
         outcome = yield InvokeOperation(plan, started, task, has_provider)
-        yield DispatchHook("after_external_call", plan)
+        if w3_command:
+            hook_plan = replace(plan, payload=copy_json(plan._payload))
+        yield DispatchHook("after_external_call", hook_plan)
         if has_provider and plan._payload["provider_binding"] != "function":
             try:
                 if isinstance(outcome, Definitive):
@@ -578,15 +620,15 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                     try:
                         outcomes.check_provider_result(driver, stored_plan, outcome)
                     except ProviderResultInvalid:
-                        yield CommitDispatch(
-                            [(yield from outcomes.unknown_steps(driver, stored_plan, "provider_result_invalid"))]
-                        )
+                        unknown = yield from outcomes.unknown_steps(driver, stored_plan, "provider_result_invalid")
+                        yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
                         return
             outcome = replace(outcome, shared_state=(yield DispatchRead.DURABLE_CONTEXT))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, outcome)))
         elif isinstance(outcome, Accepted):
             yield CommitDispatch([(yield from outcomes.accepted_steps(driver, stored_plan, outcome))])
         else:
-            yield CommitDispatch([(yield from outcomes.unknown_steps(driver, stored_plan, outcome.reason))])
+            unknown = yield from outcomes.unknown_steps(driver, stored_plan, outcome.reason)
+            yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
     except StopIteration as error:
         raise _StopIterationTransport(error) from error

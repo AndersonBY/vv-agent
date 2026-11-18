@@ -22,6 +22,7 @@ from vv_agent.budget import (
 )
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult, apply_input_guardrails
+from vv_agent.kernel._canonical_json import validate_sha256
 from vv_agent.kernel._definition import DefinitionBindings, DefinitionCache
 from vv_agent.kernel._definition import model_identity as _model_identity
 from vv_agent.kernel._hydration import ContentReader
@@ -55,6 +56,7 @@ from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .bindings import bind_shared_state, durable_shared_state
 from .children import ChildSession, ChildTool, SummaryChildTool
+from .environments import EnvironmentCapabilities
 from .providers import FunctionProvider, Provider
 from .records import MODEL_BINDING, Record, copy_json, validate
 from .reducer import ExecutionState
@@ -73,6 +75,21 @@ class RuntimeNotReady(Exception):
             raise ValueError("retry_after_ms must be a positive integer")
         self.retry_after_ms = retry_after_ms
         super().__init__(f"Runtime not ready; retry after {retry_after_ms} ms")
+
+
+class InvalidTrustedEnvironmentBinding(ValueError):
+    """A host-provided turn environment binding is incomplete or malformed."""
+
+    code = "invalid_trusted_environment_binding"
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedEnvironmentBinding:
+    """Host-owned environment facts frozen before a turn is published."""
+
+    capabilities: EnvironmentCapabilities
+    descriptor: dict[str, Any]
+    operational_policy: dict[str, Any]
 
 
 class EndpointUnavailable(Exception):
@@ -312,6 +329,7 @@ class Runtime:
         default_factory=dict
     )
     host_bindings: dict[str, Any] = field(default_factory=dict)
+    trusted_environment_binding: TrustedEnvironmentBinding | None = field(default=None, kw_only=True)
     model_resolver: Callable[[dict[str, Any]], tuple[LLMClient, ResolvedModelConfig]] | None = None
     frozen_task: AgentTask | None = None
     handler_version: str = "1"
@@ -432,6 +450,42 @@ class Runtime:
                 handler_version=self.handler_version,
             )
         return self._requirements_bound
+
+    def turn_environment_binding(self) -> TrustedEnvironmentBinding | None:
+        """Snapshot the host-owned level-3 binding before turn publication."""
+
+        binding = self.trusted_environment_binding
+        if binding is None:
+            return None
+        if type(binding) is not TrustedEnvironmentBinding:
+            raise InvalidTrustedEnvironmentBinding("trusted environment binding must be TrustedEnvironmentBinding")
+        capabilities = binding.capabilities
+        if type(capabilities) is not EnvironmentCapabilities:
+            raise InvalidTrustedEnvironmentBinding("trusted environment capabilities must be EnvironmentCapabilities")
+        if capabilities.capabilities_digest is None:
+            raise InvalidTrustedEnvironmentBinding("trusted environment capabilities_digest is required")
+        try:
+            descriptor = copy_json(binding.descriptor)
+            operational_policy = copy_json(binding.operational_policy)
+        except (TypeError, ValueError) as exc:
+            raise InvalidTrustedEnvironmentBinding("trusted environment content must be canonical JSON") from exc
+        if type(descriptor) is not dict:
+            raise InvalidTrustedEnvironmentBinding("trusted environment descriptor must be an object")
+        if type(operational_policy) is not dict or set(operational_policy) != {
+            "network_policy_digest",
+            "isolation_policy_digest",
+        }:
+            raise InvalidTrustedEnvironmentBinding("trusted environment operational_policy must be a closed object")
+        for field_name, digest_value in operational_policy.items():
+            try:
+                validate_sha256(digest_value, f"operational_policy.{field_name}")
+            except ValueError as exc:
+                raise InvalidTrustedEnvironmentBinding(str(exc)) from exc
+        return TrustedEnvironmentBinding(
+            capabilities=capabilities,
+            descriptor=descriptor,
+            operational_policy=operational_policy,
+        )
 
     def model_selection_requirements(self, selection: dict[str, Any]) -> SessionRequirements:
         """Resolve one logged selection into its exact model-only requirements."""

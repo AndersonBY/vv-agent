@@ -181,16 +181,16 @@ def test_approval_timeout_and_provider_interval_are_sampled_around_actual_poll(t
             "cancel_ref": None,
         }
         worker.runtime.poll_ms = 1000
-        poll = worker.scope.poll
+        confirmed_poll = worker.scope.confirmed_poll
         calls = []
 
-        def changed(store):
-            result = poll(store)
+        def changed():
+            result = confirmed_poll()
             calls.append(result)
             worker.runtime.poll_ms = 73
             return result
 
-        monkeypatch.setattr(worker.scope, "poll", changed)
+        monkeypatch.setattr(worker.scope, "confirmed_poll", changed)
         parked = worker.parked(plan, handle, after=True)
         assert parked.payload["poll_at_ms"] == calls[0].db_now_ms + 73
         assert parked.payload["deadline_ms"] is None
@@ -205,7 +205,7 @@ def test_invalid_acceptance_is_rejected_before_poll(tmp_path, monkeypatch):
         def unexpected(*args, **kwargs):
             raise AssertionError("invalid acceptance must not renew or observe time")
 
-        monkeypatch.setattr(worker.scope, "poll", unexpected)
+        monkeypatch.setattr(worker.scope, "confirmed_poll", unexpected)
         with pytest.raises(ProviderResultInvalid):
             worker.accepted(plan, Accepted({"kind": "provider"}))
 
@@ -215,17 +215,17 @@ def test_approval_timeout_is_bound_before_poll_and_none_skips_poll(tmp_path, mon
     with SDKWorld(tmp_path / "approval-time.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
         worker.runtime.config = replace(worker.runtime.config, approval_timeout_seconds=timeout)
-        actual_poll = worker.scope.poll
+        actual_poll = worker.scope.confirmed_poll
         polls = []
 
-        def poll(store):
+        def poll():
             assert timeout is not None, "unbounded approval must not poll"
-            result = actual_poll(store)
+            result = actual_poll()
             polls.append(result)
             worker.runtime.config = replace(worker.runtime.config, approval_timeout_seconds=99)
             return result
 
-        monkeypatch.setattr(worker.scope, "poll", poll)
+        monkeypatch.setattr(worker.scope, "confirmed_poll", poll)
         handle = {"kind": "approval", "request_id": "approval", "request_digest": plan.payload["request_digest"], "scope": []}
         result = worker.parked(plan, handle, after=False)
         assert result.payload["poll_at_ms"] is None
@@ -233,7 +233,7 @@ def test_approval_timeout_is_bound_before_poll_and_none_skips_poll(tmp_path, mon
         assert len(polls) == (0 if timeout is None else 1)
 
 
-def test_unknown_samples_the_actual_reason_only_after_retry_is_eligible(tmp_path):
+def test_unknown_samples_the_actual_reason_only_after_retry_is_eligible(tmp_path, monkeypatch):
     from vv_agent.runtime.cancellation import CancellationToken
 
     class Token(CancellationToken):
@@ -247,7 +247,8 @@ def test_unknown_samples_the_actual_reason_only_after_retry_is_eligible(tmp_path
     with SDKWorld(tmp_path / "unknown-reason.sqlite", seed=17) as world:
         worker, plan, _ = receipt_fixture(world)
         token = Token()
-        worker.scope.token = token
+        monkeypatch.setattr(worker.scope, "_token_factory", lambda: token)
+        worker.scope.reset_token()
         assert worker.unknown(plan, "provider_result_invalid").payload["retry"] == "stop"
         assert token.reads == 0
         result = worker.unknown(plan, "worker lost before durable result")

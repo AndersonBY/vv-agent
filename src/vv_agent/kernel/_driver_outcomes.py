@@ -141,8 +141,10 @@ def unknown_steps(self: CoreDriver, plan: Record, reason: str) -> Generator[Outc
         assert plan.operation_id is not None and plan.attempt is not None
         attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
         is_model = plan._payload["op_kind"] == "model"
+        # Level-3 commands remain unknown until authenticated provider evidence reconciles them.
         retry = (
-            plan._payload["purpose"] != "output_repair"
+            plan.feature_level != 3
+            and plan._payload["purpose"] != "output_repair"
             and plan.attempt
             < max(2, len(plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])))
             and (is_model or (plan._payload["tool"] or {}).get("idempotency") == "supported")

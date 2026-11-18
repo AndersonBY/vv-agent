@@ -80,6 +80,7 @@ def run_case(driver_type, path, case, monkeypatch):
     cut = Cut(case)
     with SQLiteStore.standalone(str(path), clock=clock) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         create_fixture_session(store, "s", consumers=())
         rt = runtime(path, [])
@@ -254,6 +255,7 @@ def test_sdk_uses_core_ledger_methods_and_refreshes_live_bindings(tmp_path):
     path = tmp_path / "refresh.sqlite"
     with SQLiteStore.standalone(str(path)) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         create_fixture_session(store, "s", consumers=())
         rt = runtime(path, [])
@@ -284,6 +286,7 @@ def test_core_boundary_and_pending_state_follow_actual_retained_records(tmp_path
     path = tmp_path / "state.sqlite"
     with SQLiteStore.standalone(str(path)) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         create_fixture_session(store, "s", consumers=())
         rt = runtime(path, [])

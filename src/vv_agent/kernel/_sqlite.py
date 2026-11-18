@@ -247,6 +247,7 @@ class SQLiteStore(SQLStore):
         heartbeat_busy_timeout_ms = self.heartbeat_busy_timeout_ms
         tenant_id = self.tenant_id
         supports = self.worker_supports
+        reader_level = self.reader_level
         all_tenants = self.claims_all_tenants
         configured, allow_unsigned, signer = self._input_admission_policy()
 
@@ -259,6 +260,7 @@ class SQLiteStore(SQLStore):
                 busy_timeout_ms=busy_timeout_ms,
                 heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms,
             ) as store:
+                store.configure_reader(level=reader_level)
                 store.configure_worker(
                     level=supports.max_level,
                     handler_versions=supports.handler_versions,

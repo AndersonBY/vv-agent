@@ -1089,7 +1089,11 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
             stored_definition = _hydratable_definition(admitted_definition)
         actual_requirements = None
         if bound is not None:
-            actual_requirements = definition_requirements(stored_definition, handler_version=handler_version)
+            actual_requirements = definition_requirements(
+                stored_definition,
+                handler_version=handler_version,
+                level=max(2, bound.level),
+            )
             _validate_actual_requirements(bound, actual_requirements)
         yield PublishTurnStarted(
             input_id=input_id,
