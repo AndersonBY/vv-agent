@@ -170,7 +170,15 @@ class CoreDriver:
         generation = self.state.turns[tid].start._payload["generation"] if tid else None
         self.scope.bind_turn(tid, generation, self.state.applied_inputs)
 
-    def record(self, kind: str, payload: dict[str, Any], plan: Record | None = None, *, tid: str | None = None) -> Record:
+    def record(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        plan: Record | None = None,
+        *,
+        tid: str | None = None,
+        feature_level: int = 1,
+    ) -> Record:
         payload = copy_json(payload)
         if kind == "turn_started":
             payload.setdefault("policy_digest", None)
@@ -193,6 +201,7 @@ class CoreDriver:
                 operation_id=operation_id,
                 attempt=attempt,
                 payload=payload,
+                feature_level=feature_level,
             )
         return Record(
             record_identity(kind, self.sid, turn_id, operation_id, attempt, payload),
@@ -202,6 +211,7 @@ class CoreDriver:
             operation_id,
             attempt,
             payload,
+            feature_level=feature_level,
         )
 
     def hydrator_for(self, record_owner: int | str) -> SessionHydrator:
@@ -526,6 +536,10 @@ class CoreDriver:
                 if prepare is not None:
                     with phase("prepare"):
                         prepared_records.extend(prepare(tx))
+                from ._driver_planning import resolve_command_records
+
+                with phase("command_binding"):
+                    prepared_records = resolve_command_records(self, tx, prepared_records)
                 committed = {stored.record.record_id: stored.record for stored in self.records}
                 record_ids = [record.record_id for record in prepared_records]
                 if any(record_id in committed for record_id in record_ids):
@@ -566,6 +580,7 @@ class CoreDriver:
                                     operation_id=record.operation_id,
                                     attempt=record.attempt,
                                     payload=record._payload,
+                                    feature_level=record.feature_level,
                                 )
                                 for record in prepared_records
                             ),

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import os
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
-from vv_agent.kernel._canonical_json import canonical_json_sha256
+from vv_agent.kernel._canonical_json import MAX_WIRE_INTEGER, canonical_json_sha256
 from vv_agent.session.environments import (
+    CommandSpec,
     EnvironmentCapabilities,
+    InvalidCommandSpec,
     InvalidEnvironmentCapabilities,
     InvalidLookupBinding,
     InvalidProviderLookupResult,
@@ -18,6 +25,7 @@ from vv_agent.session.environments import (
     LookupStatus,
     NetworkMode,
     ProviderLookupResult,
+    StdinMode,
     execution_id_for,
     stable_operation_key,
 )
@@ -31,6 +39,136 @@ ENVIRONMENT = "environment/a"
 PROVIDER = "provider/local-test"
 NETWORK_REF = "1" * 64
 ISOLATION_REF = "2" * 64
+
+
+def _command_spec_payload(**changes: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "command_text": "printf 'hello\\n'",
+        "argv": [],
+        "cwd": "/workspace",
+        "stdin_base64": None,
+        "stdin_mode": "none",
+        "secret_ref_names": ["MODEL_API_KEY"],
+        "limits": {"wall_time_ms": 30000, "output_bytes": 65536},
+    }
+    payload.update(changes)
+    return payload
+
+
+def test_command_spec_roundtrips_canonical_proposal_and_hook_patched_vectors() -> None:
+    source = os.environ.get("VV_AGENT_CONTRACT_SOURCE")
+    if not source:
+        pytest.skip("VV_AGENT_CONTRACT_SOURCE is not configured")
+    contract = json.loads((Path(source) / "fixtures/execution_worker_w3.json").read_text(encoding="utf-8"))
+    vectors = (
+        ("proposal", contract["command_digest_vectors"][0]["command_spec"]),
+        ("hook-patched", contract["preparation_binding"]["hook_patched_command_spec"]),
+    )
+
+    for name, payload in vectors:
+        original = deepcopy(payload)
+        spec = CommandSpec.from_dict(payload)
+
+        assert spec.to_dict() == original, name
+        assert payload == original, name
+        assert spec.launch_command == original["command_text"], name
+
+
+def test_command_spec_distinguishes_exact_argv_from_shell_text() -> None:
+    payload = _command_spec_payload(argv=["printf", "hello"])
+    spec = CommandSpec.from_dict(payload)
+
+    assert spec.command_text == "printf 'hello\\n'"
+    assert spec.launch_command == ("printf", "hello")
+    assert spec.to_dict() == payload
+
+    shell = CommandSpec(
+        command_text="printf shell",
+        argv=(),
+        cwd="/workspace",
+        stdin_base64=None,
+        stdin_mode=StdinMode.NONE,
+        secret_ref_names=(),
+        wall_time_ms=1000,
+        output_bytes=4096,
+    )
+    assert shell.launch_command == "printf shell"
+    assert shell.to_dict()["limits"] == {"wall_time_ms": 1000, "output_bytes": 4096}
+
+
+@pytest.mark.parametrize(
+    "cwd",
+    [".", "workspace/project", "/workspace/project", "workspace/project/../project"],
+)
+def test_command_spec_preserves_declared_cwd_for_environment_normalization(cwd: str) -> None:
+    payload = _command_spec_payload(cwd=cwd)
+
+    assert CommandSpec.from_dict(payload).to_dict()["cwd"] == cwd
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {key: value for key, value in _command_spec_payload().items() if key != "command_text"},
+        _command_spec_payload() | {"secret_reference_names": []},
+        _command_spec_payload() | {"env": {"API_KEY": "plaintext"}},
+        _command_spec_payload() | {"credentials": {"token": "plaintext"}},
+        _command_spec_payload(limits={"wall_time_ms": 1}),
+        _command_spec_payload(limits={"wall_time_ms": 1, "output_bytes": 1, "cpu": 1}),
+    ],
+)
+def test_command_spec_rejects_closed_shape_and_framing_mismatches(payload: dict[str, Any]) -> None:
+    with pytest.raises(InvalidCommandSpec, match="closed object"):
+        CommandSpec.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("command_text", None),
+        ("command_text", ""),
+        ("argv", "printf"),
+        ("argv", [""]),
+        ("cwd", None),
+        ("cwd", "\x00workspace"),
+        ("stdin_mode", "inherit"),
+        ("secret_ref_names", "MODEL_API_KEY"),
+        ("secret_ref_names", ["MODEL_API_KEY", "MODEL_API_KEY"]),
+        ("secret_ref_names", [" "]),
+        ("limits", None),
+        ("limits", {"wall_time_ms": True, "output_bytes": 1}),
+        ("limits", {"wall_time_ms": 0, "output_bytes": 1}),
+        ("limits", {"wall_time_ms": 1, "output_bytes": MAX_WIRE_INTEGER + 1}),
+    ],
+)
+def test_command_spec_rejects_invalid_launch_values(field: str, value: Any) -> None:
+    with pytest.raises(InvalidCommandSpec):
+        CommandSpec.from_dict(_command_spec_payload(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("stdin_mode", "stdin_base64"),
+    [
+        ("none", "aGVsbG8="),
+        ("provided", None),
+        ("provided", "YQ"),
+        ("provided", "not base64"),
+        ("pipe", ""),
+    ],
+)
+def test_command_spec_requires_stdin_mode_payload_agreement(stdin_mode: str, stdin_base64: str | None) -> None:
+    with pytest.raises(InvalidCommandSpec, match="stdin"):
+        CommandSpec.from_dict(_command_spec_payload(stdin_mode=stdin_mode, stdin_base64=stdin_base64))
+
+
+def test_command_spec_accepts_canonical_base64_for_provided_stdin() -> None:
+    payload = _command_spec_payload(stdin_mode="provided", stdin_base64="aGVsbG8=")
+    spec = CommandSpec.from_dict(payload)
+
+    assert spec.stdin_mode is StdinMode.PROVIDED
+    assert spec.stdin_base64 is not None
+    assert base64.b64decode(spec.stdin_base64, validate=True) == b"hello"
+    assert spec.to_dict() == payload
 
 
 def _environment(

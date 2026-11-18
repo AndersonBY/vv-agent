@@ -36,15 +36,15 @@ class Attempt:
         if self.prepared is None:
             return self.plan
         p = self.prepared._payload
+        payload = self.plan._payload | {
+            **{key: p[key] for key in ("request", "request_digest", "tool", "op_kind", "provider_binding", "idempotency_key")},
+            "budget_admission": {"hook_result": p["hook_result"], "shared_state": p["shared_state"]},
+        }
+        if "command_digest" in p:
+            payload["command_digest"] = p["command_digest"]
         return replace(
             self.plan,
-            payload=self.plan._payload
-            | {
-                **{
-                    key: p[key] for key in ("request", "request_digest", "tool", "op_kind", "provider_binding", "idempotency_key")
-                },
-                "budget_admission": {"hook_result": p["hook_result"], "shared_state": p["shared_state"]},
-            },
+            payload=payload,
         )
 
     @property

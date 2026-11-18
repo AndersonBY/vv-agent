@@ -698,6 +698,7 @@ class PostgresStore(SQLStore):
         fold_factory = self.fold_factory
         clock_sql = self.clock_sql
         supports = self.worker_supports
+        reader_level = self.reader_level
         all_tenants = self.claims_all_tenants
         configured, allow_unsigned, signer = self._input_admission_policy()
         store_type = type(self)
@@ -719,6 +720,7 @@ class PostgresStore(SQLStore):
                 manager = store_type.standalone(conninfo, fold_factory=fold_factory)
             with manager as store:
                 store.clock_sql = clock_sql
+                store.configure_reader(level=reader_level)
                 store.configure_worker(
                     level=supports.max_level,
                     handler_versions=supports.handler_versions,
@@ -747,6 +749,7 @@ class PostgresStore(SQLStore):
         fold_factory = self.fold_factory
         clock_sql = self.clock_sql
         supports = self.worker_supports
+        reader_level = self.reader_level
         configured, allow_unsigned, signer = self._input_admission_policy()
         store_type = type(self)
 
@@ -767,6 +770,7 @@ class PostgresStore(SQLStore):
                 manager = store_type.standalone(heartbeat_conninfo, fold_factory=fold_factory)
             with manager as store:
                 store.clock_sql = clock_sql
+                store.configure_reader(level=reader_level)
                 store.configure_worker(
                     level=supports.max_level,
                     handler_versions=supports.handler_versions,

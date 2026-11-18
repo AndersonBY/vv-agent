@@ -13,15 +13,33 @@ from ._content_publication import declared_content_ref, make_record_before_publi
 from ._context import protected_start
 from ._context_messages import retained_start
 from ._cycle_values import read_after_cycle_disallowed_tools
-from ._execution_values import AgentTask
+from ._execution_values import AgentTask, execution_id_for_values
 from ._hydration import DefinitionContent, KeyUnavailable
 from ._message_values import Message
 from ._model_settings import ModelSettings, RetrySettings
 from ._record_codec import RecordError
-from ._records import Record, _RetainedMessages, copy_json, digest
+from ._records import Record, _RetainedMessages, copy_json, digest, record_identity
 from ._reducer import Fold
 from ._state import ExecutionState
-from ._store import StoredRecord
+from ._store import SessionTx, StoredRecord
+
+W3_COMMAND_BINDING = "_vv_command_binding"
+W3_COMMAND_TOOL = "bash"
+W3_DEFAULT_OUTPUT_BYTES = 65_536
+W3_UNSUPPORTED_CONTEXT_KEYS = frozenset({"bash_env", "bash_shell", "windows_shell_priority"})
+W3_BASH_ARGUMENT_KEYS = frozenset({"auto_confirm", "command", "exec_dir", "stdin", "timeout_seconds", "yield_time_ms"})
+
+
+class InvalidW3CommandProvider(ValueError):
+    """A level-3 command cannot use the selected host provider."""
+
+    code = "invalid_w3_command_provider"
+
+
+class InvalidW3Command(ValueError):
+    """A level-3 bash request cannot be bound to a stable command."""
+
+    code = "invalid_w3_command"
 
 
 class PlanningView(Protocol):
@@ -35,6 +53,7 @@ class PlanningView(Protocol):
     def sid(self) -> str: ...
     def hydrated_definition(self, record: Record) -> DefinitionContent: ...
     def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any: ...
+    def hydrate_plan(self, record: Record) -> Record: ...
     def session_attributes(self) -> dict[str, Any]: ...
 
 
@@ -62,6 +81,11 @@ class OrderedEndpoints:
 @dataclass(frozen=True, slots=True)
 class ProviderAvailable:
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveW3Command:
+    request: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +121,15 @@ class _PlanningStopIteration(Exception):
 
 
 PlanningRequest = (
-    PlanningRead | ResolveModel | OrderedEndpoints | ProviderAvailable | BeforeCycle | BeforeLLM | DurableState | ClosePlanning
+    PlanningRead
+    | ResolveModel
+    | OrderedEndpoints
+    | ProviderAvailable
+    | ResolveW3Command
+    | BeforeCycle
+    | BeforeLLM
+    | DurableState
+    | ClosePlanning
 )
 
 
@@ -134,7 +166,22 @@ def plan(
         if kind == "model" and isinstance(request.get("messages"), list):
             retained = view.fold._messages.retain_array(request["messages"])
             request = request | {"messages": retained.value if isinstance(retained, _RetainedMessages) else retained}
-        binding = "model" if kind == "model" else request["name"] if (yield ProviderAvailable(request["name"])) else "function"
+        provider_available = None
+        if kind != "model":
+            provider_available = yield ProviderAvailable(request["name"])
+        binding = "model" if kind == "model" else request["name"] if provider_available else "function"
+        feature_level = 1
+        command_fields: dict[str, Any] = {}
+        if _is_w3_bash_request(view, request):
+            if not provider_available:
+                raise InvalidW3CommandProvider("level-3 bash requires a registered trusted command provider")
+            command_spec = yield ResolveW3Command(request)
+            if type(command_spec) is not dict:
+                raise InvalidW3Command("level-3 bash command normalization must be an object")
+            request, command_fields = _w3_command_plan_fields(view, oid, request, command_spec)
+            feature_level = 3
+            binding = W3_COMMAND_TOOL
+        request_digest = digest(_tool_call_request(request)) if kind != "model" else digest(request)
         return make_record_before_publication(
             "op_planned",
             session_id=view.sid,
@@ -145,11 +192,17 @@ def plan(
                 "op_kind": kind,
                 "purpose": purpose if kind == "model" else None,
                 "request": request,
-                "request_digest": digest(request),
+                "request_digest": request_digest,
                 "context_version": str(view.records[-1].seq),
                 "dependencies": dependencies or [],
                 "tool": capability,
-                "idempotency_key": None if capability and capability.get("idempotency") == "unsupported" else f"{view.sid}/{oid}",
+                "idempotency_key": (
+                    f"{view.sid}/{oid}"
+                    if feature_level == 3
+                    else None
+                    if capability and capability.get("idempotency") == "unsupported"
+                    else f"{view.sid}/{oid}"
+                ),
                 "budget_admission": {},
                 "not_before_ms": None,
                 "provider_binding": binding,
@@ -163,10 +216,248 @@ def plan(
                     and a.state == "unknown"
                     and op.kind != "model"
                 ],
+                **command_fields,
             },
+            feature_level=feature_level,
         )
     except StopIteration as error:
         raise _PlanningStopIteration(error) from error
+
+
+def is_w3_command_plan(view: PlanningView, plan: Record) -> bool:
+    """Return whether this record belongs to the level-3 bash command slice."""
+
+    tid = plan.turn_id or view.state.active_turn_id
+    if tid is None or tid not in view.state.turns:
+        return False
+    start = view.state.turns[tid].start
+    request = plan._payload.get("request")
+    return (
+        start.feature_level == 3
+        and type(start._payload.get("environment")) is dict
+        and type(request) is dict
+        and request.get("name") == W3_COMMAND_TOOL
+    )
+
+
+def assert_prepared_command_identity(view: PlanningView, plan: Record, call: Any) -> None:
+    """Keep execution identity, provider and environment immovable across BeforeTool."""
+
+    request = _tool_call_request(plan._payload["request"])
+    patched = _tool_call_request(call.to_dict())
+    if patched["id"] != request["id"]:
+        raise InvalidW3Command("level-3 BeforeTool cannot change tool call identity")
+    if patched["name"] != request["name"]:
+        raise InvalidW3Command("level-3 BeforeTool cannot switch provider or tool name")
+    envelope = _request_envelope(plan)
+    _, environment, _ = _frozen_environment(view, plan.turn_id)
+    if envelope.get("execution_identity", {}).get("environment_id") != environment["environment_id"]:
+        raise InvalidW3Command("level-3 command cannot switch environment")
+
+
+def committed_command_plan(view: PlanningView, started: Record) -> Record:
+    """Return a detached execution plan from the retained start transaction."""
+
+    stored = view.stored_record(started)
+    if stored.record.kind != "op_started":
+        raise InvalidW3Command("level-3 command submission requires op_started")
+    operation = view.state.operations.get(started.operation_id or "")
+    attempt = operation.attempts.get(started.attempt) if operation is not None else None
+    if attempt is None or attempt.prepared is None or attempt.dispatch is None or attempt.dispatch.record_id != started.record_id:
+        raise InvalidW3Command("level-3 command submission requires its committed prepared request")
+    plan = view.hydrate_plan(attempt.plan)
+    return replace(plan, payload=copy_json(plan._payload))
+
+
+def validate_command_submit(
+    view: PlanningView,
+    plan: Record,
+    started: Record,
+    command_spec: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify the exact retained command against the post-start execution plan."""
+
+    if not is_w3_command_plan(view, plan):
+        raise InvalidW3Command("level-3 command binding is incomplete")
+    committed = committed_command_plan(view, started)
+    for field in (
+        "request",
+        "request_digest",
+        "command_digest",
+        "execution_identity",
+        "provider_binding",
+        "idempotency_key",
+    ):
+        if plan._payload.get(field) != committed._payload.get(field):
+            raise InvalidW3Command(f"level-3 command changed after preparation: {field}")
+    operation = view.state.operations.get(plan.operation_id or "")
+    attempt = operation.attempts.get(plan.attempt) if operation is not None else None
+    if attempt is None or attempt.dispatch is None or attempt.dispatch.record_id != started.record_id:
+        raise InvalidW3Command("level-3 command submit requires the committed op_started")
+    envelope = _request_envelope(committed)
+    expected_identity = attempt.plan._payload.get("execution_identity")
+    if envelope.get("execution_identity") != expected_identity:
+        raise InvalidW3Command("level-3 command changed execution identity")
+    if expected_identity is None or expected_identity.get("tenant_id") != _tenant_id(view):
+        raise InvalidW3Command("level-3 command changed session tenant")
+    descriptor, environment, operational_policy = _frozen_environment(view, plan.turn_id)
+    if envelope.get("descriptor") != descriptor:
+        raise InvalidW3Command("level-3 command changed environment descriptor")
+    if envelope.get("environment") != environment:
+        raise InvalidW3Command("level-3 command changed environment capabilities or generation")
+    if envelope.get("operational_policy") != operational_policy:
+        raise InvalidW3Command("level-3 command changed operational policy")
+    call = _tool_call_request(committed._payload["request"])
+    if envelope.get("command_spec") != command_spec:
+        raise InvalidW3Command("level-3 command changed its normalized CommandSpec")
+    if committed._payload.get("command_digest") != envelope.get("command_digest"):
+        raise InvalidW3Command("level-3 command digest does not match its committed binding")
+    if committed._payload.get("provider_binding") != W3_COMMAND_TOOL or call["name"] != W3_COMMAND_TOOL:
+        raise InvalidW3Command("level-3 command changed its trusted provider")
+    return envelope
+
+
+def resolve_command_records(driver: Any, tx: SessionTx, records: list[Record]) -> list[Record]:
+    """Resolve one deferred command HMAC before records are encoded or appended."""
+
+    writer = None
+    resolved: list[Record] = []
+    for record in records:
+        if (
+            record.feature_level != 3
+            or record.kind not in {"op_planned", "op_prepared"}
+            or record._payload.get("command_digest") is not None
+        ):
+            resolved.append(record)
+            continue
+        plan = record
+        if record.kind == "op_prepared":
+            operation = driver.state.operations.get(record.operation_id or "")
+            attempt = operation.attempts.get(record.attempt) if operation is not None else None
+            if attempt is None:
+                raise InvalidW3Command("prepared command has no planned operation")
+            plan = attempt.plan
+        envelope = _request_envelope(record)
+        if envelope.get("execution_identity") != plan._payload.get("execution_identity"):
+            raise InvalidW3Command("command preparation changed execution identity")
+        if record.kind == "op_prepared" and record._payload.get("provider_binding") != plan._payload.get("provider_binding"):
+            raise InvalidW3Command("command preparation changed provider")
+        descriptor, environment, operational_policy = _frozen_environment(driver, record.turn_id)
+        if envelope.get("descriptor") != descriptor or envelope.get("environment") != environment:
+            raise InvalidW3Command("command preparation changed its frozen environment")
+        if envelope.get("operational_policy") != operational_policy:
+            raise InvalidW3Command("command preparation changed its frozen operational policy")
+        call = _tool_call_request(record._payload["request"])
+        if call["name"] != W3_COMMAND_TOOL or record._payload.get("provider_binding") != W3_COMMAND_TOOL:
+            raise InvalidW3Command("command preparation changed its trusted provider")
+        if record._payload.get("request_digest") != digest(call):
+            raise InvalidW3Command("command request digest does not match the actual ToolCall")
+        command_spec = envelope.get("command_spec")
+        if type(command_spec) is not dict:
+            raise InvalidW3Command("command proposal is missing its normalized CommandSpec")
+        if writer is None:
+            writer = driver.content_writer(tx)
+        command_digest = writer.command_digest(
+            command_spec=command_spec,
+            environment=environment,
+            operational_policy=operational_policy,
+        )
+        binding = copy_json(envelope) | {"command_digest": command_digest}
+        payload = copy_json(record._payload)
+        payload["command_digest"] = command_digest
+        payload["request"] = call | {W3_COMMAND_BINDING: binding}
+        resolved.append(
+            Record(
+                record_identity(
+                    record.kind,
+                    record.session_id,
+                    record.turn_id,
+                    record.operation_id,
+                    record.attempt,
+                    payload,
+                ),
+                record.kind,
+                record.session_id,
+                record.turn_id,
+                record.operation_id,
+                record.attempt,
+                payload,
+                feature_level=record.feature_level,
+            )
+        )
+    return resolved
+
+
+def _is_w3_bash_request(view: PlanningView, request: dict[str, Any]) -> bool:
+    tid = view.state.active_turn_id
+    if tid is None or tid not in view.state.turns or request.get("name") != W3_COMMAND_TOOL:
+        return False
+    start = view.state.turns[tid].start
+    return start.feature_level == 3 and type(start._payload.get("environment")) is dict
+
+
+def _w3_command_plan_fields(
+    view: PlanningView,
+    oid: str,
+    request: dict[str, Any],
+    command_spec: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    call = _tool_call_request(request)
+    descriptor, environment, operational_policy = _frozen_environment(view, view.state.active_turn_id)
+    tenant_id = _tenant_id(view)
+    operation_key = f"{view.sid}/{oid}"
+    identity = {
+        "operation_key": operation_key,
+        "tenant_id": tenant_id,
+        "environment_id": environment["environment_id"],
+        "session_id": view.sid,
+        "operation_id": oid,
+        "execution_id": execution_id_for_values(tenant_id, environment["environment_id"], operation_key),
+    }
+    envelope = {
+        "execution_identity": identity,
+        "descriptor": descriptor,
+        "environment": environment,
+        "operational_policy": operational_policy,
+        "command_spec": copy_json(command_spec),
+        "command_digest": None,
+    }
+    return call | {W3_COMMAND_BINDING: envelope}, {"execution_identity": identity, "command_digest": None}
+
+
+def _frozen_environment(view: PlanningView, tid: str | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if tid is None or tid not in view.state.turns:
+        raise InvalidW3Command("level-3 command has no frozen turn environment")
+    start = view.state.turns[tid].start
+    raw = start._payload.get("environment")
+    if start.feature_level != 3 or type(raw) is not dict:
+        raise InvalidW3Command("level-3 command has no frozen turn environment")
+    descriptor = view.hydrate_record_field(start, "environment_descriptor", raw.get("descriptor"))
+    operational_policy = view.hydrate_record_field(start, "environment_operational_policy", raw.get("operational_policy"))
+    capability_payload = {key: value for key, value in raw.items() if key not in {"descriptor", "operational_policy"}}
+    if type(descriptor) is not dict or type(operational_policy) is not dict:
+        raise InvalidW3Command("frozen environment content must be objects")
+    return copy_json(descriptor), copy_json(capability_payload), copy_json(operational_policy)
+
+
+def _tool_call_request(value: dict[str, Any]) -> dict[str, Any]:
+    from ._tool_values import ToolCall
+
+    return ToolCall.from_dict({key: item for key, item in value.items() if key != W3_COMMAND_BINDING}).to_dict()
+
+
+def _request_envelope(record: Record) -> dict[str, Any]:
+    request = record._payload.get("request")
+    if type(request) is not dict or type(request.get(W3_COMMAND_BINDING)) is not dict:
+        raise InvalidW3Command("level-3 command record is missing its encrypted binding")
+    return request[W3_COMMAND_BINDING]
+
+
+def _tenant_id(view: PlanningView) -> str:
+    tenant_id = getattr(getattr(view, "store", None), "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise InvalidW3Command("level-3 command requires an authenticated tenant")
+    return tenant_id
 
 
 def effective_model(view: PlanningView) -> Generator[PlanningRequest, Any, dict[str, Any]]:

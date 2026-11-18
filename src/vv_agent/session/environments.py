@@ -1,11 +1,19 @@
-"""Closed W3 values for environment capabilities and stable provider identity.
+"""Closed W3 values for execution environments and stable provider identity.
 
 This module deliberately contains no execution transport. It validates the
 values that an environment/provider adapter must freeze before it starts work.
+The consuming adapter must resolve ``CommandSpec.cwd`` against the selected
+environment, enforce that environment's workspace authority, and launch exactly
+the declared command: the exact ``argv`` vector when non-empty, otherwise the
+declared shell ``command_text``. It must not add a hidden environment or inject
+credentials. ``secret_ref_names`` contains broker reference names only; their
+authorization and materialization remain adapter concerns.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -36,6 +44,10 @@ class InvalidEnvironmentCapabilities(EnvironmentContractError):
     code = "invalid_environment_capabilities"
 
 
+class InvalidCommandSpec(EnvironmentContractError):
+    code = "invalid_command_spec"
+
+
 class InvalidLookupBinding(EnvironmentContractError):
     code = "invalid_lookup_binding"
 
@@ -54,6 +66,12 @@ class NetworkMode(StrEnum):
     OPEN = "open"
     ALLOWLIST = "allowlist"
     NONE = "none"
+
+
+class StdinMode(StrEnum):
+    NONE = "none"
+    PROVIDED = "provided"
+    PIPE = "pipe"
 
 
 class LookupStatus(StrEnum):
@@ -157,6 +175,64 @@ def _canonical_json(value: Any, field_name: str, error: type[EnvironmentContract
         raise error(f"{field_name} must be canonical JSON data") from exc
 
 
+_COMMAND_SPEC_FIELDS = {
+    "command_text",
+    "argv",
+    "cwd",
+    "stdin_base64",
+    "stdin_mode",
+    "secret_ref_names",
+    "limits",
+}
+_COMMAND_LIMIT_FIELDS = {"wall_time_ms", "output_bytes"}
+
+
+def _command_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise InvalidCommandSpec(f"{field_name} must be a non-empty string")
+    if "\x00" in value:
+        raise InvalidCommandSpec(f"{field_name} must not contain NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise InvalidCommandSpec(f"{field_name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _command_strings(value: Any, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple | list):
+        raise InvalidCommandSpec(f"{field_name} must be an array of non-empty strings")
+    strings = tuple(_command_text(item, field_name) for item in value)
+    return strings
+
+
+def _secret_ref_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, tuple | list):
+        raise InvalidCommandSpec("secret_ref_names must be a unique array of non-empty strings")
+    names = tuple(_identifier(item, "secret_ref_names", InvalidCommandSpec) for item in value)
+    if len(names) != len(set(names)):
+        raise InvalidCommandSpec("secret_ref_names must be a unique array of non-empty strings")
+    return names
+
+
+def _stdin_base64(value: Any, mode: StdinMode) -> str | None:
+    if mode is StdinMode.PROVIDED:
+        if not isinstance(value, str):
+            raise InvalidCommandSpec("stdin_mode provided requires stdin_base64")
+    else:
+        if value is not None:
+            raise InvalidCommandSpec(f"stdin_mode {mode.value} requires stdin_base64 to be null")
+        return None
+    try:
+        encoded = value.encode("ascii")
+        decoded = base64.b64decode(encoded, validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise InvalidCommandSpec("stdin_base64 must be canonical base64") from exc
+    if base64.b64encode(decoded) != encoded:
+        raise InvalidCommandSpec("stdin_base64 must be canonical base64")
+    return value
+
+
 def stable_operation_key(session_id: str, operation_id: str) -> str:
     """Return the existing literal operation key used across attempts."""
     session_id = _identifier(session_id, "session_id", InvalidLookupBinding)
@@ -178,6 +254,74 @@ def execution_id_for(
     environment_id = _identifier(environment_id, "environment_id", InvalidLookupBinding)
     operation_key = _identifier(operation_key, "operation_key", InvalidLookupBinding)
     return execution_id_for_values(tenant_id, environment_id, operation_key)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSpec:
+    command_text: str
+    argv: tuple[str, ...]
+    cwd: str
+    stdin_base64: str | None
+    stdin_mode: StdinMode
+    secret_ref_names: tuple[str, ...]
+    wall_time_ms: int
+    output_bytes: int
+
+    def __post_init__(self) -> None:
+        try:
+            mode = StdinMode(self.stdin_mode)
+        except (TypeError, ValueError) as exc:
+            raise InvalidCommandSpec("stdin_mode must be none, provided or pipe") from exc
+        object.__setattr__(self, "command_text", _command_text(self.command_text, "command_text"))
+        object.__setattr__(self, "argv", _command_strings(self.argv, "argv"))
+        object.__setattr__(self, "cwd", _command_text(self.cwd, "cwd"))
+        object.__setattr__(self, "stdin_base64", _stdin_base64(self.stdin_base64, mode))
+        object.__setattr__(self, "stdin_mode", mode)
+        object.__setattr__(self, "secret_ref_names", _secret_ref_names(self.secret_ref_names))
+        object.__setattr__(
+            self,
+            "wall_time_ms",
+            _integer(self.wall_time_ms, "limits.wall_time_ms", InvalidCommandSpec, minimum=1),
+        )
+        object.__setattr__(
+            self,
+            "output_bytes",
+            _integer(self.output_bytes, "limits.output_bytes", InvalidCommandSpec, minimum=1),
+        )
+
+    @property
+    def launch_command(self) -> str | tuple[str, ...]:
+        """Return the exact argv or shell text selected for process launch."""
+        return self.argv if self.argv else self.command_text
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command_text": self.command_text,
+            "argv": list(self.argv),
+            "cwd": self.cwd,
+            "stdin_base64": self.stdin_base64,
+            "stdin_mode": self.stdin_mode.value,
+            "secret_ref_names": list(self.secret_ref_names),
+            "limits": {
+                "wall_time_ms": self.wall_time_ms,
+                "output_bytes": self.output_bytes,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CommandSpec:
+        payload = _closed_mapping(value, _COMMAND_SPEC_FIELDS, InvalidCommandSpec, "CommandSpec")
+        limits = _closed_mapping(payload["limits"], _COMMAND_LIMIT_FIELDS, InvalidCommandSpec, "limits")
+        return cls(
+            command_text=payload["command_text"],
+            argv=payload["argv"],
+            cwd=payload["cwd"],
+            stdin_base64=payload["stdin_base64"],
+            stdin_mode=payload["stdin_mode"],
+            secret_ref_names=payload["secret_ref_names"],
+            wall_time_ms=limits["wall_time_ms"],
+            output_bytes=limits["output_bytes"],
+        )
 
 
 _ENVIRONMENT_FIELDS = {
@@ -546,8 +690,10 @@ class ProviderLookupResult:
 
 
 __all__ = [
+    "CommandSpec",
     "EnvironmentCapabilities",
     "EnvironmentContractError",
+    "InvalidCommandSpec",
     "InvalidEnvironmentCapabilities",
     "InvalidLookupBinding",
     "InvalidProviderLookupResult",
@@ -556,6 +702,7 @@ __all__ = [
     "LookupStatus",
     "NetworkMode",
     "ProviderLookupResult",
+    "StdinMode",
     "execution_id_for",
     "stable_operation_key",
 ]

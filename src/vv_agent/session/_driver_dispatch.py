@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import math
+import posixpath
 from collections.abc import Callable, Generator
 from dataclasses import replace
 from types import SimpleNamespace
@@ -10,7 +13,9 @@ from typing import TYPE_CHECKING, Any, cast
 from vv_agent.kernel import _child_delegation as delegation
 from vv_agent.kernel import _child_summary as summary
 from vv_agent.kernel import _driver_dispatch as core
+from vv_agent.kernel import _driver_planning as planning
 from vv_agent.kernel import _tool_admission as admission
+from vv_agent.kernel._records import copy_json
 from vv_agent.kernel._token_count import TokenCount
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.tools.base import ToolContext
@@ -26,13 +31,85 @@ from ._driver_scope import _invoke
 from .children import ChildTool, SummaryChildTool
 from .compaction import manager_for, tokens
 from .delegation import admitted_result
-from .providers import Definitive, Provider
+from .environments import CommandSpec, InvalidCommandSpec
+from .providers import Definitive, FunctionProvider, Provider
 from .records import Record
 from .reducer import Attempt
 from .runtime import EndpointUnavailable
 
 if TYPE_CHECKING:
     from .kernel import _Driver
+
+
+def _select_w3_command_provider(driver: _Driver, binding: object, request: object) -> Provider:
+    runtime = getattr(driver, "runtime", None)
+    if runtime is None:
+        raise planning.InvalidW3CommandProvider("level-3 bash requires an SDK runtime with a trusted command provider")
+    if binding != planning.W3_COMMAND_TOOL or type(request) is not dict or request.get("name") != planning.W3_COMMAND_TOOL:
+        raise planning.InvalidW3CommandProvider("level-3 bash cannot switch provider or tool name")
+    provider = runtime.providers.get(planning.W3_COMMAND_TOOL)
+    if provider is None or isinstance(provider, FunctionProvider):
+        raise planning.InvalidW3CommandProvider("level-3 bash requires a registered trusted command provider")
+    if any(not callable(getattr(provider, method, None)) for method in ("submit", "query", "cancel", "authenticate", "lookup")):
+        raise planning.InvalidW3CommandProvider("trusted command provider does not implement the provider contract")
+    return provider
+
+
+def _normalize_w3_command_spec(driver: _Driver, request: dict[str, Any]) -> dict[str, Any]:
+    call = ToolCall.from_dict({key: value for key, value in request.items() if key != planning.W3_COMMAND_BINDING}).to_dict()
+    if call.get("extra_content") is not None:
+        raise planning.InvalidW3Command("level-3 bash does not support extra_content routing context")
+    arguments = call.get("arguments")
+    if type(arguments) is not dict:
+        raise planning.InvalidW3Command("level-3 bash arguments must be an object")
+    unknown = set(arguments).difference(planning.W3_BASH_ARGUMENT_KEYS)
+    if unknown:
+        raise planning.InvalidW3Command(f"level-3 bash does not support argument context: {sorted(unknown)}")
+    assert driver.state.active_turn_id is not None
+    task = driver.hydrated_definition(driver.state.turns[driver.state.active_turn_id].start).task
+    unsupported = sorted(
+        key for key in planning.W3_UNSUPPORTED_CONTEXT_KEYS if key in task.metadata and task.metadata[key] is not None
+    )
+    if unsupported:
+        raise planning.InvalidW3Command(f"level-3 bash does not support hidden shell context: {unsupported}")
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise planning.InvalidW3Command("level-3 bash requires a non-empty command string")
+    command = command.strip()
+    if "auto_confirm" in arguments and type(arguments["auto_confirm"]) is not bool:
+        raise planning.InvalidW3Command("level-3 bash auto_confirm must be boolean")
+    if arguments.get("auto_confirm", False):
+        command = f"yes | ({command})"
+    workspace = str(driver.runtime.config.workspace or ".")
+    raw_cwd = arguments.get("exec_dir", workspace)
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        raise planning.InvalidW3Command("level-3 bash exec_dir must be a non-empty string")
+    cwd = raw_cwd if posixpath.isabs(raw_cwd) else posixpath.normpath(posixpath.join(workspace, raw_cwd))
+    stdin = arguments.get("stdin")
+    if stdin is not None and not isinstance(stdin, str):
+        raise planning.InvalidW3Command("level-3 bash stdin must be a string")
+    stdin_base64 = None if stdin is None else base64.b64encode(stdin.encode("utf-8")).decode("ascii")
+    timeout_seconds = arguments.get("timeout_seconds")
+    if timeout_seconds is None:
+        wall_time_ms = max(1, math.ceil(float(driver.runtime.tool_timeout) * 1000))
+    elif type(timeout_seconds) is int and 1 <= timeout_seconds <= 86_400:
+        wall_time_ms = timeout_seconds * 1000
+    else:
+        raise planning.InvalidW3Command("level-3 bash timeout_seconds must be an integer from 1 through 86400")
+    try:
+        spec = CommandSpec(
+            command_text=command,
+            argv=(),
+            cwd=cwd,
+            stdin_base64=stdin_base64,
+            stdin_mode="provided" if stdin_base64 is not None else "none",
+            secret_ref_names=(),
+            wall_time_ms=wall_time_ms,
+            output_bytes=planning.W3_DEFAULT_OUTPUT_BYTES,
+        )
+    except InvalidCommandSpec as exc:
+        raise planning.InvalidW3Command("level-3 bash command is invalid") from exc
+    return spec.to_dict()
 
 
 class _DispatchHost:
@@ -132,6 +209,16 @@ class _DispatchHost:
         elif isinstance(request, core.SelectProvider):
             self.provider = driver.provider(request.plan)
             return self.provider is not None
+        elif isinstance(request, planning.ResolveW3Command):
+            self.provider = _select_w3_command_provider(driver, planning.W3_COMMAND_TOOL, request.request)
+            return _normalize_w3_command_spec(driver, request.request)
+        elif isinstance(request, core.ValidateW3CommandProvider):
+            self.provider = _select_w3_command_provider(
+                driver,
+                request.plan._payload.get("provider_binding"),
+                request.plan._payload.get("request"),
+            )
+            return self.provider
         elif isinstance(request, core.SubmitInteraction):
             return driver.runtime.functions.submit(request.plan, context=self.context)
         elif isinstance(request, core.InteractionFailure):
@@ -155,9 +242,23 @@ class _DispatchHost:
         elif isinstance(request, core.BackgroundAdmissionResult):
             return admitted_result(driver.store, request.plan, request.handles)
         elif isinstance(request, core.InvokeOperation):
+            provider = cast(Provider, self.provider)
+            submission_plan = request.plan
+            if request.has_provider and planning.is_w3_command_plan(driver, request.plan):
+                committed = planning.committed_command_plan(driver, request.started)
+                command_spec = _normalize_w3_command_spec(driver, committed._payload["request"])
+                planning.validate_command_submit(driver, request.plan, request.started, command_spec)
+                selected = _select_w3_command_provider(
+                    driver,
+                    request.plan._payload.get("provider_binding"),
+                    request.plan._payload.get("request"),
+                )
+                if selected is not provider:
+                    raise planning.InvalidW3CommandProvider("level-3 command provider changed after preparation")
+                submission_plan = replace(request.plan, payload=copy_json(request.plan._payload))
             return _invoke(
                 driver.scope,
-                (lambda: cast(Provider, self.provider).submit(request.plan, context=self.context))
+                (lambda: provider.submit(submission_plan, context=self.context))
                 if request.has_provider
                 else (
                     lambda: invoke_model(driver, request.plan, request.task, self.context, request.started, self.prepared_client)
