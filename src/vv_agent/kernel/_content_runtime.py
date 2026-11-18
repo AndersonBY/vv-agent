@@ -43,6 +43,7 @@ from ._content_publication import (
     PROVIDER_RESULT,
     PROVIDER_USAGE,
     ContentSlot,
+    input_record_slots,
     publish_session_created_content,
 )
 from ._content_reader import _LinkValidatedContentStore, _OwnerBoundContentStore
@@ -283,13 +284,9 @@ for _provider_record_slot in (
     PROVIDER_USAGE,
 ):
     _add_slot_spec(_record_slot_specs, _provider_record_slot, 0)
-for _input_slots in _INPUT_SLOTS.values():
-    for _input_slot in _input_slots:
-        _add_slot_spec(
-            _record_slot_specs,
-            f"input.payload.{'.'.join(_input_slot.path)}",
-            _input_slot.path.count("*"),
-        )
+for _input_kind in _INPUT_SLOTS:
+    for _record_slot in input_record_slots(_input_kind):
+        _add_slot_spec(_record_slot_specs, _record_slot.slot, _record_slot.path.count("*"))
 _RECORD_SLOT_SPECS: Mapping[str, int] = MappingProxyType(_record_slot_specs)
 
 _input_slot_specs = _content_slot_specs(content_slot for content_slots in _INPUT_SLOTS.values() for content_slot in content_slots)

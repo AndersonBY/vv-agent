@@ -24,9 +24,11 @@ from vv_agent.kernel._record_schema import (
     INPUT_SCHEMA_LEVEL_2,
     INPUT_SCHEMA_LEVEL_3,
     OP_PLANNED_LEVEL_3,
+    OP_PREPARED_LEVEL_3,
     PAYLOADS,
     PRINCIPAL,
     PROVIDER_EVIDENCE_LEVEL_3,
+    PROVIDER_LOOKUP_RESULT,
     RECORD_ITEM_SCHEMA,
     RECORD_SCHEMA,
     RECORD_SCHEMA_LEVEL_2,
@@ -132,6 +134,12 @@ def _validate_level_3_environment(environment: dict[str, Any]) -> None:
         raise RecordError("capabilities_digest does not match the environment binding")
 
 
+def _stable_operation_key(record: Record) -> str:
+    if record.operation_id is None or record.attempt is None:
+        raise RecordError("operation and attempt are required")
+    return f"{record.session_id}/{record.operation_id}"
+
+
 def _validate_execution_identity(record: Record) -> None:
     identity = record.payload["execution_identity"]
     for field_name in ("operation_key", "tenant_id", "environment_id", "session_id", "operation_id"):
@@ -140,7 +148,7 @@ def _validate_execution_identity(record: Record) -> None:
         raise RecordError("execution identity session does not match the record envelope")
     if identity["operation_id"] != record.operation_id:
         raise RecordError("execution identity operation does not match the record envelope")
-    expected_key = f"{record.session_id}/{record.operation_id}"
+    expected_key = _stable_operation_key(record)
     if identity["operation_key"] != expected_key:
         raise RecordError("execution identity operation_key does not match the stable framing")
     expected_execution_id = execution_id_for_values(identity["tenant_id"], identity["environment_id"], expected_key)
@@ -148,9 +156,19 @@ def _validate_execution_identity(record: Record) -> None:
         raise RecordError("execution identity execution_id does not match its stable inputs")
 
 
-def _validate_provider_evidence(item: InboxItem) -> None:
+def _validate_level_3_op_prepared(record: Record) -> None:
+    payload = record.payload
+    expected_key = _stable_operation_key(record)
+    if payload["idempotency_key"] != expected_key:
+        raise RecordError("prepared idempotency_key does not match the stable operation key")
+    _validate_identifier(payload["provider_binding"], "provider_binding")
+
+
+def validate_provider_lookup_evidence(item: InboxItem, lookup: dict[str, Any]) -> None:
+    """Validate decrypted lookup evidence against its retained inbox envelope."""
+
+    validate(lookup, PROVIDER_LOOKUP_RESULT, canonical=False)
     payload = item.payload
-    lookup = payload["lookup"]
     binding = lookup["binding"]
     for field_name in ("tenant_id", "session_id", "operation_id", "idempotency_key", "environment_id", "provider_id"):
         _validate_identifier(binding[field_name], field_name)
@@ -460,7 +478,6 @@ class InboxItem:
         elif self.feature_level == 3:
             if self.requirements is not None:
                 raise RecordError("level-3 inbox items cannot contain requirements")
-            _validate_provider_evidence(self)
         else:
             raise RecordError("unsupported inbox feature level")
 
@@ -609,6 +626,7 @@ class Record:
             payload_schema = {
                 "turn_started": TURN_STARTED_LEVEL_3,
                 "op_planned": OP_PLANNED_LEVEL_3,
+                "op_prepared": OP_PREPARED_LEVEL_3,
             }[self.kind]
         else:
             payload_schema = PAYLOADS[self.kind]
@@ -684,6 +702,8 @@ class Record:
             raise RecordError("purpose required only for model operations")
         if self.feature_level == 3 and self.kind == "op_planned":
             _validate_execution_identity(self)
+        if self.feature_level == 3 and self.kind == "op_prepared":
+            _validate_level_3_op_prepared(self)
         return {}
 
     def encode(self) -> bytes:
@@ -748,8 +768,8 @@ def make_record(
     payload = copy_json(payload)
     if feature_level == 2 and kind != "session_created":
         raise RecordError("record feature level 2 is limited to session_created")
-    if feature_level == 3 and kind not in {"turn_started", "op_planned"}:
-        raise RecordError("record feature level 3 is limited to turn_started and op_planned")
+    if feature_level == 3 and kind not in {"turn_started", "op_planned", "op_prepared"}:
+        raise RecordError("record feature level 3 is limited to turn_started, op_planned and op_prepared")
     if bootstrap is not None:
         if feature_level != 2 or kind != "session_created":
             raise RecordError("bootstrap is limited to level-2 session_created records")
@@ -773,6 +793,7 @@ def make_record(
         payload_schema = {
             "turn_started": TURN_STARTED_LEVEL_3,
             "op_planned": OP_PLANNED_LEVEL_3,
+            "op_prepared": OP_PREPARED_LEVEL_3,
         }[kind]
     else:
         payload_schema = PAYLOADS[kind]
