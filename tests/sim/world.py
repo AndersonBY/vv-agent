@@ -8,7 +8,6 @@ machine or storage rules are reimplemented here.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import random
 import sqlite3
@@ -18,6 +17,9 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scripts.s1_fixture_values import (
     content_ref,
@@ -128,11 +130,11 @@ PENDING = {}
 
 
 class SimLedgerSigner:
-    """Deterministic test signer; production hosts inject an external verifier."""
+    """Deterministic Ed25519 signer using the production proof contracts."""
 
     def __init__(self, seed: int) -> None:
         self.key_id = f"sim-ledger-{seed}"
-        self.key = hashlib.sha256(f"sim-ledger:{seed}".encode()).digest()
+        self.key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(f"sim-ledger:{seed}".encode()).digest())
 
     def bind_key(self):
         signer = self
@@ -142,13 +144,18 @@ class SimLedgerSigner:
 
             @staticmethod
             def sign(message: bytes) -> bytes:
-                return hmac.new(signer.key, message, hashlib.sha256).digest()
+                return signer.key.sign(message)
 
         return Bound()
 
     def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
-        expected = hmac.new(self.key, message, hashlib.sha256).digest()
-        return key_id == self.key_id and hmac.compare_digest(signature, expected)
+        if key_id != self.key_id:
+            return False
+        try:
+            self.key.public_key().verify(signature, message)
+        except InvalidSignature:
+            return False
+        return True
 
 
 class InvariantViolation(AssertionError):
@@ -291,7 +298,7 @@ class FaultyStore:
 
 
 class SimWorld:
-    def __init__(self, database, *, seed=0, replay=None, signed=False):
+    def __init__(self, database, *, seed=0, replay=None, signed=True):
         self.database, self.seed = database, seed
         self.clock = SimClock() if isinstance(database, Path) else SystemClock()
         self.choices = Choices(seed, replay)
@@ -899,20 +906,21 @@ class SimWorld:
         for sid in store.list_sessions():
             snapshot = self.read_state(sid)
             state, rows, _ = snapshot
-            meters = {}
+            meters, observations = {}, {}
             for stored in rows:
                 r = stored.record
                 if r.kind == "usage_observed":
                     payload = r._payload
                     meter = payload["meter_id"]
-                    previous = meters.get(meter)
                     require(
-                        payload["observation"] == (previous._payload["observation"] + 1 if previous else 1),
+                        payload["observation"] == observations.get(meter, 0) + 1,
                         "I5",
                         f"missing or repeated accounting observation {meter}",
                     )
-                    meters[meter] = r
-            require(state.usage_values == meters, "I5", "cumulative accounting did not retain exactly the latest value")
+                    observations[meter] = payload["observation"]
+                    meters[meter] = (r.record_id, r.digest)
+            retained = {meter: (record.record_id, record.digest) for meter, record in state.usage_values.items()}
+            require(retained == meters, "I5", "cumulative accounting did not retain exactly the latest value")
             exercised |= bool(meters)
             for tid in state.turns:
                 usage, _ = project_model_usage(state, tid)
@@ -971,4 +979,5 @@ class SimWorld:
             "covered": sorted(self.covered),
             "pending": PENDING,
             "backend": "sqlite" if isinstance(self.database, Path) else "postgres",
+            "ledger_proof": "ed25519" if self.signed else "hash-only",
         }

@@ -4,10 +4,48 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from session.helpers import content_ref, principal
+from session.helpers import fixture_content_reader
+
+from scripts.s1_fixture_values import create_fixture_session, push_fixture_input, wrap_fixture_store
+from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, Principal, WrappedDataKey
+from vv_agent.kernel._content_publication import declare_input_content, link_declared_input_content
+from vv_agent.kernel._content_runtime import SessionContentWriter
+
+
+class _InputKeyProvider:
+    provider_id = "input-copy-fixture"
+
+    def generate_data_key(self, tenant_id, session_id):
+        return WrappedDataKey(tenant_id, session_id, "key/input-copy", b"k" * 32)
+
+    def unwrap(self, tenant_id, session_id, wrapped_key):
+        del tenant_id, session_id
+        return wrapped_key.wrapped_key
+
+    def destroy(self, tenant_id, key_id):
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"destroy/{tenant_id}/{key_id}")
+
+
+class _InputCipher:
+    def encrypt(self, key, nonce, plaintext, aad):
+        del key, nonce, aad
+        return b"encrypted:" + plaintext
+
+    def decrypt(self, key, nonce, ciphertext, aad):
+        del key, nonce, aad
+        return ciphertext.removeprefix(b"encrypted:")
+
+    def random_bytes(self, count):
+        global _INPUT_RANDOM_COUNTER
+        _INPUT_RANDOM_COUNTER += 1
+        return sha256(str(_INPUT_RANDOM_COUNTER).encode()).digest()[:count]
+
+
+_INPUT_RANDOM_COUNTER = 0
 
 
 def produce(path, case):
@@ -19,32 +57,28 @@ def produce(path, case):
     from vv_agent.run_config import RunConfig
     from vv_agent.session._driver_scope import _Scope
     from vv_agent.session.kernel import _Driver
-    from vv_agent.session.records import InboxItem, SessionSpec
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.runtime import Runtime
     from vv_agent.session.sqlite import SQLiteStore
 
     clock = SimClock()
-    attributes = content_ref(f"attributes-{case}")
-    content = content_ref("explicit input" if case == "seed" else "work")
-    workspace = content_ref("workspace")
-    actor = principal("i")
-    item = InboxItem("i", "user", {"content": content}, target_turn_id=None, actor=actor)
-    with SQLiteStore.standalone(str(path), clock=clock) as store:
-        store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec("s", principal(), workspace, attributes=attributes), consumers=())
-            tx.push("s", item)
-            if case == "cancel":
-                tx.push(
-                    "s",
-                    InboxItem(
-                        "cancel",
-                        "control",
-                        {"action": "cancel"},
-                        target_turn_id="s/turn/i",
-                        actor=principal("cancel", "service"),
-                    ),
-                )
+    input_content = "explicit input" if case == "seed" else "work"
+    global _INPUT_RANDOM_COUNTER
+    _INPUT_RANDOM_COUNTER = 0
+    with SQLiteStore.standalone(str(path), clock=clock) as raw_store:
+        raw_store.install_schema()
+        store = wrap_fixture_store(raw_store, _InputKeyProvider(), cipher=_InputCipher())
+        create_fixture_session(store, "s", consumers=())
+        push_fixture_input(store, "s", InboxItem("i", "user", {"content": input_content}))
+        if case == "cancel":
+            push_fixture_input(
+                store,
+                "s",
+                InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/i"),
+            )
+        stored = store.read_input("s", "i")
+        assert stored is not None
+        item = stored.item
         runtime = Runtime(
             Agent("input", "Work."),
             RunConfig(session_memory_enabled=False),
@@ -52,6 +86,7 @@ def produce(path, case):
             ScriptedLLM([]),
             store.heartbeat_store,
             clock=clock,
+            content_reader=fixture_content_reader(store, "s"),
         )
         compiled = []
         original = runtime.compile
@@ -83,16 +118,23 @@ def produce(path, case):
         pytest.MonkeyPatch().setattr(driver, "runtime", UnexpectedRuntime())
         assert not driver.apply_input() and not driver.start_turn()
         pytest.MonkeyPatch().setattr(driver, "runtime", runtime)
-        definition = driver.state.turns["s/turn/i"].start._payload["definition"]
+        start = driver.state.turns["s/turn/i"].start
+        hydrated = driver.hydrated_definition(start)
         return {
-            "principal": principal(),
-            "workspace": workspace,
-            "attributes": attributes,
             "item": item.to_dict(),
+            "input_content": input_content,
             "case": case,
             "compiled": compiled[0],
-            "bindings": asdict(runtime._definition_bindings(driver.state.turns["s/turn/i"].start)),
-            "definition": definition,
+            "bindings": asdict(runtime._definition_bindings(hydrated.task)),
+            "definition": {
+                "agent_name": hydrated.agent_name,
+                "memory_settings": hydrated.memory_settings,
+                "child_tools": list(hydrated.child_tools),
+                "model_binding": hydrated.model_binding,
+                "capabilities": hydrated.capabilities,
+                "task": hydrated.task.to_dict(),
+                "tools": list(hydrated.tools),
+            },
             "records": [row.record.encode().decode() for row in driver.records],
         }
 
@@ -106,11 +148,11 @@ def test_core_inputs_start_and_consume_match_actual_sdk(tmp_path, flags, case):
     script = r"""
 import importlib.abc, json, sys
 from pathlib import Path
-from threading import Event, Lock, local, get_ident
+from threading import Event
 
 root = Path(sys.argv[1])
 data = json.loads(Path(sys.argv[2]).read_text())
-sys.path.insert(0, str(root / "src"))
+sys.path[:0] = [str(root / "src"), str(root)]
 
 
 class CoreOnly(importlib.abc.MetaPathFinder):
@@ -118,12 +160,17 @@ class CoreOnly(importlib.abc.MetaPathFinder):
         assert (
             fullname in {"vv_agent", "vv_agent.kernel"}
             or fullname.startswith("vv_agent.kernel.")
+            or fullname in {"scripts", "scripts.s1_fixture_values"}
             or fullname.split(".")[0] in sys.stdlib_module_names
         ), fullname
 
 
 sys.meta_path.insert(0, CoreOnly())
+from scripts.s1_fixture_values import create_fixture_session, push_fixture_input, wrap_fixture_store
 from vv_agent.kernel import _driver_inputs as inputs
+from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
+from vv_agent.kernel._content_publication import publish_turn_started
+from vv_agent.kernel._content_runtime import durable_content_reader
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._definition import DefinitionCache, DefinitionBindings
@@ -131,7 +178,7 @@ from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._lease_scope import LeaseOwnership
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._records import SessionSpec, InboxItem, copy_json
+from vv_agent.kernel._records import InboxItem, copy_json
 from vv_agent.kernel._tool_metadata import ToolMetadata
 
 
@@ -165,6 +212,44 @@ class Scope(LeaseOwnership):
     generation = None
 
 
+class Token:
+    def cancel(self, reason):
+        raise AssertionError(f"unexpected cancellation: {reason}")
+
+
+class InputKeyProvider:
+    provider_id = "input-copy-fixture"
+
+    def generate_data_key(self, tenant_id, session_id):
+        return WrappedDataKey(tenant_id, session_id, "key/input-copy", b"k" * 32)
+
+    def unwrap(self, tenant_id, session_id, wrapped_key):
+        del tenant_id, session_id
+        return wrapped_key.wrapped_key
+
+    def destroy(self, tenant_id, key_id):
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"destroy/{tenant_id}/{key_id}")
+
+
+class InputCipher:
+    def encrypt(self, key, nonce, plaintext, aad):
+        del key, nonce, aad
+        return b"encrypted:" + plaintext
+
+    def decrypt(self, key, nonce, ciphertext, aad):
+        del key, nonce, aad
+        return ciphertext.removeprefix(b"encrypted:")
+
+    def random_bytes(self, count):
+        global INPUT_RANDOM_COUNTER
+        INPUT_RANDOM_COUNTER += 1
+        from hashlib import sha256
+        return sha256(str(INPUT_RANDOM_COUNTER).encode()).digest()[:count]
+
+
+INPUT_RANDOM_COUNTER = 0
+
+
 class Catalog:
     def planning_signature(self):
         return (0,)
@@ -185,37 +270,28 @@ class Catalog:
         return [copy_json(t) for t in data["definition"]["tools"] if tool_names is None or t["function"]["name"] in tool_names]
 
 
-with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as store:
-    store.install_schema()
-    with store.atomic() as tx:
-        tx.create(
-            SessionSpec("s", data["principal"], data["workspace"], attributes=data["attributes"]),
-            consumers=(),
+with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as raw_store:
+    raw_store.install_schema()
+    store = wrap_fixture_store(raw_store, InputKeyProvider(), cipher=InputCipher())
+    create_fixture_session(store, "s", consumers=())
+    push_fixture_input(store, "s", InboxItem("i", "user", {"content": data["input_content"]}))
+    if data["case"] == "cancel":
+        push_fixture_input(
+            store,
+            "s",
+            InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/i"),
         )
-        tx.push("s", InboxItem(**data["item"]))
-        if data["case"] == "cancel":
-            tx.push(
-                "s",
-                InboxItem(
-                    "cancel",
-                    "control",
-                    {"action": "cancel"},
-                    target_turn_id="s/turn/i",
-                    actor=data["principal"],
-                ),
-            )
+    lease = store.acquire("s", owner="owner", ttl_ms=15000)
+    assert lease is not None
     scope = Scope(
-        store.acquire("s", owner="owner", ttl_ms=15000),
+        lease,
         15000,
         0.25,
         clock=clock,
         stop=Event(),
         ready=Event(),
-        lock=Lock(),
-        poll_lock=Lock(),
-        commit_lock=Lock(),
-        latch_entry=local(),
-        actor_identity=get_ident,
+        now_ms=clock.now_ms(),
+        token_factory=Token,
     )
     driver = CoreDriver(
         store,
@@ -226,6 +302,7 @@ with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as stor
         observe_cost=lambda: None,
         hook=lambda *_: None,
         emit_phase=lambda *_: None,
+        content_reader=durable_content_reader(store, tenant_id=store.tenant_id, session_id="s"),
     )
     cache = DefinitionCache()
     trace = []
@@ -245,10 +322,34 @@ with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as stor
                 driver.commit(request.records, guarded=True)
                 response = None
             elif isinstance(request, inputs.CompileTurn):
-                assert request.content == data["item"]["payload"]["content"] and not request.control
+                assert request.content == data["input_content"] and not request.control
                 response = AgentTask.from_dict(copy_json(data["compiled"]))
             elif isinstance(request, inputs.CurrentDefinition):
                 response = inputs.DefinitionFacts(cache, DefinitionBindings(**data["bindings"]), Catalog())
+            elif isinstance(request, inputs.PublishTurnStarted):
+                def prepare_turn_started(tx):
+                    writer = driver.content_writer(tx)
+                    content = publish_turn_started(
+                        writer,
+                        request.definition,
+                        request.budget,
+                        admission_definition_digest=request.admission_definition_digest,
+                    )
+                    payload = {
+                        "input_ids": [request.input_id],
+                        "definition": content.definition.to_dict(),
+                        "definition_digest": content.definition_digest,
+                        "handler_version": request.handler_version,
+                        "budget": content.budget.to_dict(),
+                        "binding": None,
+                        "generation": request.generation,
+                    }
+                    if request.requirements is not None:
+                        payload["requirements"] = request.requirements
+                    return [driver.record("turn_started", payload, tid=request.tid)]
+
+                driver.commit([], guarded=True, prepare=prepare_turn_started)
+                response = None
             elif request is inputs.InputSetting.BUDGET_LIMITS:
                 response = None
             elif request is inputs.InputSetting.HANDLER_VERSION:
@@ -263,7 +364,14 @@ with SQLiteStore.standalone(sys.argv[3], fold_factory=fold, clock=clock) as stor
         assert not run(inputs.apply_input(driver, one_turn=False))
     trace.clear()
     assert run(inputs.start_turn(driver))
-    assert trace == ["CompileTurn", "CurrentDefinition", "budget_limits", "handler_version", "CommitRecords", "reset_token"]
+    assert trace == [
+        "CompileTurn",
+        "CurrentDefinition",
+        "budget_limits",
+        "handler_version",
+        "PublishTurnStarted",
+        "reset_token",
+    ], trace
     if data["case"] == "cancel":
         assert run(inputs.apply_input(driver, one_turn=False)) and driver.state.turns["s/turn/i"].cancelled
     assert [row.record.encode().decode() for row in driver.records] == data["records"]
@@ -298,26 +406,21 @@ def queued_driver(tmp_path):
 
     from vv_agent.session._driver_scope import _Scope
     from vv_agent.session.kernel import _Driver
-    from vv_agent.session.records import InboxItem, SessionSpec
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.sqlite import SQLiteStore
 
-    with SQLiteStore.standalone(str(tmp_path / "queued.sqlite")) as store:
-        store.install_schema()
-        with store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "s",
-                    principal(),
-                    content_ref("workspace"),
-                    attributes=content_ref("attributes"),
-                ),
-                consumers=(),
-            )
-            tx.push("s", InboxItem("i", "user", {"content": content_ref("work")}, actor=principal("i")))
+    with SQLiteStore.standalone(str(tmp_path / "queued.sqlite")) as raw_store:
+        raw_store.install_schema()
+        store = wrap_fixture_store(raw_store)
+        create_fixture_session(store, "s", consumers=())
+        push_fixture_input(store, "s", InboxItem("i", "user", {"content": "work"}))
         rt = runtime(tmp_path / "queued.sqlite", [])
+        rt.content_reader = fixture_content_reader(store, "s")
         lease = store.acquire("s", owner="test", ttl_ms=rt.ttl_ms)
         assert lease is not None
-        driver = _Driver(store, "s", rt, _Scope(lease, rt, now_ms=store._now()))
+        scope = _Scope(lease, rt, now_ms=store._now())
+        scope.poll(store)
+        driver = _Driver(store, "s", rt, scope)
         assert driver.apply_input()
         yield driver
 
@@ -349,20 +452,28 @@ def test_model_selection_failure_is_rejected_inside_core_request_boundary(queued
 
     monkeypatch.setattr(driver.runtime, "model_resolver", fail)
     with driver.store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=driver.store.tenant_id, session_id="s")
+        selection = writer.put_json({"choice": "other"})
+        actor = Principal(
+            driver.store.tenant_id,
+            "fixture/model-selection",
+            "user",
+            writer.put_json({"role": "fixture/model-selection"}),
+        ).to_dict()
+        published = declare_input_content(
+            writer,
+            InboxItem("selection", "model_selection", {"selection": selection.to_dict()}, actor=actor),
+        )
         tx.push(
             "s",
-            InboxItem(
-                "selection",
-                "model_selection",
-                {"selection": content_ref("other-selection")},
-                actor=principal("selection"),
-            ),
+            published.item,
         )
+        link_declared_input_content(writer, published.item)
     driver.refresh()
     assert driver.apply_input()
     applied = driver.state.applied_inputs["selection"]
     assert applied._payload["disposition"] == "rejected"
-    assert applied._payload["reason"] == "model_selection_unresolvable"
+    assert driver.hydrate_record_field(applied, "input_reason", applied._payload["reason"]) == "model_selection_unresolvable"
     stored = driver.store.read_input("s", "selection")
     assert stored is not None and stored.consumed_seq == driver.records[-1].seq
 
@@ -389,16 +500,7 @@ def test_real_ledger_and_catalog_stopiteration_preserves_original_error(queued_d
 
         monkeypatch.setattr(driver.runtime, "hook", hook)
     if entry == "input":
-        with driver.store.atomic() as tx:
-            tx.push(
-                "s",
-                InboxItem(
-                    "other",
-                    "follow_up",
-                    {"content": content_ref("later")},
-                    actor=principal("other"),
-                ),
-            )
+        push_fixture_input(driver.store, "s", InboxItem("other", "follow_up", {"content": "later"}))
         driver.refresh()
     before = [row.record.encode() for row in driver.store.read("s").records]
     with pytest.raises(StopIteration) as caught:

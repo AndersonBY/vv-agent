@@ -1,5 +1,6 @@
 """SDK-free receipt algorithms consume real current SQL/SDK-produced prefixes."""
 
+import base64
 import json
 import subprocess
 import sys
@@ -19,6 +20,19 @@ def test_core_receipt_unknown_and_parking_use_real_storage_without_sdk_imports(t
     database = tmp_path / "prefix.sqlite"
     with SDKWorld(database, seed=17) as world:
         worker, plan, outcome = receipt_fixture(world, limits=RunBudgetLimits(max_total_tokens=100) if budgeted else None)
+        content_bodies = {}
+
+        class RecordingReader:
+            def __init__(self, reader):
+                self.reader = reader
+
+            def read(self, tenant_id, session_id, owner, slot, ref):
+                body = self.reader.read(tenant_id, session_id, owner, slot, ref)
+                content_bodies[ref.content_id] = base64.b64encode(body).decode()
+                return body
+
+        worker.content_reader = RecordingReader(worker.content_reader)
+        worker._hydrators = {}
         clock_observations = []
         original_clock = worker.runtime.clock.monotonic_ns
         recording_budget_clock = False
@@ -62,16 +76,20 @@ def test_core_receipt_unknown_and_parking_use_real_storage_without_sdk_imports(t
             "records": [r.to_dict() for r in expected],
             "clock_ms": world.clock.now_ms(),
             "budget_clocks": clock_observations,
+            "signer_key_id": world.ledger_signer.key_id,
+            "handler_version": worker.runtime.handler_version,
+            "content_bodies": content_bodies,
         }
         assert worker.store.release(worker.scope.lease)
     facts = tmp_path / "input.json"
     facts.write_text(json.dumps(source))
     script = r"""
 import importlib.abc
+import base64
 import json
 import sys
 from pathlib import Path
-from threading import Event, Lock, local, get_ident
+from threading import Event
 sys.path.insert(0, sys.argv[1])
 class CoreOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -95,16 +113,35 @@ class Clock:
 clock=Clock()
 def unused(*args,**kwargs): raise AssertionError('no compaction in this produced prefix')
 def factory(): return Fold(normalize_memory_settings=unused,count_messages=unused)
+class ReaderVerifier:
+    key_id=source['signer_key_id']
+    def bind_key(self):
+        verifier=self
+        class Bound:
+            key_id=verifier.key_id
+            @staticmethod
+            def sign(message): raise AssertionError('read-only verifier cannot sign')
+        return Bound()
+    def verify(self,key_id,message,signature):
+        return key_id==self.key_id and len(message)>0 and len(signature)==64
+class FixtureReader:
+    def read(self,tenant_id,session_id,owner,slot,ref):
+        return base64.b64decode(source['content_bodies'][ref.content_id])
 class Scope(LeaseOwnership):
     turn_id=None
     generation=None
+class Token:
+    def cancel(self,reason): pass
 with SQLiteStore.standalone(sys.argv[2],clock=clock,fold_factory=factory) as store:
+    store.configure_reader(level=2)
+    store.configure_worker(handler_versions=(source['handler_version'],))
+    store.configure_input_admission(ReaderVerifier())
     lease=store.acquire('s',owner='core-reader',ttl_ms=15000)
     assert lease is not None
-    scope=Scope(lease,15000,.25,clock=clock,stop=Event(),ready=Event(),lock=Lock(),poll_lock=Lock(),
-                commit_lock=Lock(),latch_entry=local(),actor_identity=get_ident)
+    scope=Scope(lease,15000,.25,clock=clock,stop=Event(),ready=Event(),now_ms=clock.now_ms(),token_factory=Token)
+    scope.poll(store)
     owner=CoreDriver(store,'s',scope,fold_factory=factory,clock=clock,observe_cost=lambda:None,
-                     hook=lambda *a:None,emit_phase=lambda *a:None)
+                     hook=lambda *a:None,emit_phase=lambda *a:None,content_reader=FixtureReader())
     owner.bind_turn()
     plan=owner.state.operations[source['operation_id']].attempts[source['attempt']].execution_plan
     outcome=Definitive(source['outcome']['result'],tuple(source['outcome']['evidence']),
@@ -196,7 +233,9 @@ def _started_model_plan(tmp_path):
     runtime.hook = lambda *_: None
     lease = sessions.store.acquire("s", owner="outcomes-test", ttl_ms=15_000)
     assert lease is not None
-    driver = _Driver(sessions.store, "s", runtime, _Scope(lease, runtime, now_ms=store._now()))
+    scope = _Scope(lease, runtime, now_ms=store._now())
+    scope.poll(sessions.store)
+    driver = _Driver(sessions.store, "s", runtime, scope)
     driver.bind_turn()
     operation = next(op for op in driver.state.operations.values() if op.kind == "model")
     return store, sessions, driver, operation.attempts[1].execution_plan
@@ -243,7 +282,8 @@ def test_completed_result_and_empty_usage_are_hydratable_and_deduplicated(tmp_pa
 
     store, sessions, driver, plan = _started_model_plan(tmp_path)
     try:
-        records = driver.completed(plan, Definitive({}, (), {}, {}))
+        evidence = ("authenticated:model-result",)
+        records = driver.completed(plan, Definitive({}, evidence, {}, {}))
         assert [record.kind for record in records] == ["op_completed"]
         driver.commit(records, guarded=True)
         driver.refresh()
@@ -259,7 +299,7 @@ def test_completed_result_and_empty_usage_are_hydratable_and_deduplicated(tmp_pa
         assert driver.hydrate_record_field(completed, "result", result_ref) == {}
         assert driver.hydrate_record_field(completed, "usage", usage_ref) == {}
         assert driver.hydrate_record_field(completed, "shared_state", shared_ref) == {}
-        assert driver.hydrate_record_field(completed, "evidence", evidence_ref) == []
+        assert driver.hydrate_record_field(completed, "evidence", evidence_ref) == list(evidence)
         assert completed.payload["result_digest"] == reference_digest(result_ref)
         assert completed.payload["result_digest"] != digest({})
         rows = store._one(

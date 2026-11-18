@@ -13,6 +13,7 @@ from typing import Any
 from vv_agent.kernel._canonical_json import utf16_sort_key
 from vv_agent.kernel._execution_values import CompletionReason, CycleRecord, TaskTokenUsage, TaskTokenUsageTotals
 from vv_agent.kernel._message_values import Message
+from vv_agent.kernel._record_schema import AFTER_CYCLE_GENERIC_STOP_CODE, AFTER_CYCLE_KERNEL_STOP_CODES
 
 AFTER_CYCLE_CONTROL_STATE_KEY = "_vv_agent_after_cycle_control"
 AFTER_CYCLE_CONTROL_SCHEMA = "vv-agent.after-cycle-control.v1"
@@ -269,6 +270,12 @@ def persist_after_cycle_disallowed_tools(
         "disallowed_tools": list(ordered),
     }
     return ordered
+
+
+def _recorded_after_cycle_stop_code(code: str) -> str:
+    if code in AFTER_CYCLE_KERNEL_STOP_CODES:
+        return code
+    return AFTER_CYCLE_GENERIC_STOP_CODE
 
 
 def _validate_bounded_text(value: Any, field_name: str, max_bytes: int) -> str:

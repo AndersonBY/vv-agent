@@ -13,13 +13,28 @@ from .world import InvariantViolation, SimWorld
 
 
 def test_i9_recomputes_real_sqlite_chain_and_checkpoints(tmp_path):
-    with SimWorld(tmp_path / "ledger.sqlite", seed=17, signed=True) as world:
+    with SimWorld(tmp_path / "ledger.sqlite", seed=17) as world:
         run_scenario(world, "tools")
         world.check(quiescent=True)
+        assert world.signed is True
+        assert world.summary()["ledger_proof"] == "ed25519"
         assert "I9" in world.summary()["covered"]
         assert "I9" not in world.summary()["pending"]
 
         store = world.connection("fault")
+        checkpoints = store._rows(
+            "SELECT key_id,signature FROM sk_checkpoint WHERE tenant_id='default' AND session_id='s' ORDER BY seq"
+        )
+        admissions = store._rows(
+            "SELECT admission_key_id,admission_signature FROM sk_inbox WHERE tenant_id='default' AND session_id='s'"
+        )
+        assert checkpoints and all(
+            key_id == world.ledger_signer.key_id and len(signature) == 64 for key_id, signature in checkpoints
+        )
+        assert admissions and all(
+            key_id == world.ledger_signer.key_id and len(signature) == 64 for key_id, signature in admissions
+        )
+
         rows = store._rows(
             "SELECT seq,body,chain_digest FROM sk_record WHERE tenant_id='default' AND session_id='s' ORDER BY seq"
         )
@@ -44,8 +59,8 @@ def test_i9_recomputes_real_sqlite_chain_and_checkpoints(tmp_path):
         assert "checkpoint signature is invalid at seq 2" in str(error.value)
 
 
-def test_i9_explicit_hash_only_default_rejects_rehashed_record_without_updating_chain(tmp_path):
-    with SimWorld(tmp_path / "hash-only-ledger.sqlite", seed=23) as world:
+def test_i9_explicit_hash_only_negative_rejects_rehashed_record_without_updating_chain(tmp_path):
+    with SimWorld(tmp_path / "hash-only-ledger.sqlite", seed=23, signed=False) as world:
         run_scenario(world, "tools")
         world.check(quiescent=True)
 
@@ -62,6 +77,7 @@ def test_i9_explicit_hash_only_default_rejects_rehashed_record_without_updating_
         with pytest.raises(InvariantViolation, match=r"I9.*seed=23.*chain digest mismatch at seq 2"):
             world.check()
         assert world.signed is False
+        assert world.summary()["ledger_proof"] == "hash-only"
         assert "I9" in world.summary()["covered"]
 
 

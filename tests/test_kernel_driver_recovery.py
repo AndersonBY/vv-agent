@@ -23,13 +23,17 @@ def test_core_recovery_step_imports_without_sdk(tmp_path, flags):
     script = r"""
 import importlib.abc
 import sys
-from threading import Event, Lock, local, get_ident
-sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from threading import Event
+root=Path(sys.argv[1]).parent
+sys.path.insert(0,str(root / 'src'))
 class CoreOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         assert (fullname in {'vv_agent','vv_agent.kernel'} or fullname.startswith('vv_agent.kernel.')
                 or fullname.split('.')[0] in sys.stdlib_module_names), fullname
 sys.meta_path.insert(0, CoreOnly())
+from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
+from vv_agent.kernel._content_runtime import SessionContentWriter, bind_content_runtime, wrap_session_content_store
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_recovery import Read, step
 from vv_agent.kernel._lease_scope import LeaseOwnership
@@ -47,12 +51,36 @@ def factory(): return Fold(normalize_memory_settings=unused,count_messages=unuse
 class Scope(LeaseOwnership):
     turn_id=None
     generation=None
-with SQLiteStore.standalone(sys.argv[2],clock=clock,fold_factory=factory) as store:
-    store.install_schema()
-    with store.atomic() as tx: tx.create(SessionSpec('s','p','w'),consumers=())
-    scope=Scope(store.acquire('s',owner='core',ttl_ms=15000),15000,.25,clock=clock,
-        stop=Event(),ready=Event(),lock=Lock(),poll_lock=Lock(),commit_lock=Lock(),
-        latch_entry=local(),actor_identity=get_ident)
+class KeyProvider:
+    provider_id='core-fixture'
+    def generate_data_key(self,tenant_id,session_id):
+        return WrappedDataKey(tenant_id,session_id,'key/core',b'k'*32)
+    def unwrap(self,tenant_id,session_id,wrapped_key): return wrapped_key.wrapped_key
+    def destroy(self,tenant_id,key_id):
+        return KeyDestroyOutcome(True,KeyDestroyStatus.DESTROYED,f'destroy/{tenant_id}/{key_id}')
+class Cipher:
+    def __init__(self): self.counter=0
+    def encrypt(self,key,nonce,plaintext,aad): return plaintext
+    def decrypt(self,key,nonce,ciphertext,aad): return ciphertext
+    def random_bytes(self,count):
+        self.counter+=1
+        seed=str(self.counter).encode()
+        return (seed*((count+len(seed)-1)//len(seed)))[:count]
+def create_session(store):
+    with store.atomic() as tx:
+        writer=SessionContentWriter.bind(tx,tenant_id=store.tenant_id,session_id='s')
+        def spec(content):
+            actor,_=content.service_principal('fixture/host')
+            return SessionSpec('s',actor,content.put_json('/tmp').to_dict(),attributes={'seed':{'messages':[],'shared_state':{}}})
+        writer.create_session(spec,consumers=())
+with SQLiteStore.standalone(sys.argv[2],clock=clock,fold_factory=factory) as raw_store:
+    raw_store.install_schema()
+    binding=bind_content_runtime(raw_store,key_provider=KeyProvider(),cipher=Cipher())
+    store=wrap_session_content_store(raw_store,binding)
+    create_session(store)
+    lease=store.acquire('s',owner='core',ttl_ms=15000)
+    assert lease is not None
+    scope=Scope(lease,15000,.25,clock=clock,stop=Event(),ready=Event(),now_ms=clock.now_ms())
     owner=CoreDriver(store,'s',scope,fold_factory=factory,clock=clock,observe_cost=lambda:None,
         hook=lambda *args:None,emit_phase=lambda *args:None)
     steps=step(owner,one_turn=True)

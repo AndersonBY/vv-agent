@@ -152,8 +152,8 @@ def test_actual_implementation_mutations(sim_database, monkeypatch, record_prope
             "step",
             mutate(
                 _driver_recovery.step,
-                'payload=a.execution_plan._payload | {"not_before_ms": due},',
-                'payload=a.execution_plan._payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
+                'payload=payload | {"not_before_ms": due},',
+                'payload=payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
             ),
         )
     else:
@@ -284,8 +284,8 @@ def test_sqlite_failure_replay_minimization(tmp_path, monkeypatch, record_proper
         "step",
         mutate(
             _driver_recovery.step,
-            'payload=a.execution_plan._payload | {"not_before_ms": due},',
-            'payload=a.execution_plan._payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
+            'payload=payload | {"not_before_ms": due},',
+            'payload=payload | {"not_before_ms": due, "idempotency_key": f"changed/{a.plan.attempt}"},',
         ),
     )
     with SimWorld(tmp_path / "original.sqlite", seed=17) as failed:

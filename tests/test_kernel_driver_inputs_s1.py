@@ -7,7 +7,7 @@ import pytest
 
 from vv_agent.kernel._content import ContentRef, Principal
 from vv_agent.kernel._driver import CoreDriver
-from vv_agent.kernel._driver_inputs import CommitInput, ResolveModelSelection, apply_input
+from vv_agent.kernel._driver_inputs import CommitInput, InputSetting, ResolveModelSelection, apply_input
 from vv_agent.kernel._records import InboxItem, Record, copy_json
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.session.store import Conflict
@@ -76,6 +76,8 @@ def _driver(item: InboxItem, state: ExecutionState | None = None, *, capture: bo
 def _apply(driver: CoreDriver, response: dict | BaseException | None = None):
     pending = apply_input(driver, one_turn=True)
     request = next(pending)
+    if request is InputSetting.CANCELLED:
+        request = pending.send(False)
     if isinstance(request, ResolveModelSelection):
         request = pending.throw(response) if isinstance(response, BaseException) else pending.send(response)
     assert isinstance(request, CommitInput)

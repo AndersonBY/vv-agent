@@ -1,7 +1,7 @@
 """Authoritative S1 logical session schemas and decoded-content validators.
 
-The runtime remains stdlib-only. Logical wire values use the contract 41.0.0
-closed shapes. The plaintext schemas below validate typed content after the
+The runtime remains stdlib-only. These are the current Python S1 candidate
+logical shapes. The plaintext schemas below validate typed content after the
 implemented S1 content-store hydration step and are never accepted in a logical
 C slot.
 """
@@ -46,10 +46,19 @@ SIGNATURE = {
     "maxLength": 2_147_483_647,
 }
 CONTROL = enum("close", "archive", "suspend", "resume", "cancel", "abort")
+# Only registered kernel codes remain in the clear S payload. Host-defined
+# codes are represented by the generic code while their detail stays in C.
+AFTER_CYCLE_KERNEL_STOP_CODES = (
+    "host.policy_stop",
+    "host_stop",
+    "hook_stop",
+    "stopped",
+)
+AFTER_CYCLE_GENERIC_STOP_CODE = "host_stop"
 
 
-# Contract 41 logical definitions. Sharing these objects keeps one schema owner
-# for every Principal, ContentRef, proof, usage and handle slot.
+# Shared logical definitions keep one schema owner for every Principal,
+# ContentRef, proof, usage and handle slot.
 CONTENT_LABELS = closed(
     source=array(enum("system", "user", "internal", "untrusted")),
     classification=enum("public", "internal", "confidential", "restricted"),
@@ -270,7 +279,7 @@ BOUNDARY_DATA = {
         action=enum("continue", "steer", "stop_non_success"),
         steering_messages=array(CONTENT_REF),
         disallow_tools=STRINGS,
-        stop=nullable(closed(code=TEXT, message=CONTENT_REF)),
+        stop=nullable(closed(code=enum(*AFTER_CYCLE_KERNEL_STOP_CODES), message=CONTENT_REF)),
         shared_state=CONTENT_REF,
         error=nullable(CONTENT_REF),
     ),

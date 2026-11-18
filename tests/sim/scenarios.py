@@ -1056,7 +1056,7 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
             ("child-redelivery", template.payload),
             ("child-forged", template.payload | {"session_id": "s"}),
         ):
-            item = replace(template, input_id=input_id, payload=payload)
+            item = replace(template, input_id=input_id, payload=payload, admission_proof=None)
             with delivery.atomic() as tx:
                 writer = SessionContentWriter.bind(tx, tenant_id=delivery.tenant_id, session_id="s")
                 tx.push("s", item)

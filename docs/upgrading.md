@@ -149,8 +149,9 @@ the cursor commit together and a replay writes the same rows again. Record the
 vv-agent version that produced the session next to the copy; you will want it
 when you upgrade.
 
-vv-agent does not yet ship a versioned export format for this. Hosts own the
-shape of their copy.
+vv-agent ships a versioned S1 skeleton export for this. Use `export_session`
+for the verified ledger/archive form described below; hosts still own the shape
+of any product projection or UI history copy.
 
 ### When a session no longer needs the store
 

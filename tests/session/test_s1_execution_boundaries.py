@@ -16,6 +16,7 @@ from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, SourceKind
 from vv_agent.kernel._content_publication import declared_content_ref
 from vv_agent.kernel._cycle_values import AfterCycleDecision
+from vv_agent.kernel._record_schema import AFTER_CYCLE_GENERIC_STOP_CODE
 from vv_agent.kernel._records import make_record
 from vv_agent.kernel._state import Attempt, ExecutionState, Operation
 from vv_agent.kernel._store import StoredRecord
@@ -73,6 +74,46 @@ def _assert_persisted_references_only(store: SQLiteStore, *plaintext: str) -> No
     bodies = b"".join(row.record.encode() for row in _raw_records(store))
     for value in plaintext:
         assert value.encode() not in bodies
+
+
+def test_after_cycle_host_stop_code_stays_in_encrypted_content(tmp_path: Path) -> None:
+    path = tmp_path / "after-cycle-host-stop.sqlite"
+    key_provider = LocalKeyProvider(MASTER_KEY)
+    host_code = "host.private_policy"
+    detail = "Private host policy details remain diagnosable."
+
+    class Hook:
+        def after_cycle(self, _snapshot):
+            return AfterCycleDecision.stop_non_success(code=host_code, message=detail)
+
+    with SQLiteStore.standalone(str(path)) as store:
+        sessions = SessionDriver(store=store, content_key_provider=key_provider)
+        sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
+        sessions.push("s", InboxItem("initial", "user", {"content": "start"}))
+        runtime = _runtime(
+            sessions,
+            ScriptedModelProvider.new("scripted", "scripted", [LLMResponse("candidate")]),
+            after_cycle_hooks=(Hook(),),
+        )
+
+        assert drive(sessions.store, "s", runtime=runtime)
+        boundary_row = next(
+            row
+            for row in _raw_records(store)
+            if row.record.kind == "boundary_recorded" and row.record.payload["stage"] == "after_cycle"
+        )
+        boundary = boundary_row.record
+        data = boundary.payload["data"]
+        assert data["stop"]["code"] == AFTER_CYCLE_GENERIC_STOP_CODE
+        assert declared_content_ref(data["stop"]["message"]) is not None
+        assert declared_content_ref(data["error"]) is not None
+        _assert_persisted_references_only(store, host_code, detail)
+
+        hydrated = hydrate_record_payload(boundary_row, hydration_for_session_store(store, "s"))
+        hydrated_data = hydrated["data"]
+        assert hydrated_data["stop"]["code"] == AFTER_CYCLE_GENERIC_STOP_CODE
+        assert hydrated_data["stop"]["message"] == detail
+        assert hydrated_data["error"] == f"{host_code}: {detail}"
 
 
 def test_cold_s1_wait_user_projects_and_redrives_logical_question(tmp_path: Path) -> None:

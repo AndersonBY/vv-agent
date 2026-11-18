@@ -14,6 +14,7 @@ from ._cycle_values import (
     AfterCycleSnapshot,
     NativeCycleOutcome,
     NativeCycleOutcomeKind,
+    _recorded_after_cycle_stop_code,
     persist_after_cycle_disallowed_tools,
     read_after_cycle_disallowed_tools,
 )
@@ -203,10 +204,13 @@ def after_cycle(source: ExecutionState | CoreDriver, *, has_hooks: bool) -> Gene
             error = "after_cycle_steer_unavailable: after-cycle steering is unavailable at this boundary"
     except AfterCycleHookError as exc:
         error = f"{exc.code}: {exc}"
+    recorded = asdict(decision)
+    if decision.stop is not None:
+        recorded["stop"]["code"] = _recorded_after_cycle_stop_code(decision.stop.code)
     yield RecordAfterCycle(
         oid,
         {
-            **asdict(decision),
+            **recorded,
             "steering_messages": list(decision.steering_messages),
             "disallow_tools": list(decision.disallow_tools),
             "shared_state": shared,

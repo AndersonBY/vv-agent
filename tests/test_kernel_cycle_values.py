@@ -13,6 +13,9 @@ import pytest
 from vv_agent.kernel import _cycle_values as core
 from vv_agent.kernel._execution_values import CycleRecord, TaskTokenUsage, TaskTokenUsageTotals
 from vv_agent.kernel._message_values import Message
+from vv_agent.kernel._record_codec import RecordError, validate
+from vv_agent.kernel._record_schema import BOUNDARY_DATA
+from vv_agent.kernel._records import make_record
 
 
 def test_cycle_values_without_site_packages(tmp_path):
@@ -104,6 +107,53 @@ def test_existing_cycle_bindings_are_actual_core_objects():
     assert runtime.AfterCycleStop is core.AfterCycleStop
     assert lifecycle.AfterCycleHookManager.__module__ == lifecycle.__name__
     assert lifecycle.AfterCycleHook.__module__ == lifecycle.__name__
+
+
+def _after_cycle_data(code: str) -> dict[str, Any]:
+    content_ref = {
+        "content_id": "content/stop",
+        "mac": "0" * 64,
+        "size": 4,
+        "key_id": "key/test",
+        "labels": {"source": [], "classification": "internal"},
+    }
+    return {
+        "action": "stop_non_success",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "stop": {"code": code, "message": content_ref},
+        "shared_state": content_ref,
+        "error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["host.private_reason", "a" * 129, "host policy stop", "host\npolicy_stop"],
+    ids=["unknown", "long", "whitespace", "newline"],
+)
+def test_after_cycle_stop_code_schema_rejects_unregistered_text(code: str) -> None:
+    data = _after_cycle_data(code)
+    with pytest.raises(RecordError, match=r"^invalid session schema$"):
+        validate(data, BOUNDARY_DATA["after_cycle"])
+    with pytest.raises(RecordError, match=r"^invalid session schema$"):
+        make_record(
+            "boundary_recorded",
+            session_id="session",
+            turn_id="turn",
+            payload={
+                "boundary_id": "operation",
+                "stage": "after_cycle",
+                "source_operation_id": "operation",
+                "source_digest": None,
+                "data": data,
+            },
+        )
+
+
+@pytest.mark.parametrize("code", ["host.policy_stop", "host_stop", "hook_stop", "stopped"])
+def test_after_cycle_stop_code_schema_accepts_registered_kernel_codes(code: str) -> None:
+    validate(_after_cycle_data(code), BOUNDARY_DATA["after_cycle"])
 
 
 @pytest.mark.parametrize("usage_type", [TaskTokenUsage, TaskTokenUsageTotals])
