@@ -41,7 +41,7 @@ class WorkerSupport:
     projection_consumers: ProjectionConsumers | None = None
     page_size: int = 100
     failure_backoff_ms: int = 1000
-    lease_ttl_ms: int = 15_000
+    lease_ttl_ms: int = 60_000
     level: int = 1
     handler_versions: tuple[str, ...] = ("1",)
     capabilities: tuple[str, ...] = ()

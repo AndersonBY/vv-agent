@@ -21,7 +21,7 @@ def tick(
     page_size: int = 100,
     failure_backoff_ms: int = 1000,
     claim_owner: str | None = None,
-    claim_ttl_ms: int = 15_000,
+    claim_ttl_ms: int = 60_000,
     work_kinds: WorkKinds | None = None,
     projection_consumers: ProjectionConsumers | None = None,
     stop_after_claimed_drive: bool = False,

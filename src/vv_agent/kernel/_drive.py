@@ -13,7 +13,7 @@ from vv_agent.kernel._lease_scope import Clock, Signal
 from vv_agent.kernel._sql import SQLStore, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
 from vv_agent.kernel._store import Lease, LeaseLost, LeasePoll, SequenceConflict, SessionStore, StoredRecord
 
-FACTORY_LEASE_TTL_MS = 15000
+FACTORY_LEASE_TTL_MS = 60000
 FACTORY_HEARTBEAT_SECONDS = 0.25
 _TYPED_HEARTBEAT_FAILURES = (UnsupportedFeatureLevel, UnsupportedWorkerCapabilities)
 
