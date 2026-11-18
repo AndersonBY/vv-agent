@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.runtime.local_environment import ExecutionEnvironmentPort, LocalEnvironment
 from vv_agent.runtime.processes import (
     kill_process_tree,
     process_tree_is_running,
@@ -64,9 +65,10 @@ class _SessionState:
 class BackgroundSessionManager:
     """Process-local handles. Tool access is checked before touching a session."""
 
-    def __init__(self) -> None:
+    def __init__(self, environment: ExecutionEnvironmentPort | None = None) -> None:
         self._sessions: dict[str, _SessionState] = {}
         self._lock = Lock()
+        self._environment = environment
 
     def _register_session(
         self,
@@ -133,7 +135,8 @@ class BackgroundSessionManager:
             shell=shell,
             windows_shell_priority=windows_shell_priority,
         )
-        started = start_captured_process(shell_command, cwd=cwd, stdin_text=prepared_stdin, env=env)
+        environment = self._environment or LocalEnvironment(process_starter=start_captured_process)
+        started = environment.start_process(shell_command, cwd=cwd, stdin_text=prepared_stdin, env=env)
         return self.adopt_running_process(
             command=command,
             cwd=cwd,
