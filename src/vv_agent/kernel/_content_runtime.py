@@ -45,7 +45,7 @@ from ._content_publication import (
     ContentSlot,
     publish_session_created_content,
 )
-from ._content_reader import _OwnerBoundContentStore
+from ._content_reader import _LinkValidatedContentStore, _OwnerBoundContentStore
 from ._content_sql import CoreSQLContentStore
 from ._content_store import ContentCipher, DurableContentStore
 from ._postgres import CorePostgresContentStore, PostgresStore
@@ -421,7 +421,9 @@ def _slot(value: str, specs: Mapping[str, int]) -> str:
 class _ValidatedContentFrame:
     """Apply the writer's declared owner-slot inventory to one read frame."""
 
-    def __init__(self, frame: _OwnerBoundContentStore) -> None:
+    _supports_link_validated_get = True
+
+    def __init__(self, frame: _LinkValidatedContentStore) -> None:
         self._frame = frame
 
     def assert_link(
@@ -444,8 +446,15 @@ class _ValidatedContentFrame:
             input_id=input_id,
         )
 
-    def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes:
-        return self._frame.get(tenant_id, session_id, ref)
+    def get(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+        *,
+        link_validated: bool = False,
+    ) -> bytes:
+        return self._frame.get(tenant_id, session_id, ref, link_validated=link_validated)
 
 
 class _ValidatedDurableContentStore:
@@ -505,12 +514,19 @@ class _ValidatedDurableContentStore:
         *,
         record_seqs: Iterable[int] = (),
         input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
     ) -> Iterator[_OwnerBoundContentStore]:
         opener = getattr(self._durable, "_read_frame", None)
         if not callable(opener):
             yield self
             return
-        with opener(tenant_id, session_id, record_seqs=record_seqs, input_ids=input_ids) as frame:
+        with opener(
+            tenant_id,
+            session_id,
+            record_seqs=record_seqs,
+            input_ids=input_ids,
+            validate_each_read=validate_each_read,
+        ) as frame:
             yield _ValidatedContentFrame(frame)
 
     def __getattr__(self, name: str) -> Any:

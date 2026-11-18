@@ -944,6 +944,300 @@ def test_level_two_session_driver_typed_null_restores_base_and_next_valid_select
 
 
 @pytest.mark.capability("model-selection")
+def test_session_driver_routes_from_upgraded_cache_and_preserves_explicit_requirements(store, database):
+    routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h2")
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    create_fixture_session(store, "s")
+    explicit = SessionRequirements(2, "handler/h2", ("tool:upgrade",))
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h1", "handler/h2"),
+        capabilities=explicit.capabilities,
+    )
+    try:
+        driver.push(
+            "s",
+            InboxItem(
+                "upgrade",
+                "user",
+                {"content": "upgrade"},
+                feature_level=2,
+                requirements=explicit.to_dict(),
+            ),
+        )
+        upgraded = store.read_input("s", "upgrade")
+        assert upgraded is not None and upgraded.item.requirements == explicit.to_dict()
+        assert routing_requirements(store) == explicit
+
+        driver.push("s", InboxItem("idle", "user", {"content": "continue"}))
+        routed_input = store.read_input("s", "idle")
+        assert routed_input is not None
+        assert routed_input.item.feature_level == 2
+        assert routed_input.item.requirements == explicit.to_dict()
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_follow_up_uses_route_level_instead_of_level_two_format_floor(store, database):
+    create_level_two(store, SessionRequirements(1, "1", ()))
+    with store.atomic():
+        row = store._one(
+            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,"
+            "deletion_state,handler_version,required_capabilities,active_turn_id "
+            "FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (store.tenant_id, "s"),
+        )
+        routing = store._require_routing_cache("s", row)
+    assert routing.route_level == 1
+    assert routing.requirements.level == 2
+
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=1,
+        handler_versions=("1",),
+    )
+    try:
+        driver.push("s", InboxItem("follow", "follow_up", {"content": "continue"}))
+        stored = store.read_input("s", "follow")
+        assert stored is not None
+        assert stored.item.feature_level == 1
+        assert stored.item.requirements is None
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_session_driver_selection_without_runtime_uses_current_h2_cache(store, database):
+    rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h2")
+    create_level_two(store, SessionRequirements(2, "handler/h1", ("family:bootstrap",)))
+    upgraded = SessionRequirements(2, "handler/h2", ("tool:upgrade",))
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "upgrade",
+            "user",
+            {"content": "upgrade"},
+            feature_level=2,
+            requirements=upgraded.to_dict(),
+        ),
+    )
+    driver = SessionDriver(
+        store=store,
+        model_resolver=rt.model_resolver,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h1", "handler/h2"),
+        capabilities=_worker_capabilities(rt, (SELECTION,)),
+    )
+    try:
+        assert "s" not in driver._runtimes
+        driver.push("s", InboxItem("select", "model_selection", {"selection": SELECTION}))
+
+        stored = store.read_input("s", "select")
+        assert stored is not None
+        assert stored.item.requirements == rt.model_selection_requirements(SELECTION).to_dict()
+        assert stored.item.requirements["handler_version"] == "handler/h2"
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_session_driver_start_preserves_registration_level_two_bound(store, database):
+    rt, _ = routed(database, [LLMResponse("done")], store=store, handler_version="handler/h2")
+    bootstrap = rt.requirements_bound()
+    rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))
+    create_level_two(store, bootstrap)
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h2",),
+        capabilities=_worker_capabilities(rt, ()),
+    )
+    try:
+        driver.start(
+            "s",
+            rt.agent,
+            rt.config,
+            "start",
+            input_id="started",
+            handler_version="handler/h2",
+        )
+        stored = store.read_input("s", "started")
+        assert stored is not None
+        assert stored.item.feature_level == 2
+        requirements = SessionRequirements.from_dict(stored.item.requirements)
+        assert requirements.level == 2
+        assert requirements.handler_version == bootstrap.handler_version
+        assert set(bootstrap.capabilities) <= set(requirements.capabilities)
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_session_driver_follow_up_merges_trusted_static_requirements(store, database):
+    rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h2")
+    rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))
+    create_level_two(store, SessionRequirements(2, "handler/h2", ()))
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h2",),
+        capabilities=_worker_capabilities(rt, ()),
+    )
+    try:
+        driver._register_runtime("s", rt, armed=True)
+        expected = static_session_requirements(
+            rt.agent,
+            rt.config,
+            rt.resolved,
+            level=2,
+            handler_version="handler/h2",
+            extra_capabilities=driver.capabilities,
+        )
+
+        driver.push("s", InboxItem("follow", "follow_up", {"content": "continue"}))
+
+        stored = store.read_input("s", "follow")
+        assert stored is not None
+        assert stored.item.feature_level == 2
+        assert stored.item.requirements == expected.to_dict()
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_session_driver_follow_up_uses_bootstrap_without_runtime_registration(store, database):
+    rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h2")
+    rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))
+    capabilities = _worker_capabilities(rt, ())
+    bootstrap = static_session_requirements(
+        rt.agent,
+        rt.config,
+        rt.resolved,
+        level=2,
+        handler_version="handler/h2",
+        extra_capabilities=capabilities,
+    )
+    create_level_two(store, bootstrap)
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "active",
+            "user",
+            {"content": "active"},
+            feature_level=2,
+            requirements=SessionRequirements(2, "handler/h2", ()).to_dict(),
+        ),
+    )
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h2",),
+        capabilities=capabilities,
+    )
+    try:
+        assert "s" not in driver._runtimes
+
+        driver.push("s", InboxItem("follow", "follow_up", {"content": "continue"}))
+
+        stored = store.read_input("s", "follow")
+        assert stored is not None
+        assert stored.item.feature_level == 2
+        assert stored.item.requirements == bootstrap.to_dict()
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_session_driver_user_uses_current_registration_after_queued_old_handler(store, database):
+    rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h3")
+    rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))
+    capabilities = _worker_capabilities(rt, ())
+    store.configure_worker(
+        level=2,
+        handler_versions=("handler/h2", "handler/h3"),
+        capabilities=capabilities,
+    )
+    create_level_two(store, SessionRequirements(2, "handler/h2", ()))
+    push_fixture_input(
+        store,
+        "s",
+        InboxItem(
+            "queued-old-handler",
+            "follow_up",
+            {"content": "old follow-up"},
+            feature_level=2,
+            requirements=SessionRequirements(2, "handler/h2", ()).to_dict(),
+        ),
+    )
+    assert routing_requirements(store).handler_version == "handler/h2"
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h3",),
+        capabilities=capabilities,
+    )
+    try:
+        driver._register_runtime("s", rt, armed=True)
+        expected = static_session_requirements(
+            rt.agent,
+            rt.config,
+            rt.resolved,
+            level=2,
+            handler_version="handler/h3",
+            extra_capabilities=capabilities,
+        )
+
+        driver.push("s", InboxItem("new-user", "user", {"content": "new user"}))
+
+        stored = store.read_input("s", "new-user")
+        assert stored is not None
+        assert stored.item.requirements == expected.to_dict()
+        assert routing_requirements(store) == expected
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+@pytest.mark.parametrize("selection", [None, SELECTION])
+def test_session_driver_selection_uses_registered_runtime_handler_when_requirements_are_unbound(store, database, selection):
+    rt, _ = routed(database, [LLMResponse("A")], [LLMResponse("B")], store=store, handler_version="handler/v2")
+    rt.config.model_provider = ScriptedModelProvider.new("scripted", "scripted", [])
+    create_level_two(store, replace(rt.requirements_bound(), handler_version=None))
+    push_user(store, rt, "pending", "pending")
+    expected = SessionRequirements(2, "handler/v2", ()) if selection is None else rt.model_selection_requirements(selection)
+    driver = SessionDriver(
+        store=store,
+        model_resolver=rt.model_resolver,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/v2",),
+        capabilities=_worker_capabilities(rt, (selection,)),
+    )
+    try:
+        driver._register_runtime("s", rt, armed=True)
+        input_id = "reset" if selection is None else "select"
+        driver.push("s", InboxItem(input_id, "model_selection", {"selection": selection}))
+
+        stored = store.read_input("s", input_id)
+        assert stored is not None
+        assert stored.item.requirements == expected.to_dict()
+        assert stored.item.requirements["handler_version"] == "handler/v2"
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
 def test_level_two_wrong_handler_selection_writes_nothing(store, database):
     rt, _ = routed(database, [LLMResponse("A")], store=store)
     start(store, rt)
@@ -1145,6 +1439,85 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
         assert thread.turns[-1].result.get("finalOutput") == "selected client", thread.turns[-1].result
         assert calls == ["default", "selected"]
         assert any(request["model"] == "selected" and request.get("route") == selection["route"] for request in resolved_requests)
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_app_server_selection_before_first_turn_uses_host_resolver_without_runtime(store, tmp_path):
+    from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
+    from vv_agent.run_config import RunConfig
+
+    calls = []
+    default_provider = ScriptedModelProvider.from_callback(
+        "default-backend",
+        "default",
+        lambda request: calls.append(request.model) or LLMResponse("default client"),
+    )
+    selected_provider = ScriptedModelProvider.from_callback(
+        "selected-backend",
+        "selected",
+        lambda request: calls.append(request.model) or LLMResponse("selected client"),
+    )
+    selection = {"model": "selected", "route": {"backend_type": "selected-backend"}}
+
+    class RoutedHost(DefaultAppServerHost):
+        def resolve_model(self, request):
+            if request["model"] == "selected" and request.get("route") == selection["route"]:
+                resolved = selected_provider.resolve(ModelRef.named("selected"))
+                return selected_provider.client(resolved), resolved
+            raise ModelError("unknown model or route")
+
+    agent = Agent("test", "Answer.", model="default")
+    config = RunConfig(model_provider=default_provider, workspace=tmp_path)
+    host = RoutedHost(agent=agent, run_config=config)
+    bootstrap = static_session_requirements(agent, config, level=2, handler_version="1")
+    expected = static_model_selection_requirements(selection, resolve_model=host.resolve_model, handler_version="1")
+    capabilities = tuple(sorted(set(bootstrap.capabilities) | set(expected.capabilities)))
+    store.configure_worker(level=2, handler_versions=("1",), capabilities=capabilities)
+
+    transport = ChannelTransport(connection_id="test", outbound_capacity=10_000)
+    server = AppServer(transport=transport, store=store, host=host)
+
+    def send(identity, method, params):
+        server.processor.process_message("test", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params})
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    try:
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        server.kernel._next_session_requirements = bootstrap
+        server.kernel.create(
+            "thread",
+            str(tmp_path),
+            {"app_server": {"agent_key": "default", "cwd": None, "metadata": {}}},
+        )
+        server.kernel._ensure_static_worker_support(level=2, capabilities=capabilities)
+        assert "result" in send(0, "initialize", {"clientInfo": {"name": "test"}})
+        assert "thread" not in server.kernel._runtimes
+
+        selected = send(
+            1,
+            "thread/model/select",
+            {"threadId": "thread", "inputId": "select", "selection": selection},
+        )
+        assert "result" in selected, selected
+        stored = store.read_input("thread", "select")
+        assert stored is not None
+        assert stored.item.requirements == expected.to_dict()
+
+        started = send(
+            2,
+            "turn/start",
+            {"threadId": "thread", "inputId": "first", "expectedTurnId": None, "input": [{"type": "text", "text": "first"}]},
+        )
+        assert "result" in started, started
+        server.run_adapter.join()
+        thread = server.store.read_thread("thread")
+        assert thread.turns[-1].result.get("finalOutput") == "selected client", thread.turns[-1].result
+        assert calls == ["selected"]
     finally:
         server.run_adapter.join()
         server.kernel.close()

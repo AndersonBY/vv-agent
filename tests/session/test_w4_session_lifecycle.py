@@ -15,8 +15,10 @@ import pytest
 import vv_agent.session.surfaces as surface_module
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.events import AssistantDeltaEvent
+from vv_agent.kernel._content import ContentRef, Principal
+from vv_agent.kernel._content import KeyUnavailable as BackendKeyUnavailable
 from vv_agent.kernel._requirements import SessionRequirements
-from vv_agent.kernel._sql import UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
+from vv_agent.kernel._sql import SessionNotLive, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.model import ScriptedModelProvider, resolve_model_selection
 from vv_agent.run_handle import RunHandle
@@ -24,6 +26,7 @@ from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import ChildSession, InvalidChildBatch
 from vv_agent.session.content_runtime import bind_content_key_provider
 from vv_agent.session.content_store import LocalKeyProvider
+from vv_agent.session.deletion import SessionDeletionStore
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.runtime import (
     static_model_selection_requirements,
@@ -37,6 +40,7 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 from .helpers import (
+    content_ref,
     create_fixture_session,
     fixture_key_provider,
     record,
@@ -1152,6 +1156,158 @@ def test_completed_handle_wakes_worker_for_follow_up() -> None:
         assert provider_threads == ["session-external-call", "session-external-call"]
     finally:
         driver.close()
+
+
+def test_level_one_start_and_follow_up_keep_level_one_and_lock_settings_first(store, monkeypatch) -> None:
+    driver = SessionDriver(
+        store=store,
+        content_key_provider=fixture_key_provider(),
+        worker_level=1,
+        handler_versions=("1",),
+    )
+    provider = ScriptedModelProvider.new(
+        "scripted",
+        "m",
+        [LLMResponse("first"), LLMResponse("second")],
+    )
+    lock_events: list[str] = []
+    original_ceiling = store._write_ceiling
+    original_lock = store._lock
+
+    def write_ceiling():
+        lock_events.append("write_ceiling")
+        return original_ceiling()
+
+    def lock(session_id):
+        lock_events.append("lock")
+        return original_lock(session_id)
+
+    monkeypatch.setattr(store, "_write_ceiling", write_ceiling)
+    monkeypatch.setattr(store, "_lock", lock)
+    try:
+        driver.create("level-one", ".")
+        store._rows("UPDATE sk_settings SET write_level=1 WHERE singleton=1")
+        handle = driver.start(
+            "level-one",
+            Agent("level-one", "Answer.", model="m"),
+            RunConfig(model_provider=provider),
+            "one",
+            input_id="start",
+        )
+
+        assert lock_events[0] == "write_ceiling", lock_events
+        assert handle.result(timeout=8).final_output == "first"
+        handle.follow_up("two")
+        _wait_for(
+            lambda: (
+                len((state := driver._read_state("level-one")[0]).turns) == 2 and all(turn.ended for turn in state.turns.values())
+            )
+        )
+
+        applied = [
+            stored.record._payload["input"]
+            for stored in driver.store.read("level-one", limit=100).records
+            if stored.record.kind == "input_applied"
+        ]
+        assert [(item["kind"], item["feature_level"]) for item in applied] == [
+            ("user", 1),
+            ("follow_up", 1),
+        ]
+        assert all("requirements" not in item for item in applied)
+    finally:
+        driver.close()
+
+
+def test_read_state_fails_closed_through_entire_deletion_fence(store) -> None:
+    key_provider = fixture_key_provider()
+    try:
+        wrapped = wrap_fixture_store(store, key_provider)
+        create_fixture_session(wrapped, "deletion-fence")
+        assert store.read_state("deletion-fence")[1]
+
+        actor = Principal(
+            store.tenant_id,
+            "fixture/deleter",
+            "user",
+            ContentRef.from_dict(content_ref("deletion-actor")),
+        )
+        deletion = SessionDeletionStore(store, cast(Any, None), allow_unsigned=True)
+
+        store.begin_forget(
+            "deletion-fence",
+            actor,
+            bound_signer=None,
+            verifier=None,
+            allow_unsigned=True,
+        )
+        with pytest.raises(SessionNotLive, match="fenced for deletion"):
+            store.read_state("deletion-fence")
+        assert deletion.read_skeleton(store.tenant_id, "deletion-fence").tombstone is not None
+
+        store.complete_forget("deletion-fence")
+        with pytest.raises(SessionNotLive, match="fenced for deletion"):
+            store.read_state("deletion-fence")
+        skeleton = deletion.read_skeleton(store.tenant_id, "deletion-fence")
+        assert skeleton.tombstone is not None
+        assert skeleton.tombstone.state.value == "complete"
+
+        store.begin_purge(
+            "deletion-fence",
+            actor,
+            bound_signer=None,
+            verifier=None,
+            allow_unsigned=True,
+        )
+        with pytest.raises(SessionNotLive, match="fenced for deletion"):
+            store.read_state("deletion-fence")
+    finally:
+        key_provider.close()
+
+
+def test_recovery_defers_transient_key_unavailable_then_completes(store, monkeypatch) -> None:
+    key_provider = fixture_key_provider()
+    driver = SessionDriver(store=store, content_key_provider=key_provider, worker_level=1, handler_versions=("1",))
+    model_calls: list[object] = []
+    unwrap_threads: list[str] = []
+    fail_next_worker_unwrap = True
+    original_unwrap = key_provider.unwrap
+    provider = ScriptedModelProvider.from_callback(
+        "scripted",
+        "m",
+        lambda request: model_calls.append(request) or LLMResponse("recovered"),
+    )
+
+    def transient_unwrap(tenant_id, session_id, wrapped_key):
+        nonlocal fail_next_worker_unwrap
+        if fail_next_worker_unwrap and current_thread().name.startswith("session-local-worker"):
+            fail_next_worker_unwrap = False
+            unwrap_threads.append(current_thread().name)
+            raise BackendKeyUnavailable("temporary key-provider outage")
+        return original_unwrap(tenant_id, session_id, wrapped_key)
+
+    monkeypatch.setattr(key_provider, "unwrap", transient_unwrap)
+    try:
+        driver.create("transient-key", ".")
+        handle = driver.start(
+            "transient-key",
+            Agent("transient-key", "Answer.", model="m"),
+            RunConfig(model_provider=provider),
+            "go",
+            autostart=False,
+        )
+        handle.start()
+        assert handle.result(timeout=8).final_output == "recovered"
+
+        state, records, _ = driver._read_state("transient-key")
+        assert state.active_turn_id is None
+        assert len(model_calls) == 1
+        assert unwrap_threads and unwrap_threads[0].startswith("session-local-worker")
+        assert "transient-key" not in driver._errors
+        assert [row.record.payload["status"] for row in records if row.record.kind == "turn_ended"] == ["completed"]
+        assert not [row.record for row in records if row.record.kind == "turn_failed"]
+    finally:
+        driver.close()
+        key_provider.close()
 
 
 def test_two_handles_are_independent_cursor_subscribers() -> None:

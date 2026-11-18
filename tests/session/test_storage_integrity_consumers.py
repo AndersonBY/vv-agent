@@ -203,16 +203,8 @@ def test_deleted_signed_proofs_and_keyless_rehash_cannot_downgrade_trusted_paths
         with pytest.raises(LedgerIntegrityError, match="checkpoint is missing at seq 1"), reopened.atomic() as tx:
             tx.consumer_batch("s", "events")
 
-        lease = reopened.acquire("s", owner="writer", ttl_ms=10_000)
-        assert lease is not None
-        with pytest.raises(LedgerIntegrityError, match="checkpoint is missing at seq 1"), reopened.atomic() as tx:
-            tx.append(
-                "s",
-                lease=lease,
-                expected_seq=1,
-                commit_id="must-not-extend",
-                records=(record("turn_started", sid="s"),),
-            )
+        with pytest.raises(LedgerIntegrityError, match="ledger checkpoint is missing at seq 1"):
+            reopened.acquire("s", owner="writer", ttl_ms=10_000)
         assert reopened._head("s")[0] == 1
 
     with SQLiteStore.standalone(str(path)) as hash_only:
@@ -236,16 +228,8 @@ def test_cached_prefix_does_not_skip_input_proof_revalidation_before_append(tmp_
         store.read_state("s")
         store.connection.execute("UPDATE sk_inbox SET admission_key_id=NULL,admission_signature=NULL,admission_signed_ms=NULL")
 
-        lease = store.acquire("s", owner="writer", ttl_ms=10_000)
-        assert lease is not None
-        with pytest.raises(InputAdmissionProofError, match="proof is missing"), store.atomic() as tx:
-            tx.append(
-                "s",
-                lease=lease,
-                expected_seq=1,
-                commit_id="must-not-extend",
-                records=(record("turn_started", sid="s"),),
-            )
+        with pytest.raises(InputAdmissionProofError, match="signed input admission proof is missing at input_seq 1"):
+            store.acquire("s", owner="writer", ttl_ms=10_000)
 
 
 def test_trusted_verify_and_export_require_explicit_integrity_mode(tmp_path):

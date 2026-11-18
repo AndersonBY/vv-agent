@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vv_agent.kernel._content import (
     ContentBindingMismatch,
@@ -43,6 +43,17 @@ class _OwnerBoundContentStore(Protocol):
     ) -> ContentRef: ...
 
     def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes: ...
+
+
+class _LinkValidatedContentStore(_OwnerBoundContentStore, Protocol):
+    def get(
+        self,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+        *,
+        link_validated: bool = False,
+    ) -> bytes: ...
 
 
 def _non_empty(value: object, field_name: str) -> str:
@@ -110,6 +121,7 @@ class DurableContentReader:
         *,
         record_seqs: Iterable[int] = (),
         input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
     ) -> Iterator[DurableContentReader]:
         """Bind one disposable frame store without retaining it on this reader."""
 
@@ -117,7 +129,13 @@ class DurableContentReader:
         if not callable(opener):
             yield self
             return
-        with opener(self.tenant_id, self.session_id, record_seqs=record_seqs, input_ids=input_ids) as store:
+        with opener(
+            self.tenant_id,
+            self.session_id,
+            record_seqs=record_seqs,
+            input_ids=input_ids,
+            validate_each_read=validate_each_read,
+        ) as store:
             yield DurableContentReader(store, tenant_id=self.tenant_id, session_id=self.session_id)
 
     def read(
@@ -145,6 +163,9 @@ class DurableContentReader:
             raise HydrationError("content link validation failed") from exc
 
         try:
+            if getattr(self._store, "_supports_link_validated_get", False) is True:
+                store = cast(_LinkValidatedContentStore, self._store)
+                return store.get(tenant_id, session_id, ref, link_validated=True)
             return self._store.get(tenant_id, session_id, ref)
         except ContentUnavailable as exc:
             raise MissingContent(f"content is unavailable: {owner}/{slot}") from exc

@@ -806,7 +806,7 @@ class SimDriver(CoreDriver):
         if isinstance(request, CommitRecords):
             return self.commit(request.records, guarded=True)
         if isinstance(request, inputs.CommitInput):
-            return self.commit(request.records, (request.input_id,), guarded=True)
+            return self.commit(request.records, request.input_ids, guarded=True)
         if isinstance(request, inputs.CompileTurn):
             return self.runtime.compile_task(request.content, request.turn_id)
         if isinstance(request, inputs.AuthenticateProvider):

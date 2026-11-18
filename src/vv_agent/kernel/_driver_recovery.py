@@ -20,6 +20,7 @@ from ._context import protected_start
 from ._driver import CoreDriver
 from ._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from ._execution_values import AgentTask
+from ._hydration import KeyUnavailable
 from ._message_values import Message
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance
 from ._record_codec import RecordError
@@ -461,10 +462,11 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         yield CommitRecords(repairs)
                         return True
             a = op.attempts[max(op.attempts)]
-            rejected = _result(self, a.result) if a.result is not None else None
+            rejected = None
+            if op.kind == "model" and a.result is not None:
+                rejected = _result(self, a.result)
             if (
-                op.kind == "model"
-                and rejected
+                rejected
                 and (rejected.get("error_code") == "model_request_rejected")
                 and (a.plan._payload["purpose"] != "compaction")
             ):
@@ -643,6 +645,8 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
         if plan is not None:
             yield CommitRecords([plan])
         return True
+    except KeyUnavailable:
+        return False
     except StopIteration as error:
         raise _RecoveryStopIteration(error) from error
 

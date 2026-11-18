@@ -844,7 +844,7 @@ def test_first_reconnect_warns_when_future_query_invalidates_without_subscriber(
             provider_server.close()
 
 
-def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tmp_path):
+def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tmp_path, monkeypatch):
     business = BusinessDB(tmp_path / "remote-complete-business.sqlite")
     session_path = tmp_path / "remote-complete-session.sqlite"
     with ExitStack() as stack:
@@ -853,6 +853,15 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
         second_store = stack.enter_context(SQLiteStore.standalone(str(session_path)))
         first = ProviderServer(first_store, business)
         second = ProviderServer(second_store, business)
+        s1_jobs = _S1JobsProvider(business)
+        original_runtime = second.server.kernel.runtime
+
+        def runtime(*args, **kwargs):
+            value = original_runtime(*args, **kwargs)
+            value.providers["work"] = s1_jobs
+            return value
+
+        monkeypatch.setattr(second.server.kernel, "runtime", runtime)
         stack.callback(first.close)
         stack.callback(second.close)
 
@@ -868,6 +877,12 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
         failure = first.server.kernel._errors[PROVIDER_THREAD]
         assert isinstance(failure.error, ProviderResultInvalid) and failure.terminal
         assert failure.warning_sent is False
+        first.server.kernel._worker.support = replace(
+            first.server.kernel._worker.support,
+            drive=None,
+            project=None,
+            projection_consumers=(),
+        )
 
         observer = second.connect("observer")
         response, _messages = _request_with_messages(
@@ -879,11 +894,15 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
         )
         assert "result" in response
         business.setting("invalid", "")
+        query_count_before_result = business.count("query")
         callback = _callback_for_business_job(business, input_id="remote-completed-result")
         _tx_push_provider_result(second, callback)
         second.due()
         second.resume(transport=observer)
         _eventually(lambda: second.state().turns[PROVIDER_TURN].ended)
+        applied = second_store.read_state(PROVIDER_THREAD)[0].applied_inputs[callback.input_id].payload
+        assert applied["disposition"] == "applied"
+        assert business.count("query") == query_count_before_result
         assert second.attempt().state == "completed"
         assert second.terminal()["status"] == "completed"
         query_count = business.count("query")
@@ -913,8 +932,7 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
         assert not [
             message
             for message in messages
-            if message.get("method") == "error/warning"
-            and message.get("params", {}).get("code") == "provider_result_invalid"
+            if message.get("method") == "error/warning" and message.get("params", {}).get("code") == "provider_result_invalid"
         ]
 
 

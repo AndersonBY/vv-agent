@@ -79,6 +79,7 @@ class SessionHydration:
     reader: ContentReader = field(repr=False)
     tenant_id: str
     session_id: str
+    _validated_json_refs: set[ContentRef] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, str) or not self.tenant_id:
@@ -135,6 +136,7 @@ class SessionHydration:
             tenant_id=self.tenant_id,
             session_id=self.session_id,
             owner=owner,
+            validated_json_refs=self._validated_json_refs,
         )
         try:
             selected = HydrationSlot(slot)
@@ -228,10 +230,14 @@ class SessionHydration:
             raise IntegrityFailure(f"{slot} size does not match ContentRef")
         try:
             value = json.loads(body)
-            if canonical_json_bytes(value, slot) != body:
-                raise ValueError("content is not canonical JSON")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise TypedSchemaFailure(f"{slot} is not valid canonical JSON") from exc
+        validated_refs = self._validated_json_refs
+        if validated_refs is None or ref not in validated_refs:
+            if canonical_json_bytes(value, slot) != body:
+                raise TypedSchemaFailure(f"{slot} is not canonical JSON")
+            if validated_refs is not None:
+                validated_refs.add(ref)
         return value
 
 
@@ -333,7 +339,7 @@ def hydrate_session_record_payload(
     """Hydrate every declared content slot while preserving the committed envelope."""
 
     record = stored.record
-    source = copy_json(record._payload)
+    source = record._payload
     payload = copy_json(source)
     owner = f"record:{stored.seq}"
     for path, slot, value in _payload_slots(record.kind, source):
@@ -372,6 +378,23 @@ def hydrate_session_record_payload(
     return payload
 
 
+def _retain_record_payload(record: Record, body: bytes, payload: dict[str, Any]) -> None:
+    record._retain(
+        body,
+        {
+            "record_id": record.record_id,
+            "kind": record.kind,
+            "session_id": record.session_id,
+            "turn_id": record.turn_id,
+            "operation_id": record.operation_id,
+            "attempt": record.attempt,
+            "payload": payload,
+            "schema_version": record.schema_version,
+            "feature_level": record.feature_level,
+        },
+    )
+
+
 def hydrate_session_stored_record(
     stored: StoredRecord,
     hydration: SessionHydration | None,
@@ -389,7 +412,7 @@ def hydrate_session_stored_record(
         _decoded_values=decoded_values,
     )
     record = replace(stored.record, payload=payload)
-    record._retain(retained_body, record.to_dict())
+    _retain_record_payload(record, retained_body, payload)
     if record.kind == "turn_started":
         definition = decoded_values.get(("definition",))
         if not isinstance(definition, DefinitionContent):
@@ -433,8 +456,11 @@ def _hydrate_session_records_batch(
             )
             for stored in sources
         )
-    with hydration.reader._read_frame(record_seqs=(stored.seq for stored in sources)) as reader:
-        framed = replace(hydration, reader=reader)
+    with hydration.reader._read_frame(
+        record_seqs=(stored.seq for stored in sources),
+        validate_each_read=False,
+    ) as reader:
+        framed = replace(hydration, reader=reader, _validated_json_refs=set())
         return tuple(
             hydrate_session_stored_record(
                 stored,
@@ -462,7 +488,7 @@ def _prepare_fold_records(
             fold_payload = copy_json(logical_payload)
             fold_payload["input"] = copy_json(source.record._payload["input"])
             fold_record = replace(record, payload=fold_payload)
-            fold_record._retain(source.record.encode(), fold_record.to_dict())
+            _retain_record_payload(fold_record, source.record.encode(), fold_payload)
             object.__setattr__(fold_record, "_business_payload", logical_payload)
             logical_items[fold_record.record_id] = RetainedInboxItem(
                 InboxItem(**logical_payload["input"]),

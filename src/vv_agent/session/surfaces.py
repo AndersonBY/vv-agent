@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import sqlite3
 import warnings
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, suppress
@@ -50,6 +51,7 @@ from vv_agent.kernel._sql import (
     LedgerIntegrityError,
     UnsupportedFeatureLevel,
     UnsupportedWorkerCapabilities,
+    _RoutingCache,
 )
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted
@@ -61,6 +63,7 @@ from vv_agent.run_handle import RunHandle
 from vv_agent.tracing import trace_processors
 from vv_agent.types import AgentTask, Message
 
+from ._driver_scope import _sqlite_lock_error
 from .children import child_delivery, child_handles
 from .content_runtime import (
     INPUT_CONTENT,
@@ -124,6 +127,44 @@ def _session_requirements(store: SessionStore, sid: str) -> SessionRequirements:
     if created.feature_level == 1:
         return SessionRequirements(1, None, ())
     return normalize_requirements(created._payload["bootstrap"])
+
+
+def _verified_routing_cache(
+    store: SessionStore,
+    sid: str,
+    *,
+    ceiling: int | None = None,
+) -> tuple[_RoutingCache, int]:
+    """Verify routing under the writer lock order: settings, then session."""
+
+    sql_store = cast(Any, store)
+    if ceiling is None:
+        ceiling = sql_store._write_ceiling()
+    row = sql_store._lock(sid)
+    sql_store._require_live_row(row)
+    return sql_store._require_routing_cache(sid, row), ceiling
+
+
+def _merge_registration_requirements(
+    requirements: SessionRequirements,
+    registration: _RuntimeRegistration | None,
+    *,
+    static_requirements: SessionRequirements | None = None,
+) -> SessionRequirements:
+    registered = static_requirements
+    if registration is not None:
+        registered = registered or registration.requirements
+    if registered is None:
+        return requirements
+    return SessionRequirements.normalized(
+        level=max(requirements.level, registered.level),
+        handler_version=(
+            registration.handler_version
+            if registration is not None
+            else requirements.handler_version or registered.handler_version
+        ),
+        capabilities=(*requirements.capabilities, *registered.capabilities),
+    )
 
 
 def _static_agent_tree(agent: Agent, config: RunConfig) -> Iterator[tuple[Agent, RunConfig]]:
@@ -1368,7 +1409,45 @@ class SessionDriver:
                 store.release(lease)
             self._notify_session(session_id)
             return
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, sqlite3.OperationalError) and _sqlite_lock_error(exc):
+                prior = failure
+                attempts = 1 if prior is None else prior.attempts + 1
+                first_cause = exc if prior is None else prior.error
+                retry_attempts, retry_base, retry_cap, retry_jitter = self._lease_retry_policy(
+                    registration,
+                    None,
+                )
+                terminal = attempts >= retry_attempts
+                self._errors[session_id] = _SessionFailure(
+                    None if prior is None else prior.turn_id,
+                    first_cause,
+                    attempts,
+                    0 if prior is None else prior.progress_head,
+                    terminal,
+                    retry_attempts,
+                    retry_base,
+                    retry_cap,
+                    retry_jitter,
+                )
+                try:
+                    if not terminal:
+                        store.defer_drive(
+                            lease,
+                            retry_after_ms=self._lease_retry_delay_ms(
+                                attempts + 1,
+                                base_seconds=retry_base,
+                                cap_seconds=retry_cap,
+                                jitter=retry_jitter,
+                            ),
+                        )
+                except LeaseLost:
+                    pass
+                finally:
+                    with suppress(LeaseLost):
+                        store.release(lease)
+                self._notify_session(session_id)
+                return
             with suppress(LeaseLost):
                 store.defer_drive(lease, retry_after_ms=self._worker.support.failure_backoff_ms)
             with suppress(LeaseLost):
@@ -1508,6 +1587,48 @@ class SessionDriver:
                     # so provide the same bounded backoff here. If keeper close
                     # retained ownership, defer fails closed and is left for the
                     # active lease to expire.
+                    with suppress(LeaseLost):
+                        store.defer_drive(
+                            lease,
+                            retry_after_ms=self._lease_retry_delay_ms(
+                                attempts + 1,
+                                base_seconds=retry_base,
+                                cap_seconds=retry_cap,
+                                jitter=retry_jitter,
+                            ),
+                        )
+            elif isinstance(exc, sqlite3.OperationalError) and _sqlite_lock_error(exc):
+                # Keep SQLite contention inside the normal bounded DriveCore retry
+                # path. Any committed op_started marker is still reconciled as an
+                # unknown outcome before another external call can be planned.
+                if (
+                    provider_failure is not None
+                    and state is not None
+                    and self._provider_failure_still_fenced(state, provider_failure)
+                ):
+                    provider_failure.progress_head = after_head
+                    return
+                progressed = after_head > before_head
+                prior = None if progressed else failure
+                attempts = 1 if prior is None else prior.attempts + 1
+                first_cause = exc if prior is None else prior.error
+                retry_attempts, retry_base, retry_cap, retry_jitter = self._lease_retry_policy(
+                    registration,
+                    runtime,
+                )
+                terminal = attempts >= retry_attempts
+                self._errors[session_id] = _SessionFailure(
+                    tid,
+                    first_cause,
+                    attempts,
+                    after_head,
+                    terminal,
+                    retry_attempts,
+                    retry_base,
+                    retry_cap,
+                    retry_jitter,
+                )
+                if not terminal and not ownership_transferred:
                     with suppress(LeaseLost):
                         store.defer_drive(
                             lease,
@@ -2077,6 +2198,14 @@ class SessionDriver:
         *,
         principal: PrincipalInput | None = None,
     ) -> None:
+        if attributes is not None:
+            seed = attributes.get("seed") if isinstance(attributes, Mapping) else None
+            if isinstance(seed, Mapping) and "messages" in seed:
+                messages = seed["messages"]
+                if not isinstance(messages, list):
+                    raise TypeError("seed.messages must be a list")
+                for message in messages:
+                    Message.from_dict(message)
         bootstrap = self._next_session_requirements
         self._next_session_requirements = None
         if bootstrap is not None and bootstrap.level < 2:
@@ -2326,6 +2455,7 @@ class SessionDriver:
 
         armed = replace(registration, armed=True)
         with self.store.atomic() as tx:
+            ceiling = cast(Any, self.store)._write_ceiling()
             tx.lock_session(sid)
             previous_registration = self._runtimes.get(sid)
             try:
@@ -2344,6 +2474,7 @@ class SessionDriver:
                     actor=actor,
                     actor_subject_id=actor_subject_id,
                     registration=armed,
+                    ceiling=ceiling,
                 )
             except BaseException:
                 if self._runtimes.get(sid) is armed:
@@ -2360,40 +2491,83 @@ class SessionDriver:
         item: InboxItem,
         *,
         registration: _RuntimeRegistration | None = None,
+        ceiling: int | None = None,
     ) -> InboxItem:
         """Attach the contract-41 requirement for one level-2 logical input."""
 
-        session_requirements = _session_requirements(self.store, sid)
-        if session_requirements.level == 1 or item.kind not in {"user", "follow_up", "model_selection"}:
+        if item.kind not in {"user", "follow_up", "model_selection"} or item.feature_level == 2:
             return item
+        if registration is None:
+            registration = self._registration_for_cursor(sid)
+        routing, ceiling = _verified_routing_cache(self.store, sid, ceiling=ceiling)
+        route_level = routing.route_level
+        if route_level is None:
+            raise LedgerIntegrityError("verified routing cache has no route level")
+        registration_is_level_two = registration is not None and registration.requirements.level >= 2
+        if route_level < 2 and not (registration_is_level_two and ceiling >= 2):
+            return item
+        if (
+            item.kind == "model_selection"
+            and registration is not None
+            and routing.requirements.handler_version not in {None, registration.handler_version}
+        ):
+            raise Conflict("registered runtime handler does not match the current route")
+        static_requirements = None
+        if registration is not None:
+            static_requirements = static_session_requirements(
+                registration.agent,
+                registration.config,
+                registration.resolved,
+                level=2,
+                handler_version=registration.handler_version,
+                extra_capabilities=self.capabilities,
+            )
+        else:
+            static_requirements = _session_requirements(self.store, sid)
+        session_requirements = _merge_registration_requirements(
+            routing.requirements,
+            registration,
+            static_requirements=static_requirements,
+        )
         if item.kind == "model_selection":
-            selection = item.payload["selection"]
-            if registration is None:
-                registration, _ = self._runtime_lineage(self.store, sid)
-            if selection is None:
-                requirements = SessionRequirements(
-                    level=2,
-                    handler_version=session_requirements.handler_version or registration.handler_version,
-                    capabilities=(),
-                )
-            else:
-                resolve_model = self.model_resolver
-                if resolve_model is None:
-                    provider = registration.config.model_provider
-                    if provider is None:
-                        raise Conflict("model selection requires the trusted session model provider")
-
-                    def resolve_model(value):
-                        return resolve_model_selection(provider, value)
-
-                requirements = static_model_selection_requirements(
-                    selection,
-                    resolve_model=resolve_model,
-                    handler_version=session_requirements.handler_version or registration.handler_version,
-                )
+            requirements = self._route_model_selection(sid, item, session_requirements, registration)
         else:
             requirements = session_requirements
         return replace(item, feature_level=2, requirements=requirements)
+
+    def _route_model_selection(
+        self,
+        sid: str,
+        item: InboxItem,
+        session_requirements: SessionRequirements,
+        registration: _RuntimeRegistration | None,
+    ) -> SessionRequirements:
+        selection = item.payload["selection"]
+        resolve_model = self.model_resolver
+        if selection is not None and resolve_model is None:
+            if registration is None:
+                registration, _ = self._runtime_lineage(self.store, sid)
+            provider = registration.config.model_provider
+            if provider is None:
+                raise Conflict("model selection requires the trusted session model provider")
+
+            def resolve_model(value):
+                return resolve_model_selection(provider, value)
+
+        handler_version = session_requirements.handler_version
+        if handler_version is None and registration is None:
+            registration = self._runtimes.get(sid)
+        if handler_version is None and registration is not None:
+            handler_version = registration.handler_version
+        handler_version = handler_version or self.default_handler_version
+        if selection is None:
+            return SessionRequirements(level=2, handler_version=handler_version, capabilities=())
+        assert resolve_model is not None
+        return static_model_selection_requirements(
+            selection,
+            resolve_model=resolve_model,
+            handler_version=handler_version,
+        )
 
     def push(
         self,
@@ -2426,9 +2600,10 @@ class SessionDriver:
         actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
         registration: _RuntimeRegistration | None = None,
+        ceiling: int | None = None,
     ):
         writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
-        item = self._route_inbox_item(sid, item, registration=registration)
+        item = self._route_inbox_item(sid, item, registration=registration, ceiling=ceiling)
         item = self._prepare_item(sid, item, writer)
         persisted = False
         actor = actor if actor is not None else item.actor

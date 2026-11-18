@@ -175,17 +175,22 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
-def _decode_json(body: bytes, slot: HydrationSlot | str) -> Any:
+def _decode_json(
+    body: bytes,
+    slot: HydrationSlot | str,
+    *,
+    canonical_checked: bool = False,
+) -> Any:
     label = slot.value if isinstance(slot, HydrationSlot) else slot
     if type(body) is not bytes:
         raise TypedSchemaFailure(f"{label} reader must return bytes")
     try:
         text = body.decode("utf-8", errors="strict")
         value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject_constant)
-        canonical = canonical_json_bytes(value, label)
+        canonical = None if canonical_checked else canonical_json_bytes(value, label)
     except (UnicodeError, ValueError, TypeError) as exc:
         raise TypedSchemaFailure(f"{label} is not valid canonical JSON") from exc
-    if canonical != body:
+    if canonical is not None and canonical != body:
         raise TypedSchemaFailure(f"{label} is not canonical JSON")
     return value
 
@@ -300,7 +305,15 @@ def _translate_backend_error(exc: Exception) -> HydrationError:
 class SessionHydrator:
     """Hydrate explicitly typed slots from one tenant/session/owner binding."""
 
-    def __init__(self, reader: ContentReader, *, tenant_id: str, session_id: str, owner: str) -> None:
+    def __init__(
+        self,
+        reader: ContentReader,
+        *,
+        tenant_id: str,
+        session_id: str,
+        owner: str,
+        validated_json_refs: set[ContentRef] | None = None,
+    ) -> None:
         try:
             self._tenant_id = _non_empty(tenant_id, "tenant_id")
             self._session_id = _non_empty(session_id, "session_id")
@@ -310,6 +323,7 @@ class SessionHydrator:
         if not isinstance(reader, ContentReader):
             raise TypeError("reader must implement ContentReader")
         self._reader = reader
+        self._validated_json_refs = validated_json_refs
 
     @property
     def binding(self) -> tuple[str, str, str]:
@@ -347,7 +361,12 @@ class SessionHydrator:
             raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
         if len(body) != ref.size:
             raise IntegrityFailure(f"{slot} size does not match ContentRef")
-        return _decode_json(body, slot)
+        validated_refs = self._validated_json_refs
+        canonical_checked = validated_refs is not None and ref in validated_refs
+        value = _decode_json(body, slot, canonical_checked=canonical_checked)
+        if validated_refs is not None:
+            validated_refs.add(ref)
+        return value
 
     def nested(self, kind: str, source: Mapping[str, Any], outer_slot: str, value: Any) -> Any:
         """Hydrate only the nested links declared by the closed publication inventory."""

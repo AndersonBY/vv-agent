@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -359,6 +360,151 @@ def test_factory_error_identity_and_backoff_cause_reach_subscriber(tmp_path: Pat
         assert caught.value.__cause__ is backoff_error
         assert factory_calls == ["factory-error"]
         assert len(backoff_calls) == 1
+
+
+def test_pre_core_sqlite_lock_defers_before_release_and_recovers_without_model_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sid = "pre-core-sqlite-lock"
+    lock_error = sqlite3.OperationalError("database is locked")
+    model_calls: list[LlmRequest] = []
+
+    def response(request: LlmRequest) -> LLMResponse:
+        model_calls.append(request)
+        return LLMResponse("lock recovered")
+
+    with _temporary_driver(tmp_path, sid) as driver:
+        driver.create(sid, str(tmp_path))
+        handle = driver.start(
+            sid,
+            Agent("agent", "Answer.", model="m"),
+            RunConfig(model_provider=ScriptedModelProvider.from_callback("scripted", "m", response)),
+            "go",
+            autostart=False,
+        )
+        assert handle._pending_submission is not None
+        handle._pending_submission()
+        handle._pending_submission = None
+        handle._runtime_reservation = None
+
+        with driver._open_drive_store() as store:
+            bound = store.for_tenant(driver.tenant_id)
+            lease = bound.acquire(sid, owner="pre-core-lock", ttl_ms=driver._worker.support.lease_ttl_ms)
+            assert lease is not None
+            original_read = bound.read
+            locked = True
+
+            def locked_read(*args, **kwargs):
+                nonlocal locked
+                if locked:
+                    locked = False
+                    raise lock_error
+                return original_read(*args, **kwargs)
+
+            monkeypatch.setattr(bound, "read", locked_read)
+            driver._drive_worker_session(bound, sid, lease=lease)
+
+            failure = driver._errors[sid]
+            assert failure.error is lock_error
+            assert not failure.terminal
+            assert failure.attempts == 1
+            retry_at_ms = cast(Any, bound)._one(
+                "SELECT drive_retry_at_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (driver.tenant_id, sid),
+            )[0]
+            assert retry_at_ms > 0
+
+        _force_due(driver, sid)
+        with driver._open_drive_store() as claim_store:
+            claimed = tick(
+                claim_store,
+                project=lambda *_args: None,
+                dispatch_claimed=lambda session_id, claimed_lease: driver._drive_worker_session(
+                    claim_store,
+                    session_id,
+                    lease=claimed_lease,
+                ),
+                work_kinds=("drive",),
+                stop_after_claimed_drive=True,
+            )
+
+        assert claimed == 1
+        state, records, _ = driver.store.read_state(sid)
+        recovered_failure = driver._errors.get(sid)
+        assert state.active_turn_id is None
+        assert any(stored.record.kind == "turn_ended" and stored.record.payload["status"] == "completed" for stored in records)
+        assert len(model_calls) == 1
+        assert recovered_failure is None
+
+
+@pytest.mark.parametrize(
+    "lock_message",
+    ["database is locked", "database table is locked: sk_session"],
+)
+def test_transient_sqlite_lock_retries_without_terminal_failure_or_model_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_message: str,
+) -> None:
+    from vv_agent.session.kernel import _Driver
+
+    original_step = _Driver.step
+    original_drive = SessionDriver._drive_worker_session
+    lock_error = sqlite3.OperationalError(lock_message)
+    step_calls = 0
+    observed_terminal: list[bool] = []
+    observed_attempts: list[int] = []
+    observed_retry_after_ms: list[int] = []
+    model_calls: list[LlmRequest] = []
+
+    def locked_once(driver):
+        nonlocal step_calls
+        step_calls += 1
+        if step_calls == 1:
+            raise lock_error
+        return original_step(driver)
+
+    def track_failure(driver, store, session_id, *, lease):
+        try:
+            return original_drive(driver, store, session_id, lease=lease)
+        finally:
+            failure = driver._errors.get(session_id)
+            if failure is not None and failure.error is lock_error:
+                observed_terminal.append(failure.terminal)
+                observed_attempts.append(failure.attempts)
+                retry_at = cast(Any, store)._one(
+                    "SELECT drive_retry_at_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                    (driver.tenant_id, session_id),
+                )[0]
+                observed_retry_after_ms.append(retry_at)
+
+    def response(request: LlmRequest) -> LLMResponse:
+        model_calls.append(request)
+        return LLMResponse("lock recovered")
+
+    monkeypatch.setattr(_Driver, "step", locked_once)
+    monkeypatch.setattr(SessionDriver, "_drive_worker_session", track_failure)
+
+    sid = "sqlite-lock-retry"
+    with _temporary_driver(tmp_path, sid) as driver:
+        driver.create(sid, str(tmp_path))
+        handle = driver.start(
+            sid,
+            Agent("agent", "Answer.", model="m"),
+            RunConfig(model_provider=ScriptedModelProvider.from_callback("scripted", "m", response)),
+            "go",
+        )
+
+        assert handle.result(timeout=5).final_output == "lock recovered"
+        assert observed_terminal == [False]
+        assert observed_attempts == [1]
+        assert observed_retry_after_ms and observed_retry_after_ms[0] > 0
+        assert step_calls >= 2
+        assert len(model_calls) == 1
+        state, records, _ = driver.store.read_state(sid)
+        assert state.active_turn_id is None
+        assert all(stored.record.kind != "turn_failed" for stored in records)
 
 
 def test_ledger_read_failure_reaches_subscriber_once_without_turn_failure(

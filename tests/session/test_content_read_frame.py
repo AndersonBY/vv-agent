@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.sim.content import SimContentKeyProvider
-from vv_agent.kernel import _content_sql
+from vv_agent.kernel import _boundary_hydration, _content_sql
 from vv_agent.kernel._boundary_hydration import (
     SessionHydration,
     hydrate_session_input,
@@ -47,6 +47,7 @@ from vv_agent.session.deletion import SessionDeletionStore
 from vv_agent.session.records import InboxItem, digest
 from vv_agent.session.sqlite import SQLiteStore
 
+from .conftest import Database, open_store
 from .helpers import append_fixture_records, create_fixture_session, push_fixture_input
 from .helpers import record as fixture_record
 
@@ -165,14 +166,14 @@ def _link_values(store, values: dict[str, Any]) -> dict[str, ContentRef]:
 
 def _delete_session_from_other_connection(
     *,
-    path: Path,
+    database: Database,
     tenant_id: str,
     provider: CountingProvider,
     cipher: CountingCipher,
     ref: ContentRef,
     operation: str,
 ) -> None:
-    with SQLiteStore.standalone(str(path)) as deleting_store:
+    with open_store(database) as deleting_store:
         bind_content_runtime(deleting_store, key_provider=provider, cipher=cipher)
         durable = durable_content_store(deleting_store)
         assert isinstance(durable, _ValidatedDurableContentStore)
@@ -334,6 +335,55 @@ def test_frame_rechecks_cached_content_identity(
         assert hydration.read(record_owner(1), "request.messages[0]", ref) == {"body": "warm"}
         with pytest.raises(expected_error):
             hydration.read(record_owner(1), "request.messages[0]", wrong)
+
+
+def test_link_validated_get_still_validates_cached_content_metadata(content_setup) -> None:
+    store, _wrapped, reader, _provider, _cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "validated-again"}})["request.messages[0]"]
+
+    with reader._read_frame(record_seqs=(1,)) as frame_reader:
+        assert isinstance(frame_reader._store, _ValidatedContentFrame)
+        frame = frame_reader._store._frame
+        assert frame.get(store.tenant_id, SESSION, ref) == b'{"body":"validated-again"}'
+        wrong = ContentRef(ref.content_id, ref.mac, ref.size + 1, ref.key_id, ref.labels)
+        with pytest.raises(_content_sql.ContentIntegrityError):
+            frame.get(store.tenant_id, SESSION, wrong, link_validated=True)
+
+
+def test_frame_reuses_canonical_json_proof_without_sharing_mutable_values(
+    content_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, _provider, _cipher = content_setup
+    with store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=SESSION)
+        ref = writer.put_json({"items": [1], "shared": True})
+        writer.link_record(1, ref, "request.messages[0]")
+        writer.link_record(1, ref, "request.messages[1]")
+
+    canonical_calls = 0
+    original_canonical = _boundary_hydration.canonical_json_bytes
+
+    def counted_canonical(value, field_name="value"):
+        nonlocal canonical_calls
+        canonical_calls += 1
+        return original_canonical(value, field_name)
+
+    monkeypatch.setattr(_boundary_hydration, "canonical_json_bytes", counted_canonical)
+    with reader._read_frame(record_seqs=(1,)) as frame_reader:
+        hydration = SessionHydration(
+            frame_reader,
+            tenant_id=store.tenant_id,
+            session_id=SESSION,
+            _validated_json_refs=set(),
+        )
+        first = hydration.read(record_owner(1), "request.messages[0]", ref)
+        second = hydration.read(record_owner(1), "request.messages[1]", ref)
+
+    assert canonical_calls == 1
+    assert first == second == {"items": [1], "shared": True}
+    first["items"].append(2)
+    assert second == {"items": [1], "shared": True}
 
 
 def test_frame_enforces_owner_slot_and_tenant_bindings(content_setup) -> None:
@@ -537,11 +587,11 @@ def test_frame_rejects_wrong_key_and_detects_key_destroy_between_independent_cal
         frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[1]", other)
 
 
-@pytest.mark.sqlite_file
+@pytest.mark.persistent_store
 @pytest.mark.parametrize("deletion_operation", ("forget", "purge"))
 def test_frame_fails_closed_when_another_connection_deletes_cached_session(
     content_setup,
-    tmp_path: Path,
+    database: Database,
     deletion_operation: str,
 ) -> None:
     store, _wrapped, reader, provider, cipher = content_setup
@@ -568,7 +618,7 @@ def test_frame_fails_closed_when_another_connection_deletes_cached_session(
         assert frame.get(store.tenant_id, SESSION, ref) == b'{"body":"forget-me"}'
 
         _delete_session_from_other_connection(
-            path=tmp_path / "session.sqlite",
+            database=database,
             tenant_id=store.tenant_id,
             provider=provider,
             cipher=cipher,
@@ -589,8 +639,53 @@ def test_frame_fails_closed_when_another_connection_deletes_cached_session(
         with pytest.raises(MissingContentLink):
             frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[0]", ref)
 
-    with reader._read_frame(record_seqs=(1,)) as frame_reader, pytest.raises(MissingContentLink):
-        frame_reader.read(store.tenant_id, SESSION, record_owner(1), "request.messages[0]", ref)
+    with pytest.raises(ContentUnavailable), reader._read_frame(record_seqs=(1,)):
+        pass
+
+
+@pytest.mark.persistent_store
+@pytest.mark.parametrize("link_operation", ("read_links", "assert_link"))
+def test_durable_link_read_uses_one_snapshot_across_concurrent_delete(
+    content_setup,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+    link_operation: str,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    ref = _link_values(store, {"request.messages[0]": {"body": "snapshot-me"}})["request.messages[0]"]
+    assert isinstance(reader._store, _ValidatedDurableContentStore)
+    durable = reader._store._durable
+    assert isinstance(durable, CoreSQLContentStore)
+    require_live = durable._require_live
+    deleted = False
+
+    def delete_after_live(tenant_id: str, session_id: str) -> None:
+        nonlocal deleted
+        require_live(tenant_id, session_id)
+        if deleted:
+            return
+        deleted = True
+        _delete_session_from_other_connection(
+            database=database,
+            tenant_id=tenant_id,
+            provider=provider,
+            cipher=cipher,
+            ref=ref,
+            operation="forget",
+        )
+
+    monkeypatch.setattr(durable, "_require_live", delete_after_live)
+    if link_operation == "read_links":
+        links = durable.read_links(store.tenant_id, SESSION, record_seq=1)
+        assert any(link.slot == "request.messages[0]" and link.ref == ref for link in links)
+    else:
+        assert durable.assert_link(store.tenant_id, SESSION, ref, "request.messages[0]", record_seq=1) == ref
+    assert deleted
+    with pytest.raises(ContentUnavailable):
+        if link_operation == "read_links":
+            durable.read_links(store.tenant_id, SESSION, record_seq=1)
+        else:
+            durable.assert_link(store.tenant_id, SESSION, ref, "request.messages[0]", record_seq=1)
 
 
 @pytest.mark.sqlite_file
@@ -609,7 +704,7 @@ def test_get_rechecks_lifecycle_after_decrypt_before_caching_plaintext(
         phases.append("decrypt")
         plaintext = original_decrypt(key, nonce, ciphertext, aad)
         _delete_session_from_other_connection(
-            path=tmp_path / "session.sqlite",
+            database=tmp_path / "session.sqlite",
             tenant_id=store.tenant_id,
             provider=provider,
             cipher=cipher,
@@ -668,7 +763,7 @@ def test_direct_get_rejects_session_deleted_during_decrypt(
         assert provider.snapshot_depth == 0, "SQL snapshots must not cover decryption"
         plaintext = original_decrypt(key, nonce, ciphertext, aad)
         _delete_session_from_other_connection(
-            path=tmp_path / "session.sqlite",
+            database=tmp_path / "session.sqlite",
             tenant_id=store.tenant_id,
             provider=provider,
             cipher=cipher,
@@ -862,6 +957,211 @@ def test_record_batch_does_not_prefetch_unused_input_owner_links(content_setup, 
     assert len(hydrated) == len(records)
     assert any("record_seq IN" in statement for statement in statements)
     assert not any("input_id IN" in statement for statement in statements)
+
+
+def test_record_batch_uses_two_lifecycle_snapshots_and_disposes_frame(
+    content_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, _provider, _cipher = content_setup
+    pending = [fixture_record("turn_started", sid=SESSION, tid="t")]
+    for index in range(8):
+        input_id = f"batch-{index}"
+        push_fixture_input(store, SESSION, InboxItem(input_id, "user", {"content": input_id}))
+        stored_input = store.read_input(SESSION, input_id)
+        assert stored_input is not None
+        pending.append(
+            fixture_record(
+                "input_applied",
+                sid=SESSION,
+                input=stored_input.item.to_dict(),
+                input_digest=digest(stored_input.item.to_dict()),
+            )
+        )
+    append_fixture_records(
+        store,
+        SESSION,
+        pending,
+        consume_input_ids=tuple(f"batch-{index}" for index in range(8)),
+        commit_id="batch-snapshot-count",
+    )
+    records = tuple(stored for stored in store.read(SESSION).records if stored.record.kind == "input_applied")
+    assert len(records) == 8
+
+    assert isinstance(reader._store, _ValidatedDurableContentStore)
+    assert isinstance(reader._store._durable, CoreSQLContentStore)
+    backend = reader._store._durable._backend
+    original_snapshot = backend.read_snapshot
+    snapshot_calls = 0
+
+    @contextmanager
+    def counted_snapshot() -> Iterator[None]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        with original_snapshot():
+            yield
+
+    frames: list[_ContentReadFrame] = []
+    original_read_frame = reader._read_frame
+
+    @contextmanager
+    def capture_frame(*args, **kwargs) -> Iterator[DurableContentReader]:
+        with original_read_frame(*args, **kwargs) as frame_reader:
+            assert isinstance(frame_reader._store, _ValidatedContentFrame)
+            frames.append(frame_reader._store._frame)
+            yield frame_reader
+
+    monkeypatch.setattr(backend, "read_snapshot", counted_snapshot)
+    monkeypatch.setattr(reader, "_read_frame", capture_frame)
+    hydrated = hydrate_session_records(
+        records,
+        SessionHydration(reader, tenant_id=store.tenant_id, session_id=SESSION),
+    )
+
+    assert len(hydrated) == len(records)
+    assert snapshot_calls == 2
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame._session_key is None
+    assert frame._data_key is None
+    assert frame._plaintext == {}
+    assert frame._links == {}
+    assert frame._content == {}
+
+
+@pytest.mark.parametrize("deletion_state", ("forgetting", "purging"))
+def test_deleting_session_fences_frame_before_unwrap_or_decrypt(
+    content_setup,
+    deletion_state: str,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    push_fixture_input(
+        store,
+        SESSION,
+        InboxItem("fenced-delete", "user", {"content": {"body": "must-not-read"}}),
+    )
+    stored_input = store.read_input(SESSION, "fenced-delete")
+    assert stored_input is not None
+    append_fixture_records(
+        store,
+        SESSION,
+        (
+            fixture_record("turn_started", sid=SESSION, tid="t"),
+            fixture_record(
+                "input_applied",
+                sid=SESSION,
+                input=stored_input.item.to_dict(),
+                input_digest=digest(stored_input.item.to_dict()),
+            ),
+        ),
+        consume_input_ids=("fenced-delete",),
+        commit_id="fenced-delete",
+    )
+    records = tuple(stored for stored in store.read(SESSION).records if stored.record.kind == "input_applied")
+    assert len(records) == 1
+
+    with store.atomic():
+        store._rows(
+            "UPDATE sk_session SET deletion_state=%s WHERE tenant_id=%s AND session_id=%s",
+            (deletion_state, store.tenant_id, SESSION),
+        )
+    assert store._one(
+        "SELECT s.deletion_state,k.state FROM sk_session s "
+        "JOIN sk_session_key k ON k.tenant_id=s.tenant_id AND k.session_id=s.session_id "
+        "WHERE s.tenant_id=%s AND s.session_id=%s",
+        (store.tenant_id, SESSION),
+    ) == (deletion_state, "active")
+    provider.unwrap_calls = provider.restore_calls = cipher.decrypt_calls = 0
+
+    frame_yielded = False
+    with (
+        pytest.raises(ContentUnavailable, match="content session is fenced for deletion"),
+        reader._read_frame(record_seqs=(records[0].seq,), validate_each_read=False),
+    ):
+        frame_yielded = True
+    assert not frame_yielded
+    assert provider.unwrap_calls == 0
+    assert cipher.decrypt_calls == 0
+
+    with pytest.raises(ContentUnavailable, match="content session is fenced for deletion"):
+        hydrate_session_records(
+            records,
+            SessionHydration(reader, tenant_id=store.tenant_id, session_id=SESSION),
+        )
+    assert provider.unwrap_calls == 0
+    assert cipher.decrypt_calls == 0
+
+
+def test_record_batch_fails_when_session_is_deleted_before_normal_frame_exit(
+    content_setup,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _wrapped, reader, provider, cipher = content_setup
+    push_fixture_input(
+        store,
+        SESSION,
+        InboxItem("batch-delete", "user", {"content": {"body": "delete-before-exit"}}),
+    )
+    stored_input = store.read_input(SESSION, "batch-delete")
+    assert stored_input is not None
+    input_record = fixture_record(
+        "input_applied",
+        sid=SESSION,
+        input=stored_input.item.to_dict(),
+        input_digest=digest(stored_input.item.to_dict()),
+    )
+    append_fixture_records(
+        store,
+        SESSION,
+        (fixture_record("turn_started", sid=SESSION, tid="t"), input_record),
+        consume_input_ids=("batch-delete",),
+        commit_id="batch-delete",
+    )
+    records = tuple(stored for stored in store.read(SESSION).records if stored.record.kind == "input_applied")
+    assert len(records) == 1
+
+    ref = ContentRef.from_dict(stored_input.item.payload["content"])
+    original_decrypt = cipher.decrypt
+    deleted = False
+
+    def decrypt_then_delete(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        nonlocal deleted
+        plaintext = original_decrypt(key, nonce, ciphertext, aad)
+        if not deleted:
+            deleted = True
+            _delete_session_from_other_connection(
+                database=database,
+                tenant_id=store.tenant_id,
+                provider=provider,
+                cipher=cipher,
+                ref=ref,
+                operation="forget",
+            )
+        return plaintext
+
+    frames: list[_ContentReadFrame] = []
+    original_read_frame = reader._read_frame
+
+    @contextmanager
+    def capture_frame(*args, **kwargs) -> Iterator[DurableContentReader]:
+        with original_read_frame(*args, **kwargs) as frame_reader:
+            assert isinstance(frame_reader._store, _ValidatedContentFrame)
+            frames.append(frame_reader._store._frame)
+            yield frame_reader
+
+    monkeypatch.setattr(cipher, "decrypt", decrypt_then_delete)
+    monkeypatch.setattr(reader, "_read_frame", capture_frame)
+    with pytest.raises(ContentUnavailable):
+        hydrate_session_records(
+            records,
+            SessionHydration(reader, tenant_id=store.tenant_id, session_id=SESSION),
+        )
+
+    assert deleted
+    assert len(frames) == 1
+    assert frames[0]._data_key is None
+    assert frames[0]._plaintext == {}
 
 
 def test_frame_leaves_caller_transaction_open(content_setup, store_backend: str) -> None:

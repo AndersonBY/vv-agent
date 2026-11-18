@@ -1,6 +1,7 @@
 """M6 capacity bounds use the M5 PostgreSQL history and default lease settings."""
 
 import time
+from collections import Counter
 from contextlib import suppress
 
 import pytest
@@ -14,6 +15,7 @@ from support.s1_fixture_values import (
 )
 
 from vv_agent.budget import RunBudgetLimits
+from vv_agent.kernel import _driver_recovery
 from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.session.kernel import drive
 from vv_agent.session.records import digest
@@ -139,9 +141,37 @@ def test_capacity_2000_records(store, database):
         before = time.monotonic()
         drive(cold, "s", runtime=runtime(cold, database, []))
         elapsed = time.monotonic() - before
+    state, rows, _ = read_fixture_state(store, "s")
+    turn_rows = [row.record for row in rows if row.record.kind in {"turn_started", "turn_ended"}]
     assert elapsed <= 2, f"2000-record cold drive took {elapsed:.3f}s (limit 2s)"
-    assert read_fixture_state(store, "s")[0].active_turn_id is None
+    assert state.active_turn_id is None
+    assert turn_rows[-1].kind == "turn_ended" and turn_rows[-1].turn_id == tid
     assert tid is not None
+
+
+def test_recovery_hydrates_completed_tool_results_once(store, database, monkeypatch):
+    _, history = seed_history(store, database, 120)
+    expected = {
+        operation_id
+        for row in history
+        if row.kind == "op_completed" and (operation_id := row.operation_id) is not None and "/benchmark/tool/" in operation_id
+    }
+    assert expected
+
+    calls: Counter[str] = Counter()
+    result = _driver_recovery._result
+
+    def counted_result(driver, record):
+        assert record.operation_id is not None
+        calls[record.operation_id] += 1
+        return result(driver, record)
+
+    monkeypatch.setattr(_driver_recovery, "_result", counted_result)
+    with open_store(database) as cold:
+        drive(wrap_fixture_store(cold), "s", runtime=runtime(cold, database, []))
+
+    observed = {operation_id: calls[operation_id] for operation_id in expected}
+    assert observed == dict.fromkeys(expected, 1), observed
 
 
 def seed_completed_prefix(store, database, size=5000):

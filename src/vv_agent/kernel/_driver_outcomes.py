@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
-from vv_agent.kernel._boundary_hydration import hydrate_record
+from vv_agent.kernel._boundary_hydration import hydrate_input, hydrate_record
 from vv_agent.kernel._budget import BudgetObservation, CoreBudgetEvaluator
 from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot, RunBudgetLimits
 from vv_agent.kernel._canonical_json import canonical_json_bytes
@@ -413,13 +413,19 @@ def yield_results_steps(
             metadata: dict[str, Any] = {"yield_reason": "steer"}
             if stored_attempt.child_handle:
                 completed = self.fold.state.child_completions or {}
+
+                def logical_payload(receipt: Record) -> dict[str, Any]:
+                    if self.content_reader is None:
+                        return receipt._payload["input"]["payload"]
+                    try:
+                        self.stored_record(receipt)
+                    except RecordError:
+                        return hydrate_input(self, InboxItem(**receipt._payload["input"])).payload
+                    return hydrate_record(self, receipt)._payload["input"]["payload"]
+
+                current_operation = (plan.operation_id, plan.attempt)
                 logical_completed = {
-                    key: (
-                        hydrate_record(self, receipt)._payload["input"]["payload"]
-                        if self.content_reader is not None
-                        else receipt._payload["input"]["payload"]
-                    )
-                    for key, receipt in completed.items()
+                    key: logical_payload(receipt) for key, receipt in completed.items() if key[:2] == current_operation
                 }
                 handles = [
                     h

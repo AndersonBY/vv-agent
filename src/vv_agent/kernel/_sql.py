@@ -764,7 +764,8 @@ class SQLStore:
                 level,
             )
 
-        candidates: list[tuple[str, SessionRequirements]] = []
+        stored_input_sequences = {stored.item.input_id: stored.input_seq for stored in prefix.stored_inputs}
+        queued_candidates: list[tuple[int, str, SessionRequirements]] = []
         for input_id, applied in state.applied_inputs.items():
             input_item = InboxItem(**applied._payload["input"])
             if (
@@ -773,24 +774,54 @@ class SQLStore:
                 or input_item.kind not in {"user", "follow_up"}
             ):
                 continue
-            candidates.append((input_item.kind, self._inbox_requirements(input_item, inherited=bootstrap)))
+            if input_id not in stored_input_sequences:
+                raise LedgerIntegrityError("queued input is missing from the stored inbox prefix")
+            queued_candidates.append(
+                (
+                    stored_input_sequences[input_id],
+                    input_item.kind,
+                    self._inbox_requirements(input_item, inherited=bootstrap),
+                )
+            )
+
+        pending_candidates: list[tuple[int, int, str, SessionRequirements]] = []
         for stored in pending:
             input_item = stored.item
             if input_item.kind in {"user", "follow_up"} and input_item.target_turn_id is None:
-                candidates.append((input_item.kind, self._inbox_requirements(input_item, inherited=bootstrap)))
-
-        route = bootstrap
-        if candidates:
-            route = min(enumerate(candidates), key=lambda entry: (entry[1][0] != "user", entry[0]))[1][1]
+                pending_candidates.append(
+                    (
+                        stored.input_seq,
+                        input_item.available_ms,
+                        input_item.kind,
+                        self._inbox_requirements(input_item, inherited=bootstrap),
+                    )
+                )
 
         effective_selection = InboxItem(**state.model_selection._payload["input"]) if state.model_selection is not None else None
         for stored in pending:
             selection = stored.item
             if selection.kind != "model_selection":
                 continue
+            publication_candidates = [
+                (kind, requirements) for input_seq, kind, requirements in queued_candidates if input_seq < stored.input_seq
+            ]
+            publication_candidates.extend(
+                (kind, requirements)
+                for input_seq, available_ms, kind, requirements in pending_candidates
+                if input_seq < stored.input_seq and available_ms <= stored.received_ms
+            )
+            route = (
+                min(enumerate(publication_candidates), key=lambda entry: (entry[1][0] != "user", entry[0]))[1][1]
+                if publication_candidates
+                else bootstrap
+            )
             if selection.feature_level == 2 and self._inbox_requirements(selection).handler_version != route.handler_version:
                 continue
             effective_selection = None if selection.payload["selection"] is None else selection
+
+        candidates = [(kind, requirements) for _, kind, requirements in queued_candidates]
+        candidates.extend((kind, requirements) for _, _, kind, requirements in pending_candidates)
+        route = min(enumerate(candidates), key=lambda entry: (entry[1][0] != "user", entry[0]))[1][1] if candidates else bootstrap
         selected = self._selection_requirements(effective_selection) if effective_selection is not None else None
         capabilities = set(route.capabilities)
         level = route.level
@@ -985,12 +1016,14 @@ class SQLStore:
             if not verifier.verify(key_id, message, bytes(signature)):
                 raise LedgerIntegrityError(f"ledger checkpoint signature is invalid at seq {seq}")
 
-    def _verify_commits(self, session_id: str, chains: tuple[str, ...], *, through: int) -> None:
-        record_rows = self._rows(
-            "SELECT seq,record_id,digest,commit_id,commit_digest,commit_position FROM sk_record "
-            "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
-            (self.tenant_id, session_id, through),
-        )
+    def _verify_commits(
+        self,
+        session_id: str,
+        chains: tuple[str, ...],
+        *,
+        through: int,
+        record_rows: list[tuple[Any, ...]],
+    ) -> None:
         if len(record_rows) != len(chains):
             raise LedgerIntegrityError("ledger record count does not match the session head")
         records_by_seq = {row[0]: row for row in record_rows}
@@ -1337,12 +1370,13 @@ class SQLStore:
         previous = _initial_chain_digest(self.tenant_id, session_id)
         chains: list[str] = []
         stored_rows: list[tuple[Any, ...]] = []
+        commit_record_rows: list[tuple[Any, ...]] = []
         cached = self._cached_prefix(session_id)
         cursor = 0
         while cursor < through:
             rows = self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
-                "schema_version,kind,turn_id,operation_id,attempt,commit_position "
+                "schema_version,kind,turn_id,operation_id,attempt,commit_position,commit_digest "
                 "FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq>%s AND seq<=%s "
                 "ORDER BY seq LIMIT %s",
                 (self.tenant_id, session_id, cursor, through, _RECORD_READ_PAGE_SIZE),
@@ -1365,6 +1399,7 @@ class SQLStore:
                     operation_id,
                     attempt,
                     commit_position,
+                    commit_digest,
                 ) = row
                 if seq != expected_seq:
                     raise LedgerIntegrityError(f"log sequence gap or reorder at seq {expected_seq}; found {seq}")
@@ -1422,6 +1457,7 @@ class SQLStore:
                 previous = actual_chain
                 chains.append(actual_chain)
                 stored_rows.append((body, seq, commit_id, epoch, created_ms, checksum))
+                commit_record_rows.append((seq, record_id, checksum, commit_id, commit_digest, commit_position))
             cursor = expected_seq
         if cursor != through:
             raise LedgerIntegrityError(f"log sequence gap at seq {cursor + 1}")
@@ -1429,7 +1465,7 @@ class SQLStore:
         # append-only and committed with the session head, so bounded queries
         # validate that exact prefix without holding a transaction across hydration.
         self._verify_checkpoints(session_id, tuple(chains), through=through, verifier=verifier, signed=signed)
-        self._verify_commits(session_id, tuple(chains), through=through)
+        self._verify_commits(session_id, tuple(chains), through=through, record_rows=commit_record_rows)
         self._verify_head_bounds(session_id)
         return stored_rows, tuple(chains)
 
@@ -1516,7 +1552,7 @@ class SQLStore:
         *,
         expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
-        row = self._head(session_id)
+        row = self._require_live(session_id)
         self._require_reader_row(row)
         if expected_head is not None:
             if self._ledger_integrity_mode() == "unconfigured":
@@ -2964,9 +3000,10 @@ class SQLSessionTx:
             raise Conflict("duplicate record_id in batch")
         s = self.store
         s._require_live(session_id)
-        captured = s._head(session_id)
+        captured = s._head(session_id) if expected_head is not None else None
         latest_turn = next((record for record in reversed(records) if record.kind == "turn_started"), None)
         if expected_head is not None:
+            assert captured is not None
             if s._ledger_integrity_mode() == "unconfigured":
                 raise LedgerIntegrityError(
                     "expected_head appends require an explicit signed signer or allow_unsigned hash-only mode"
@@ -2978,19 +3015,6 @@ class SQLSessionTx:
                 head_seq=captured[0],
                 chain_digest=s._chain_anchor(session_id, captured[0]),
             )
-        prefix = None
-        reducer = None
-        # Commit replay needs no history or live lease. Prepare new immutable history
-        # before the write lock; locked admission below rechecks both CAS and epoch.
-        if expected_seq == captured[0] and not s._rows(
-            "SELECT 1 FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
-            (s.tenant_id, session_id, commit_id),
-        ):
-            # Execution authority is checked before preparing and decoding the
-            # immutable prefix. Reader-level validation cannot replace it.
-            s._require_worker_accepts_row(captured)
-            prefix = s._prefix(session_id, captured, require_worker=False)
-            reducer = prefix.reducer.fork()
         if self._lease_guard is not None:
             lease = self._lease_guard()
         with s._bound_append(lease) if self._lease_guard is not None else s._transaction():
@@ -3019,7 +3043,7 @@ class SQLSessionTx:
             )
             if old:
                 # Commit replay verifies the existing ledger without acquiring
-                # execution capability. New history follows the gated path above.
+                # execution capability.
                 s._prefix(session_id, row, require_worker=False)
                 stored = {
                     r.record_id: s._one(
@@ -3045,7 +3069,9 @@ class SQLSessionTx:
                 ):
                     raise Conflict("commit identity has different bytes")
                 return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
+            s._require_worker_accepts_row(row)
             prefix = s._prefix(session_id, row, require_worker=False)
+            reducer = prefix.reducer.fork()
             routing_before = s._require_routing_cache(session_id, row, prefix=prefix)
             s._require_worker_supports(
                 level=routing_before.requirements.level,
@@ -3075,8 +3101,6 @@ class SQLSessionTx:
             s._check_lease(session_id, lease, row, s._now())
             if expected_seq != row[0] or (expected_inbox_seq is not None and expected_inbox_seq != row[1]):
                 raise SequenceConflict("head or inbox watermark changed")
-            if prefix is None or reducer is None or row[2] != captured[2]:
-                raise SequenceConflict("head or epoch changed during append preparation")
             if prefix.head_digest != head_chain_digest:
                 raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
             sequences: list[tuple[str, int]] = []
@@ -3150,8 +3174,9 @@ class SQLSessionTx:
                     "UPDATE sk_inbox SET consumed_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (seq, s.tenant_id, session_id, input_id),
                 )
+            added = tuple(StoredRecord(record, seq, commit_id, lease.epoch, now) for _, record, seq in new)
             if new:
-                added_for_routing = tuple(StoredRecord(record, seq, commit_id, lease.epoch, now) for _, record, seq in new)
+                added_for_routing = added
                 stored_inputs = s._stored_inputs(session_id, row[1])
                 routing_prefix = _Prefix(
                     s.tenant_id,
@@ -3182,10 +3207,10 @@ class SQLSessionTx:
                 and state.due_ms == prefix.reducer.state.due_ms
                 and all(r.kind in {"input_applied", "usage_observed"} for _, r, _ in new),
             )
-            added = tuple(StoredRecord(r, seq, commit_id, lease.epoch, now) for _, r, seq in new)
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
             self._commit(session_id, commit_id, body, receipt.record_sequences, head, now)
             checksum = previous_chain
+            retained_inputs = stored_inputs if new else s._stored_inputs(session_id, row[1])
             s._retain_prefix(
                 _Prefix(
                     s.tenant_id,
@@ -3194,7 +3219,7 @@ class SQLSessionTx:
                     checksum,
                     reducer,
                     prefix.records + added,
-                    s._stored_inputs(session_id, row[1]),
+                    retained_inputs,
                 )
             )
             s._check_lease(session_id, lease, row, s._now())

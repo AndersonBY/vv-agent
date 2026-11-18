@@ -256,4 +256,4 @@ class RunHandle:
         return resume_turn(self.session_id, self.run_id, tenant_id=self.kernel.tenant_id)
 
 
-__all__ = ["RunHandle", "RunHandleController", "RunHandleState"]
+__all__ = ["RunHandle", "RunHandleController", "RunHandleState", "RunHandleStatus"]

@@ -371,7 +371,7 @@ def test_undeclared_local_child_keeps_steer_until_normal_result(store, tmp_path,
     [
         ("mixed", True),
         ("all_yieldable", False),
-        ("stale_generation", True),
+        ("stale_generation", False),
         ("turn_wait", True),
         ("empty_wait", False),
         ("stale_target", False),
@@ -451,13 +451,30 @@ def test_steer_held_fact_matches_core_whole_batch_eligibility(case, expected):
 
 
 @pytest.mark.parametrize(
-    ("one_turn", "target_tid", "generation", "expected_held"),
+    ("target_tid", "generation", "expected"),
     [
-        (False, "turn", 0, True),
-        (True, None, None, False),
+        (None, None, True),
+        ("ended-turn", None, False),
+        (None, 0, False),
+        ("ended-turn", 0, False),
     ],
 )
-def test_steer_held_fact_matches_real_core_apply_input(one_turn, target_tid, generation, expected_held):
+def test_steer_held_fact_rejects_stale_identity_without_active_turn(target_tid, generation, expected):
+    state = SimpleNamespace(active_turn_id=None, turns={}, operations={}, child_completions={})
+    item = InboxItem("late", "steer", {"content": "late"}, target_tid, generation)
+    assert _steer_held_in_state(state, item, one_turn=False) is expected
+
+
+@pytest.mark.parametrize(
+    ("one_turn", "target_tid", "generation", "expected_held", "expected_disposition"),
+    [
+        (False, "turn", 1, True, None),
+        (False, "turn", 0, False, "rejected"),
+        (True, None, None, False, "applied"),
+        (False, None, 99, False, "rejected"),
+    ],
+)
+def test_steer_held_fact_matches_real_core_apply_input(one_turn, target_tid, generation, expected_held, expected_disposition):
     turn_start = Record(
         "turn/s/current",
         "turn_started",
@@ -475,7 +492,7 @@ def test_steer_held_fact_matches_real_core_apply_input(one_turn, target_tid, gen
     )
     state = ExecutionState(
         session_id="s",
-        turns={"turn": Turn(turn_start)},
+        turns={"turn": Turn(turn_start, suspended=expected_held)},
         active_turn_id="turn",
         operations={"op": Operation(turn_id="turn", kind="tool", attempts={1: attempt})},
     )
@@ -510,7 +527,7 @@ def test_steer_held_fact_matches_real_core_apply_input(one_turn, target_tid, gen
     else:
         assert not expected_held
         assert isinstance(request, CommitInput)
-        assert request.records[0]._payload["disposition"] == "applied"
+        assert request.records[0]._payload["disposition"] == expected_disposition
         pending.close()
 
 

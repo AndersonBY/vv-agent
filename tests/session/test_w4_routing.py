@@ -99,7 +99,7 @@ def _level_one_input(input_id: str, kind: str = "user") -> InboxItem:
     )
 
 
-def _applied_input_record(session_id: str, turn_id: str, item: InboxItem, *, disposition: str) -> Any:
+def _applied_input_record(session_id: str, turn_id: str | None, item: InboxItem, *, disposition: str) -> Any:
     return make_record(
         "input_applied",
         session_id=session_id,
@@ -848,6 +848,216 @@ def test_idle_selection_derivation_follows_publish_order(store, sequence, expect
     assert handler == "handler/h2"
     assert capabilities == expected_capabilities
     assert active is None
+
+    missing_capabilities = tuple(capability for capability in expected_capabilities if capability != "model:new")
+    if missing_capabilities != expected_capabilities:
+        bound.configure_worker(
+            level=2,
+            handler_versions=("handler/h2",),
+            capabilities=missing_capabilities,
+        )
+        assert bound.claim_runnable(owner=f"missing-model-{'-'.join(sequence)}", ttl_ms=10_000, limit=1) == ()
+
+    bound.configure_worker(
+        level=2,
+        handler_versions=("handler/h2",),
+        capabilities=expected_capabilities,
+    )
+    claimed = bound.claim_runnable(owner=f"routing-{'-'.join(sequence)}", ttl_ms=10_000, limit=1)
+    assert len(claimed) == 1 and claimed[0].lease is not None
+    assert bound.release(claimed[0].lease)
+
+
+@pytest.mark.persistent_store
+def test_idle_selection_uses_queued_input_publication_sequence_across_turns(store) -> None:
+    bootstrap = _requirements("family:agent", "tool:base", handler="handler/h1")
+    bound = _create_session(store, "queued-selection", bootstrap=bootstrap)
+    bound.configure_worker(
+        level=2,
+        handler_versions=("handler/h1",),
+        capabilities=bootstrap.capabilities,
+    )
+    initial = _input("initial", "user", bootstrap)
+    follow = _input("follow", "follow_up", _requirements("tool:follow", handler="handler/h2"))
+    selection = _input("select", "model_selection", _requirements("model:new", handler="handler/h2"))
+
+    _push(bound, "queued-selection", initial)
+    lease = _acquire(bound, "queued-selection", "queued-selection-driver")
+    try:
+        initial_applied = _applied_input_record("queued-selection", None, initial, disposition="applied")
+        _append(
+            bound,
+            "queued-selection",
+            lease,
+            "initial-applied",
+            (initial_applied,),
+            consume_input_ids=(initial.input_id,),
+        )
+        _append(
+            bound,
+            "queued-selection",
+            lease,
+            "previous-turn-start",
+            (
+                make_record(
+                    "turn_started",
+                    session_id="queued-selection",
+                    turn_id="turn-previous",
+                    payload={
+                        "input_ids": [initial.input_id],
+                        "definition": content_ref("definition"),
+                        "definition_digest": digest(content_ref("definition")),
+                        "handler_version": "handler/h1",
+                        "budget": content_ref("budget"),
+                        "binding": "task",
+                        "generation": 1,
+                        "policy_digest": None,
+                        "requirements": bootstrap.to_dict(),
+                        "tokenizer_binding": None,
+                        "environment": None,
+                    },
+                ),
+            ),
+        )
+        _append(
+            bound,
+            "queued-selection",
+            lease,
+            "previous-turn-usage",
+            (
+                _usage_record("queued-selection", "meter-1", 1),
+                _usage_record("queued-selection", "meter-2", 1),
+                _usage_record("queued-selection", "meter-3", 1),
+            ),
+        )
+
+        _push(bound, "queued-selection", follow)
+        queued_record = _applied_input_record("queued-selection", "turn-previous", follow, disposition="queued")
+        with bound.atomic() as tx:
+            queued_receipt = tx.append(
+                "queued-selection",
+                lease=lease,
+                expected_seq=bound.read("queued-selection").head_seq,
+                commit_id="follow-queued",
+                records=(queued_record,),
+                consume_input_ids=(follow.input_id,),
+            )
+        _append(
+            bound,
+            "queued-selection",
+            lease,
+            "previous-turn-end",
+            (
+                make_record(
+                    "turn_ended",
+                    session_id="queued-selection",
+                    turn_id="turn-previous",
+                    payload={
+                        "status": "completed",
+                        "reason": None,
+                        "result": None,
+                        "adopted_results": [],
+                        "budget": content_ref("budget"),
+                        "unconfirmed_operations": [],
+                    },
+                ),
+            ),
+        )
+        _push(bound, "queued-selection", selection)
+    finally:
+        assert bound.release(lease)
+
+    assert queued_receipt.record_sequences == ((queued_record.record_id, 7),)
+    assert bound.read("queued-selection").inbox_seq == 3
+    assert _cache(bound, "queued-selection") == (
+        2,
+        "handler/h2",
+        ("model:new", "tool:follow"),
+        None,
+    )
+
+    bound.configure_worker(
+        level=2,
+        handler_versions=("handler/h2",),
+        capabilities=("tool:follow",),
+    )
+    assert bound.claim_runnable(owner="missing-model", ttl_ms=10_000, limit=1) == ()
+
+    bound.configure_worker(
+        level=2,
+        handler_versions=("handler/h2",),
+        capabilities=("model:new", "tool:follow"),
+    )
+    claimed = bound.claim_runnable(owner="with-model", ttl_ms=10_000, limit=1)
+    assert len(claimed) == 1 and claimed[0].lease is not None
+    assert bound.release(claimed[0].lease)
+
+
+@pytest.mark.parametrize("tamper", ["record", "commit", "checkpoint", "inbox_proof"])
+@pytest.mark.persistent_store
+def test_append_revalidates_locked_prefix_before_signing(store, tamper: str) -> None:
+    store.configure_input_admission(_HashSigner())
+    session_id = f"locked-prefix-{tamper}"
+    bound = _create_session(store, session_id)
+    _push(bound, session_id, _level_one_input("pending"))
+    lease = _acquire(bound, session_id, "locked-prefix-worker")
+    guard_calls = 0
+
+    def tamper_same_head_before_lock() -> Lease:
+        nonlocal guard_calls
+        guard_calls += 1
+        if tamper == "record":
+            bound._rows(
+                "UPDATE sk_record SET body=%s WHERE tenant_id=%s AND session_id=%s AND seq=1",
+                (b"tampered", bound.tenant_id, session_id),
+            )
+        elif tamper == "commit":
+            bound._rows(
+                "UPDATE sk_commit SET body=%s WHERE tenant_id=%s AND session_id=%s "
+                "AND commit_id=(SELECT commit_id FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=1)",
+                (b"tampered", bound.tenant_id, session_id, bound.tenant_id, session_id),
+            )
+        elif tamper == "checkpoint":
+            bound._rows(
+                "UPDATE sk_checkpoint SET chain_digest=%s WHERE tenant_id=%s AND session_id=%s AND seq=1",
+                ("0" * 64, bound.tenant_id, session_id),
+            )
+        else:
+            bound._rows(
+                "UPDATE sk_inbox SET admission_signature=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                (b"tampered", bound.tenant_id, session_id, "pending"),
+            )
+        return lease
+
+    try:
+        with bound.atomic() as tx:
+            tx.bind_lease_guard(tamper_same_head_before_lock)
+            with pytest.raises((LedgerIntegrityError, InputAdmissionProofError)):
+                tx.append(
+                    session_id,
+                    lease=lease,
+                    expected_seq=1,
+                    commit_id="must-not-sign",
+                    records=(_usage_record(session_id, "tampered-prefix", 1),),
+                )
+    finally:
+        bound.release(lease)
+
+    assert guard_calls == 1
+    assert (
+        bound._one(
+            "SELECT head_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (bound.tenant_id, session_id),
+        )[0]
+        == 1
+    )
+    assert (
+        bound._one(
+            "SELECT count(*) FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+            (bound.tenant_id, session_id, "must-not-sign"),
+        )[0]
+        == 0
+    )
 
 
 @pytest.mark.persistent_store

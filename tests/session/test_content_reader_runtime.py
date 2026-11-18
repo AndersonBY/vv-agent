@@ -231,3 +231,53 @@ def test_driver_without_reader_keeps_hydration_unavailable(tmp_path: Path) -> No
             driver.durable_shared_state()
         with pytest.raises(RecordError, match="content hydration is unavailable"):
             driver.hydrator_for(2)
+
+
+def test_reader_calls_legacy_store_without_link_validated_keyword() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class LegacyStore:
+        def assert_link(self, tenant_id, session_id, ref, slot, **owner):
+            calls.append(("assert_link", tenant_id, session_id, ref, slot, owner))
+            return ref
+
+        def get(self, tenant_id, session_id, ref):
+            calls.append(("get", tenant_id, session_id, ref))
+            return b"body"
+
+    reader = DurableContentReader(LegacyStore(), tenant_id=TENANT, session_id=SESSION)
+    ref = _stored_ref("reader-compat")
+    assert reader.read(TENANT, SESSION, record_owner(2), "definition", ref) == b"body"
+    assert [call[0] for call in calls] == ["assert_link", "get"]
+    assert calls[1] == ("get", TENANT, SESSION, ref)
+
+
+def test_reader_uses_link_validation_keyword_only_for_capable_frame() -> None:
+    from vv_agent.kernel._content_runtime import _ValidatedContentFrame
+
+    validation: list[bool] = []
+
+    class Frame:
+        def assert_link(self, tenant_id, session_id, ref, slot, **owner):
+            return ref
+
+        def get(self, tenant_id, session_id, ref, *, link_validated: bool = False):
+            validation.append(link_validated)
+            return b"body"
+
+    reader = DurableContentReader(_ValidatedContentFrame(Frame()), tenant_id=TENANT, session_id=SESSION)
+    assert reader.read(TENANT, SESSION, record_owner(2), "definition", _stored_ref("reader-frame")) == b"body"
+    assert validation == [True]
+
+
+def test_reader_does_not_catch_store_type_error() -> None:
+    class BrokenStore:
+        def assert_link(self, tenant_id, session_id, ref, slot, **owner):
+            return ref
+
+        def get(self, tenant_id, session_id, ref):
+            raise TypeError("store internals failed")
+
+    reader = DurableContentReader(BrokenStore(), tenant_id=TENANT, session_id=SESSION)
+    with pytest.raises(TypeError, match="store internals failed"):
+        reader.read(TENANT, SESSION, record_owner(2), "definition", _stored_ref("reader-broken"))

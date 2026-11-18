@@ -547,7 +547,7 @@ def test_events_advance_one_record_cursor_across_multiple_pages(monkeypatch) -> 
         monkeypatch.setattr(
             handle.kernel,
             "_snapshot_status",
-            lambda _store, _sid, _state, requested: (requested, True, None),
+            lambda _store, _sid, _state, requested, **_kwargs: (requested, True, None),
         )
         events = list(handle.events())
         assert len(page_cursors) > 2

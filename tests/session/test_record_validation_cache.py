@@ -29,7 +29,7 @@ from vv_agent.kernel._sql import LedgerIntegrityError, _extend_chain_digest
 from vv_agent.session import records
 from vv_agent.session.kernel import read_state
 from vv_agent.session.records import RecordError, digest
-from vv_agent.session.store import Conflict
+from vv_agent.session.store import Conflict, SequenceConflict
 
 from .conftest import open_store
 from .helpers import record
@@ -189,6 +189,87 @@ def test_warm_prefix_skips_only_record_body_normalization(store, monkeypatch, re
     assert record_decodes == 0
     assert "stored record body" not in contexts
     assert proof_calls == Counter({"_verify_checkpoints": 1, "_verify_commits": 1, "_verify_head_bounds": 1})
+
+
+@pytest.mark.persistent_store
+def test_authority_pass_reuses_verified_record_metadata(store, monkeypatch):
+    store.configure_input_admission(allow_unsigned=True)
+    create_fixture_session(store, "s")
+    append_fixture_records(store, "s", (turn_record(),), commit_id="single-record")
+
+    raw = store._root
+    direct_record_scans = []
+    original_rows = raw._rows
+
+    def counted_rows(query, params=()):
+        normalized = " ".join(query.upper().split())
+        if normalized.startswith("SELECT BODY,SEQ,") and " FROM SK_RECORD " in normalized:
+            direct_record_scans.append(query)
+        return original_rows(query, params)
+
+    monkeypatch.setattr(raw, "_rows", counted_rows)
+    store.read_state("s")
+
+    assert len(direct_record_scans) == 1, direct_record_scans
+
+
+def test_append_validates_current_locked_context_once(store, monkeypatch):
+    create_fixture_session(store, "stable")
+    create_fixture_session(store, "changed")
+    raw = store._root
+    stable_lease = store.acquire("stable", owner="stable-worker", ttl_ms=15000)
+    changed_lease = store.acquire("changed", owner="changed-worker", ttl_ms=15000)
+    assert stable_lease is not None and changed_lease is not None
+
+    prefix_calls: Counter[str] = Counter()
+    original_prefix = raw._prefix
+    counting = True
+
+    def counted_prefix(session_id, row, **kwargs):
+        if counting:
+            prefix_calls[session_id] += 1
+        return original_prefix(session_id, row, **kwargs)
+
+    monkeypatch.setattr(raw, "_prefix", counted_prefix)
+    clear_fixture_state_cache(store)
+    with store.atomic() as tx:
+        tx.append(
+            "stable",
+            lease=stable_lease,
+            expected_seq=1,
+            commit_id="stable",
+            records=(record("turn_started", sid="stable"),),
+        )
+    assert prefix_calls["stable"] == 1
+
+    def commit_before_lock():
+        nonlocal counting
+        counting = False
+        try:
+            with raw.atomic() as other_tx:
+                other_tx.append(
+                    "changed",
+                    lease=changed_lease,
+                    expected_seq=1,
+                    commit_id="concurrent",
+                    records=(record("turn_started", sid="changed"),),
+                )
+        finally:
+            counting = True
+        return changed_lease
+
+    clear_fixture_state_cache(store)
+    with store.atomic() as tx:
+        tx.bind_lease_guard(commit_before_lock)
+        with pytest.raises(SequenceConflict):
+            tx.append(
+                "changed",
+                lease=changed_lease,
+                expected_seq=1,
+                commit_id="stale",
+                records=(record("turn_started", sid="changed"),),
+            )
+    assert prefix_calls["changed"] == 1
 
 
 def test_record_body_reuse_is_bound_to_tenant_and_session(store):

@@ -175,12 +175,11 @@ def append_fixture_records(
 def read_fixture_state(store, session_id: str):
     """Return the logical hydrated state and rows for test assertions."""
 
-    page = store.read(session_id)
-    rows = page.records
+    _, rows, inbox_seq = store.read_state(session_id)
     hydration = hydration_for_session_store(store, session_id)
     hydrated = hydrate_records(rows, hydration)
     state = fold_hydrated_records(hydrated, rows, _fold_factory_for(store), hydration)
-    return state, hydrated, page.inbox_seq
+    return state, hydrated, inbox_seq
 
 
 def clear_fixture_state_cache(store) -> None:
