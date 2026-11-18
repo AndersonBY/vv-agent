@@ -13,7 +13,6 @@ import pytest
 from vv_agent.kernel import _driver_dispatch as dispatch_core
 from vv_agent.kernel import _driver_inputs as inputs
 from vv_agent.kernel import _driver_recovery as core
-from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.kernel._store import LeasePoll
 from vv_agent.session import kernel
@@ -149,12 +148,13 @@ def test_factory_handoff_controls_bind_new_token_without_driver_renewal(store, d
         adopt_confirmed(self, poll, expires_deadline=expires_deadline)
 
     binds: list[_Bind] = []
-    bind_turn = CoreDriver.bind_turn
+    bind_turn = kernel._Driver.bind_turn
 
     def observed_bind_turn(self) -> None:
         bind_turn(self)
         binding = self.scope.control_binding
         assert binding is not None
+        active_state = self.fold.state if self._logical_dirty else self.state
         binds.append(
             _Bind(
                 binding.turn_id,
@@ -163,7 +163,7 @@ def test_factory_handoff_controls_bind_new_token_without_driver_renewal(store, d
                 binding.token.cancelled,
                 binding.token.reason,
                 tuple(binding.applied_inputs),
-                binding.applied_inputs is self.state.applied_inputs,
+                binding.applied_inputs is active_state.applied_inputs,
             )
         )
 
@@ -234,7 +234,7 @@ def test_factory_handoff_controls_bind_new_token_without_driver_renewal(store, d
     monkeypatch.setattr(_LeaseHeartbeat, "heartbeat_finished", observed_heartbeat_finished)
     monkeypatch.setattr(_LeaseHeartbeat, "heartbeat_confirmed", observed_heartbeat_confirmed)
     monkeypatch.setattr(_Scope, "adopt_confirmed", observed_adopt)
-    monkeypatch.setattr(CoreDriver, "bind_turn", observed_bind_turn)
+    monkeypatch.setattr(kernel._Driver, "bind_turn", observed_bind_turn)
     monkeypatch.setattr(_Scope, "reset_token", observed_reset_token)
 
     try:
