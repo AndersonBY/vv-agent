@@ -551,6 +551,7 @@ class Runtime:
             sqlite_heartbeat_retry_delay_seconds=self.sqlite_heartbeat_retry_delay_seconds,
             model_timeout=self.model_timeout,
             tool_timeout=self.tool_timeout,
+            hook=self.hook,
             wake=self.wake,
             memory_manager=replace(self.memory_manager),
         )

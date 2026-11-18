@@ -1,6 +1,6 @@
 # Execution environments and workers
 
-Status: P1 design for W4 and W3 in P3; no worker or execution-environment implementation is delivered by this document.
+Status: W3 command identity and lookup bindings, the W4 worker/tick boundary, and the local process, container validation, and remote HTTP seams are implemented. Full provider-backed container/remote execution, lookup-driven recovery, and cross-worker acceptance remain follow-up work.
 Authority: approved plan `vv-agent-trusted-distributed-harness-plan-2026-11-11.md` (2026-11-11 v3), sections 1.4, W1, W3, W4, W6a, W9 and 8.
 Baseline: `vv-agent` 0.35.0 at `d2d02c238cc8600d30aa9af87366ccba8fedba93`; `vv-agent-contract` 38.0.0 at `1f4e6ff891996f1199f02e6b65edb1305ec7d8ae`. That repository's `support-matrix.json` at revision `13dffcfd61aa4aba800b7466295f1a7ca8675176` verifies adoption at the Python baseline. Canonical semantics are in its `docs/session-kernel.md` and record/inbox fixtures. Rust remains frozen on contract 23 / 0.21.x; its lock is unchanged.
 
@@ -12,7 +12,7 @@ EW-D1 is settled for this design: preserve `admit(plan)`, `admit(plan,summary)` 
 
 ## Canonical design decisions before implementation
 
-These decisions close the P1 interface questions. They define the contract allocation that P3 must perform; no W3/W4 implementation is claimed here.
+These decisions close the P1 interface questions. The implemented adapters enforce these identities, while the kernel's execution-store integration and full acceptance matrix continue to consume the same allocation.
 
 | ID | Settled choice | Contract-first allocation |
 | --- | --- | --- |

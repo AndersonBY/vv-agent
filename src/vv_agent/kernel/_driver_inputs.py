@@ -213,6 +213,48 @@ def _check_provider_result(self: CoreDriver, plan: Record, outcome: Definitive) 
     validate_provider_result(logical_plan, outcome, handle)
 
 
+def _validate_provider_evidence_reference(
+    driver: CoreDriver,
+    logical_item: InboxItem,
+    retained_item: InboxItem,
+    plan: Record,
+    turn,
+) -> None:
+    if logical_item.kind != "provider_evidence":
+        return
+    if logical_item.feature_level == 3:
+        if driver.content_reader is None:
+            raise ProviderResultInvalid()
+        try:
+            lookup = logical_item.payload["provider_lookup"]
+            binding = lookup["binding"]
+            identity = plan._payload["execution_identity"]
+            environment = turn.start._payload["environment"]
+            expected = {
+                "tenant_id": identity["tenant_id"],
+                "session_id": plan.session_id,
+                "operation_id": plan.operation_id,
+                "attempt": plan.attempt,
+                "request_digest": plan._payload["request_digest"],
+                "execution_id": identity["execution_id"],
+                "command_digest": plan._payload["command_digest"],
+                "environment_id": identity["environment_id"],
+                "generation": environment["generation"],
+                "provider_id": plan._payload["provider_binding"],
+            }
+            if (
+                type(lookup) is not dict
+                or type(binding) is not dict
+                or any(binding.get(key) != value for key, value in expected.items())
+            ):
+                raise ValueError("provider lookup binding mismatch")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderResultInvalid() from exc
+        return
+    if driver.content_reader is not None:
+        validate_reference_provider_handle(plan, retained_item.payload["handle"])
+
+
 def _hydratable_definition(value: Any) -> Any:
     if declared_content_ref(value) is not None or type(value) is not dict:
         return value
@@ -555,15 +597,19 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                 disposition, reason = "rejected", "untrusted or mismatched provider evidence"
             else:
                 try:
-                    if logical_item.kind == "provider_evidence" and self.content_reader is not None:
-                        validate_reference_provider_handle(attempt.execution_plan, item.payload["handle"])
+                    _validate_provider_evidence_reference(
+                        self,
+                        logical_item,
+                        item,
+                        attempt.execution_plan,
+                        self.state.turns[op.turn_id],
+                    )
                 except ProviderResultInvalid:
                     disposition, reason = "rejected", "provider_result_invalid"
-                    reference_invalid = True
                 else:
-                    reference_invalid = False
-                if not reference_invalid:
-                    if not (yield AuthenticateProvider(logical_item, item, attempt.execution_plan)):
+                    if logical_item.feature_level == 3:
+                        disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                    elif not (yield AuthenticateProvider(logical_item, item, attempt.execution_plan)):
                         disposition, reason = "rejected", "untrusted or mismatched provider evidence"
                     elif logical_item.kind == "provider_result":
                         retained_result = hydrate_record(self, attempt.result) if attempt.result is not None else None
@@ -612,8 +658,6 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                                 logical_item.payload["handle"],
                                 yield_on_steer=logical_item.payload.get("yield_on_steer", False),
                             )
-                            if self.content_reader is not None:
-                                validate_reference_provider_handle(attempt.execution_plan, item.payload["handle"])
                             validate_acceptance(attempt.execution_plan, accepted)
                             now = yield InputSetting.POLL_NOW
                             parked = self.record(

@@ -13,8 +13,9 @@ from typing import Any
 import regex as regex_engine
 
 from vv_agent.runtime import local_environment as local_environment_runtime
-from vv_agent.runtime.local_environment import expected_capabilities_for, local_environment_for
+from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
 from vv_agent.tools.base import ToolContext
+from vv_agent.tools.handlers.common import builtin_error
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace.artifacts import is_artifact_namespace_path
@@ -598,6 +599,8 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     with matching_request():
         try:
             return _search_files(context, arguments)
+        except LocalEnvironmentError as exc:
+            return builtin_error(str(exc), exc.code)
         except TimeoutError as exc:
             return _result_error(f"{exc} during file enumeration")
 

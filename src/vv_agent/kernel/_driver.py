@@ -365,16 +365,7 @@ class CoreDriver:
         operation = self.state.operations.get(record.operation_id or "")
         attempt = operation.attempts.get(record.attempt) if operation is not None and record.attempt is not None else None
         if attempt is not None and attempt.prepared is not None:
-            prepared = self.stored_record(attempt.prepared).record._payload
-            record = replace(
-                record,
-                payload=record._payload
-                | {
-                    key: prepared[key]
-                    for key in ("request", "request_digest", "tool", "op_kind", "provider_binding", "idempotency_key")
-                }
-                | {"budget_admission": {"hook_result": prepared["hook_result"], "shared_state": prepared["shared_state"]}},
-            )
+            record = attempt.execution_plan
         value = record._payload
         payload = value | {
             "request": self.hydrate_record_field(record, "request", value["request"]),

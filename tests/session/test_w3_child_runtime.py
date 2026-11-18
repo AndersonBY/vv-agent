@@ -1,18 +1,36 @@
-"""Trusted environment bindings stay on the level-3 parent runtime."""
+"""W3 child routing and worker feature levels share their durable evidence."""
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import replace
 from typing import Any
 
+import pytest
+
 from vv_agent import Agent, RunConfig
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.llm.base import LLMClient
 from vv_agent.model import ScriptedModelProvider, resolve_run_model
 from vv_agent.run_config import ToolPolicy
+from vv_agent.session.children import ChildSession, create_child
 from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode, NetworkMode
+from vv_agent.session.records import digest, make_record
 from vv_agent.session.runtime import Runtime, TrustedEnvironmentBinding
+from vv_agent.session.surfaces import SessionDriver
+
+from .helpers import (
+    append_fixture_records,
+    content_ref,
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_key_provider,
+    wrap_fixture_store,
+)
+from .helpers import (
+    record as fixture_record,
+)
 
 
 class _ToolProvider:
@@ -48,6 +66,48 @@ def _binding() -> TrustedEnvironmentBinding:
             "network_policy_digest": "3" * 64,
             "isolation_policy_digest": "4" * 64,
         },
+    )
+
+
+def _level_three_turn(session_id: str, *, turn_id: str = "parent/w3") -> Any:
+    definition = content_ref(f"definition/{session_id}/{turn_id}")
+    handler_version = "handler/v3"
+    return make_record(
+        "turn_started",
+        session_id=session_id,
+        turn_id=turn_id,
+        payload={
+            "input_ids": [],
+            "definition": definition,
+            "definition_digest": digest(definition),
+            "handler_version": handler_version,
+            "budget": content_ref(f"budget/{session_id}/{turn_id}"),
+            "binding": "task",
+            "generation": 1,
+            "policy_digest": None,
+            "requirements": {
+                "level": 3,
+                "handler_version": handler_version,
+                "capabilities": [],
+            },
+            "tokenizer_binding": None,
+            "environment": {
+                "descriptor": content_ref(f"environment/{session_id}/{turn_id}"),
+                "environment_id": f"environment/{session_id}",
+                "generation": 1,
+                "isolation": "container",
+                "network": "none",
+                "enforces_network_policy": True,
+                "enforces_resource_limits": True,
+                "persistent": False,
+                "environment_capabilities": ("command.execute",),
+                "capabilities_digest": None,
+                "network_policy_ref_digest": None,
+                "isolation_policy_ref_digest": None,
+                "operational_policy": content_ref(f"operational-policy/{session_id}/{turn_id}"),
+            },
+        },
+        feature_level=3,
     )
 
 
@@ -122,7 +182,126 @@ def test_for_agent_drops_w3_binding_from_ordinary_child_runtime(tmp_path):
     assert child_runtime.model_timeout == parent_runtime.model_timeout
     assert child_runtime.tool_timeout == parent_runtime.tool_timeout
     assert child_runtime.handler_version == parent_runtime.handler_version
+    assert child_runtime.hook is parent_runtime.hook
+    assert child_runtime.hook is Runtime.__dataclass_fields__["hook"].default
     assert child_runtime.config.workspace == child_config.workspace
     assert child_runtime.config.tool_policy == child_config.tool_policy
     assert child_runtime.config.shared_state == child_config.shared_state
     assert child_runtime.memory_manager == replace(parent_runtime.memory_manager)
+
+
+@pytest.mark.persistent_store
+def test_level_three_parent_admits_ordinary_child_from_child_ledger(store) -> None:
+    handler_version = "1"
+    child_requirements = SessionRequirements(2, handler_version, ())
+    provider = fixture_key_provider()
+    store._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
+    store.configure_worker(level=3, handler_versions=(handler_version, "handler/v3"), capabilities=())
+    store.configure_reader(level=3)
+    content_store = wrap_fixture_store(store, provider)
+    create_fixture_session(content_store, "parent", workspace="/tmp/parent")
+    append_fixture_records(
+        content_store,
+        "parent",
+        (_level_three_turn("parent"),),
+        commit_id="parent-w3",
+    )
+    assert store._one("SELECT level FROM sk_session WHERE session_id='parent'")[0] == 3
+
+    child_spec = replace(
+        fixture_child_spec(content_store, "parent", "child"),
+        feature_level=2,
+        bootstrap=child_requirements,
+    )
+    admission = fixture_record("op_planned", sid="parent", tid="parent/admission", oid="parent/op")
+    with content_store.atomic() as tx:
+        create_child(tx, ChildSession(child_spec, "ordinary child"), admission, 1)
+
+    assert store._one("SELECT level,handler_version FROM sk_session WHERE session_id='child'") == (2, handler_version)
+
+    store.configure_worker(level=2, handler_versions=(handler_version,), capabilities=())
+    claimed = store.claim_runnable(
+        owner="ordinary-level-two-worker",
+        ttl_ms=10_000,
+        limit=10,
+        work_kinds=("drive",),
+        projection_consumers=(),
+    )
+    assert [(item.work.session_id, item.work.kind) for item in claimed] == [("child", "drive")]
+    assert claimed[0].lease is not None
+    assert store.release(claimed[0].lease)
+
+
+@pytest.mark.persistent_store
+def test_level_three_worker_reads_and_discovers_level_three_work(store) -> None:
+    provider = fixture_key_provider()
+    store._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
+    store.configure_worker(level=3, handler_versions=("handler/v3",), capabilities=())
+    content_store = wrap_fixture_store(store, provider)
+    create_fixture_session(content_store, "level-three", workspace="/tmp/level-three")
+    append_fixture_records(
+        content_store,
+        "level-three",
+        (_level_three_turn("level-three"),),
+        commit_id="level-three-work",
+    )
+    store.configure_reader(level=2)
+
+    with closing(
+        SessionDriver(
+            store=store,
+            content_key_provider=provider,
+            worker_level=3,
+            handler_versions=("handler/v3",),
+            capabilities=(),
+        )
+    ) as driver:
+        assert driver.store.reader_level == 3
+        assert driver.store.worker_level == 3
+        assert driver.store.read("level-three", limit=10).head_seq == 2
+
+        # Reader configuration may widen read support, but it never selects or
+        # narrows the declared execution level.
+        store.configure_reader(level=2)
+        assert store.worker_level == 3
+        with driver._drive_store_factory() as drive:
+            assert drive.reader_level == 3
+            assert drive.worker_level == 3
+            claimed = drive.claim_runnable(
+                owner="level-three-worker",
+                ttl_ms=10_000,
+                limit=10,
+                work_kinds=("drive",),
+                projection_consumers=(),
+            )
+            assert [(item.work.session_id, item.work.kind) for item in claimed] == [("level-three", "drive")]
+            assert claimed[0].lease is not None
+            assert drive.release(claimed[0].lease)
+
+
+def test_for_agent_preserves_custom_runtime_hook(tmp_path):
+    model_provider = ScriptedModelProvider.new("scripted", "parent", [])
+    parent_agent = Agent("parent", "Parent.", model="parent")
+    parent_config = RunConfig(workspace=tmp_path / "parent", model_provider=model_provider)
+    llm, resolved = resolve_run_model(agent=parent_agent, run_config=parent_config)
+    hook_calls: list[str] = []
+
+    def host_hook(point: str, _record: Any) -> None:
+        hook_calls.append(point)
+
+    parent_runtime = Runtime(
+        parent_agent,
+        parent_config,
+        resolved,
+        llm,
+        lambda: nullcontext(None),
+        hook=host_hook,
+    )
+    child_runtime = parent_runtime.for_agent(
+        Agent("worker", "Worker.", model="child"),
+        RunConfig(workspace=tmp_path / "child"),
+    )
+
+    assert child_runtime.hook is host_hook
+    child_runtime.hook("after_drive", None)
+    assert hook_calls == ["after_drive"]

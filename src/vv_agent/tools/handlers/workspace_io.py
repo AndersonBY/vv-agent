@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.runtime import local_environment as local_environment_runtime
-from vv_agent.runtime.local_environment import expected_capabilities_for, local_environment_for
+from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
@@ -456,6 +456,8 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             result = _find_files(context, arguments)
             check_matching_budget()
             return result
+        except LocalEnvironmentError as exc:
+            return _workspace_error(str(exc), error_code=exc.code)
         except TimeoutError as exc:
             return _workspace_error(f"{exc} during file enumeration", error_code="regex_timeout")
 
@@ -510,6 +512,8 @@ def _find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
                 max_results=scan_limit,
                 scan_limit=scan_limit,
             )
+        except LocalEnvironmentError:
+            raise
         except ValueError as exc:
             message = str(exc)
             if message.startswith("path not found:"):

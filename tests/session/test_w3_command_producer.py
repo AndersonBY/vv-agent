@@ -14,6 +14,7 @@ from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.kernel._driver_planning import InvalidW3Command, InvalidW3CommandProvider
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.runtime.hooks import BeforeToolCallEvent
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.environments import (
     EnvironmentCapabilities,
@@ -137,6 +138,16 @@ class SwitchCallHook:
             dict(event.call.arguments),
             extra_content={"environment_id": "other-environment"},
         )
+
+
+class RewriteCommandHook:
+    def __init__(self, command: str) -> None:
+        self.command = command
+
+    def before_tool_call(self, event: BeforeToolCallEvent) -> ToolCall:
+        arguments = dict(event.call.arguments)
+        arguments["command"] = self.command
+        return ToolCall(event.call.id, event.call.name, arguments, extra_content=event.call.extra_content)
 
 
 def _agent(*, hooks=None, metadata: dict[str, Any] | None = None) -> Agent:
@@ -344,6 +355,67 @@ def test_level_three_bash_is_bound_after_preparation_and_submitted_after_start(
     cycle = result.raw_result.cycles[0]
     assert [call.to_dict() for call in cycle.tool_calls] == [{"id": "bash-1", "name": "bash", "arguments": COMMAND_ARGS}]
     assert cycle.tool_results[0].content == "provider-ok"
+
+
+@pytest.mark.persistent_store
+def test_before_tool_rewrite_commits_and_submits_only_the_final_command(
+    tmp_path: Path,
+    store_backend: str,
+    database: str | Path,
+) -> None:
+    del store_backend
+    key_provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "rewrite-keys.sqlite3")
+    provider = HostCommandProvider()
+    final_command = "printf 'rewritten\\n'"
+
+    result, records, hydrated, _, committed_at_start = _run(
+        database,
+        key_provider,
+        provider,
+        hooks=[RewriteCommandHook(final_command)],
+    )
+
+    assert result.final_output == "done"
+    assert committed_at_start == 0
+    assert len(provider.probe.submitted_plans) == len(provider.probe.submitted_calls) == 1
+    final_args = COMMAND_ARGS | {"command": final_command}
+    assert provider.probe.submitted_calls[0].to_dict() == {"id": "bash-1", "name": "bash", "arguments": final_args}
+    assert "op_started" in provider.probe.ledger_at_submit
+
+    plan = next(
+        record.record for record in hydrated if record.record.kind == "op_planned" and "/tool/" in str(record.record.operation_id)
+    )
+    prepared = next(
+        record.record
+        for record in hydrated
+        if record.record.kind == "op_prepared" and "/tool/" in str(record.record.operation_id)
+    )
+    submitted = provider.probe.submitted_plans[0]
+    envelope = submitted._payload["request"]["_vv_command_binding"]
+    assert envelope["command_spec"]["command_text"] == final_command
+    assert prepared._payload["request"] == submitted._payload["request"]
+    assert prepared._payload["command_digest"] == submitted._payload["command_digest"] == envelope["command_digest"]
+    assert prepared._payload["command_digest"] != plan._payload["command_digest"]
+    assert submitted._payload["request_digest"] == prepared._payload["request_digest"]
+    assert prepared._payload["request_digest"] != plan._payload["request_digest"]
+    assert submitted._payload["execution_identity"] == envelope["execution_identity"]
+    assert submitted._payload["execution_identity"]["execution_id"] == execution_id_for(
+        TENANT_ID,
+        _capabilities().environment_id,
+        stable_operation_key(SESSION_ID, plan.operation_id),
+    )
+    assert submitted._payload["idempotency_key"] == stable_operation_key(SESSION_ID, plan.operation_id)
+    assert submitted._payload["provider_binding"] == "bash"
+    assert sum(stored.record.kind == "op_started" and "/tool/" in str(stored.record.operation_id) for stored in records) == 1
+
+    with open_store(database) as store, store.atomic() as tx:
+        writer = SessionContentWriter(tx=tx, tenant_id=TENANT_ID, session_id=SESSION_ID, key_provider=key_provider)
+        expected_digest = writer.command_digest(
+            command_spec=envelope["command_spec"],
+            environment=envelope["environment"],
+            operational_policy=envelope["operational_policy"],
+        )
+    assert envelope["command_digest"] == expected_digest
 
 
 @pytest.mark.persistent_store
