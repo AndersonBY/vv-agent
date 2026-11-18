@@ -264,7 +264,7 @@ memory sessions. Defaults are a 15-second lease (`ttl_ms=15000`) and 250 ms
 heartbeats; the heartbeat must be at most one second and under half the TTL.
 
 For a callable runtime, `drive` uses the explicit
-`FACTORY_LEASE_TTL_MS = 15000` and `FACTORY_HEARTBEAT_SECONDS = 0.25` preparation
+`FACTORY_LEASE_TTL_MS = 60000` and `FACTORY_HEARTBEAT_SECONDS = 0.25` preparation
 policy. Before calling the factory, it opens `store.heartbeat_store()` and
 completes an initial renewal. Renewal continues during the factory; this TTL is
 not a build timeout. Every factory exit stops and joins that worker, and passes

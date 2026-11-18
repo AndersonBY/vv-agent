@@ -312,7 +312,7 @@ class Runtime:
     model_resolver: Callable[[dict[str, Any]], tuple[LLMClient, ResolvedModelConfig]] | None = None
     frozen_task: AgentTask | None = None
     handler_version: str = "1"
-    ttl_ms: int = 15000
+    ttl_ms: int = 60000
     heartbeat_seconds: float = 0.25
     poll_ms: int = 1000
     cancellation_grace: float = 0.25

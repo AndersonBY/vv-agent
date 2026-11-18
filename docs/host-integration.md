@@ -203,7 +203,7 @@ Lease renewal is not another executor. `ThreadLeaseKeeper` registers heartbeats
 with the process-wide scheduler. Each registration opens one independent
 heartbeat connection on first renewal, reuses it for the registration lifetime,
 and closes it when renewal stops. A heartbeat for runtime-factory preparation
-starts at 15 seconds (`FACTORY_LEASE_TTL_MS`) and renews every 250 ms
+starts at 60 seconds (`FACTORY_LEASE_TTL_MS`) and renews every 250 ms
 (`FACTORY_HEARTBEAT_SECONDS`). The runtime's own TTL applies before execution.
 A lost lease or changed epoch prevents use of the factory result, and every
 append still checks the database fence.
