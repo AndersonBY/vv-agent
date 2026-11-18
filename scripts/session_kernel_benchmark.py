@@ -6,6 +6,7 @@ import platform
 import statistics
 import sys
 import time
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,7 +18,15 @@ from psycopg import sql
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from tests.session.helpers import record
+from scripts.s1_fixture_values import (
+    content_ref,
+    fixture_content_reader,
+    fixture_key_provider_for_store,
+    principal,
+    push_fixture_input,
+    wrap_fixture_store,
+)
+from tests.session.helpers import read_fixture_state, record
 from tests.session.test_capacity import seed_history
 from tests.session.test_recovery_matrix import runtime
 from vv_agent.session.kernel import _Scope, drive, read_state
@@ -67,23 +76,31 @@ def benchmark_history(store, database, size, samples):
     lease = store.acquire("s", owner="steady-benchmark", ttl_ms=rt.ttl_ms)
     assert lease is not None and rt.ttl_ms == 15000 and rt.heartbeat_seconds == 0.25
     scope = _Scope(lease, rt)
-    scope.thread.start()
+    scope.start()
     steady_values = []
     try:
+        assert scope.ready.wait(5), "lease heartbeat did not become ready"
         read_state(store, "s")  # Warm this exact head/epoch before consecutive durable appends.
         for index in range(samples):
             addition = record("usage_observed", tid=tid, meter_id="steady", observation=index + 1)
             before = time.perf_counter()
-            with scope.lock:
-                assert not scope.lost
-                with store.atomic() as tx:
-                    tx.append("s", lease=scope.lease, expected_seq=size + index, commit_id=f"steady/{index}", records=(addition,))
+            with scope.committing() as current_lease, store.atomic() as tx:
+                tx.append(
+                    "s",
+                    lease=current_lease,
+                    expected_seq=size + index,
+                    commit_id=f"steady/{index}",
+                    records=(addition,),
+                )
             steady_values.append((time.perf_counter() - before) * 1000)
         assert not scope.lost
     finally:
-        scope.stop.set()
-        scope.thread.join(timeout=2)
-        store.release(scope.lease)
+        cleanup = suppress(Exception) if sys.exc_info()[0] is not None else nullcontext()
+        with cleanup:
+            try:
+                scope.close()
+            finally:
+                store.release(scope.lease)
     steady = {"samples_ms": steady_values, "median_ms": statistics.median(steady_values), "max_ms": max(steady_values)}
     with store.connection.transaction():
         store.connection.execute("DELETE FROM sk_record WHERE session_id='s' AND seq>%s", (size,))
@@ -92,8 +109,9 @@ def benchmark_history(store, database, size, samples):
     full_fold = measure(lambda: fold(logical, consumed_inputs=consumed), samples)
 
     def read_cold():
-        with PostgresStore.standalone(database) as fresh:
-            read_state(fresh, "s")
+        with PostgresStore.standalone(database) as raw_store:
+            cold_store = wrap_fixture_store(raw_store, fixture_key_provider_for_store(raw_store))
+            read_state(cold_store, "s")
 
     cold_read = measure(read_cold, samples)
     cold_drive = []
@@ -101,16 +119,17 @@ def benchmark_history(store, database, size, samples):
     for index in range(min(samples, 3)):
         # New connection and Runtime per invocation, with no retained reducer/cache.
         begin = time.perf_counter()
-        with PostgresStore.standalone(database) as fresh:
-            rt = runtime(database, [])
+        with PostgresStore.standalone(database) as raw_store:
+            cold_store = wrap_fixture_store(raw_store, fixture_key_provider_for_store(raw_store))
+            rt = runtime(database, [], content_reader=fixture_content_reader(cold_store, "s"))
             with patch.object(rt.llm, "complete", wraps=rt.llm.complete) as completion:
                 try:
-                    drive(fresh, "s", runtime=rt)
+                    drive(cold_store, "s", runtime=rt)
                 except LeaseLost as exc:
                     cold_failures.append({"sample": index, "error": type(exc).__name__, "reason": str(exc)})
                 assert completion.call_count == 0
         cold_drive.append((time.perf_counter() - begin) * 1000)
-        state, recovered, _ = read_state(store, "s")
+        state, recovered, _ = read_fixture_state(store, "s")
         ends = [r.record for r in recovered if r.record.kind == "turn_ended"]
         if ends:
             assert state.active_turn_id is None and len(ends) == 1
@@ -119,6 +138,7 @@ def benchmark_history(store, database, size, samples):
             assert any(f["sample"] == index for f in cold_failures), "drive returned without terminal or LeaseLost"
             cold_failures[-1]["elapsed_ms"] = cold_drive[-1]
         with store.connection.transaction():
+            store.connection.execute("DELETE FROM sk_content_link WHERE session_id='s' AND record_seq>%s", (size,))
             store.connection.execute("DELETE FROM sk_record WHERE session_id='s' AND seq>%s", (size,))
             store.connection.execute("DELETE FROM sk_commit WHERE session_id='s' AND head_seq>%s", (size,))
             store.connection.execute("UPDATE sk_session SET head_seq=%s,terminal_seq=0 WHERE session_id='s'", (size,))
@@ -147,9 +167,17 @@ def benchmark_runnable(store, size, samples):
     with store.atomic() as tx:
         for index in range(size):
             sid = f"catalog/{index:05d}"
-            tx.create(SessionSpec(sid, "benchmark", "/tmp"), consumers=("events",))
-            if index % 2 == 0:
-                tx.push(sid, InboxItem("input", "user", {"content": "go"}))
+            tx.create(
+                SessionSpec(
+                    sid,
+                    principal("catalog/benchmark", "service"),
+                    content_ref(f"{sid}/workspace"),
+                    attributes=content_ref(f"{sid}/attributes"),
+                ),
+                consumers=("events",),
+            )
+    for index in range(0, size, 2):
+        push_fixture_input(store, f"catalog/{index:05d}", InboxItem("input", "user", {"content": "go"}))
     store.connection.execute("ANALYZE sk_session")
     store.connection.execute("ANALYZE sk_inbox")
     store.connection.execute("ANALYZE sk_consumer")
@@ -207,8 +235,9 @@ def main():
                 name = f"vvsk_test_m5_bench_{uuid4().hex[:16]}"
                 admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
                 try:
-                    with PostgresStore.standalone(f"dbname={name}") as store:
-                        store.install_schema()
+                    with PostgresStore.standalone(f"dbname={name}") as raw_store:
+                        raw_store.install_schema()
+                        store = wrap_fixture_store(raw_store, fixture_key_provider_for_store(raw_store))
                         value = (
                             benchmark_history(store, f"dbname={name}", size, args.samples)
                             if category == "history"
