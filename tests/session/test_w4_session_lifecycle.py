@@ -39,6 +39,7 @@ from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
+from .conftest import open_store as configured_open_store
 from .helpers import (
     content_ref,
     create_fixture_session,
@@ -107,10 +108,13 @@ def test_bootstrap_requirements_never_authorize_worker_capabilities(tmp_path: Pa
     database = tmp_path / "capability-bound.sqlite3"
     with ExitStack() as stack:
         producer_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        producer_store.configure_input_admission(allow_unsigned=True)
         producer_store.install_schema()
         producer_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         consumer_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        consumer_store.configure_input_admission(allow_unsigned=True)
         compatible_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        compatible_store.configure_input_admission(allow_unsigned=True)
 
         def unexpected_factory(*_args):
             factory_calls.append(object())
@@ -227,10 +231,13 @@ def test_persisted_bootstrap_level_never_raises_worker_feature_level(tmp_path: P
     database = tmp_path / "format-bound.sqlite3"
     with ExitStack() as stack:
         producer_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        producer_store.configure_input_admission(allow_unsigned=True)
         producer_store.install_schema()
         producer_store._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
         consumer_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        consumer_store.configure_input_admission(allow_unsigned=True)
         explicit_store = stack.enter_context(SQLiteStore.standalone(str(database)))
+        explicit_store.configure_input_admission(allow_unsigned=True)
 
         def unexpected_factory(*_args):
             factory_calls.append(object())
@@ -385,6 +392,7 @@ def test_runtime_factory_binds_host_admission_to_worker_transaction(tmp_path: Pa
     holder: dict[str, SessionDriver] = {}
 
     with SQLiteStore.standalone(str(tmp_path / "admission.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         store._rows("CREATE TABLE host_admission (marker TEXT NOT NULL)")
 
@@ -511,6 +519,7 @@ def test_public_session_driver_passes_preclaimed_lease_to_model_drive(monkeypatc
 
     monkeypatch.setattr(CoreSQLiteStore, "acquire", unexpected_acquire)
     with SQLiteStore.standalone(str(tmp_path / "lease.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"w" * 32))
         try:
@@ -540,6 +549,7 @@ def test_worker_support_includes_statically_reachable_agent_tools(tmp_path: Path
     config = RunConfig(model_provider=ScriptedModelProvider.new("scripted", "m", []))
 
     with SQLiteStore.standalone(str(tmp_path / "support.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         driver = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"s" * 32))
         try:
@@ -610,6 +620,7 @@ def test_after_commit_watermark_uses_batch_head(tmp_path: Path) -> None:
     provider = fixture_key_provider()
     database = tmp_path / "watermark.sqlite"
     with SQLiteStore.standalone(str(database)) as root:
+        root.configure_input_admission(allow_unsigned=True)
         root.install_schema()
         store = wrap_fixture_store(root, provider)
         create_fixture_session(store, "watermark", consumers=())
@@ -663,6 +674,7 @@ def test_after_commit_watermark_uses_batch_head(tmp_path: Path) -> None:
 
 def test_driver_does_not_mutate_unowned_projection_consumers(tmp_path: Path) -> None:
     with SQLiteStore.standalone(str(tmp_path / "consumers.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         driver = SessionDriver(
             store=store,
@@ -711,12 +723,13 @@ def test_explicit_open_store_factory_is_used_for_worker_drive(tmp_path: Path) ->
     database = tmp_path / "custom-drive.sqlite"
     opened = 0
     with SQLiteStore.standalone(str(database)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
 
         def open_store():
             nonlocal opened
             opened += 1
-            return SQLiteStore.standalone(str(database))
+            return configured_open_store(database)
 
         driver = SessionDriver(
             store=store,
@@ -914,6 +927,7 @@ def test_custom_factory_extra_capabilities_feed_l2_bootstrap_and_worker(
     holder: dict[str, SessionDriver] = {}
 
     with SQLiteStore.standalone(str(tmp_path / "custom-factory.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
 

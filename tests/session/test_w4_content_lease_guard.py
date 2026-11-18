@@ -143,6 +143,7 @@ def test_content_tx_statement_timeout_rolls_back_business_parent_and_child(store
     from psycopg.errors import QueryCanceled
 
     raw_host = HostPostgresStore(store.connection)
+    raw_host.configure_input_admission(allow_unsigned=True)
     host = wrap_fixture_store(raw_host)
     host._rows("CREATE TABLE business_child (id integer PRIMARY KEY)")
     start(host)
