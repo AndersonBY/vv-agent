@@ -532,6 +532,64 @@ def test_postgres_heartbeat_does_not_generalize_storage_errors():
     assert caught.value is failure
 
 
+def test_postgres_success_after_old_safety_deadline_is_not_confirmed():
+    class Clock:
+        def __init__(self) -> None:
+            self.mono = 10.0
+
+        def now_ms(self):
+            return 1_000
+
+        def monotonic(self):
+            return self.mono
+
+        def monotonic_ns(self):
+            return int(self.mono * 1_000_000_000)
+
+        def sleep(self, seconds):
+            del seconds
+
+    lease = Lease("s", "owner", 1, 2_000)
+    receipt = LeasePoll(lease, 1_000, 0, ())
+    clock = Clock()
+
+    class Postgres(CorePostgresStore):
+        def __init__(self):
+            pass
+
+        def _now(self):
+            return receipt.db_now_ms
+
+        def _rows(self, query, params=()):
+            del query, params
+            return []
+
+        def renew(self, lease, *, ttl_ms):
+            assert lease.session_id == "s" and ttl_ms == 1_000
+            assert clock.monotonic() < heartbeat.safety_deadline
+            clock.mono = heartbeat.safety_deadline + 0.01
+            return receipt
+
+    heartbeat = _LeaseHeartbeat(
+        lease,
+        lambda: contextmanager(lambda: (yield))(),
+        1_000,
+        0.04,
+        clock=clock,
+        now_ms=1_000,
+    )
+    assert receipt.db_now_ms < receipt.lease.expires_at_ms
+    assert heartbeat.safety_deadline == pytest.approx(10.5)
+
+    with pytest.raises(LeaseLost, match="safety deadline"):
+        heartbeat.heartbeat_once(Postgres())
+
+    assert heartbeat.lost
+    assert heartbeat.latest_poll is None
+    assert not heartbeat.successful_ready
+    assert not heartbeat.ready.is_set()
+
+
 @pytest.mark.sqlite_file
 def test_short_foreground_write_lock_retries_without_reinvoking_model_callback(tmp_path, monkeypatch):
     database = tmp_path / "foreground.sqlite"

@@ -38,6 +38,23 @@ def _heartbeat_for(path, session_id, *, ttl_ms: int, heartbeat_seconds: float) -
 
 
 @pytest.mark.sqlite_file
+def test_registration_thread_owns_schedule_without_shared_scheduler(tmp_path):
+    database = tmp_path / "independent-schedule.sqlite"
+    heartbeat = _heartbeat_for(database, "s", ttl_ms=4_000, heartbeat_seconds=0.04)
+    keeper = _SharedLeaseKeeper()
+    heartbeat.lease_keeper = keeper
+    try:
+        heartbeat.start()
+        assert heartbeat.ready.wait(3) and heartbeat.successful_ready
+
+        thread_names = {thread.name for thread in threading.enumerate()}
+        assert "session-heartbeat" in thread_names
+        assert "session-heartbeat-scheduler" not in thread_names
+    finally:
+        heartbeat.close()
+
+
+@pytest.mark.sqlite_file
 def test_slow_renewal_barrier_case_does_not_starve_foreground_writer(tmp_path, monkeypatch):
     """A deterministic barrier places renewal work inside the interval."""
 
