@@ -39,6 +39,7 @@ PROVIDER_HANDLE_JOB_ID = "provider.handle.job_id"
 PROVIDER_HANDLE_EVIDENCE = "provider.handle.evidence"
 PROVIDER_HANDLE_QUERY_REF = "provider.handle.query_ref"
 PROVIDER_HANDLE_CANCEL_REF = "provider.handle.cancel_ref"
+PROVIDER_LOOKUP = "provider_lookup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +175,7 @@ _INPUT_SLOTS: Mapping[str, tuple[ContentSlot, ...]] = {
         ContentSlot(("handle", "evidence"), PROVIDER_HANDLE_EVIDENCE),
         ContentSlot(("handle", "query_ref"), PROVIDER_HANDLE_QUERY_REF),
         ContentSlot(("handle", "cancel_ref"), PROVIDER_HANDLE_CANCEL_REF),
+        ContentSlot(("provider_lookup",), PROVIDER_LOOKUP),
     ),
 }
 
@@ -209,6 +211,7 @@ def input_record_slots(kind: str) -> tuple[ContentSlot, ...]:
     return tuple(
         ContentSlot(("input", "payload", *item.path), f"input.payload.{'.'.join(item.path)}")
         for item in input_content_slots(kind)
+        if item.slot != PROVIDER_LOOKUP
     )
 
 
@@ -342,6 +345,7 @@ def make_record_before_publication(
     turn_id: str | None = None,
     operation_id: str | None = None,
     attempt: int | None = None,
+    feature_level: int = 1,
 ) -> Record:
     """Build a content record that must pass through ``publish_record_content`` before encoding."""
 
@@ -364,6 +368,7 @@ def make_record_before_publication(
             operation_id=operation_id,
             attempt=attempt,
             payload=payload,
+            feature_level=feature_level,
         )
     return Record(
         record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
@@ -373,6 +378,7 @@ def make_record_before_publication(
         operation_id,
         attempt,
         payload,
+        feature_level=feature_level,
     )
 
 
@@ -384,6 +390,7 @@ def make_retained_record_before_publication(
     turn_id: str | None = None,
     operation_id: str | None = None,
     attempt: int | None = None,
+    feature_level: int = 1,
 ) -> Record:
     """Rebuild a committed record while preserving refs at closed content slots."""
 
@@ -401,6 +408,7 @@ def make_retained_record_before_publication(
         operation_id=operation_id,
         attempt=attempt,
         payload=retained,
+        feature_level=feature_level,
     )
 
 

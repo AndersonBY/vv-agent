@@ -429,7 +429,7 @@ PROVIDER_EVIDENCE_LEVEL_3 = closed(
     operation_id=TEXT,
     attempt=POS,
     request_digest=HASH,
-    lookup=PROVIDER_LOOKUP_RESULT,
+    provider_lookup=CONTENT_REF,
 )
 
 INPUT_SCHEMA = closed(
@@ -652,6 +652,18 @@ OP_PLANNED_LEVEL_3 = closed(
     execution_identity=EXECUTION_IDENTITY,
     command_digest=HASH,
 )
+OP_PREPARED_LEVEL_3 = closed(
+    request=CONTENT_REF,
+    request_digest=HASH,
+    op_kind={"const": "tool"},
+    tool=CONTENT_REF,
+    provider_binding=TEXT,
+    idempotency_key=TEXT,
+    hook_result=nullable(CONTENT_REF),
+    shared_state=CONTENT_REF,
+    policy_decision=POLICY_DECISION,
+    command_digest=HASH,
+)
 
 RECORD_SCHEMA = closed(
     schema_version={"const": "S1"},
@@ -680,7 +692,7 @@ RECORD_SCHEMA_LEVEL_3 = closed(
     schema_version={"const": "S1"},
     feature_level={"const": 3, "type": "integer"},
     record_id=TEXT,
-    kind=enum("turn_started", "op_planned"),
+    kind=enum("turn_started", "op_planned", "op_prepared"),
     session_id=TEXT,
     turn_id=NULLABLE_TEXT,
     operation_id=NULLABLE_TEXT,
@@ -721,6 +733,7 @@ SCHEMAS = (
     PROVIDER_EVIDENCE_LEVEL_3,
     TURN_STARTED_LEVEL_3,
     OP_PLANNED_LEVEL_3,
+    OP_PREPARED_LEVEL_3,
     RESULT_ID,
     CHILD_ADMISSION,
     APP_SERVER_ATTRIBUTES,

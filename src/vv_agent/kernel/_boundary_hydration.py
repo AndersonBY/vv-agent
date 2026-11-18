@@ -46,7 +46,7 @@ from ._hydration import (
     _parse_principal_attributes,
     reference_digest,
 )
-from ._records import InboxItem, Record, copy_json
+from ._records import InboxItem, Record, copy_json, validate_provider_lookup_evidence
 from ._reducer import Fold, TransitionError, logical_inputs
 from ._state import ExecutionState
 from ._store import StoredRecord
@@ -312,6 +312,8 @@ def _hydrate_session_input(
     """Hydrate one input through an already owner-bound local reader."""
 
     payload = hydrate_session_input_payload(item, hydration)
+    if item.feature_level == 3 and item.kind == "provider_evidence":
+        validate_provider_lookup_evidence(item, payload["provider_lookup"])
     actor = copy_json(item.actor)
     if include_actor_attributes and actor is not None:
         attributes = _path_get(actor, ("attributes",))
@@ -375,7 +377,22 @@ def hydrate_session_record_payload(
             path,
             projected,
         )
+    if include_input and _lookup_input_owner(record) is not None:
+        if hydration is None or record.session_id != hydration.session_id:
+            raise MissingContentLink("applied lookup requires its original session's inbox reader")
+        item = InboxItem(**source["input"])
+        # The proof and encrypted lookup remain bound to the original inbox row.
+        logical = _hydrate_session_input(item, hydration, include_actor_attributes=False)
+        payload["input"]["payload"] = logical.payload
     return payload
+
+
+def _lookup_input_owner(record: Record) -> str | None:
+    if record.kind == "input_applied":
+        item = record._payload["input"]
+        if item["kind"] == "provider_evidence" and item["feature_level"] == 3:
+            return item["input_id"]
+    return None
 
 
 def _retain_record_payload(record: Record, body: bytes, payload: dict[str, Any]) -> None:
@@ -458,6 +475,9 @@ def _hydrate_session_records_batch(
         )
     with hydration.reader._read_frame(
         record_seqs=(stored.seq for stored in sources),
+        input_ids=(
+            input_id for stored in sources if include_input and (input_id := _lookup_input_owner(stored.record)) is not None
+        ),
         validate_each_read=False,
     ) as reader:
         framed = replace(hydration, reader=reader, _validated_json_refs=set())
