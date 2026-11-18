@@ -28,6 +28,7 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> None:
 def _lease_for(path, session_id: str):
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         create_fixture_session(wrap_fixture_store(store), session_id, consumers=())
         lease = store.acquire(session_id, owner=f"owner-{session_id}", ttl_ms=4_000)
     assert lease is not None
@@ -65,6 +66,7 @@ def test_keeper_reuses_one_heartbeat_connection_for_repeated_renewals(tmp_path, 
     @contextmanager
     def tracked_store():
         with heartbeat_store() as store:
+            store.configure_input_admission(allow_unsigned=True)
             opened_threads.append(threading.get_ident())
             opened_connections.append(id(store.connection))
             opened_stores.append(store)
@@ -123,6 +125,7 @@ def test_blocked_heartbeat_resource_close_keeps_lease_unreleased(tmp_path, monke
         nonlocal connection
         manager = SQLiteStore.standalone(str(database))
         store = manager.__enter__()
+        store.configure_input_admission(allow_unsigned=True)
         connection = store.connection
         opened_threads.append(threading.get_ident())
         try:
@@ -164,6 +167,7 @@ def test_blocked_heartbeat_resource_close_keeps_lease_unreleased(tmp_path, monke
         finally:
             if stopped:
                 with SQLiteStore.standalone(str(database)) as verifier:
+                    verifier.configure_input_admission(allow_unsigned=True)
                     assert verifier.release(lease)
                     assert not verifier.release(lease)
 
@@ -257,6 +261,7 @@ def test_heartbeat_resource_close_error_propagates_from_close(tmp_path):
     @contextmanager
     def failing_store():
         with SQLiteStore.standalone(str(database)) as store:
+            store.configure_input_admission(allow_unsigned=True)
             yield store
         raise failure
 

@@ -20,6 +20,7 @@ from .test_recovery_matrix import records_of, runtime, start
 def no_wait_heartbeat_store(database, *, clock=None):
     with SQLiteStore.standalone(str(database), clock=clock) as store:
         # Keep lock-contention tests within the heartbeat retry budget.
+        store.configure_input_admission(allow_unsigned=True)
         store.connection.execute("PRAGMA busy_timeout=0")
         yield store
 
