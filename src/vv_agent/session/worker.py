@@ -77,12 +77,15 @@ class LocalWorker:
         self._state = Condition()
         self._commands: Queue[ObservationCallback] = Queue()
         self._pending_observations = 0
+        self._pending_wake_sessions: set[str] = set()
+        self._scanning_wake_sessions: frozenset[str] = frozenset()
         self._executor: ThreadPoolExecutor | None = None
         self._inflight: Future[_DriveCompletion] | None = None
         self._inflight_lease: Lease | None = None
         self._drive_thread_ident: int | None = None
         self._thread: Thread | None = None
         self._last_error: Exception | None = None
+        self._coordinate_pass = 0
         self._name = name
         self._owner = f"local-worker/{uuid4().hex}"
 
@@ -102,6 +105,16 @@ class LocalWorker:
     def last_error(self) -> Exception | None:
         with self._state:
             return self._last_error
+
+    @property
+    def coordinate_pass(self) -> int:
+        with self._state:
+            return self._coordinate_pass
+
+    @property
+    def active_wake_sessions(self) -> frozenset[str]:
+        with self._state:
+            return frozenset(self._pending_wake_sessions | self._scanning_wake_sessions)
 
     def start(self) -> None:
         with self._state:
@@ -128,10 +141,12 @@ class LocalWorker:
         return self._executor
 
     def wake(self, session_id: str) -> None:
-        """Wake the coordinator; ``session_id`` is only a hint and may be dropped."""
+        """Wake the coordinator and retain the session until a scan owns the hint."""
 
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
+        with self._state:
+            self._pending_wake_sessions.add(session_id)
         self._wake.set()
 
     def post_observation(self, callback: ObservationCallback) -> None:
@@ -170,6 +185,29 @@ class LocalWorker:
                 if remaining is not None and remaining <= 0:
                     raise TimeoutError("LocalWorker did not become idle before timeout")
                 self._state.wait(remaining)
+
+    def wait_for_coordinate_pass(self, previous: int, timeout: float | None = None) -> bool:
+        """Wait until the coordinator completes a pass after ``previous``."""
+
+        if type(previous) is not int or previous < 0:
+            raise ValueError("previous must be a nonnegative integer")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0):
+            raise ValueError("timeout must be a nonnegative number or None")
+        deadline = None if timeout is None else monotonic() + float(timeout)
+        with self._state:
+            thread = self._thread
+            if thread is None:
+                return False
+            if current_thread() is thread:
+                raise RuntimeError("LocalWorker coordinator cannot wait for itself")
+            while self._coordinate_pass <= previous:
+                if not thread.is_alive():
+                    return False
+                remaining = None if deadline is None else deadline - monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("LocalWorker did not complete a coordinator pass before timeout")
+                self._state.wait(remaining)
+            return True
 
     def stop(self) -> None:
         self._stop.set()
@@ -393,6 +431,18 @@ class LocalWorker:
             error = self._combine_errors(error, exc)
         return error
 
+    def _scan_pass(self, store: SessionStore) -> Exception | None:
+        with self._state:
+            self._scanning_wake_sessions = frozenset(self._pending_wake_sessions)
+            self._pending_wake_sessions.clear()
+        try:
+            return self._periodic_scan(store)
+        finally:
+            with self._state:
+                self._scanning_wake_sessions = frozenset()
+                self._coordinate_pass += 1
+                self._state.notify_all()
+
     def _scan(self) -> None:
         """Run one local scan and wait for its drive claim to be finished."""
 
@@ -408,7 +458,7 @@ class LocalWorker:
                 error = self._combine_errors(
                     self._reap_inflight(store),
                     self._drain_observations(store),
-                    self._periodic_scan(store),
+                    self._scan_pass(store),
                 )
                 while True:
                     with self._state:
@@ -517,7 +567,7 @@ class LocalWorker:
                 self._record_error(error)
                 continue
 
-            scan_error = self._periodic_scan(store)
+            scan_error = self._scan_pass(store)
             error = self._combine_errors(error, scan_error)
             with self._state:
                 self._last_error = error

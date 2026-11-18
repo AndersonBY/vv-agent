@@ -33,7 +33,7 @@ from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
 from vv_agent.kernel._sql import LedgerIntegrityError, _initial_chain_digest
-from vv_agent.kernel._sqlite import SQLiteStore
+from vv_agent.kernel._sqlite import DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS, SQLiteStore
 from vv_agent.kernel._store import LeaseLost
 from vv_agent.kernel._tool_values import ToolCall
 
@@ -79,10 +79,24 @@ def sqlite_state_version(store, sid):
 
 
 class SimSQLiteStore(SQLiteStore):
-    def __init__(self, path, *, fold_factory=None, clock=None):
+    def __init__(
+        self,
+        path,
+        *,
+        fold_factory=None,
+        clock=None,
+        busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms=DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ):
         selected_fold_factory = fold_factory or _DEFAULT_FOLD_FACTORY
         selected_clock = clock or SimClock()
-        super().__init__(path, fold_factory=selected_fold_factory, clock=selected_clock)
+        super().__init__(
+            path,
+            fold_factory=selected_fold_factory,
+            clock=selected_clock,
+            busy_timeout_ms=busy_timeout_ms,
+            heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms,
+        )
         self._sim_verified_ledger_cache = None
 
     def _verified_records(self, session_id, through, **kwargs):

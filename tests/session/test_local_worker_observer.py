@@ -33,10 +33,12 @@ def _wait_for(predicate, timeout: float = 3.0) -> None:
     raise AssertionError("condition was not met before timeout")
 
 
-def _open_store(database: str | Path):
-    if isinstance(database, Path):
-        return SQLiteStore.standalone(str(database))
-    return PostgresStore.standalone(database)
+@contextmanager
+def _open_store(database: str | Path) -> Iterator[SQLiteStore | PostgresStore]:
+    manager = SQLiteStore.standalone(str(database)) if isinstance(database, Path) else PostgresStore.standalone(database)
+    with manager as store:
+        store.configure_input_admission(allow_unsigned=True)
+        yield store
 
 
 @contextmanager
@@ -652,6 +654,56 @@ def test_wait_idle_does_not_wait_for_a_remote_lease(tmp_path: Path) -> None:
         finally:
             assert worker.close(timeout=2)
             assert store.release(remote)
+
+
+@pytest.mark.sqlite_file
+def test_wake_session_remains_visible_until_its_coordinate_pass_finishes(tmp_path: Path) -> None:
+    database = tmp_path / "wake-handoff.sqlite"
+    first_enter, first_release, second_enter, second_release = Event(), Event(), Event(), Event()
+    scan_calls = 0
+    with _installed_database(database) as database:
+        worker = LocalWorker(
+            WorkerSupport(
+                open_store=lambda: _open_store(database),
+                drive=None,
+                project=None,
+                projection_consumers=(),
+            ),
+            scan_interval=1,
+            name="wake-handoff",
+        )
+
+        def blocked_scan(_store: SessionStore) -> None:
+            nonlocal scan_calls
+            scan_calls += 1
+            if scan_calls == 1:
+                first_enter.set()
+                assert first_release.wait(3)
+            elif scan_calls == 2:
+                second_enter.set()
+                assert second_release.wait(3)
+
+        worker._periodic_scan = blocked_scan
+        try:
+            worker.start()
+            assert first_enter.wait(3)
+            previous = worker.coordinate_pass
+            worker.wake("thread")
+
+            assert worker.active_wake_sessions == frozenset({"thread"})
+            first_release.set()
+            assert worker.wait_for_coordinate_pass(previous, 3)
+            assert second_enter.wait(3)
+
+            assert worker.active_wake_sessions == frozenset({"thread"})
+            previous = worker.coordinate_pass
+            second_release.set()
+            assert worker.wait_for_coordinate_pass(previous, 3)
+            assert not worker.active_wake_sessions
+        finally:
+            first_release.set()
+            second_release.set()
+            assert worker.close(timeout=2)
 
 
 @pytest.mark.persistent_store

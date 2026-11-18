@@ -26,6 +26,7 @@ from vv_agent.session.timing import SystemClock, ThreadInvoker, ThreadLeaseKeepe
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
+from .conftest import open_store
 from .helpers import create_fixture_session, fixture_content_reader, push_fixture_input, wrap_fixture_store
 from .test_recovery_matrix import runtime as base_runtime
 
@@ -104,6 +105,7 @@ def test_postgres_tenant_scoped_factory_renews_the_requested_session(store):
 
 
 def create_sessions(store, *session_ids):
+    store.configure_input_admission(allow_unsigned=True)
     wrapped = wrap_fixture_store(store)
     for session_id in session_ids:
         create_fixture_session(wrapped, session_id, consumers=())
@@ -120,13 +122,18 @@ def heartbeat_for(
     connection_ids=None,
     closed_threads=None,
 ):
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         lease = store.acquire(session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
     assert lease is not None
 
     @contextmanager
     def renewal_store():
-        with SQLiteStore.standalone(str(path)) as store:
+        with SQLiteStore.standalone(
+            str(path),
+            busy_timeout_ms=10,
+            heartbeat_busy_timeout_ms=10,
+        ) as store:
+            store.configure_input_admission(allow_unsigned=True)
             if opened_threads is not None:
                 opened_threads.append(threading.get_ident())
             if connection_ids is not None:
@@ -143,6 +150,8 @@ def heartbeat_for(
         ttl_ms,
         heartbeat_seconds,
         now_ms=now_ms,
+        sqlite_heartbeat_retry_budget_seconds=heartbeat_seconds,
+        sqlite_heartbeat_retry_delay_seconds=min(heartbeat_seconds / 8, 0.05),
     )
 
 
@@ -214,7 +223,7 @@ def test_default_thread_keeper_shares_scheduler_and_closes_scopes_independently(
         assert closed_threads == [scheduler_thread] * len(scopes)
         wait_until(lambda: scheduler_thread not in {thread.ident for thread in threading.enumerate()})
 
-        with SQLiteStore.standalone(str(path)) as store:
+        with open_store(path) as store:
             assert store.release(scopes[2].lease)
         rebuilt = heartbeat_for(
             path,
@@ -268,6 +277,7 @@ def test_runtime_monotonic_schedule_stays_separate_from_sqlite_elapsed_epoch(tmp
     database_clock, runtime_clock = DatabaseClock(), RuntimeClock()
     with SQLiteStore.standalone(str(path), clock=database_clock) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         create_sessions(store, "s")
         lease = store.acquire("s", owner="owner", ttl_ms=3_000)
         assert lease is not None
@@ -275,6 +285,7 @@ def test_runtime_monotonic_schedule_stays_separate_from_sqlite_elapsed_epoch(tmp
     @contextmanager
     def renewal_store():
         with SQLiteStore.standalone(str(path), clock=database_clock) as store:
+            store.configure_input_admission(allow_unsigned=True)
             yield store
 
     heartbeat = _LeaseHeartbeat(
@@ -352,6 +363,8 @@ def test_public_kernel_three_agents_share_keeper_across_model_cycles(tmp_path, m
     try:
         stores = [SQLiteStore(str(database)) for _ in session_ids]
         stores[0].install_schema()
+        for store in stores:
+            store.configure_input_admission(allow_unsigned=True)
         wrapped = [wrap_fixture_store(store) for store in stores]
         for session_id, store in zip(session_ids, wrapped, strict=True):
             create_fixture_session(store, session_id, consumers=())

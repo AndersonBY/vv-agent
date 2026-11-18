@@ -34,6 +34,7 @@ def test_slow_renewal_barrier_case_does_not_starve_foreground_writer(tmp_path, m
     heartbeat_seconds = 0.02
     with SQLiteStore.standalone(str(database)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         create_fixture_session(wrap_fixture_store(store), "s", consumers=())
         lease = store.acquire("s", owner="heartbeat-owner", ttl_ms=4_000)
         assert lease is not None

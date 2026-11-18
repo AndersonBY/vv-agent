@@ -305,7 +305,7 @@ def test_worker_does_not_second_release_when_keeper_close_cannot_stop(tmp_path: 
     monkeypatch.setattr(ThreadLeaseKeeper, "close", tracked_close)
     monkeypatch.setattr(session_timing, "HEARTBEAT_CLOSE_SECONDS", 0.05)
 
-    with SQLiteStore.standalone(str(tmp_path / "keeper.sqlite")) as store:
+    with open_store(tmp_path / "keeper.sqlite") as store:
         store.install_schema()
         driver = SessionDriver(
             store=store,
@@ -368,27 +368,28 @@ def test_public_worker_retries_transient_lease_loss_then_reports_bounded_exhaust
 
     monkeypatch.setattr(_Driver, "step", lost)
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("must not run")])
-    driver = SessionDriver(
-        tmp_path / "retry.sqlite",
-        content_key_provider=LocalKeyProvider(b"r" * 32),
-    )
-    try:
-        driver.create("retry", str(tmp_path))
-        handle = driver.start(
-            "retry",
-            Agent("agent", "Answer.", model="m"),
-            RunConfig(model_provider=provider),
-            "go",
+    with open_store(tmp_path / "retry.sqlite") as store:
+        driver = SessionDriver(
+            store=store,
+            content_key_provider=LocalKeyProvider(b"r" * 32),
         )
-        with pytest.raises(LeaseRetryExhausted) as caught:
-            handle.result(timeout=8)
-        assert caught.value.session_id == "retry"
-        assert caught.value.attempts == len(attempts) == 5
-        assert isinstance(caught.value.__cause__, LeaseLost)
-        assert driver.store.read_state("retry")[0].turns == {}
-        assert len(driver.store.peek_inbox("retry")) == 1
-    finally:
-        driver.close()
+        try:
+            driver.create("retry", str(tmp_path))
+            handle = driver.start(
+                "retry",
+                Agent("agent", "Answer.", model="m"),
+                RunConfig(model_provider=provider),
+                "go",
+            )
+            with pytest.raises(LeaseRetryExhausted) as caught:
+                handle.result(timeout=8)
+            assert caught.value.session_id == "retry"
+            assert caught.value.attempts == len(attempts) == 5
+            assert isinstance(caught.value.__cause__, LeaseLost)
+            assert driver.store.read_state("retry")[0].turns == {}
+            assert len(driver.store.peek_inbox("retry")) == 1
+        finally:
+            driver.close()
 
 
 def test_takeover_progress_clears_terminal_lease_retry_for_existing_cursor(tmp_path: Path, monkeypatch) -> None:
@@ -401,7 +402,7 @@ def test_takeover_progress_clears_terminal_lease_retry_for_existing_cursor(tmp_p
 
     monkeypatch.setattr(_Driver, "step", lost)
     key_provider = LocalKeyProvider(b"t" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "takeover.sqlite")) as store:
+    with open_store(tmp_path / "takeover.sqlite") as store:
         store.install_schema()
         failing = SessionDriver(store=store, content_key_provider=key_provider)
         takeover = SessionDriver(store=store, content_key_provider=key_provider)
@@ -821,7 +822,7 @@ def test_background_child_is_driven_by_worker_after_parent_handle_finishes(tmp_p
         runtime.children["background_child"] = admit
         return runtime
 
-    with SQLiteStore.standalone(str(tmp_path / "background.sqlite")) as store:
+    with open_store(tmp_path / "background.sqlite") as store:
         store.install_schema()
         driver = SessionDriver(
             store=store,
@@ -1019,7 +1020,7 @@ def test_yield_on_steer_is_resumed_by_the_worker(tmp_path: Path) -> None:
         requests.append(request)
         return LLMResponse("after steer")
 
-    with SQLiteStore.standalone(str(tmp_path / "yield.sqlite")) as store:
+    with open_store(tmp_path / "yield.sqlite") as store:
         store.install_schema()
         driver = SessionDriver(
             store=store,

@@ -61,6 +61,9 @@ from .reducer import ExecutionState
 from .store import SessionStore
 from .timing import Clock, Invoker, LeaseKeeper, SystemClock, ThreadInvoker, ThreadLeaseKeeper
 
+DEFAULT_SQLITE_HEARTBEAT_RETRY_BUDGET_SECONDS = 5.0
+DEFAULT_SQLITE_HEARTBEAT_RETRY_DELAY_SECONDS = 0.05
+
 
 class RuntimeNotReady(Exception):
     """Host input preparation needs another scheduled attempt, without failing a turn."""
@@ -321,8 +324,8 @@ class Runtime:
     lease_retry_cap_seconds: float = 0.5
     lease_retry_jitter: Callable[[float, float], float] = random.uniform
     lease_retry_sleep: Callable[[float], None] = time.sleep
-    sqlite_heartbeat_retry_budget_seconds: float = 5.0
-    sqlite_heartbeat_retry_delay_seconds: float = 0.05
+    sqlite_heartbeat_retry_budget_seconds: float = DEFAULT_SQLITE_HEARTBEAT_RETRY_BUDGET_SECONDS
+    sqlite_heartbeat_retry_delay_seconds: float = DEFAULT_SQLITE_HEARTBEAT_RETRY_DELAY_SECONDS
     model_timeout: float = 300
     tool_timeout: float = 300
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None

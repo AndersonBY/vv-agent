@@ -39,7 +39,7 @@ def terminal_status(rows, tid):
 
 
 def assert_control(actual, expected):
-    assert replace(actual, actor=None) == expected
+    assert replace(actual, actor=None, admission_proof=None) == expected
     assert ContentRef.from_dict(actual.actor["attributes"]).content_id
 
 

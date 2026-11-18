@@ -6,14 +6,20 @@ from time import monotonic
 
 import pytest
 
-from vv_agent.session import kernel
-from vv_agent.session.kernel import drive
+from vv_agent.session import children, kernel
+from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost
-from vv_agent.types import LLMResponse
+from vv_agent.tools.function import function_tool
+from vv_agent.types import LLMResponse, ToolCall
 
-from .helpers import fixture_content_reader, wrap_fixture_store
+from .helpers import fixture_child_spec, fixture_content_reader, wrap_fixture_store
 from .test_recovery_matrix import records_of, runtime, start
+
+
+@function_tool
+def child_task() -> str:
+    raise AssertionError("the child task must run through its session")
 
 
 @contextmanager
@@ -23,6 +29,48 @@ def no_wait_heartbeat_store(database, *, clock=None):
         store.configure_input_admission(allow_unsigned=True)
         store.connection.execute("PRAGMA busy_timeout=0")
         yield store
+
+
+def test_sqlite_store_uses_default_and_configured_busy_timeouts(tmp_path):
+    default_database = tmp_path / "default-timeouts.sqlite"
+    configured_database = tmp_path / "configured-timeouts.sqlite"
+
+    with SQLiteStore.standalone(str(default_database)) as store:
+        assert store.connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+        with store.heartbeat_store() as heartbeat:
+            assert heartbeat.connection.execute("PRAGMA busy_timeout").fetchone() == (250,)
+
+    with SQLiteStore.standalone(
+        str(configured_database),
+        busy_timeout_ms=8000,
+        heartbeat_busy_timeout_ms=125,
+    ) as store:
+        assert store.connection.execute("PRAGMA busy_timeout").fetchone() == (8000,)
+        with store.heartbeat_store() as heartbeat:
+            assert heartbeat.connection.execute("PRAGMA busy_timeout").fetchone() == (125,)
+
+
+def test_drive_store_factory_preserves_sqlite_timeouts_worker_and_admission(tmp_path):
+    database = tmp_path / "drive-factory.sqlite"
+    with SQLiteStore.standalone(str(database), busy_timeout_ms=8000, heartbeat_busy_timeout_ms=125) as store:
+        store.install_schema()
+        store.configure_worker(
+            level=3,
+            handler_versions=("1", "2", "3"),
+            capabilities=("child-admission",),
+            all_tenants=True,
+        )
+        store.configure_input_admission(allow_unsigned=True)
+
+        with store.drive_store_factory()() as drive:
+            assert drive.connection.execute("PRAGMA busy_timeout").fetchone() == (8000,)
+            assert drive.heartbeat_busy_timeout_ms == 125
+            with drive.heartbeat_store() as heartbeat:
+                assert heartbeat.connection.execute("PRAGMA busy_timeout").fetchone() == (125,)
+            assert drive.worker_supports.max_level == 3
+            assert drive.worker_supports.handler_versions == ("1", "2", "3")
+            assert drive.worker_supports.capabilities == ("child-admission",)
+            assert drive._ledger_integrity_mode() == "hash-only"
 
 
 @pytest.mark.sqlite_file
@@ -43,7 +91,7 @@ def test_existing_database_heartbeat_connections_skip_journal_configuration_unde
         connected = Barrier(3)
 
         def open_heartbeat(_):
-            with SQLiteStore.standalone(str(database)) as heartbeat:
+            with writer.heartbeat_store() as heartbeat:
                 connected.wait(timeout=5)
                 return (
                     heartbeat.connection.execute("PRAGMA journal_mode").fetchone()[0],
@@ -55,7 +103,7 @@ def test_existing_database_heartbeat_connections_skip_journal_configuration_unde
             results = [future.result(timeout=10) for future in [pool.submit(open_heartbeat, index) for index in range(3)]]
         writer.connection.execute("ROLLBACK")
 
-    assert results == [("wal", 2, 5000)] * 3
+    assert results == [("wal", 2, 250)] * 3
     assert not [statement for statement in statements if statement.strip().lower() == "pragma journal_mode=wal"]
 
 
@@ -73,12 +121,69 @@ def test_new_database_initialization_still_configures_wal_once(tmp_path):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(sqlite3, "connect", traced_connect)
         with SQLiteStore.standalone(str(database)) as store:
+            assert store.connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+            store.install_schema()
             store.install_schema()
             assert store.connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
             assert store.connection.execute("PRAGMA synchronous").fetchone() == (2,)
             assert store.connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
 
     assert sum(statement.strip().lower() == "pragma journal_mode=wal" for statement in statements) == 1
+
+
+@pytest.mark.sqlite_file
+def test_three_concurrent_long_child_tasks_survive_shared_sqlite_write_lock(store, database):
+    parent_ids = [f"parent-{index}" for index in range(3)]
+    child_ids = []
+
+    def parent_runtime(prefix):
+        child_specs = tuple(fixture_child_spec(store, prefix, f"{prefix}-child-{index}") for index in range(2))
+        return runtime(
+            database,
+            [LLMResponse("", [ToolCall("child-call", "child_task", {})]), LLMResponse("parent done")],
+            [child_task],
+            children={"child_task": lambda _plan: tuple(children.ChildSession(spec, "work") for spec in child_specs)},
+        )
+
+    for parent_id in parent_ids:
+        start(store, parent_id)
+        drive(store, parent_id, runtime=parent_runtime(parent_id))
+        parked = next(row.record for row in read_state(store, parent_id)[1] if row.record.kind == "op_parked")
+        child_ids.extend(handle["session_id"] for handle in children.child_handles(parked.payload["handle"]))
+
+    assert len(parent_ids) == 3 and len(child_ids) == 6
+    started = [Event() for _ in child_ids]
+    release_models = Event()
+    model_calls = {session_id: 0 for session_id in child_ids}
+
+    def run_child(index, session_id):
+        def response(_request):
+            model_calls[session_id] += 1
+            started[index].set()
+            assert release_models.wait(30)
+            return LLMResponse("child done")
+
+        with SQLiteStore.standalone(str(database)) as child_store:
+            child_store.configure_input_admission(allow_unsigned=True)
+            drive(wrap_fixture_store(child_store), session_id, runtime=runtime(database, [response]))
+
+    with ThreadPoolExecutor(max_workers=len(child_ids)) as pool:
+        futures = [pool.submit(run_child, index, session_id) for index, session_id in enumerate(child_ids)]
+        deadline = monotonic() + 5
+        while not all(event.is_set() for event in started) and monotonic() < deadline:
+            Event().wait(0.01)
+        assert all(event.is_set() for event in started), [
+            future.exception() if future.done() else "running" for future in futures
+        ]
+        with SQLiteStore.standalone(str(database), busy_timeout_ms=30000) as locker, locker.atomic():
+            locker._rows("UPDATE sk_session SET next_drive_ms=next_drive_ms WHERE session_id=%s", (child_ids[0],))
+            Event().wait(16)
+        release_models.set()
+        for future in futures:
+            future.result(timeout=15)
+
+    assert model_calls == {session_id: 1 for session_id in child_ids}
+    assert all(any(row.record.kind == "turn_ended" for row in read_state(store, session_id)[1]) for session_id in child_ids)
 
 
 @pytest.mark.sqlite_file

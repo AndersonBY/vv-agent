@@ -1718,19 +1718,16 @@ class _KernelRunAdapter(RunAdapter):
     def _wait_for_local_claim_handoff(self, session_id: str) -> bool:
         worker = self.kernel._worker
         deadline = self.clock.monotonic() + max(5.0, worker.scan_interval * 4)
-        # A durable claim is acquired inside the coordinator before it publishes
-        # the matching drive lease to this adapter. ``wait_idle`` cannot cover
-        # that short handoff window. Wait for complete coordinator passes and
-        # return true only when the same session has crossed into the executor.
+        # A completed previous drive can remain visible until the coordinator
+        # reaps it. Drain that metadata before observing a fresh pass so a stale
+        # local lease cannot be mistaken for this handoff.
+        worker.wait_idle(max(0.0, deadline - self.clock.monotonic()))
+        # The owner can release between two scans. Check two complete passes so
+        # that release race cannot strand runnable work after ``join`` returns.
         for _ in range(2):
+            previous = worker.coordinate_pass
             worker.wake(session_id)
-            while worker._wake.is_set():
-                inflight = worker._inflight_lease
-                if inflight is not None and inflight.session_id == session_id:
-                    return True
-                if self.clock.monotonic() >= deadline:
-                    raise TimeoutError(f"local claim handoff did not complete for {session_id}")
-                sleep(0.005)
+            worker.wait_for_coordinate_pass(previous, max(0.0, deadline - self.clock.monotonic()))
             inflight = worker._inflight_lease
             if inflight is not None and inflight.session_id == session_id:
                 return True
@@ -1740,7 +1737,8 @@ class _KernelRunAdapter(RunAdapter):
         """Wait for this node's accepted work without joining a remote lease."""
 
         handles = tuple(handle for handle in self.kernel.handles if handle.consumer == "app_server")
-        if not self._notification_positions and not handles and not self.kernel._worker.started:
+        wake_sessions = self.kernel._worker.active_wake_sessions
+        if not self._notification_positions and not handles and not wake_sessions and not self.kernel._worker.started:
             return
         if self.kernel._worker.started and not self.kernel._worker.running:
             return
@@ -1774,7 +1772,14 @@ class _KernelRunAdapter(RunAdapter):
         # Give claimable due work one coordinator scan. A live remote lease is
         # only observed; this join never waits for another node to release it.
         claim_deadline = self.clock.monotonic() + max(5.0, self.kernel._worker.scan_interval * 4)
-        for sid in tuple(self._notification_positions):
+        session_ids = dict.fromkeys(
+            (
+                *self._notification_positions,
+                *self.kernel._worker.active_wake_sessions,
+                *(handle.session_id for handle in handles),
+            )
+        )
+        for sid in session_ids:
             while self.clock.monotonic() < claim_deadline:
                 inflight = self.kernel._worker._inflight_lease
                 if inflight is not None and inflight.session_id == sid:

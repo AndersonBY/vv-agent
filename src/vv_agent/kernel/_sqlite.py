@@ -20,6 +20,8 @@ from vv_agent.kernel._store import SessionStore
 
 SCHEMA_VERSION = 4
 STORAGE_MAJOR = "S1"
+DEFAULT_BUSY_TIMEOUT_MS = 5000
+DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 250
 SCHEMA_FINGERPRINT_VERSION = "S1-sqlite-schema-v2"
 # Update this digest with intentional DDL changes and contract review.
 SCHEMA_FINGERPRINT = "0bd580cfc9c3e59787f7700963be03094b8289522592c7d734bd00fa7539ecd2"
@@ -222,6 +224,11 @@ def _schema_is_current(connection: sqlite3.Connection) -> bool:
     )
 
 
+def _positive_timeout(value: int, name: str) -> None:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
 class SQLiteStore(SQLStore):
     """A serialized connection per instance; BEGIN IMMEDIATE fences local writers."""
 
@@ -236,6 +243,8 @@ class SQLiteStore(SQLStore):
         path = self.path
         fold_factory = self.fold_factory
         clock = self.clock
+        busy_timeout_ms = self.busy_timeout_ms
+        heartbeat_busy_timeout_ms = self.heartbeat_busy_timeout_ms
         tenant_id = self.tenant_id
         supports = self.worker_supports
         all_tenants = self.claims_all_tenants
@@ -243,7 +252,13 @@ class SQLiteStore(SQLStore):
 
         @contextmanager
         def open_store() -> Iterator[SessionStore]:
-            with SQLiteStore.standalone(path, fold_factory=fold_factory, clock=clock) as store:
+            with SQLiteStore.standalone(
+                path,
+                fold_factory=fold_factory,
+                clock=clock,
+                busy_timeout_ms=busy_timeout_ms,
+                heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms,
+            ) as store:
                 store.configure_worker(
                     level=supports.max_level,
                     handler_versions=supports.handler_versions,
@@ -258,26 +273,47 @@ class SQLiteStore(SQLStore):
 
     def _heartbeat_connection(self):
         return self._inherit_runtime_configuration(
-            SQLiteStore.standalone(self.path, fold_factory=self.fold_factory, clock=self.clock)
+            SQLiteStore.standalone(
+                self.path,
+                fold_factory=self.fold_factory,
+                clock=self.clock,
+                busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+                heartbeat_busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+            )
         )
 
-    def __init__(self, path: str, *, fold_factory: Callable[[], Fold], clock: Clock):
+    def __init__(
+        self,
+        path: str,
+        *,
+        fold_factory: Callable[[], Fold],
+        clock: Clock,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ):
         if path == ":memory:":
             raise ValueError("session SQLiteStore requires a file path; ':memory:' is not supported")
+        _positive_timeout(busy_timeout_ms, "busy_timeout_ms")
+        _positive_timeout(heartbeat_busy_timeout_ms, "heartbeat_busy_timeout_ms")
         super().__init__(fold_factory=fold_factory)
         self.clock = clock
         self.path = path
-        self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
+        self.busy_timeout_ms = busy_timeout_ms
+        self.heartbeat_busy_timeout_ms = heartbeat_busy_timeout_ms
+        self.connection = sqlite3.connect(
+            path,
+            isolation_level=None,
+            timeout=busy_timeout_ms / 1000,
+            check_same_thread=False,
+        )
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         objects = _schema_objects(self.connection)
         if not _schema_is_current(self.connection) and (version != 0 or objects):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         self.connection.execute("PRAGMA synchronous=FULL")
-        if version == 0:
-            self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.create_function("session_now_ms", 0, self.clock.now_ms)
         self._connection_lock = RLock()
         self._epoch = 0
@@ -285,8 +321,24 @@ class SQLiteStore(SQLStore):
 
     @classmethod
     @contextmanager
-    def standalone(cls, path: str, *, fold_factory: Callable[[], Fold], clock: Clock) -> Iterator[SQLiteStore]:
-        with cls._owned(cls(path, fold_factory=fold_factory, clock=clock)) as store:
+    def standalone(
+        cls,
+        path: str,
+        *,
+        fold_factory: Callable[[], Fold],
+        clock: Clock,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ) -> Iterator[SQLiteStore]:
+        with cls._owned(
+            cls(
+                path,
+                fold_factory=fold_factory,
+                clock=clock,
+                busy_timeout_ms=busy_timeout_ms,
+                heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms,
+            )
+        ) as store:
             yield store
 
     @staticmethod
@@ -333,19 +385,21 @@ class SQLiteStore(SQLStore):
             return self._epoch
 
     def install_schema(self) -> None:
-        with self._transaction():
+        with self._connection_lock:
             version = self.connection.execute("PRAGMA user_version").fetchone()[0]
             if _schema_is_current(self.connection):
                 return
             if version != 0 or _schema_objects(self.connection):
                 raise ValueError("unsupported session SQLite schema version")
-            for statement in DDL.split(";"):
-                if statement.strip():
-                    self.connection.execute(statement)
-            self.connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
-            self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            if not _schema_is_current(self.connection):
-                raise ValueError("session SQLite schema fingerprint does not match this runtime")
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            with self._transaction():
+                for statement in DDL.split(";"):
+                    if statement.strip():
+                        self.connection.execute(statement)
+                self.connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
+                self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                if not _schema_is_current(self.connection):
+                    raise ValueError("session SQLite schema fingerprint does not match this runtime")
 
 
 class _SQLiteContentBackend:
