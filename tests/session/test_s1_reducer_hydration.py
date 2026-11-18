@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -42,6 +43,7 @@ from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse
 
+from .conftest import open_store
 from .helpers import record as fixture_record
 
 _CONTENT_BODIES = {
@@ -88,7 +90,7 @@ def test_cold_driver_hydrates_seed_definition_and_budget_without_rewriting_refer
     path = tmp_path / "cold-s1.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     limits = RunBudgetLimits(max_total_tokens=100, max_tool_calls=2)
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path, allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create(
             "s",
@@ -132,7 +134,7 @@ def test_cold_driver_hydrates_seed_definition_and_budget_without_rewriting_refer
         persisted_bodies = [_row_body(store, row.seq) for row in driver.records]
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path, allow_unsigned=True) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.active_turn_id == turn_id
         with pytest.raises(RetainedBudgetHydrationRequired, match="requires hydrated logical state"):
@@ -175,7 +177,7 @@ def test_cold_driver_hydrates_seed_definition_and_budget_without_rewriting_refer
 
 def test_logical_state_rehydrates_after_content_key_destroy(tmp_path: Path) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "destroyed.sqlite")) as store:
+    with open_store(tmp_path / "destroyed.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
 
@@ -194,7 +196,7 @@ def test_logical_state_rehydrates_after_content_key_destroy(tmp_path: Path) -> N
 
 def test_step_scopes_logical_state_and_closes_with_retained_budget(tmp_path: Path) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "step-scope.sqlite")) as store:
+    with open_store(tmp_path / "step-scope.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, _lease = _started_driver(sessions, store)
         scope = driver.scope
@@ -241,7 +243,7 @@ def test_logical_scope_exit_does_not_rehydrate_discarded_commit_state(tmp_path: 
         return hydrate_and_fold_records(*args, **kwargs)
 
     monkeypatch.setattr(kernel_module, "hydrate_and_fold_records", counted_hydration)
-    with SQLiteStore.standalone(str(tmp_path / "scope-commit.sqlite")) as store:
+    with open_store(tmp_path / "scope-commit.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         boundary = make_record_before_publication(
@@ -278,7 +280,7 @@ def test_nested_logical_scope_reuses_the_outer_validated_view(tmp_path: Path, mo
         return hydrate_and_fold_records(*args, **kwargs)
 
     monkeypatch.setattr(kernel_module, "hydrate_and_fold_records", counted_hydration)
-    with SQLiteStore.standalone(str(tmp_path / "nested-scope.sqlite")) as store:
+    with open_store(tmp_path / "nested-scope.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
 
@@ -298,7 +300,7 @@ def test_logical_scope_refresh_invalidates_stale_fold_and_recovers_after_hydrati
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "scope-refresh.sqlite")) as store:
+    with open_store(tmp_path / "scope-refresh.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         other = _Driver(sessions.store, "s", driver.runtime, driver.scope)
@@ -375,7 +377,7 @@ def test_logical_scope_refresh_invalidates_stale_fold_and_recovers_after_hydrati
 
 def test_logical_retry_payloads_skip_unrelated_attempt_one_plans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "retry-lazy.sqlite")) as store:
+    with open_store(tmp_path / "retry-lazy.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         driver.records = tuple(
@@ -400,7 +402,7 @@ def test_logical_retry_payloads_skip_unrelated_attempt_one_plans(tmp_path: Path,
 
 def test_retry_plan_hydrates_its_own_request_before_rejecting_changed_identity(tmp_path: Path) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "retry-tamper.sqlite")) as store:
+    with open_store(tmp_path / "retry-tamper.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         request = {"id": "call", "name": "retry_probe_tool", "arguments": {"text": "one"}}
@@ -450,7 +452,7 @@ def test_retry_plan_hydrates_its_own_request_before_rejecting_changed_identity(t
 
 def test_retry_plan_preserves_current_prepared_hook_parameters(tmp_path: Path) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "retry-prepared.sqlite")) as store:
+    with open_store(tmp_path / "retry-prepared.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_tool_driver(sessions, store)
         turn_id = driver.state.active_turn_id
@@ -527,7 +529,7 @@ def test_retry_plan_preserves_current_prepared_hook_parameters(tmp_path: Path) -
 
 def test_logical_preflight_base_folds_only_pending_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "preflight-delta.sqlite")) as store:
+    with open_store(tmp_path / "preflight-delta.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         boundary = make_record_before_publication(
@@ -554,7 +556,7 @@ def test_logical_preflight_base_folds_only_pending_records(tmp_path: Path, monke
 
 def test_input_applied_payload_hydrates_once_from_its_record_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "input-owner.sqlite")) as store:
+    with open_store(tmp_path / "input-owner.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_driver(sessions, store)
         applied = next(row for row in driver.records if row.record.kind == "input_applied")
@@ -827,7 +829,7 @@ def test_active_logical_scope_reuses_verified_completed_result_without_rereading
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / "completed-result-scope.sqlite")) as store:
+    with open_store(tmp_path / "completed-result-scope.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_tool_driver(sessions, store)
         raw_completed, expected = _completed_tool_result(driver, lease)
@@ -875,7 +877,7 @@ def test_active_logical_scope_reuses_verified_completed_result_without_rereading
 @pytest.mark.parametrize("damage", ["key", "link"])
 def test_completed_result_reuse_does_not_cross_independent_logical_scopes(tmp_path: Path, damage: str) -> None:
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(tmp_path / f"completed-result-{damage}.sqlite")) as store:
+    with open_store(tmp_path / f"completed-result-{damage}.sqlite", allow_unsigned=True) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         driver, lease = _started_tool_driver(sessions, store)
         raw_completed, expected = _completed_tool_result(driver, lease)
@@ -915,7 +917,7 @@ def _row_body(store: SQLiteStore, seq: int) -> bytes:
 
 
 def test_hydrated_turn_record_retains_bytes_and_caches_one_logical_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    with SQLiteStore.standalone(str(tmp_path / "record-cache.sqlite")) as store:
+    with open_store(tmp_path / "record-cache.sqlite", allow_unsigned=True) as store:
         store.install_schema()
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
         driver, lease = _started_driver(sessions, store)
@@ -948,7 +950,7 @@ def test_hydrated_turn_record_retains_bytes_and_caches_one_logical_task(tmp_path
 
 
 def test_semantic_preflight_rejects_retained_endpoint_tamper_before_dispatch(tmp_path: Path) -> None:
-    with SQLiteStore.standalone(str(tmp_path / "endpoint-preflight.sqlite")) as store:
+    with open_store(tmp_path / "endpoint-preflight.sqlite", allow_unsigned=True) as store:
         store.install_schema()
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
         driver, lease = _started_driver(sessions, store)
@@ -1023,8 +1025,10 @@ def test_rejected_http_retry_reuses_hydrated_request_identity(tmp_path: Path, mo
     monkeypatch.setattr(VvLlmClient, "_sleep_backoff", lambda *_args, **_kwargs: None)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    sessions = SessionDriver(tmp_path / "endpoint-retry.sqlite", content_key_provider=LocalKeyProvider(b"k" * 32))
-    try:
+    with (
+        open_store(tmp_path / "endpoint-retry.sqlite", allow_unsigned=True) as store,
+        closing(SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))) as sessions,
+    ):
         sessions.create("s", str(workspace), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "go"}))
         client = VvLlmClient(
@@ -1056,5 +1060,3 @@ def test_rejected_http_retry_reuses_hydrated_request_identity(tmp_path: Path, mo
         assert len({plan.payload["request_digest"] for plan in plans}) == 1
         assert [record.payload["endpoint_id"] for record in starts] == ["a", "b"]
         assert terminal.payload["reason"] is None
-    finally:
-        sessions.close()

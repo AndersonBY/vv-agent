@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from hashlib import sha256
 from pathlib import Path
-from threading import Barrier, Event
+from threading import Barrier, Event, Thread
 
 import pytest
 from support.s1_fixture_values import wrap_fixture_store
@@ -41,6 +41,7 @@ def request(server, identity, method, params):
 
 def node(stack, path, connection, provider, *, agent=None, content_key_provider=None):
     store = stack.enter_context(SQLiteStore.standalone(str(path)))
+    store.configure_input_admission(allow_unsigned=True)
     store.install_schema()
     if content_key_provider is None:
         resolved_path = Path(path).resolve()
@@ -161,7 +162,7 @@ def test_steer_and_followup_receipts_survive_turn_completion(tmp_path):
         assert len(b.kernel.store.read_state("thread")[0].turns) == 2
 
 
-def test_control_resume_and_approval_from_second_processor_after_disconnect(tmp_path):
+def test_control_resume_and_approval_from_second_processor_after_disconnect(tmp_path, monkeypatch):
     effects = []
 
     @function_tool(needs_approval=True)
@@ -182,6 +183,8 @@ def test_control_resume_and_approval_from_second_processor_after_disconnect(tmp_
         approval = notice["params"]
         a.processor.disconnect_connection("A")
         a.run_adapter.join()
+        a.kernel._worker.stop()
+        assert a.kernel._worker.join(5), "disconnected processor worker did not stop"
         status = request(b, 3, "thread/status", {"threadId": "thread"})["result"]
         assert status["status"] == "approval_wait" and status["waitKind"] == "approval"
         assert status["pendingInteraction"]["requestId"] == approval["requestId"]
@@ -203,6 +206,44 @@ def test_control_resume_and_approval_from_second_processor_after_disconnect(tmp_
             b.router.cancel_matching_server_requests()
             b.run_adapter.join()
         assert "result" in request(b, 4, "turn/resume", {"threadId": "thread", "turnId": tid})
+        original_scan = b.kernel._worker._periodic_scan
+        handoff_armed, first_scan, handoff_claimed, handoff_release = Event(), Event(), Event(), Event()
+        scan_state = {"count": 0}
+
+        class ClaimHandoffGate:
+            def __init__(self, store):
+                self._store = store
+
+            def __getattr__(self, name):
+                return getattr(self._store, name)
+
+            def claim_runnable(self, **kwargs):
+                claims = self._store.claim_runnable(**kwargs)
+                if handoff_armed.is_set() and any(
+                    claim.work.session_id == "thread" and claim.lease is not None for claim in claims
+                ):
+                    handoff_armed.clear()
+                    handoff_claimed.set()
+                    assert handoff_release.wait(5), "claim handoff was not released"
+                return claims
+
+        def gated_scan(store):
+            if handoff_armed.is_set():
+                scan_state["count"] += 1
+                if scan_state["count"] == 1:
+                    first_scan.set()
+                    return None
+            return original_scan(ClaimHandoffGate(store))
+
+        monkeypatch.setattr(b.kernel._worker, "_periodic_scan", gated_scan)
+        original_post_observation = b.kernel._worker.post_observation
+
+        def suppress_handoff_observations(callback):
+            if not handoff_claimed.is_set():
+                original_post_observation(callback)
+
+        monkeypatch.setattr(b.kernel._worker, "post_observation", suppress_handoff_observations)
+        handoff_armed.set()
         answer = request(
             b,
             5,
@@ -210,7 +251,27 @@ def test_control_resume_and_approval_from_second_processor_after_disconnect(tmp_
             {"threadId": "thread", "turnId": tid, "requestId": approval["requestId"], "decision": "allow"},
         )
         assert "result" in answer
-        b.run_adapter.join()
+        assert first_scan.wait(5), "worker did not reach the pre-claim scan"
+        joined, join_errors = Event(), []
+
+        def join_handoff():
+            try:
+                b.run_adapter.join()
+            except BaseException as exc:
+                join_errors.append(exc)
+            finally:
+                joined.set()
+
+        join_thread = Thread(target=join_handoff, name="approval-handoff-join")
+        join_thread.start()
+        try:
+            assert handoff_claimed.wait(5), "approval answer was not claimed"
+            assert not joined.wait(0.2), "join returned while the local claim was still handing off"
+        finally:
+            handoff_release.set()
+            join_thread.join(5)
+        assert not join_thread.is_alive(), "join did not finish after claim handoff"
+        assert not join_errors
         assert effects == ["executed"], [
             (r.record.kind, r.record.payload)
             for r in b.kernel.store.read_state("thread")[1]

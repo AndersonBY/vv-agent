@@ -232,19 +232,23 @@ def test_cached_prefix_does_not_skip_input_proof_revalidation_before_append(tmp_
             store.acquire("s", owner="writer", ttl_ms=10_000)
 
 
-def test_trusted_verify_and_export_require_explicit_integrity_mode(tmp_path):
+@pytest.mark.b8_unconfigured_storage
+def test_unconfigured_store_requires_explicit_mode_before_writes_and_trusted_reads(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "unconfigured.sqlite")) as store:
         store.install_schema()
+        assert store._one("SELECT storage_major,write_level FROM sk_settings WHERE singleton=1") == ("S1", 1)
+        with pytest.raises(LedgerIntegrityError, match="explicit signed signer or allow_unsigned hash-only"):
+            _create(store)
+        assert store._one("SELECT count(*) FROM sk_session")[0] == 0
+
+        store.configure_input_admission(allow_unsigned=True)
         _create(store)
 
         assert store.read_state("s")[2] == 0
         chain = store._one("SELECT chain_digest FROM sk_record WHERE seq=1")[0]
-        with pytest.raises(LedgerIntegrityError, match="explicit signed signer or allow_unsigned hash-only"):
-            store.read_state("s", expected_head=(1, chain))
-        with pytest.raises(LedgerIntegrityError, match="explicit signed signer or allow_unsigned hash-only"):
-            store.verify_ledger("s")
-        with pytest.raises(LedgerIntegrityError, match="explicit signed signer or allow_unsigned hash-only"):
-            export_session(store, "s")
+        assert store.read_state("s", expected_head=(1, chain))[2] == 0
+        assert store.verify_ledger("s")[0] == 1
+        assert export_session(store, "s").header.head_seq == 1
 
 
 def test_sql_deletion_rebinds_descendant_and_purge_actor_with_new_signatures(tmp_path):

@@ -15,7 +15,6 @@ from support.s1_fixture_values import append_fixture_records, create_fixture_ses
 
 from vv_agent.kernel._content import (
     Classification,
-    ContentBindingMismatch,
     ContentLabels,
     ContentRef,
     ContentSessionWriter,
@@ -89,12 +88,12 @@ def _principal(
     store: SQLiteStore,
     session_id: str,
     tenant_id: str = TENANT,
-    subject_id: str = "user/deleter",
+    subject_id: str = "service/deleter",
 ) -> Principal:
     with store.for_tenant(TENANT).atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id=session_id)
         attributes = writer.put_json({"role": subject_id})
-    return Principal(tenant_id, subject_id, "user", attributes)
+    return Principal(tenant_id, subject_id, "service", attributes)
 
 
 @contextmanager
@@ -450,15 +449,21 @@ def test_missing_signer_fails_before_fence_and_unsigned_mode_is_explicitly_weak(
     key_provider: LocalKeyProvider,
 ) -> None:
     path = tmp_path / "unsigned.sqlite"
-    with _sqlite(path, key_provider, signed=False) as (store, _signer):
-        _create_session(store, key_provider, "session")
-        adapter, _ref_value = _publish_content(store, key_provider, "session")
-        actor = _principal(store, "session")
+    with _sqlite(path, key_provider, signed=False) as (setup, _signer):
+        setup.configure_input_admission(allow_unsigned=True)
+        _create_session(setup, key_provider, "session")
+        _publish_content(setup, key_provider, "session")
+        actor = _principal(setup, "session")
 
+    with SQLiteStore.standalone(str(path)) as store:
+        adapter = SQLiteContentStore(store, key_provider)
         with pytest.raises(DeletionSignerUnavailable):
             SessionDeletionStore(store, adapter).forget_session(TENANT, "session", actor=actor)
         assert store._one("SELECT deletion_state FROM sk_session WHERE session_id='session'") == ("live",)
 
+    with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
+        adapter = SQLiteContentStore(store, key_provider)
         deletion = SessionDeletionStore(store, adapter, allow_unsigned=True)
         receipt = deletion.forget_session(TENANT, "session", actor=actor)
         assert receipt.authenticity is DeletionAuthenticity.HASH_ONLY
@@ -479,9 +484,9 @@ def test_wrong_tenant_cannot_fence_or_delete_a_session(tmp_path, key_provider: L
         _create_session(store, key_provider, "session")
         adapter, _ref_value = _publish_content(store, key_provider, "session")
         deletion = SessionDeletionStore(store, adapter, signer=signer)
-        with pytest.raises(ContentBindingMismatch):
+        with pytest.raises(PermissionError, match="another tenant"):
             deletion.forget_session(TENANT, "session", actor=_principal(store, "session", "tenant-b"))
-        with pytest.raises(Conflict):
+        with pytest.raises(Conflict, match="not found in tenant"):
             deletion.forget_session("tenant-b", "session", actor=_principal(store, "session", "tenant-b"))
         assert store._one(
             "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id='session'",

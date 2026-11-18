@@ -642,7 +642,8 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     same_result(new, old)
     assert [c["purpose"] for c in new.metadata["session_model_calls"]] == ["session_memory", "primary"]
     new_file = Path(config.workspace) / ".memory/session/remember/session_memory.json"
-    assert not new_file.exists()
+    assert new_file.exists()
+    assert "retain user goal" in new_file.read_text(encoding="utf-8")
     _, persisted, _ = read_fixture_state(store, "control")
     saved = [
         row.record
@@ -666,7 +667,7 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     drive(store, "control", runtime=rt)
     new2 = project_result(store, "control", "control/turn/second", runtime=rt)
     same_result(new2, old2)
-    assert len(requests) == 2 and not new_file.exists()
+    assert len(requests) == 2 and new_file.exists()
 
 
 class StreamingScripted(ScriptedLLM):

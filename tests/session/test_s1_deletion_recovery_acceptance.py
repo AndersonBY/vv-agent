@@ -195,7 +195,14 @@ def test_sqlite_deletion_order_restore_convergence_and_identity_fence(
                 store._chain_anchor("child", store._one("SELECT head_seq FROM sk_session WHERE session_id='child'")[0]),
             )
             adapter = durable_content_store(wrapped)
-            deletion = SessionDeletionStore(store, adapter, signer=signer)
+            with pytest.raises(ValueError, match="cannot override a signed admission policy"):
+                SessionDeletionStore(store, adapter, allow_unsigned=True).forget_session(
+                    TENANT,
+                    "root",
+                    actor=actor,
+                )
+            assert _session_state(store, "root") == ("live", None)
+            deletion = SessionDeletionStore(store, adapter)
             observer = sqlite3.connect(path, isolation_level=None)
             observations: list[tuple[str, tuple[str, str | None]]] = []
             original_destroy = provider.destroy
@@ -269,7 +276,7 @@ def test_sqlite_deletion_order_restore_convergence_and_identity_fence(
             restored.configure_input_admission(signer)
             restored_wrapped = wrap_fixture_store(restored, provider)
             restored_adapter = durable_content_store(restored_wrapped)
-            restored_deletion = SessionDeletionStore(restored, restored_adapter, signer=signer)
+            restored_deletion = SessionDeletionStore(restored, restored_adapter)
             assert actor is not None
             assert _session_state(restored, "root") == ("forgotten", "complete")
             skeleton = restored_deletion.read_skeleton(TENANT, "root")

@@ -502,6 +502,12 @@ class SQLStore:
             return "unconfigured"
         return "hash-only" if allow_unsigned else "signed"
 
+    def _require_configured_ledger(self, operation: str) -> None:
+        """Reject trust-dependent operations until the host chooses a proof mode."""
+
+        if self._ledger_integrity_mode() == "unconfigured":
+            raise LedgerIntegrityError(f"{operation} requires an explicit signed signer or allow_unsigned hash-only mode")
+
     def _resolve_ledger_verifier(
         self,
         verifier: Any,
@@ -512,14 +518,15 @@ class SQLStore:
         configured, allow_unsigned, configured_verifier = self._input_admission_policy()
         if verifier is _CONFIGURED_VERIFIER:
             verifier = configured_verifier
+        if not configured and verifier is None:
+            self._require_configured_ledger("ledger verification")
         resolved_signed = configured and not allow_unsigned if signed is None else signed
         return resolved_signed, verifier
 
-    def _requires_input_integrity_gate(self, session_id: str) -> bool:
-        """Signed/hash-only stores gate every input; unconfigured stores only
-        enter this path when retained proof rows prove the mode cannot be downgraded."""
+    def _require_input_integrity_gate(self) -> None:
+        """Require an explicit mode before reading any inbox projection."""
 
-        return self._ledger_integrity_mode() != "unconfigured" or self._has_input_admission_evidence(session_id)
+        self._require_configured_ledger("ledger input read")
 
     @contextmanager
     def _inherit_runtime_configuration(self, manager: AbstractContextManager[SQLStore]) -> Iterator[SQLStore]:
@@ -645,22 +652,54 @@ class SQLStore:
         )
         return sql, (self.worker_level, handlers, capabilities)
 
-    def _input_level(self, item: InboxItem) -> int:
+    def _input_level(self, item: InboxItem, *, parent_session_id: str | None = None) -> int:
         required = _level(item.feature_level, "input feature_level")
         if item.kind == "child_result":
             child_id = item.payload.get("session_id")
             if not isinstance(child_id, str):
                 raise Conflict("child_result requires a child session_id")
             child = self._rows(
-                "SELECT level,deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                "SELECT level,deletion_state,parent_session_id FROM sk_session WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, child_id),
             )
             if len(child) != 1:
+                if parent_session_id is None:
+                    # Persisted admission already raised the parent's level while the
+                    # child was current. Rebuild must not make consumption depend on
+                    # the child's later deletion lifecycle.
+                    return required
                 raise Conflict("child_result references a missing child session")
             if child[0][1] != "live":
+                if parent_session_id is None:
+                    return required
                 raise SessionNotLive("child result session is fenced for deletion")
+            if parent_session_id is not None and child[0][2] != parent_session_id:
+                raise Conflict("child_result does not belong to this parent session")
             required = max(required, _level(child[0][0], "child session level"))
         return required
+
+    def child_is_deleted(self, session_id: str) -> bool:
+        """Return true only for a completed deletion bound by a verified tombstone."""
+
+        row = self._rows(
+            "SELECT deletion_state,head_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        )
+        tombstone = self._tombstone(session_id)
+        if tombstone is None or tombstone.state is not TombstoneState.COMPLETE:
+            return False
+        _configured, allow_unsigned, verifier = self._input_admission_policy()
+        self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+        if not row:
+            # Purge removes the session row only after publishing its complete
+            # tombstone. The tenant-scoped tombstone proves the identity was deleted.
+            return True
+        deletion_state, head = row[0]
+        if deletion_state != "forgotten":
+            return False
+        if tombstone.final_seq != head or tombstone.chain_digest != self._chain_anchor(session_id, head):
+            raise LedgerIntegrityError("completed tombstone does not match the forgotten session head")
+        return True
 
     def _record_level(self, record: Record) -> int:
         # Historical input_applied records retain their own validated skeleton. Looking up
@@ -674,13 +713,33 @@ class SQLStore:
                 required = max(required, self._input_level(stored.item))
         return required
 
+    def _historical_child_input_level(self, records: tuple[StoredRecord, ...]) -> int:
+        child_ids = {
+            stored.record._payload["input"]["payload"]["session_id"]
+            for stored in records
+            if stored.record.kind == "input_applied" and stored.record._payload["input"]["kind"] == "child_result"
+        }
+        if not child_ids:
+            return 1
+        placeholders = ",".join("%s" for _ in child_ids)
+        rows = self._rows(
+            f"SELECT level,deletion_state FROM sk_session WHERE tenant_id=%s AND session_id IN ({placeholders})",
+            (self.tenant_id, *sorted(child_ids)),
+        )
+        return max((_level(level, "child session level") for level, state in rows if state == "live"), default=1)
+
     def _level_floor(
         self,
         records: tuple[StoredRecord, ...],
         stored_inputs: tuple[StoredInput, ...],
+        *,
+        minimum_level: int = 1,
     ) -> int:
-        required = max((self._record_level(stored.record) for stored in records), default=1)
-        return max(required, self._pending_input_level(stored_inputs))
+        required = max(
+            max((self._record_level(stored.record) for stored in records), default=1),
+            self._historical_child_input_level(records),
+        )
+        return max(minimum_level, required, self._pending_input_level(stored_inputs))
 
     def _verify_level_cache(
         self,
@@ -727,10 +786,15 @@ class SQLStore:
         prefix: _Prefix,
         *,
         now: int,
+        minimum_level: int = 1,
     ) -> _RoutingCache:
         state = prefix.reducer.state
         pending = self._ready_pending_inputs(prefix.stored_inputs, now)
-        format_floor = self._level_floor(prefix.records, prefix.stored_inputs)
+        format_floor = self._level_floor(
+            prefix.records,
+            prefix.stored_inputs,
+            minimum_level=minimum_level,
+        )
         bootstrap = self._bootstrap_requirements(prefix)
         if state.active_turn_id is not None:
             turn = state.turns[state.active_turn_id].start
@@ -909,6 +973,23 @@ class SQLStore:
             times.add(available)
         return tuple(sorted(moment for moment in times if lower_bound <= moment <= now))
 
+    def _deleted_child_changes_projection(self, prefix: _Prefix, actual: _RoutingCache, expected: _RoutingCache) -> bool:
+        """Allow a verified live-child routing cut to be refreshed after deletion."""
+
+        if (
+            actual.requirements.level <= expected.requirements.level
+            or actual.requirements.handler_version != expected.requirements.handler_version
+            or actual.requirements.capabilities != expected.requirements.capabilities
+        ):
+            return False
+        child_ids = {stored.item.payload["session_id"] for stored in prefix.stored_inputs if stored.item.kind == "child_result"}
+        child_ids.update(
+            stored.record._payload["input"]["payload"]["session_id"]
+            for stored in prefix.records
+            if stored.record.kind == "input_applied" and stored.record._payload["input"]["kind"] == "child_result"
+        )
+        return any(self.child_is_deleted(session_id) for session_id in child_ids)
+
     def _require_routing_cache(
         self,
         session_id: str,
@@ -918,8 +999,8 @@ class SQLStore:
     ) -> _RoutingCache:
         routing_prefix = prefix or self._prefix(session_id, row, require_worker=False)
         expected_time = self._now()
-        expected = self._derive_routing_cache(routing_prefix, now=expected_time)
         actual = self._routing_cache_from_row(row)
+        expected = self._derive_routing_cache(routing_prefix, now=expected_time)
         minimum_level = self._level_floor(routing_prefix.records, routing_prefix.stored_inputs)
         matches = actual.requirements == expected.requirements and actual.active_turn_id == expected.active_turn_id
         if not matches:
@@ -930,8 +1011,14 @@ class SQLStore:
                 stored_inputs=routing_prefix.stored_inputs,
                 now=expected_time,
             )
-            stale = any(
-                (historical := self._derive_routing_cache(routing_prefix, now=moment)).requirements == actual.requirements
+            stale = self._deleted_child_changes_projection(routing_prefix, actual, expected) or any(
+                (
+                    historical := self._derive_routing_cache(
+                        routing_prefix,
+                        now=moment,
+                    )
+                ).requirements
+                == actual.requirements
                 and historical.active_turn_id == actual.active_turn_id
                 for moment in projection_times
             )
@@ -1236,15 +1323,6 @@ class SQLStore:
         if len(rows) != inbox_seq:
             raise InputAdmissionProofError(f"stored input count exceeds session inbox_seq at input_seq {inbox_seq + 1}")
         return tuple(self._stored_input(session_id, row) for row in rows)
-
-    def _has_input_admission_evidence(self, session_id: str) -> bool:
-        return bool(
-            self._one(
-                "SELECT EXISTS(SELECT 1 FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND "
-                "(admission_key_id IS NOT NULL OR admission_signature IS NOT NULL OR admission_signed_ms IS NOT NULL))",
-                (self.tenant_id, session_id),
-            )[0]
-        )
 
     @contextmanager
     def _bound_append(self, lease: Lease) -> Iterator[None]:
@@ -1555,10 +1633,6 @@ class SQLStore:
         row = self._require_live(session_id)
         self._require_reader_row(row)
         if expected_head is not None:
-            if self._ledger_integrity_mode() == "unconfigured":
-                raise LedgerIntegrityError(
-                    "expected_head reads require an explicit signed signer or allow_unsigned hash-only mode"
-                )
             _require_expected_head(
                 expected_head,
                 tenant_id=self.tenant_id,
@@ -1600,6 +1674,7 @@ class SQLStore:
         )
 
     def rebuild_schedule(self, session_id: str) -> ExecutionState:
+        self._require_configured_ledger("schedule rebuild")
         self._require_live(session_id)
         while True:
             captured = self._head(session_id)
@@ -1633,8 +1708,6 @@ class SQLStore:
         self._require_reader_row(row)
         # Records are immutable: cap by the captured head without locking writers.
         head, inbox = row[:2]
-        if expected_head is not None and self._ledger_integrity_mode() == "unconfigured":
-            raise LedgerIntegrityError("expected_head reads require an explicit signed signer or allow_unsigned hash-only mode")
         if expected_head is not None:
             _require_expected_head(
                 expected_head,
@@ -1644,8 +1717,8 @@ class SQLStore:
                 chain_digest=self._chain_anchor(session_id, head),
             )
         verified, _chains = self._verified_records(session_id, head)
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, inbox)
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, inbox)
         boundary = min(head, through_seq) if through_seq is not None else head
         rows = [row for row in verified if after_seq < row[1] <= boundary][:limit]
         return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
@@ -1661,8 +1734,6 @@ class SQLStore:
         row = self._require_live(session_id)
         self._require_reader_row(row)
         head, inbox = row[:2]
-        if self._ledger_integrity_mode() == "unconfigured":
-            raise LedgerIntegrityError("verify_ledger requires an explicit signed signer or allow_unsigned hash-only mode")
         chain_digest = self._chain_anchor(session_id, head)
         _require_expected_head(
             expected_head,
@@ -1672,8 +1743,8 @@ class SQLStore:
             chain_digest=chain_digest,
         )
         _stored_rows, chains = self._verified_records(session_id, head)
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, inbox)
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, inbox)
         if not chains or chains[-1] != chain_digest:
             raise LedgerIntegrityError(f"ledger head chain mismatch at seq {head}")
         return head, chains[-1]
@@ -1689,8 +1760,8 @@ class SQLStore:
     def read_input(self, session_id: str, input_id: str) -> StoredInput | None:
         row = self._require_live(session_id)
         self._require_reader_row(row)
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, row[1])
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, row[1])
         rows = self._rows(
             "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
             "FROM sk_inbox "
@@ -1715,8 +1786,8 @@ class SQLStore:
         # complete captured-head prefix, then select only indexed rows at or
         # before the caller's logical boundary.
         verified, _chains = self._verified_records(session_id, head)
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, inbox)
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, inbox)
         verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
         rows = self._rows(
             "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest "
@@ -1739,8 +1810,8 @@ class SQLStore:
         # record in the captured committed prefix before exposing dependencies
         # through the page boundary.
         verified, _chains = self._verified_records(session_id, row[0])
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, row[1])
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, row[1])
         verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
         if any(stored.seq not in verified_by_seq for stored in records):
             raise LedgerIntegrityError("projection input contains a record outside the verified ledger prefix")
@@ -1821,8 +1892,8 @@ class SQLStore:
             _natural(through_input_seq, "through_input_seq")
         row = self._require_live(session_id)
         self._require_reader_row(row)
-        if self._requires_input_integrity_gate(session_id):
-            self._stored_inputs(session_id, row[1])
+        self._require_input_integrity_gate()
+        self._stored_inputs(session_id, row[1])
         through = row[1] if through_input_seq is None else min(through_input_seq, row[1])
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
@@ -1835,6 +1906,7 @@ class SQLStore:
         return tuple(self._stored_input(session_id, row) for row in rows)
 
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None:
+        self._require_configured_ledger("lease acquisition")
         _identity(owner)
         _positive(ttl_ms, "ttl_ms")
         with self._transaction():
@@ -1860,11 +1932,13 @@ class SQLStore:
             return lease
 
     def renew(self, lease: Lease, *, ttl_ms: int) -> LeasePoll:
+        self._require_configured_ledger("lease renewal")
         _positive(ttl_ms, "ttl_ms")
         with self._transaction():
             row = self._lock(lease.session_id)
             now = self._now()
             self._check_lease(lease.session_id, lease, row, now)
+            self._require_worker_accepts_row(row)
             routing = self._require_routing_cache(lease.session_id, row)
             self._require_worker_supports(
                 level=routing.requirements.level,
@@ -1889,6 +1963,7 @@ class SQLStore:
             return LeasePoll(renewed, now, row[1], controls)
 
     def release(self, lease: Lease) -> bool:
+        self._require_configured_ledger("lease release")
         with self._transaction():
             row = self._lock(lease.session_id)
             try:
@@ -1921,6 +1996,7 @@ class SQLStore:
         return self._defer_idle_drive(lease, poll_ms=poll_ms)
 
     def _defer_idle_drive(self, lease: Lease, *, poll_ms: int, lease_guard: Callable[[], Lease] | None = None) -> bool:
+        self._require_configured_ledger("idle drive deferral")
         _positive(poll_ms, "poll_ms")
         sid = lease.session_id
         self._require_live(sid)
@@ -1960,6 +2036,7 @@ class SQLStore:
 
     def defer_drive(self, lease: Lease, *, retry_after_ms: int) -> None:
         """Fence failure/readiness retry independently of due work and ready inbox."""
+        self._require_configured_ledger("drive deferral")
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
             row = self._lock(lease.session_id)
@@ -1974,6 +2051,7 @@ class SQLStore:
 
     def defer_projection(self, session_id: str, consumer: str, *, retry_after_ms: int) -> None:
         """Back off one consumer without claiming or delaying execution."""
+        self._require_configured_ledger("projection deferral")
         _positive(retry_after_ms, "retry_after_ms")
         with self._transaction():
             _, level, deletion_state, handler_version, required_capabilities = self._one(
@@ -1984,7 +2062,7 @@ class SQLStore:
             )
             if deletion_state != "live":
                 raise SessionNotLive("session is fenced for deletion")
-            self._require_worker_accepts_row((0, 0, 0, level, handler_version, required_capabilities))
+            self._require_reader_level(level)
             if handler_version is not None and (not isinstance(handler_version, str) or not handler_version):
                 raise LedgerIntegrityError("session handler_version is invalid")
             self._session_capabilities(required_capabilities)
@@ -2069,6 +2147,8 @@ class SQLStore:
         else:
             worker_predicate = ""
             worker_params = ()
+        reader_predicate = "AND s.level<=%s"
+        reader_params = (self.reader_level,)
         drive_scope = "" if tenant_id is None else "s.tenant_id=%s AND "
         project_scope = "" if tenant_id is None else "c.tenant_id=%s AND "
         scope_params: tuple[Any, ...] = () if tenant_id is None else (tenant_id,)
@@ -2093,7 +2173,7 @@ class SQLStore:
                 CROSS JOIN clock t
                 WHERE {project_scope}(c.tenant_id,c.session_id,'project',c.consumer)>(%s,%s,%s,%s)
                   AND s.schema_version='S1' AND s.deletion_state='live'
-                  {worker_predicate}
+                  {reader_predicate}
                   {project_filter}
                   AND c.last_seq<s.head_seq AND c.project_retry_at_ms<=t.ms
                 ORDER BY c.tenant_id,c.session_id,c.consumer LIMIT %s
@@ -2111,7 +2191,7 @@ class SQLStore:
                 *project_select_params,
                 *scope_params,
                 *cursor,
-                *worker_params,
+                *reader_params,
                 *project_filter_params,
                 limit,
                 limit,
@@ -2193,6 +2273,7 @@ class SQLStore:
     ) -> tuple[ClaimedWork, ...]:
         """Atomically claim work, holding at most one drive lease."""
 
+        self._require_configured_ledger("runnable work claim")
         _identity(owner)
         _positive(ttl_ms, "ttl_ms")
         _positive(limit, "limit")
@@ -2373,6 +2454,7 @@ class SQLStore:
         allow_unsigned: bool,
     ) -> tuple[str, ...]:
         """Fence a forget scope and durably bind its pending tombstone."""
+        self._require_configured_ledger("session forget")
         if actor.tenant_id != self.tenant_id:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
@@ -2429,6 +2511,7 @@ class SQLStore:
 
     def complete_forget(self, session_id: str) -> None:
         """Publish the complete tombstone after content/key erasure succeeds."""
+        self._require_configured_ledger("session forget completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
             if not scope:
@@ -2467,6 +2550,7 @@ class SQLStore:
         allow_unsigned: bool,
     ) -> tuple[str, ...]:
         """Freeze root/descendants, persist pending tombstones, and start purge."""
+        self._require_configured_ledger("session purge")
         if actor.tenant_id != self.tenant_id:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
@@ -2505,6 +2589,7 @@ class SQLStore:
 
     def complete_purge(self, session_id: str) -> tuple[str, ...]:
         """Delete a fenced scope child-first and retain only complete tombstones."""
+        self._require_configured_ledger("session purge completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
             if not scope:
@@ -2737,6 +2822,7 @@ class SQLSessionTx:
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         self._active()
+        self.store._require_configured_ledger("session creation")
         for consumer in consumers:
             _identity(consumer)
         if len(consumers) != len(set(consumers)):
@@ -2858,6 +2944,7 @@ class SQLSessionTx:
 
     def push(self, session_id: str, item: InboxItem) -> InputReceipt:
         self._active()
+        self.store._require_configured_ledger("input push")
         body = _input_body(item)
         s = self.store
         assert item.actor is not None
@@ -2895,7 +2982,7 @@ class SQLSessionTx:
             required = s._admit_level(
                 ceiling=ceiling,
                 required=max(
-                    s._input_level(item),
+                    s._input_level(item, parent_session_id=session_id),
                     s._level_floor(prefix_before.records, prefix_before.stored_inputs),
                 ),
                 current=1,
@@ -2951,7 +3038,7 @@ class SQLSessionTx:
             )
             routing_row = (row[0], seq, *row[2:6], required, *row[7:])
             prefix = s._prefix(session_id, routing_row, require_worker=False)
-            routing = s._derive_routing_cache(prefix, now=now)
+            routing = s._derive_routing_cache(prefix, now=now, minimum_level=required)
             s._write_routing_cache(session_id, routing, minimum_level=required)
             return InputReceipt(item.input_id, seq, now)
 
@@ -2968,6 +3055,7 @@ class SQLSessionTx:
         expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> CommitReceipt:
         self._active()
+        self.store._require_configured_ledger("ledger append")
         _identity(commit_id)
         _natural(expected_seq, "expected_seq")
         if expected_inbox_seq is not None:
@@ -3081,7 +3169,7 @@ class SQLSessionTx:
             required = s._admit_level(
                 ceiling=ceiling,
                 required=max((s._record_level(record) for record in records), default=1),
-                current=1,
+                current=routing_before.requirements.level,
             )
             if latest_turn is not None:
                 actual = normalize_requirements(latest_turn._payload["requirements"])
@@ -3187,13 +3275,14 @@ class SQLSessionTx:
                     prefix.records + added_for_routing,
                     stored_inputs,
                 )
-                routing = s._derive_routing_cache(routing_prefix, now=now)
-                floor = s._level_floor(routing_prefix.records, stored_inputs)
+                routing = s._derive_routing_cache(routing_prefix, now=now, minimum_level=required)
+                floor = s._level_floor(routing_prefix.records, stored_inputs, minimum_level=required)
                 s._write_routing_cache(session_id, routing, minimum_level=max(required, floor))
             else:
+                level = max(routing_before.requirements.level, s._level_floor(prefix.records, prefix.stored_inputs))
                 s._rows(
                     "UPDATE sk_session SET level=%s WHERE tenant_id=%s AND session_id=%s",
-                    (s._level_floor(prefix.records, prefix.stored_inputs), s.tenant_id, session_id),
+                    (level, s.tenant_id, session_id),
                 )
             s._rows(
                 "UPDATE sk_session SET head_seq=%s WHERE tenant_id=%s AND session_id=%s",
@@ -3245,8 +3334,8 @@ class SQLSessionTx:
         if last > head:
             raise LedgerIntegrityError("consumer cursor is beyond the verified ledger head")
         verified, _chains = s._verified_records(session_id, head)
-        if s._requires_input_integrity_gate(session_id):
-            s._stored_inputs(session_id, inbox)
+        s._require_input_integrity_gate()
+        s._stored_inputs(session_id, inbox)
         verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
         # One statement snapshot. Include all remaining rows of the commit touching the soft limit.
         rows = s._rows(
@@ -3276,6 +3365,7 @@ class SQLSessionTx:
 
     def ack(self, batch: ConsumerBatch) -> None:
         self._active()
+        self.store._require_configured_ledger("consumer acknowledgement")
         row = self.store._lock(batch.session_id)
         self.store._require_live_row(row)
         self.store._require_reader_level(row[6])

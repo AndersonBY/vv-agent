@@ -7,6 +7,12 @@ from collections.abc import Callable
 from typing import cast
 
 from vv_agent.kernel._content import KeyUnavailable, SessionHead
+from vv_agent.kernel._content_runtime import (
+    _ContentSessionStoreAdapter,
+    content_runtime_binding_for,
+    durable_content_reader,
+    wrap_session_content_store,
+)
 from vv_agent.kernel._drive import (
     FACTORY_HEARTBEAT_SECONDS,
     FACTORY_LEASE_TTL_MS,
@@ -103,6 +109,19 @@ def drive_with_runtime(
 
             selected_runtime = cast(Runtime, selected)
             selected_runtime._key_unavailable = False
+            binding = content_runtime_binding_for(selected_store)
+            if binding is not None:
+                if not isinstance(selected_store, _ContentSessionStoreAdapter):
+                    selected_store = wrap_session_content_store(selected_store, binding)
+                if selected_runtime.content_reader is None:
+                    tenant_id = getattr(selected_store, "tenant_id", None)
+                    if not isinstance(tenant_id, str) or not tenant_id:
+                        raise ValueError("content-bound store requires a non-empty tenant binding")
+                    selected_runtime.content_reader = durable_content_reader(
+                        selected_store,
+                        tenant_id=tenant_id,
+                        session_id=selected_session_id,
+                    )
             if selected_runtime.content_reader is not None and not isinstance(
                 selected_runtime.content_reader,
                 _KeyUnavailableTrackingReader,

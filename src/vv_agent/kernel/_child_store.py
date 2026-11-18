@@ -15,6 +15,7 @@ from vv_agent.kernel._content import (
     SESSION_ATTRIBUTES,
     SESSION_PRINCIPAL_ATTRIBUTES,
     SESSION_WORKSPACE,
+    ContentBindingMismatch,
     ContentRef,
     ContentSessionWriter,
     ContentUnavailable,
@@ -22,6 +23,7 @@ from vv_agent.kernel._content import (
 )
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec
 from vv_agent.kernel._requirements import normalize_requirements
+from vv_agent.kernel._sql import SessionNotLive
 from vv_agent.kernel._state import ExecutionState
 from vv_agent.kernel._state import child_handles as child_handles
 from vv_agent.kernel._store import ContentSessionTx, SessionStore, SessionTx, StoredRecord
@@ -335,19 +337,78 @@ def child_delivery(
     return batch.through_seq
 
 
-def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any], item: InboxItem) -> StoredRecord | None:
-    handle = next((h for h in child_handles(handle) if h["session_id"] == item.payload["session_id"]), {})
-    if not handle:
+@dataclass(frozen=True)
+class ChildCompletion:
+    session_id: str
+    turn_id: str
+    status: str
+    result: Any
+    terminal_seq: int
+    terminal_digest: str
+    from_parent_copy: bool
+
+
+class ChildCompletionPending:
+    """The child is fenced, but its complete tombstone is not available yet."""
+
+
+PENDING_CHILD_COMPLETION = ChildCompletionPending()
+_UNHYDRATED_RESULT = object()
+_UNVERIFIED = object()
+
+
+def _child_is_deleted(store: SessionStore, session_id: str) -> bool:
+    checker = getattr(store, "child_is_deleted", None)
+    return checker(session_id) is True if callable(checker) else False
+
+
+def _verified_parent_copy(store: SessionStore, parent_id: str, item: InboxItem) -> Any:
+    if item.actor is None:
+        return _UNVERIFIED
+    tenant_id = _store_tenant_id(store)
+    if item.actor["tenant_id"] != tenant_id:
+        return _UNVERIFIED
+    with store.atomic() as tx:
+        parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=parent_id)
+        try:
+            parent_writer.assert_input(item.input_id, item.actor["attributes"], INPUT_ACTOR_ATTRIBUTES)
+            result_ref = item.payload["result"]
+            if result_ref is None:
+                return None
+            parent_writer.assert_input(item.input_id, result_ref, CHILD_RESULT)
+            return parent_writer.get_json(result_ref)
+        except (ContentBindingMismatch, ContentUnavailable):
+            return _UNVERIFIED
+
+
+def _matched_completion_handle(parent_id: str, handles: dict[str, Any], item: InboxItem) -> dict[str, Any] | None:
+    p = item.payload
+    handle = next((h for h in child_handles(handles) if h["session_id"] == p["session_id"]), None)
+    if handle is None:
         return None
-    p, target = item.payload, handle["delivery_target"]
+    target = handle["delivery_target"]
     if (
         target["session_id"] != parent_id
         or target["turn_id"] != item.target_turn_id
+        or target["generation"] != item.generation
         or target["operation_id"] != p["operation_id"]
         or target["attempt"] != p["attempt"]
         or handle["session_id"] != p["session_id"]
         or handle["turn_id"] != p["turn_id"]
     ):
+        return None
+    return handle
+
+
+def _verify_live_completion(
+    store: SessionStore,
+    parent_id: str,
+    handle: dict[str, Any],
+    item: InboxItem,
+) -> ChildCompletion | None:
+    p = item.payload
+    handle = _matched_completion_handle(parent_id, handle, item)
+    if handle is None:
         return None
     created_stored = store.read(p["session_id"], limit=1).records[0]
     created = created_stored.record
@@ -386,16 +447,13 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
     ):
         return None
     tenant_id = _store_tenant_id(store)
+    delivered_result = _verified_parent_copy(store, parent_id, item)
+    if delivered_result is _UNVERIFIED:
+        return None
     with store.atomic() as tx:
-        parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=parent_id)
         child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=p["session_id"])
-        if item.actor is None:
-            return None
-        parent_writer.assert_input(item.input_id, item.actor["attributes"], INPUT_ACTOR_ATTRIBUTES)
         result_ref = item.payload["result"]
         if result_ref is not None:
-            parent_writer.assert_input(item.input_id, result_ref, CHILD_RESULT)
-            delivered_result = parent_writer.get_json(result_ref)
             terminal_result = r.payload["result"]
             if not is_content_ref(terminal_result):
                 return None
@@ -403,10 +461,63 @@ def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any
             terminal_result = child_writer.get_json(terminal_result)
             if canonical_json_bytes(delivered_result) != canonical_json_bytes(terminal_result):
                 return None
-    return terminal
+    return ChildCompletion(
+        session_id=p["session_id"],
+        turn_id=p["turn_id"],
+        status=r._payload["status"],
+        result=delivered_result,
+        terminal_seq=terminal.seq,
+        terminal_digest=r.digest,
+        from_parent_copy=False,
+    )
 
 
-_UNHYDRATED_RESULT = object()
+def _verify_parent_completion(
+    store: SessionStore,
+    parent_id: str,
+    handle: dict[str, Any],
+    item: InboxItem,
+) -> ChildCompletion | None:
+    p = item.payload
+    handle = _matched_completion_handle(parent_id, handle, item)
+    if handle is None:
+        return None
+    delivered_result = _verified_parent_copy(store, parent_id, item)
+    if delivered_result is _UNVERIFIED:
+        return None
+    return ChildCompletion(
+        session_id=p["session_id"],
+        turn_id=p["turn_id"],
+        status=p["status"],
+        result=delivered_result,
+        terminal_seq=p["terminal_seq"],
+        terminal_digest=p["terminal_digest"],
+        from_parent_copy=True,
+    )
+
+
+def verify_completion(
+    store: SessionStore,
+    parent_id: str,
+    handle: dict[str, Any],
+    item: InboxItem,
+) -> ChildCompletion | ChildCompletionPending | None:
+    """Verify a live child terminal or its already-admitted parent-owned copy."""
+
+    if _child_is_deleted(store, item.payload["session_id"]):
+        return _verify_parent_completion(store, parent_id, handle, item)
+    try:
+        return _verify_live_completion(store, parent_id, handle, item)
+    except KeyError:
+        return (
+            _verify_parent_completion(store, parent_id, handle, item)
+            if _child_is_deleted(store, item.payload["session_id"])
+            else None
+        )
+    except SessionNotLive:
+        # A pending tombstone fences the child before completion. Keep the parent
+        # inbox recoverable; the complete tombstone switches this to the parent copy.
+        return PENDING_CHILD_COMPLETION
 
 
 def _hydrate_terminal_result(store: SessionStore, terminal: StoredRecord) -> Any:
@@ -430,6 +541,29 @@ def _hydrate_terminal_result(store: SessionStore, terminal: StoredRecord) -> Any
     )
 
 
+def _child_outcome(
+    plan: Record,
+    *,
+    session_id: str,
+    turn_id: str,
+    status: str,
+    result: Any,
+) -> ToolExecutionResult:
+    if is_content_ref(result):
+        raise ValueError("child turn result requires content hydration")
+    return ToolExecutionResult(
+        tool_call_id=plan.payload["request"]["id"],
+        content=result if isinstance(result, str) else str(result),
+        status_code=ToolResultStatus.SUCCESS if status == "completed" else ToolResultStatus.ERROR,
+        error_code=None if status == "completed" else f"child_{status}",
+        metadata={
+            "child_session_id": session_id,
+            "child_turn_id": turn_id,
+            "status": status,
+        },
+    )
+
+
 def child_outcome(
     plan: Record,
     terminal: StoredRecord,
@@ -438,19 +572,42 @@ def child_outcome(
 ) -> ToolExecutionResult:
     p = terminal.record.payload
     result = p["result"] if hydrated_result is _UNHYDRATED_RESULT else hydrated_result
-    if is_content_ref(result):
-        raise ValueError("child turn result requires content hydration")
-    return ToolExecutionResult(
-        tool_call_id=plan.payload["request"]["id"],
-        content=result if isinstance(result, str) else str(result),
-        status_code=ToolResultStatus.SUCCESS if p["status"] == "completed" else ToolResultStatus.ERROR,
-        error_code=None if p["status"] == "completed" else f"child_{p['status']}",
-        metadata={
-            "child_session_id": terminal.record.session_id,
-            "child_turn_id": terminal.record.turn_id,
-            "status": p["status"],
-        },
+    return _child_outcome(
+        plan,
+        session_id=terminal.record.session_id,
+        turn_id=terminal.record.turn_id,
+        status=p["status"],
+        result=result,
     )
+
+
+def completion_outcome(plan: Record, completion: ChildCompletion) -> ToolExecutionResult:
+    return _child_outcome(
+        plan,
+        session_id=completion.session_id,
+        turn_id=completion.turn_id,
+        status=completion.status,
+        result=completion.result,
+    )
+
+
+def _result_from_outcomes(plan: Record, results: Sequence[ToolExecutionResult]) -> ToolExecutionResult:
+    if len(results) == 1:
+        return results[0]
+    return ToolExecutionResult(
+        plan._payload["request"]["id"],
+        json.dumps([result.to_dict() for result in results]),
+        status_code=ToolResultStatus.ERROR
+        if any(result.status_code == ToolResultStatus.ERROR for result in results)
+        else ToolResultStatus.SUCCESS,
+        metadata={"children": [result.metadata for result in results]},
+    )
+
+
+def result_from_completions(plan: Record, completions: Sequence[ChildCompletion]) -> ToolExecutionResult:
+    """Project admitted parent copies without reading a live child session."""
+
+    return _result_from_outcomes(plan, [completion_outcome(plan, completion) for completion in completions])
 
 
 def ordinary_result_for_children(
@@ -467,13 +624,4 @@ def ordinary_result_for_children(
         snapshot = first if i == 0 else store.read_state(handle["session_id"])
         terminal = next(r for r in snapshot[1] if r.record.kind == "turn_ended" and r.record.turn_id == handle["turn_id"])
         results.append(child_outcome(plan, terminal, hydrated_result=_hydrate_terminal_result(store, terminal)))
-    if len(results) == 1:
-        return results[0]
-    return ToolExecutionResult(
-        plan._payload["request"]["id"],
-        json.dumps([result.to_dict() for result in results]),
-        status_code=ToolResultStatus.ERROR
-        if any(r.status_code == ToolResultStatus.ERROR for r in results)
-        else ToolResultStatus.SUCCESS,
-        metadata={"children": [result.metadata for result in results]},
-    )
+    return _result_from_outcomes(plan, results)

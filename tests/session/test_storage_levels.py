@@ -1,8 +1,11 @@
 import pytest
 
+from vv_agent.kernel._content import Principal
 from vv_agent.kernel._sql import LedgerIntegrityError, UnsupportedFeatureLevel
+from vv_agent.session.export import export_session
 from vv_agent.session.records import InboxItem, SessionSpec
 
+from .conftest import open_store
 from .helpers import content_ref, item, principal, record
 
 
@@ -113,15 +116,15 @@ def test_held_lease_is_fenced_when_session_level_rises(store):
         store.defer_idle_drive(lease, poll_ms=1_000)
     with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
         store.defer_drive(lease, retry_after_ms=1_000)
-    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
-        store.defer_projection("s", "host", retry_after_ms=1_000)
+    store.defer_projection("s", "host", retry_after_ms=1_000)
 
     assert tuple(store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_record", "sk_commit", "sk_inbox")) == counts
     assert store._rows("SELECT drive_retry_at_ms FROM sk_session WHERE session_id='s'")[0][0] == 0
-    assert store._rows("SELECT project_retry_at_ms FROM sk_consumer WHERE session_id='s'")[0][0] == 0
+    assert store._rows("SELECT project_retry_at_ms FROM sk_consumer WHERE session_id='s'")[0][0] > 0
     assert store.release(lease)
 
     store.configure_worker(level=2)
+    store._rows("UPDATE sk_session SET level=1 WHERE tenant_id=%s AND session_id='s'", (store.tenant_id,))
     high = store.acquire("s", owner="upgraded", ttl_ms=10_000)
     assert high is not None
     store.release(high)
@@ -166,7 +169,7 @@ def test_host_push_and_commit_replay_do_not_require_worker_execution(store):
     assert session_level(store) == 2
 
 
-def test_incompatible_workers_skip_claims_and_projection_without_failure(store):
+def test_incompatible_executor_skips_drive_while_projection_uses_reader_level(store):
     create(store, consumers=("host",))
     store.configure_worker(level=2)
     lease = acquire(store)
@@ -177,17 +180,17 @@ def test_incompatible_workers_skip_claims_and_projection_without_failure(store):
     store.configure_worker(level=1)
     assert store.acquire("s", owner="old", ttl_ms=10_000) is None
     assert not store.is_runnable("s")
-    assert store.list_runnable() == ()
+    claimed = store.claim_runnable(owner="projection", ttl_ms=10_000, limit=10)
+    assert [(work.work.kind, work.lease) for work in claimed] == [("project", None)]
+    store.defer_projection("s", "host", retry_after_ms=1_000)
     with store.atomic() as tx:
-        assert tx.consumer_batch("s", "host") is None
+        batch = tx.consumer_batch("s", "host")
+        assert batch is not None and batch.through_seq == 2
+        tx.ack(batch)
 
     store.configure_worker(level=2)
     high = store.acquire("s", owner="new", ttl_ms=10_000)
     assert high is not None
-    assert store.list_runnable()
-    with store.atomic() as tx:
-        batch = tx.consumer_batch("s", "host")
-        assert batch is not None and batch.through_seq == 2
     store.release(high)
 
 
@@ -206,7 +209,7 @@ def test_projection_ack_rechecks_level_inside_transaction(store):
             "UPDATE sk_session SET level=3 WHERE tenant_id=%s AND session_id='s'",
             (store.tenant_id,),
         )
-        with pytest.raises(UnsupportedFeatureLevel, match="session feature level 3 exceeds worker feature level 2"):
+        with pytest.raises(UnsupportedFeatureLevel, match="session feature level 3 exceeds reader feature level 2"):
             tx.ack(batch)
 
     assert store._rows("SELECT last_seq FROM sk_consumer WHERE session_id='s' AND consumer='host'")[0][0] == 0
@@ -288,3 +291,73 @@ def test_default_level_one_remains_runnable_and_acquirable(store):
     lease = acquire(store)
     assert lease is not None
     store.release(lease)
+
+
+@pytest.mark.persistent_store
+@pytest.mark.b8_unconfigured_storage
+def test_unconfigured_store_rejects_writes_and_strong_reads(store, database):
+    create(store, consumers=("host",))
+    lease = acquire(store)
+    chain = store._one(
+        "SELECT chain_digest FROM sk_record WHERE tenant_id=%s AND session_id='s' AND seq=1",
+        (store.tenant_id,),
+    )[0]
+    counts = tuple(
+        store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_session", "sk_record", "sk_commit", "sk_inbox")
+    )
+    actor = Principal.from_dict(principal("forget"))
+    message = "explicit signed signer or allow_unsigned hash-only"
+
+    with open_store(database, allow_unsigned=False) as unconfigured:
+        assert unconfigured._ledger_integrity_mode() == "unconfigured"
+        assert unconfigured._one("SELECT storage_major,write_level FROM sk_settings WHERE singleton=1") == ("S1", 1)
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.read("s")
+
+        with pytest.raises(LedgerIntegrityError, match=message):
+            create(unconfigured, "blocked-create")
+        with pytest.raises(LedgerIntegrityError, match=message), unconfigured.atomic() as tx:
+            tx.push("s", item("blocked-push"))
+        with pytest.raises(LedgerIntegrityError, match=message), unconfigured.atomic() as tx:
+            tx.append(
+                "s",
+                lease=lease,
+                expected_seq=1,
+                commit_id="blocked-append",
+                records=(record("usage_observed"),),
+            )
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.acquire("s", owner="blocked-lease", ttl_ms=10_000)
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.begin_forget(
+                "s",
+                actor,
+                bound_signer=None,
+                verifier=None,
+                allow_unsigned=True,
+            )
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.complete_forget("s")
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.begin_purge(
+                "s",
+                actor,
+                bound_signer=None,
+                verifier=None,
+                allow_unsigned=True,
+            )
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.complete_purge("s")
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.read_state("s", expected_head=(1, chain))
+        with pytest.raises(LedgerIntegrityError, match=message):
+            unconfigured.verify_ledger("s")
+        with pytest.raises(LedgerIntegrityError, match=message):
+            export_session(unconfigured, "s")
+
+    after = tuple(
+        store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_session", "sk_record", "sk_commit", "sk_inbox")
+    )
+    assert after == counts
+    assert store._ledger_integrity_mode() == "hash-only"
+    assert export_session(store, "s").header.head_seq == 1

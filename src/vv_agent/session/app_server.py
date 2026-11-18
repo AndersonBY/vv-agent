@@ -1715,6 +1715,27 @@ class _KernelRunAdapter(RunAdapter):
         else:
             self.kernel._worker.post_observation(self._observe_with_driver)
 
+    def _wait_for_local_claim_handoff(self, session_id: str) -> bool:
+        worker = self.kernel._worker
+        deadline = self.clock.monotonic() + max(5.0, worker.scan_interval * 4)
+        # A durable claim is acquired inside the coordinator before it publishes
+        # the matching drive lease to this adapter. ``wait_idle`` cannot cover
+        # that short handoff window. Wait for complete coordinator passes and
+        # return true only when the same session has crossed into the executor.
+        for _ in range(2):
+            worker.wake(session_id)
+            while worker._wake.is_set():
+                inflight = worker._inflight_lease
+                if inflight is not None and inflight.session_id == session_id:
+                    return True
+                if self.clock.monotonic() >= deadline:
+                    raise TimeoutError(f"local claim handoff did not complete for {session_id}")
+                sleep(0.005)
+            inflight = worker._inflight_lease
+            if inflight is not None and inflight.session_id == session_id:
+                return True
+        return False
+
     def join(self):
         """Wait for this node's accepted work without joining a remote lease."""
 
@@ -1740,13 +1761,8 @@ class _KernelRunAdapter(RunAdapter):
                     handle.join()
                     break
                 if self.kernel.store.lease_status(handle.session_id)[2] > 0:
-                    local_handoff_deadline = self.clock.monotonic() + 0.05
-                    while self.clock.monotonic() < local_handoff_deadline:
-                        inflight = self.kernel._worker._inflight_lease
-                        if inflight is not None and inflight.session_id == handle.session_id:
-                            handle.join()
-                            break
-                        sleep(0.005)
+                    if self._wait_for_local_claim_handoff(handle.session_id):
+                        handle.join()
                     break
                 if not self.kernel.store.is_runnable(handle.session_id) and self.kernel.store.next_drive_delay_ms(
                     handle.session_id
@@ -1764,7 +1780,11 @@ class _KernelRunAdapter(RunAdapter):
                 if inflight is not None and inflight.session_id == sid:
                     self.kernel._worker.wait_idle()
                     break
-                if self.kernel.store.lease_status(sid)[2] > 0 or not self.kernel.store.is_runnable(sid):
+                if self.kernel.store.lease_status(sid)[2] > 0:
+                    if self._wait_for_local_claim_handoff(sid):
+                        self.kernel._worker.wait_idle()
+                    break
+                if not self.kernel.store.is_runnable(sid):
                     break
                 sleep(0.01)
         # Reconcile the terminal record, operational error, and released cursor.

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.host import ToolResultResourceAuthorizationRequest, TrustedPrincipal
+from vv_agent.app_server.processor import CLIENT_METHODS
 from vv_agent.app_server.protocol.tool_result import ToolResultRef
+from vv_agent.app_server.schema import CLIENT_METHOD_SPECS
 from vv_agent.kernel._content import ContentLabels, ContentRef, ContentUnavailable, Principal
 from vv_agent.session.content_runtime import SessionContentWriter, durable_content_store
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
-from vv_agent.session.deletion import SessionDeletionStore
+from vv_agent.session.deletion import DeletionAuthenticity, SessionDeletionStore
+from vv_agent.session.export import export_session
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.types import LLMResponse
 from vv_agent.workspace.resources import ToolResultResourceRef
@@ -418,11 +421,206 @@ def test_same_tenant_users_reuse_only_explicit_shared_resource_grants(store, tmp
         provider.close()
 
 
-@pytest.mark.skip(
-    reason=(
-        "P3 boundary: P2 App Server exposes no thread export/delete surface, and the store export/delete APIs "
-        "do not receive an authenticated user Principal for resource authorization."
+def test_a14_export_and_delete_wire_surface_remains_contract_gated(store, tmp_path):
+    host = DefaultAppServerHost(
+        agent=Agent("test", "Be precise."),
+        run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "m", []), workspace=tmp_path),
     )
-)
-def test_a14_export_and_delete_user_authorization_matrix() -> None:
-    raise AssertionError("P3 must add an authenticated App Server export/delete contract before A14 can pass")
+    server, provider, client = _server(store, host, tmp_path / "wire-gate-keys.sqlite3")
+    try:
+        assert "thread/export" not in CLIENT_METHODS
+        assert "thread/delete" not in CLIENT_METHODS
+        assert "thread/export" not in CLIENT_METHOD_SPECS
+        assert "thread/delete" not in CLIENT_METHOD_SPECS
+        for method in ("thread/export", "thread/delete"):
+            assert client.rpc(method, {"threadId": "source"})["error"]["code"] == -32601
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+        provider.close()
+
+
+def test_a14_export_forget_and_purge_authorization_matrix(store, tmp_path, monkeypatch):
+    tenant = store.tenant_id
+    owner = _principal("user-a", tenant)
+    host = _GrantHost(
+        principals={"user-a": owner},
+        grants={("user-a", "create", "source")},
+        resource_grants=set(),
+        agent=Agent("test", "Be precise."),
+        run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "m", []), workspace=tmp_path),
+    )
+    server, provider, client = _server(store, host, tmp_path / "service-authorization-keys.sqlite3")
+    adapter_joined = False
+    try:
+        session_ids = ("source", "service-session", "agent-session", "authorized-service")
+        host.grants.update(("user-a", "create", session_id) for session_id in session_ids)
+        for session_id in session_ids:
+            assert client.rpc("thread/start", {"inputId": session_id})["result"]["threadId"] == session_id
+        source_principal = Principal.from_dict(_creation(server, "source")["principal"])
+        user_b = Principal(tenant, "user-b", "user", source_principal.attributes)
+        foreign = Principal(f"{tenant}-other", "foreign-user", "user", source_principal.attributes)
+        service = Principal(tenant, "service", "service", source_principal.attributes)
+        agent = Principal(tenant, "agent", "agent", source_principal.attributes)
+        invalid_kind = Principal(tenant, "robot", "robot", source_principal.attributes)
+        authorizations: list[tuple[str, str, str]] = []
+        grants: set[tuple[str, str, str]] = set()
+
+        def authorize(actor: Principal, session_id: str, action: str) -> bool:
+            authorizations.append((actor.subject_id, session_id, action))
+            return (actor.subject_id, session_id, action) in grants
+
+        content = durable_content_store(store)
+        deletion = SessionDeletionStore(store, content)
+
+        def operation(name: str, session_id: str, *, actor: Any, callback: Any = None):
+            if name == "export":
+                return export_session(store, session_id, actor=actor, authorize=callback)
+            return getattr(deletion, f"{name}_session")(tenant, session_id, actor=actor, authorize=callback)
+
+        lock_calls = 0
+        lock = store._lock
+
+        def tracked_lock(session_id: str, *args: Any, **kwargs: Any):
+            nonlocal lock_calls
+            lock_calls += 1
+            return lock(session_id, *args, **kwargs)
+
+        monkeypatch.setattr(store, "_lock", tracked_lock)
+        scoped_calls = 0
+        for_tenant = store.for_tenant
+
+        def tracked_for_tenant(selected_tenant: str):
+            nonlocal scoped_calls
+            scoped_calls += 1
+            return for_tenant(selected_tenant)
+
+        monkeypatch.setattr(store, "for_tenant", tracked_for_tenant)
+
+        for name in ("export", "forget", "purge"):
+            with pytest.raises(PermissionError, match="requires an authorization hook"):
+                operation(name, "source", actor=user_b)
+        with pytest.raises(PermissionError):
+            export_session(store, "source", authorize=authorize)
+
+        for name in ("export", "forget", "purge"):
+            with pytest.raises(PermissionError, match="not authorized"):
+                operation(name, "source", actor=user_b, callback=authorize)
+        assert authorizations == [
+            ("user-b", "source", "export"),
+            ("user-b", "source", "forget"),
+            ("user-b", "source", "purge"),
+        ]
+
+        authorization_count = len(authorizations)
+        for name in ("export", "forget", "purge"):
+            with pytest.raises(PermissionError, match="another tenant"):
+                operation(name, "source", actor=foreign, callback=authorize)
+            with pytest.raises(PermissionError, match="requires a Principal"):
+                operation(name, "source", actor=object(), callback=authorize)
+            with pytest.raises(PermissionError, match="invalid subject kind"):
+                operation(name, "source", actor=invalid_kind, callback=authorize)
+            with pytest.raises(PermissionError, match="authorization hook is invalid"):
+                operation(name, "source", actor=user_b, callback=True)
+        assert len(authorizations) == authorization_count
+        assert lock_calls == 0
+        assert scoped_calls == 0
+        assert _session_ids(store) == set(session_ids)
+        assert store._rows(
+            "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (tenant, "source"),
+        ) == [("live",)]
+        assert store._tombstone("source") is None
+
+        policy_scoped_calls = scoped_calls
+        for override in ({"signer": cast(Any, object())}, {"allow_unsigned": False}):
+            with pytest.raises(ValueError, match="cannot override a hash-only admission policy"):
+                SessionDeletionStore(store, content, **override).forget_session(
+                    tenant,
+                    "source",
+                    actor=service,
+                )
+        assert scoped_calls == policy_scoped_calls + 2
+        assert lock_calls == 0
+        assert store._rows(
+            "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (tenant, "source"),
+        ) == [("live",)]
+        assert store._tombstone("source") is None
+
+        grants.update(
+            {
+                ("user-b", "source", "export"),
+                ("user-b", "source", "forget"),
+                ("user-b", "source", "purge"),
+            }
+        )
+        document = export_session(store, "source", actor=user_b, authorize=authorize)
+        assert document.header.session_id == "source"
+        assert lock_calls > 0
+
+        for session_id, actor in (("service-session", service), ("agent-session", agent)):
+            assert export_session(store, session_id, actor=actor).header.session_id == session_id
+
+        authorization_count = len(authorizations)
+        for name in ("export", "forget", "purge"):
+            with pytest.raises(PermissionError, match="not authorized"):
+                operation(name, "authorized-service", actor=service, callback=authorize)
+        assert [item[2] for item in authorizations[authorization_count:]] == ["export", "forget", "purge"]
+        assert store._rows(
+            "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (tenant, "authorized-service"),
+        ) == [("live",)]
+        server.run_adapter.join()
+        adapter_joined = True
+
+        forgotten = deletion.forget_session(tenant, "source", actor=user_b, authorize=authorize)
+        assert forgotten.operation == "forget"
+        assert forgotten.authenticity is DeletionAuthenticity.HASH_ONLY
+        receipt = deletion.purge_session(tenant, "source", actor=user_b, authorize=authorize)
+        assert receipt.operation == "purge"
+        assert receipt.session_ids == ("source",)
+        assert "source" not in _session_ids(store)
+        assert authorizations[-2:] == [
+            ("user-b", "source", "forget"),
+            ("user-b", "source", "purge"),
+        ]
+
+        for session_id, actor in (("service-session", service), ("agent-session", agent)):
+            assert deletion.forget_session(tenant, session_id, actor=actor).operation == "forget"
+            assert deletion.purge_session(tenant, session_id, actor=actor).operation == "purge"
+
+        grants.update(
+            {
+                ("service", "authorized-service", "export"),
+                ("service", "authorized-service", "forget"),
+                ("service", "authorized-service", "purge"),
+            }
+        )
+        assert export_session(store, "authorized-service", actor=service, authorize=authorize).header.session_id == (
+            "authorized-service"
+        )
+        assert (
+            deletion.forget_session(
+                tenant,
+                "authorized-service",
+                actor=service,
+                authorize=authorize,
+            ).operation
+            == "forget"
+        )
+        assert (
+            deletion.purge_session(
+                tenant,
+                "authorized-service",
+                actor=service,
+                authorize=authorize,
+            ).operation
+            == "purge"
+        )
+        assert [item[2] for item in authorizations[-3:]] == ["export", "forget", "purge"]
+    finally:
+        if not adapter_joined:
+            server.run_adapter.join()
+        server.kernel.close()
+        provider.close()

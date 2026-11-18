@@ -5,16 +5,20 @@ from __future__ import annotations
 from collections.abc import Generator
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+
+from vv_agent.tools.base import ToolContext
+from vv_agent.tools.handlers.sub_agents import create_sub_task
 
 from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
 from ._canonical_json import canonical_json_bytes
-from ._child_store import child_handles, verify_completion
+from ._child_store import PENDING_CHILD_COMPLETION, ChildCompletion, child_handles, result_from_completions, verify_completion
 from ._content_publication import declared_content_ref
 from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import CoreDriver
-from ._execution_values import AgentTask
+from ._execution_values import AgentStatus, AgentTask, SubTaskOutcome
 from ._message_values import Message
 from ._provider_outcomes import (
     Accepted,
@@ -37,7 +41,7 @@ from ._summary_requests import compaction_request
 from ._token_count import _StopIterationTransport
 from ._tool_planner import ToolCatalog
 from ._tool_result_checks import provider_result_identity
-from ._tool_values import ToolExecutionResult
+from ._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
 
 
 class InputSetting(Enum):
@@ -815,9 +819,12 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
     op = self.state.operations.get(target)
     a = op.attempts.get(p["attempt"]) if op else None
     handle = a.child_handle if a else None
-    terminal = verify_completion(self.store, self.sid, handle, item) if handle else None
-    if a is None or op is None or handle is None or terminal is None:
+    completion = verify_completion(self.store, self.sid, handle, item) if handle else None
+    if completion is PENDING_CHILD_COMPLETION:
+        return target, [], "pending", None
+    if a is None or op is None or handle is None or completion is None:
         return target, [], "rejected", "untrusted or mismatched child completion"
+    assert isinstance(completion, ChildCompletion)
     turn = self.state.turns[op.turn_id]
     if item.generation != turn.start._payload["generation"]:
         return target, [], "rejected", "authenticated child completion: stale generation audit only"
@@ -833,18 +840,24 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
             return target, [], "pending", None
         return target, [], "applied", "background child notification"
     handles = child_handles(handle)
-    delivered = {p["session_id"]: terminal}
+    delivered = {p["session_id"]: completion}
     for h in handles:
         prior = cache.get((target, p["attempt"], h["session_id"])) if cache else None
         if prior:
             old = InboxItem(**prior._payload["input"])
             verified = verify_completion(self.store, self.sid, handle, old)
-            if verified:
+            if isinstance(verified, ChildCompletion):
                 delivered[old.payload["session_id"]] = verified
     if any(h["session_id"] not in delivered for h in handles):
         return target, [], "applied", "batch member completed"
     sdk = a.wait and a.wait.get("delegation")
-    result = yield ChildResult(a.execution_plan, handles)
+    completions = tuple(delivered[handle["session_id"]] for handle in handles)
+    delegation = sdk if isinstance(sdk, dict) else None
+    if any(completion.from_parent_copy for completion in completions):
+        plan = self.hydrate_plan(a.execution_plan) if self.content_reader is not None else a.execution_plan
+        result = result_for_parent_copies(plan, handles, completions, delegation).to_dict()
+    else:
+        result = yield ChildResult(a.execution_plan, handles)
     if a.result:
         return (
             target,
@@ -852,11 +865,82 @@ def apply_child(self: CoreDriver, item: InboxItem) -> Generator[object, Any, tup
             "noop" if digest(a.result._payload["result"]) == digest(result) else "rejected",
             "retained child result",
         )
-    outcome = Definitive(result, tuple(f"child/{r.seq}/{r.record.digest}" for r in delivered.values()))
+    outcome = Definitive(
+        result,
+        tuple(f"child/{completion.terminal_seq}/{completion.terminal_digest}" for completion in delivered.values()),
+    )
     if sdk and not turn.cancelled and not turn.ended and self.state.active_turn_id == op.turn_id:
         yield PrepareToolContext(a.execution_plan, include_store=False)
         outcome = yield FinalizeTool(a.execution_plan, outcome)
     return target, (yield CompleteResult(a.execution_plan, outcome)), "applied", None
+
+
+def _completion_status(completion: ChildCompletion) -> AgentStatus:
+    return AgentStatus.COMPLETED if completion.status == "completed" else AgentStatus.FAILED
+
+
+def _completion_text(completion: ChildCompletion) -> str:
+    if completion.result is None:
+        return ""
+    return completion.result if isinstance(completion.result, str) else str(completion.result)
+
+
+def result_for_parent_copies(
+    plan: Record,
+    handles: list[dict[str, Any]],
+    completions: list[ChildCompletion] | tuple[ChildCompletion, ...],
+    delegation: dict[str, Any] | None,
+) -> ToolExecutionResult:
+    """Project admitted copies through the SDK envelope frozen at parent admission."""
+
+    if delegation is None:
+        return result_from_completions(plan, completions)
+    if len(handles) != len(completions):
+        raise ValueError("parent child completions do not match the admitted handles")
+    mode = delegation["mode"]
+    agent_name = delegation["agent_name"]
+    if mode == "configured":
+        outcomes = [
+            SubTaskOutcome(
+                task_id=handle["session_id"],
+                agent_name=agent_name,
+                status=_completion_status(completion),
+                session_id=handle["session_id"],
+                final_answer=_completion_text(completion) or None,
+                error=(_completion_text(completion) or None) if _completion_status(completion) != AgentStatus.COMPLETED else None,
+                error_code="sub_task_failed" if _completion_status(completion) != AgentStatus.COMPLETED else None,
+            )
+            for handle, completion in zip(handles, completions, strict=True)
+        ]
+        values = iter(outcomes)
+        context = SimpleNamespace(
+            sub_task_runner=lambda _request: next(values), run_context=None, ctx=None, tool_call_id="", workspace_backend=None
+        )
+        result = create_sub_task(
+            cast(ToolContext, context), copy_json(plan._payload["request"]["arguments"]) | {"wait_for_completion": True}
+        )
+        result.tool_call_id = plan._payload["request"]["id"]
+        return result
+    completion = completions[0]
+    status = _completion_status(completion)
+    final_output = _completion_text(completion)
+    result = ToolExecutionResult(
+        plan._payload["request"]["id"],
+        final_output,
+        metadata={
+            "agent": agent_name,
+            "mode": mode,
+            "child_status": status.value,
+            "child_run_id": completion.session_id,
+        },
+    )
+    if mode == "handoff":
+        result.directive = ToolDirective.FINISH
+        if status != AgentStatus.COMPLETED:
+            result.status_code = ToolResultStatus.ERROR
+            result.error_code = "handoff_failed"
+            result.content = final_output or "handoff failed"
+    return result
 
 
 def _validate_actual_requirements(bound, actual) -> None:

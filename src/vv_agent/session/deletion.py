@@ -20,6 +20,7 @@ from vv_agent.kernel._store import (
     StoredInput,
     StoredRecord,
 )
+from vv_agent.session._authorization import SessionResourceAuthorization, authorize_session_resource_access
 
 SESSION_DELETION_TABLES = SESSION_DELETION_INVENTORY
 
@@ -86,21 +87,35 @@ class SessionDeletionStore:
         content_store: CoreSQLContentStore,
         *,
         signer: LedgerSigner | None = None,
-        allow_unsigned: bool = False,
+        allow_unsigned: bool | None = None,
     ) -> None:
         self._store = store
         self._content_store = content_store
-        self._signer = signer
-        self._allow_unsigned = allow_unsigned
+        self._signer_override = signer
+        self._allow_unsigned_override = allow_unsigned
 
     def _authority(self, scoped: SQLStore) -> _Authority:
         configured, configured_unsigned, configured_signer = scoped._input_admission_policy()
-        if self._allow_unsigned:
-            if self._signer is not None or (configured and not configured_unsigned):
-                raise ValueError("hash-only deletion cannot claim a trusted signer")
-            return _Authority(None, None, DeletionAuthenticity.HASH_ONLY)
+        signer_override = self._signer_override
+        allow_unsigned_override = self._allow_unsigned_override
 
-        signer = self._signer or configured_signer
+        if configured and configured_unsigned:
+            if signer_override is not None:
+                raise ValueError("signed deletion cannot override a hash-only admission policy")
+            if allow_unsigned_override is False:
+                raise ValueError("signed deletion cannot override a hash-only admission policy")
+            return _Authority(None, None, DeletionAuthenticity.HASH_ONLY)
+        if configured:
+            if allow_unsigned_override is True:
+                raise ValueError("hash-only deletion cannot override a signed admission policy")
+            signer = signer_override if signer_override is not None else configured_signer
+        elif allow_unsigned_override is True:
+            if signer_override is not None:
+                raise ValueError("deletion cannot enable both a signer and hash-only admission")
+            return _Authority(None, None, DeletionAuthenticity.HASH_ONLY)
+        else:
+            signer = signer_override
+
         if signer is None or not callable(getattr(signer, "verify", None)):
             raise DeletionSignerUnavailable("deletion requires a configured ledger signer")
         bound = signer.bind_key()
@@ -343,8 +358,27 @@ class SessionDeletionStore:
             if count:
                 raise LedgerIntegrityError(f"purge left {table} rows for a fenced session")
 
-    def forget_session(self, tenant_id: str, session_id: str, *, actor: Principal) -> DeletionReceipt:
-        """Destroy one session key/content after fencing its complete subtree."""
+    def forget_session(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        actor: Principal,
+        authorize: SessionResourceAuthorization | None = None,
+    ) -> DeletionReceipt:
+        """Destroy one session key/content after fencing its complete subtree.
+
+        A service or agent Principal selects the trusted service API. A user-facing
+        caller must also supply the resource hook; denial fails before any
+        tenant-scoped store access.
+        """
+        authorize_session_resource_access(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            actor=actor,
+            authorize=authorize,
+            action="forget",
+        )
         scoped = self._scoped(tenant_id)
         authority = self._authority(scoped)
         session_ids = scoped.begin_forget(
@@ -374,8 +408,22 @@ class SessionDeletionStore:
             authority.authenticity,
         )
 
-    def purge_session(self, tenant_id: str, session_id: str, *, actor: Principal) -> DeletionReceipt:
+    def purge_session(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        actor: Principal,
+        authorize: SessionResourceAuthorization | None = None,
+    ) -> DeletionReceipt:
         """Cascade descendants, erase their content, then delete owned SQL rows."""
+        authorize_session_resource_access(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            actor=actor,
+            authorize=authorize,
+            action="purge",
+        )
         scoped = self._scoped(tenant_id)
         authority = self._authority(scoped)
         session_ids = scoped.begin_purge(
@@ -479,5 +527,6 @@ __all__ = [
     "DeletionReceipt",
     "DeletionSignerUnavailable",
     "SessionDeletionStore",
+    "SessionResourceAuthorization",
     "SkeletonSnapshot",
 ]

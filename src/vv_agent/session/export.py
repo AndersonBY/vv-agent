@@ -13,11 +13,13 @@ from vv_agent.kernel._content import (
     ExportLineKind,
     ExportModeMismatch,
     InvalidExport,
+    Principal,
     SessionHead,
     TombstoneState,
     _declared_content_slots,
 )
 from vv_agent.kernel._sql import LedgerIntegrityError, SessionNotLive, _require_expected_head
+from vv_agent.session._authorization import SessionResourceAuthorization, authorize_session_resource_access
 from vv_agent.session.content_store import ContentExportRef
 
 
@@ -61,6 +63,8 @@ def export_session(
     signer: Any | None = None,
     expected_head: SessionHead | tuple[int, str] | None = None,
     content_store: Any | None = None,
+    actor: Principal | None = None,
+    authorize: SessionResourceAuthorization | None = None,
 ) -> ExportDocument:
     """Build and verify one S1 export from a tenant-bound SQL store.
 
@@ -68,7 +72,9 @@ def export_session(
     stores produce an unsigned export whose integrity depends on canonical
     bytes and hash chains, not signatures. Content is hydrated only when
     ``content_mode`` is explicitly ``include-content``; callers may provide a
-    bound durable content store for that mode.
+    bound durable content store for that mode. Omitting both ``actor`` and
+    ``authorize`` selects the trusted service API. A user-facing caller must
+    provide both; partial or denied authorization fails before store access.
     """
 
     try:
@@ -78,6 +84,13 @@ def export_session(
     tenant_id = getattr(store, "tenant_id", None)
     if not isinstance(tenant_id, str) or not tenant_id:
         raise TypeError("export_session requires a tenant-bound SQL session store")
+    authorize_session_resource_access(
+        tenant_id=tenant_id,
+        session_id=session_id,
+        actor=actor,
+        authorize=authorize,
+        action="export",
+    )
     required = (
         "atomic",
         "configure_input_admission",
@@ -261,4 +274,4 @@ def export_session(
         return document
 
 
-__all__ = ["export_session"]
+__all__ = ["SessionResourceAuthorization", "export_session"]

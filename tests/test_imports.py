@@ -60,6 +60,7 @@ def test_storage_and_app_server_imports_do_not_load_model_sdks():
         assert {"VvLlmClient", "EndpointTarget"} <= set(dir(vv_agent.llm))
         with TemporaryDirectory() as directory:
             with SQLiteStore.standalone(f"{directory}/sessions.sqlite") as store:
+                store.configure_input_admission(allow_unsigned=True)
                 store.install_schema()
                 with store.atomic() as tx:
                     tx.create(

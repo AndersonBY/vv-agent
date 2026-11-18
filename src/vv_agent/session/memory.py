@@ -48,8 +48,6 @@ def restore_memory(driver: _Driver) -> SessionMemory:
 
 def save_projection(driver: _Driver) -> None:
     # Files are a replayable projection of the log; atomic replace never exposes partial JSON.
-    if driver.content_reader is not None:
-        return
     latest = {}
     for (tid, stage, _), r in driver.state.boundaries.items():
         if stage != "session_memory_saved":

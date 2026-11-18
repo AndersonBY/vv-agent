@@ -219,6 +219,35 @@ def test_heterogeneous_workers_filter_candidates_without_advancing_epoch(store) 
 
 
 @pytest.mark.persistent_store
+def test_projection_claim_defer_ack_uses_reader_level_not_executor_support(store) -> None:
+    requirements = _requirements("tool:future")
+    bound = _create_session(store, "reader-projection", bootstrap=requirements, consumers=("host",))
+    _push(bound, "reader-projection", _input("future", "user", requirements))
+    bound.configure_reader(level=2)
+    bound.configure_worker(level=1, handler_versions=("handler/h1",), capabilities=())
+
+    assert bound.acquire("reader-projection", owner="executor", ttl_ms=10_000) is None
+    claimed = bound.claim_runnable(owner="reader", ttl_ms=10_000, limit=10)
+    assert [(work.work.kind, work.work.consumer, work.lease) for work in claimed] == [("project", "host", None)]
+    assert _lease_row(bound, "reader-projection")[:2] == (0, None)
+
+    bound.defer_projection("reader-projection", "host", retry_after_ms=1_000)
+    with bound.atomic() as tx:
+        batch = tx.consumer_batch("reader-projection", "host")
+        assert batch is not None
+        assert [stored.record.kind for stored in batch.records] == ["session_created"]
+        tx.ack(batch)
+
+    assert (
+        bound._one(
+            "SELECT last_seq FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
+            (bound.tenant_id, "reader-projection", "host"),
+        )[0]
+        == 1
+    )
+
+
+@pytest.mark.persistent_store
 def test_level_two_format_floor_blocks_level_one_worker_before_decode(store, monkeypatch) -> None:
     level_one = _requirements(handler="handler/h1", level=1)
     bound = _create_session(store, "format-floor", bootstrap=level_one, consumers=("host",))
@@ -227,7 +256,7 @@ def test_level_two_format_floor_blocks_level_one_worker_before_decode(store, mon
 
     bound.configure_worker(level=1, handler_versions=("handler/h1",), capabilities=())
     assert bound.acquire("format-floor", owner="level-one-worker", ttl_ms=10_000) is None
-    assert bound.claim_runnable(owner="level-one-worker", ttl_ms=10_000, limit=1) == ()
+    assert bound.claim_runnable(owner="level-one-worker", ttl_ms=10_000, limit=1, work_kinds=("drive",)) == ()
     assert _lease_row(bound, "format-floor")[:2] == (0, None)
 
     bound.configure_reader(level=1)
@@ -318,7 +347,7 @@ def test_sim_seed17_delayed_signed_l2_input_is_converged_without_a_write(tmp_pat
         assert bound.release(claimed[0].lease)
 
 
-@pytest.mark.parametrize("admission_mode", ["signed", "hash-only", "unconfigured"])
+@pytest.mark.parametrize("admission_mode", ["signed", "hash-only"])
 @pytest.mark.sqlite_file
 def test_delayed_routing_accepts_each_evidence_cut_and_repeated_availability(
     tmp_path: Path,
@@ -372,7 +401,7 @@ def test_delayed_routing_accepts_each_evidence_cut_and_repeated_availability(
         assert bound.release(second_claim[0].lease)
 
 
-@pytest.mark.parametrize("admission_mode", ["signed", "hash-only", "unconfigured"])
+@pytest.mark.parametrize("admission_mode", ["signed", "hash-only"])
 @pytest.mark.sqlite_file
 def test_malformed_routing_cache_is_rejected_before_epoch_in_each_admission_mode(
     tmp_path: Path,
@@ -403,7 +432,7 @@ def test_malformed_routing_cache_is_rejected_before_epoch_in_each_admission_mode
         assert _lease_row(bound, session_id)[:2] == (0, None)
 
 
-@pytest.mark.parametrize("admission_mode", ["signed", "hash-only", "unconfigured"])
+@pytest.mark.parametrize("admission_mode", ["signed", "hash-only"])
 @pytest.mark.sqlite_file
 def test_late_received_ready_input_cannot_reuse_an_old_bootstrap_cache(
     tmp_path: Path,
@@ -443,7 +472,7 @@ def test_late_received_ready_input_cannot_reuse_an_old_bootstrap_cache(
         assert _lease_row(bound, session_id)[:2] == (0, None)
 
 
-@pytest.mark.parametrize("admission_mode", ["signed", "hash-only", "unconfigured"])
+@pytest.mark.parametrize("admission_mode", ["signed", "hash-only"])
 @pytest.mark.postgres
 def test_postgres_delayed_routing_refreshes_in_each_admission_mode(store, admission_mode: str) -> None:
     if admission_mode == "signed":
@@ -471,7 +500,7 @@ def test_postgres_delayed_routing_refreshes_in_each_admission_mode(store, admiss
     assert bound.release(claimed[0].lease)
 
 
-@pytest.mark.parametrize("admission_mode", ["signed", "hash-only", "unconfigured"])
+@pytest.mark.parametrize("admission_mode", ["signed", "hash-only"])
 @pytest.mark.postgres
 def test_postgres_late_ready_input_cannot_reuse_an_old_bootstrap_cache(store, admission_mode: str) -> None:
     if admission_mode == "signed":
@@ -640,7 +669,7 @@ def test_level_two_turn_end_and_idle_follow_up_never_lower_format_floor(store) -
 
     bound.configure_worker(level=1, handler_versions=("handler/h1",), capabilities=())
     assert bound.acquire("persistent-floor", owner="level-one-worker", ttl_ms=10_000) is None
-    assert bound.claim_runnable(owner="level-one-worker", ttl_ms=10_000, limit=1) == ()
+    assert bound.claim_runnable(owner="level-one-worker", ttl_ms=10_000, limit=1, work_kinds=("drive",)) == ()
     bound.configure_worker(level=2, handler_versions=("handler/h1",), capabilities=())
     claimed = bound.claim_runnable(owner="level-two-worker", ttl_ms=10_000, limit=1)
     assert len(claimed) == 1 and claimed[0].lease is not None
@@ -1402,6 +1431,7 @@ def test_local_worker_returns_pre_handoff_claim_through_lease_tenant(store, data
         if opens == 2:
             raise RuntimeError("drive connection failed before handoff")
         with session_sqlite.SQLiteStore.standalone(str(database)) as opened:
+            opened.configure_input_admission(allow_unsigned=True)
             yield opened
 
     worker = LocalWorker(
@@ -1492,6 +1522,7 @@ def test_real_postgres_worker_credential_scans_tenants_but_tenant_does_not(store
         )
 
         with session_postgres.PostgresStore.worker_standalone(worker_dsn) as worker:
+            worker.configure_input_admission(allow_unsigned=True)
             assert worker.runtime_mode == "worker"
             assert worker.credential_isolation is False
             assert worker.credential_tenant_id is None
@@ -1519,6 +1550,7 @@ def test_real_postgres_worker_credential_scans_tenants_but_tenant_does_not(store
                 assert worker.for_tenant(second[0].lease.tenant_id).release(second[0].lease)
 
         with session_postgres.PostgresStore.tenant_standalone(tenant_dsn, tenant_id="tenant-a") as tenant:
+            tenant.configure_input_admission(allow_unsigned=True)
             assert tenant.runtime_mode == "tenant"
             assert tenant.credential_isolation is True
             assert tenant.credential_tenant_id == "tenant-a"

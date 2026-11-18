@@ -49,6 +49,7 @@ def test_sqlite_tenant_x_driver_completes_without_reading_tenant_y(tmp_path: Pat
     path = tmp_path / "tenant-routing.sqlite"
     try:
         with SQLiteStore.standalone(str(path)) as store:
+            store.configure_input_admission(allow_unsigned=True)
             store.install_schema()
             create_fixture_session(wrap_fixture_store(store.for_tenant(TENANT_Y), provider), "shared-drive", consumers=())
             driver = SessionDriver(store=store, tenant_id=TENANT_X, content_key_provider=provider)
@@ -81,6 +82,7 @@ def test_sqlite_facade_cannot_destroy_another_tenants_key(
     monkeypatch.setattr(provider, "destroy", track_destroy)
     try:
         with SQLiteStore.standalone(str(tmp_path / "sqlite-destroy.sqlite")) as store:
+            store.configure_input_admission(allow_unsigned=True)
             store.install_schema()
             tenant_y = wrap_fixture_store(store.for_tenant(TENANT_Y), provider)
             create_fixture_session(tenant_y, "cross-tenant", consumers=())
@@ -130,11 +132,13 @@ def test_postgres_worker_drives_only_authenticated_tenant_x(
             _dsn(rls_database, rls_database.tenant_b_role, rls_database.tenant_b_password),
             tenant_id=TENANT_B,
         ) as tenant_y:
+            tenant_y.configure_input_admission(allow_unsigned=True)
             create_fixture_session(wrap_fixture_store(tenant_y, provider), "shared-drive", consumers=())
 
         with PostgresStore.worker_standalone(
             _dsn(rls_database, rls_database.worker_role, rls_database.worker_password)
         ) as worker:
+            worker.configure_input_admission(allow_unsigned=True)
             driver = SessionDriver(store=worker, tenant_id=TENANT_A, content_key_provider=provider)
             try:
                 assert _run_driver(driver, "shared-drive", tmp_path) == "done"
@@ -146,6 +150,7 @@ def test_postgres_worker_drives_only_authenticated_tenant_x(
             _dsn(rls_database, rls_database.tenant_b_role, rls_database.tenant_b_password),
             tenant_id=TENANT_B,
         ) as tenant_y:
+            tenant_y.configure_input_admission(allow_unsigned=True)
             y_page = tenant_y.read("shared-drive")
 
         assert x_page.records[-1].record.kind == "turn_ended"
@@ -176,11 +181,13 @@ def test_tenant_bound_worker_cannot_destroy_another_tenants_session_key(
             _dsn(rls_database, rls_database.tenant_b_role, rls_database.tenant_b_password),
             tenant_id=TENANT_B,
         ) as tenant_b:
+            tenant_b.configure_input_admission(allow_unsigned=True)
             create_fixture_session(wrap_fixture_store(tenant_b, provider), "cross-tenant", consumers=())
 
         with PostgresStore.worker_standalone(
             _dsn(rls_database, rls_database.worker_role, rls_database.worker_password)
         ) as worker:
+            worker.configure_input_admission(allow_unsigned=True)
             tenant_a = worker.for_tenant(TENANT_A)
             with pytest.raises(ContentBindingMismatch, match="another tenant"), tenant_a.atomic() as tx:
                 PostgresContentStore(tx, provider).forget_session(TENANT_B, "cross-tenant")
@@ -202,6 +209,7 @@ def test_join_transaction_binds_authenticated_tenant_for_content_io(
             _dsn(rls_database, rls_database.tenant_a_role, rls_database.tenant_a_password),
             tenant_id=TENANT_A,
         ) as tenant_a:
+            tenant_a.configure_input_admission(allow_unsigned=True)
             create_fixture_session(wrap_fixture_store(tenant_a, provider), "joined-content", consumers=())
             with tenant_a.connection.transaction():
                 tx = join_transaction(tenant_a.connection)

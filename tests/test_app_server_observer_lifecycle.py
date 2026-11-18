@@ -631,6 +631,7 @@ def test_wake_after_kernel_close_is_a_dropped_hint(tmp_path, monkeypatch):
 def test_due_provider_query_survives_subscription_and_local_handle_release(tmp_path):
     business = BusinessDB(tmp_path / "provider-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "provider-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         provider_server = ProviderServer(store, business)
         try:
@@ -661,6 +662,7 @@ def test_due_provider_query_survives_subscription_and_local_handle_release(tmp_p
 def test_provider_result_invalid_warns_once_and_stays_parked_across_backoff(tmp_path):
     business = BusinessDB(tmp_path / "invalid-provider-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "invalid-provider-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         provider_server = ProviderServer(store, business)
         try:
@@ -747,6 +749,7 @@ def test_provider_result_invalid_warns_once_and_stays_parked_across_backoff(tmp_
 def test_first_reconnect_warns_when_future_query_invalidates_without_subscriber(tmp_path):
     business = BusinessDB(tmp_path / "detached-invalid-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "detached-invalid-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         provider_server = ProviderServer(store, business)
         try:
@@ -849,8 +852,10 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
     session_path = tmp_path / "remote-complete-session.sqlite"
     with ExitStack() as stack:
         first_store = stack.enter_context(SQLiteStore.standalone(str(session_path)))
+        first_store.configure_input_admission(allow_unsigned=True)
         first_store.install_schema()
         second_store = stack.enter_context(SQLiteStore.standalone(str(session_path)))
+        second_store.configure_input_admission(allow_unsigned=True)
         first = ProviderServer(first_store, business)
         second = ProviderServer(second_store, business)
         s1_jobs = _S1JobsProvider(business)
@@ -1017,6 +1022,7 @@ def store_is_terminal(store) -> bool:
 def test_standard_tx_valid_provider_result_advances_invalid_fence_after_wake(tmp_path, monkeypatch):
     business = BusinessDB(tmp_path / "standard-tx-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "standard-tx-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         with store.atomic():
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
@@ -1056,6 +1062,7 @@ def test_standard_tx_valid_provider_result_advances_invalid_fence_after_wake(tmp
 def test_declared_yield_provider_steer_continues_parent_without_query(tmp_path, monkeypatch):
     business = BusinessDB(tmp_path / "declared-yield-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "declared-yield-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         with store.atomic():
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
@@ -1099,6 +1106,7 @@ def test_declared_yield_provider_steer_continues_parent_without_query(tmp_path, 
 def test_archive_and_forged_callback_keep_invalid_failure_without_query(tmp_path):
     business = BusinessDB(tmp_path / "archive-forged-business.sqlite")
     with SQLiteStore.standalone(str(tmp_path / "archive-forged-session.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         with store.atomic():
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
@@ -1141,6 +1149,7 @@ def test_provider_invalid_fence_survives_unrelated_rpc_inputs_before_recovery(tm
     if recovery == "cancel":
         business.setting("cancel", "confirmed")
     with SQLiteStore.standalone(str(tmp_path / f"held-invalid-session-{recovery}.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
         with store.atomic():
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")

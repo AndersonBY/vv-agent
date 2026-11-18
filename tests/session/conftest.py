@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -13,10 +14,13 @@ from vv_agent.session.sqlite import SQLiteStore
 Database = str | Path
 
 
-def open_store(database: Database):
-    if isinstance(database, Path):
-        return SQLiteStore.standalone(str(database))
-    return PostgresStore.standalone(database)
+@contextmanager
+def open_store(database: Database, *, allow_unsigned: bool = True) -> Iterator[SQLiteStore | PostgresStore]:
+    manager = SQLiteStore.standalone(str(database)) if isinstance(database, Path) else PostgresStore.standalone(database)
+    with manager as store:
+        if allow_unsigned:
+            store.configure_input_admission(allow_unsigned=True)
+        yield store
 
 
 def pytest_generate_tests(metafunc):
