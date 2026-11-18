@@ -594,6 +594,28 @@ class SessionContentWriter:
     def create_session_key(self):
         return self._durable.create_session_key(self.tenant_id, self.session_id)
 
+    def command_digest(
+        self,
+        *,
+        command_spec: dict[str, Any],
+        environment: dict[str, Any],
+        operational_policy: dict[str, str],
+    ) -> str:
+        """Return the digest inside this writer's caller-owned transaction.
+
+        The writer supplies the authenticated tenant and session, so callers
+        cannot substitute either scope or provide a session data key directly.
+        """
+
+        self.tx._active()
+        return self._durable.command_digest(
+            self.tenant_id,
+            self.session_id,
+            command_spec=command_spec,
+            environment=environment,
+            operational_policy=operational_policy,
+        )
+
     def put_bytes(self, value: bytes, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
         ref = self._durable.put(self.tenant_id, self.session_id, value, labels)
         self._published_refs.add(ref)

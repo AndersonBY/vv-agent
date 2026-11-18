@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from vv_agent.kernel._canonical_json import canonical_json_sha256
-from vv_agent.kernel._content import KeyDestroyOutcome, WrappedDataKey
 from vv_agent.session.environments import (
     EnvironmentCapabilities,
-    InvalidCommandDigest,
     InvalidEnvironmentCapabilities,
     InvalidLookupBinding,
     InvalidProviderLookupResult,
@@ -21,8 +18,6 @@ from vv_agent.session.environments import (
     LookupStatus,
     NetworkMode,
     ProviderLookupResult,
-    command_digest,
-    command_digest_framing,
     execution_id_for,
     stable_operation_key,
 )
@@ -99,38 +94,6 @@ def _provider_handle(binding: LookupBinding) -> dict[str, Any]:
         "query_ref": f"query:{binding.operation_id}",
         "cancel_ref": f"cancel:{binding.operation_id}",
     }
-
-
-class _SessionKeyProvider:
-    def __init__(self, key: bytes) -> None:
-        self.key = key
-        self.calls: list[tuple[str, str, WrappedDataKey]] = []
-
-    def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
-        raise AssertionError("command digest must only unwrap the existing session key")
-
-    def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
-        self.calls.append((tenant_id, session_id, wrapped_key))
-        return self.key
-
-    def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
-        raise AssertionError("command digest must not destroy the session key")
-
-
-def _command_inputs() -> tuple[dict[str, Any], dict[str, Any], WrappedDataKey, _SessionKeyProvider]:
-    command = {
-        "command": "printf hello",
-        "cwd": "/workspace",
-        "stdin": None,
-        "secret_reference_names": ["secret/api"],
-        "resource_limits": {"cpu_millis": 1000},
-    }
-    policy = {
-        "isolation_policy_digest": canonical_json_sha256({"limits": command["resource_limits"]}),
-        "network_policy_digest": canonical_json_sha256({"allow": ["api.example.com:443"]}),
-    }
-    wrapped = WrappedDataKey(TENANT, SESSION, "session-key", b"wrapped-key")
-    return command, policy, wrapped, _SessionKeyProvider(b"k" * 32)
 
 
 def test_environment_capabilities_are_deterministic_closed_and_digest_checked() -> None:
@@ -308,99 +271,6 @@ def test_lookup_binding_rejects_random_wrong_and_override_values() -> None:
     payload["request_digest"] = "NOT-A-DIGEST"
     with pytest.raises(InvalidLookupBinding, match="lowercase SHA-256"):
         LookupBinding.from_dict(payload)
-
-
-def test_command_digest_is_session_keyed_deterministic_and_policy_bound() -> None:
-    command, policy, wrapped, key_provider = _command_inputs()
-    environment = _environment()
-
-    first = command_digest(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=environment,
-        operational_policy=policy,
-        key_provider=key_provider,
-        wrapped_key=wrapped,
-    )
-    second = command_digest(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=environment,
-        operational_policy=policy,
-        key_provider=key_provider,
-        wrapped_key=wrapped,
-    )
-
-    framing = command_digest_framing(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=environment,
-        operational_policy=policy,
-    )
-    assert first == second
-    assert first == command_digest(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=environment,
-        operational_policy=policy,
-        key_provider=_SessionKeyProvider(b"k" * 32),
-        wrapped_key=wrapped,
-    )
-    assert first != sha256(framing).hexdigest()
-    assert first != sha256(command["command"].encode()).hexdigest()
-    assert len(key_provider.calls) == 2
-
-    other_policy = policy | {"network_policy_digest": "4" * 64}
-    assert first != command_digest(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=environment,
-        operational_policy=other_policy,
-        key_provider=_SessionKeyProvider(b"k" * 32),
-        wrapped_key=wrapped,
-    )
-    assert first != command_digest(
-        tenant_id=TENANT,
-        session_id=SESSION,
-        command_spec=command,
-        environment=_environment(generation=1),
-        operational_policy=policy,
-        key_provider=_SessionKeyProvider(b"k" * 32),
-        wrapped_key=wrapped,
-    )
-
-
-def test_command_digest_rejects_key_tenant_or_session_substitution() -> None:
-    command, policy, wrapped, key_provider = _command_inputs()
-    environment = _environment()
-    wrong = WrappedDataKey("tenant-b", SESSION, "session-key", b"wrapped-key")
-
-    with pytest.raises(InvalidCommandDigest, match="not bound"):
-        command_digest(
-            tenant_id=TENANT,
-            session_id=SESSION,
-            command_spec=command,
-            environment=environment,
-            operational_policy=policy,
-            key_provider=key_provider,
-            wrapped_key=wrong,
-        )
-
-    with pytest.raises(InvalidCommandDigest, match="closed object"):
-        command_digest(
-            tenant_id=TENANT,
-            session_id=SESSION,
-            command_spec=command,
-            environment=environment,
-            operational_policy=policy | {"attempt": 2},
-            key_provider=key_provider,
-            wrapped_key=wrapped,
-        )
 
 
 def test_provider_lookup_reuses_provider_outcomes_and_validates_state() -> None:

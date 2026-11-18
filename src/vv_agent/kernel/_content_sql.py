@@ -17,7 +17,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from ._canonical_json import canonical_json_bytes
+from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
     ContentBindingMismatch,
     ContentCleanupUnavailable,
@@ -47,6 +47,7 @@ _NONCE_BYTES = 12
 _STAGING_PIN_MS = 5 * 60 * 1000
 _CONTENT_COLUMNS = "content_id,key_id,mac,size,labels,state,nonce,ciphertext,object_locator"
 _READ_FRAME_OWNER_BATCH = 256
+_COMMAND_POLICY_FIELDS = frozenset({"network_policy_digest", "isolation_policy_digest"})
 
 ObjectLocatorCleaner = Callable[[str, str, bytes], None]
 
@@ -130,6 +131,47 @@ def _content_mac(data_key: bytes, tenant_id: str, session_id: str, plaintext: by
         "content MAC framing",
     )
     return hmac.digest(data_key, framing + b"\0" + plaintext, hashlib.sha256).hex()
+
+
+def _command_digest_framing(
+    *,
+    tenant_id: str,
+    session_id: str,
+    command_spec: dict[str, Any],
+    environment: dict[str, Any],
+    operational_policy: dict[str, str],
+) -> bytes:
+    """Construct the one canonical command-digest preimage."""
+
+    if type(command_spec) is not dict:
+        raise TypeError("command_spec must be a stable command object")
+    if type(environment) is not dict:
+        raise TypeError("environment must provide a closed contract object")
+    if type(operational_policy) is not dict or set(operational_policy) != _COMMAND_POLICY_FIELDS:
+        raise ValueError("operational_policy must be a closed object")
+    policy = {
+        "network_policy_digest": validate_sha256(
+            operational_policy["network_policy_digest"],
+            "operational_policy.network_policy_digest",
+        ),
+        "isolation_policy_digest": validate_sha256(
+            operational_policy["isolation_policy_digest"],
+            "operational_policy.isolation_policy_digest",
+        ),
+    }
+    return canonical_json_bytes(
+        {
+            "domain": "vv-agent/S1/command-digest",
+            "framing_version": 1,
+            "purpose": "stable-command",
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "command_spec": command_spec,
+            "environment": environment,
+            "operational_policy": policy,
+        },
+        "command digest framing",
+    )
 
 
 @runtime_checkable
@@ -625,6 +667,37 @@ class CoreSQLContentStore:
         if len(data_key) != _DATA_KEY_BYTES:
             raise KeyUnavailable("session data key has an invalid size")
         return data_key
+
+    def command_digest(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        command_spec: dict[str, Any],
+        environment: dict[str, Any],
+        operational_policy: dict[str, str],
+    ) -> str:
+        """HMAC stable command facts with the caller's existing session key.
+
+        The caller validates the command and capabilities before hashing.
+        Publication still checks the session fence when appending the digest.
+        """
+
+        tenant_id = _text(tenant_id, "tenant_id")
+        session_id = _text(session_id, "session_id")
+        self._require_transaction()
+        self._assert_backend_tenant_context(tenant_id)
+        framing = _command_digest_framing(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            command_spec=command_spec,
+            environment=environment,
+            operational_policy=operational_policy,
+        )
+        self._require_live(tenant_id, session_id)
+        key = self._active_session_key(tenant_id, session_id)
+        data_key = self._unwrap(tenant_id, session_id, key)
+        return hmac.digest(data_key, framing, hashlib.sha256).hex()
 
     def _bound_content(
         self,
