@@ -499,6 +499,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         operation_id=oid,
                         attempt=(a.plan.attempt or 1) + 1,
                         payload=payload | {"not_before_ms": due},
+                        feature_level=a.plan.feature_level,
                     )
                     yield CommitRecords([next_plan])
                     return True

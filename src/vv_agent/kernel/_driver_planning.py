@@ -265,7 +265,7 @@ def committed_command_plan(view: PlanningView, started: Record) -> Record:
     attempt = operation.attempts.get(started.attempt) if operation is not None else None
     if attempt is None or attempt.prepared is None or attempt.dispatch is None or attempt.dispatch.record_id != started.record_id:
         raise InvalidW3Command("level-3 command submission requires its committed prepared request")
-    plan = view.hydrate_plan(attempt.plan)
+    plan = view.hydrate_plan(attempt.execution_plan)
     return replace(plan, payload=copy_json(plan._payload))
 
 
@@ -290,13 +290,9 @@ def validate_command_submit(
     ):
         if plan._payload.get(field) != committed._payload.get(field):
             raise InvalidW3Command(f"level-3 command changed after preparation: {field}")
-    operation = view.state.operations.get(plan.operation_id or "")
-    attempt = operation.attempts.get(plan.attempt) if operation is not None else None
-    if attempt is None or attempt.dispatch is None or attempt.dispatch.record_id != started.record_id:
-        raise InvalidW3Command("level-3 command submit requires the committed op_started")
     envelope = _request_envelope(committed)
-    expected_identity = attempt.plan._payload.get("execution_identity")
-    if envelope.get("execution_identity") != expected_identity:
+    expected_identity = envelope.get("execution_identity")
+    if committed._payload.get("execution_identity") != expected_identity:
         raise InvalidW3Command("level-3 command changed execution identity")
     if expected_identity is None or expected_identity.get("tenant_id") != _tenant_id(view):
         raise InvalidW3Command("level-3 command changed session tenant")

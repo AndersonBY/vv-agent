@@ -1002,6 +1002,15 @@ class SessionDriver:
             attributes = created.get("attributes", {})
             if "child_admission" in attributes:
                 runtime = runtime.child_runtime(store, child_sid)
+                if self.runtime_factory is not None:
+                    runtime = self._runtime_for_session(
+                        store,
+                        runtime.agent,
+                        runtime.config,
+                        runtime.frozen_task,
+                        child_sid,
+                        registration.handler_version,
+                    )
             else:
                 runtime = self._runtime_for_session(
                     store,

@@ -27,8 +27,10 @@ from vv_agent.session.children import ChildSession, InvalidChildBatch
 from vv_agent.session.content_runtime import bind_content_key_provider
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.deletion import SessionDeletionStore
+from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode, NetworkMode
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.runtime import (
+    TrustedEnvironmentBinding,
     static_model_selection_requirements,
     static_session_requirements,
     static_worker_supports,
@@ -37,7 +39,7 @@ from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 from .conftest import open_store as configured_open_store
 from .helpers import (
@@ -62,6 +64,28 @@ class _HostAdapter:
 
     def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
         self.store._rows(sql, params)
+
+
+def _trusted_environment_binding() -> TrustedEnvironmentBinding:
+    return TrustedEnvironmentBinding(
+        capabilities=EnvironmentCapabilities.create(
+            environment_id="environment/level-three-child-parent",
+            generation=1,
+            isolation=IsolationMode.CONTAINER,
+            network=NetworkMode.NONE,
+            enforces_network_policy=True,
+            enforces_resource_limits=True,
+            persistent=False,
+            environment_capabilities=("command.execute",),
+            network_policy_ref_digest="1" * 64,
+            isolation_policy_ref_digest="2" * 64,
+        ),
+        descriptor={"provider": "test-host", "workspace": "workspace"},
+        operational_policy={
+            "network_policy_digest": "3" * 64,
+            "isolation_policy_digest": "4" * 64,
+        },
+    )
 
 
 def _wait_for(predicate, timeout: float = 8.0) -> None:
@@ -480,6 +504,111 @@ def test_runtime_factory_binds_host_admission_to_worker_transaction(tmp_path: Pa
                 assert business == []
                 assert child_rows == []
                 assert parent_parked == []
+        finally:
+            driver.close()
+
+
+def test_level_three_child_reconstruction_uses_host_factory_and_hook(tmp_path: Path) -> None:
+    key_provider = LocalKeyProvider(b"h" * 32)
+    factory_calls: list[tuple[str, Any]] = []
+    hook_calls: list[tuple[str, str]] = []
+    holder: dict[str, SessionDriver] = {}
+    trusted_environment_binding = _trusted_environment_binding()
+
+    with SQLiteStore.standalone(str(tmp_path / "child-hook.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
+        store.install_schema()
+        store._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
+        store.configure_reader(level=3)
+
+        def host_hook(session_id: str):
+            def hook(point: str, _record: Any) -> None:
+                hook_calls.append((session_id, point))
+
+            return hook
+
+        def runtime_factory(drive_store, agent, config, task, session_id):
+            factory_calls.append((session_id, task))
+            runtime = holder["driver"].runtime(
+                agent,
+                config,
+                task,
+                session_id=session_id,
+                store=drive_store,
+                handler_version="handler/v3",
+            )
+            runtime.hook = host_hook(session_id)
+            if session_id == "parent":
+                runtime.trusted_environment_binding = trusted_environment_binding
+            return runtime
+
+        provider = ScriptedModelProvider.new(
+            "scripted",
+            "m",
+            [
+                LLMResponse(
+                    "",
+                    [
+                        ToolCall(
+                            "child-call",
+                            "create_sub_task",
+                            {"agent_id": "worker", "task_description": "child work"},
+                        )
+                    ],
+                ),
+                LLMResponse("child done"),
+                LLMResponse("parent done"),
+            ],
+        )
+        agent = Agent(
+            "parent",
+            "Use the child tool.",
+            model="m",
+            sub_agents={"worker": SubAgentConfig(model="m", description="Worker instructions.")},
+        )
+        config = RunConfig(model_provider=provider)
+        static_requirements = static_session_requirements(
+            agent,
+            config,
+            resolved=None,
+            handler_version="handler/v3",
+        )
+        driver = SessionDriver(
+            store=store,
+            content_key_provider=key_provider,
+            runtime_factory=runtime_factory,
+            worker_level=3,
+            handler_versions=("handler/v3",),
+        )
+        holder["driver"] = driver
+        try:
+            driver._configure_static_worker(
+                level=3,
+                capabilities=static_worker_supports(agent, config, resolved=None),
+                requirements=SessionRequirements(
+                    level=3,
+                    handler_version="handler/v3",
+                    capabilities=static_requirements.capabilities,
+                ),
+            )
+            driver.create("parent", str(tmp_path), {"seed": {"messages": [], "shared_state": {}}})
+            created = store.read("parent", limit=1).records[0].record
+            assert created._payload["bootstrap"]["level"] == 3
+            handle = driver.start(
+                "parent",
+                agent,
+                config,
+                "go",
+                handler_version="handler/v3",
+            )
+            assert handle.result(timeout=8).final_output == "parent done"
+
+            child_session_id = next(session_id for session_id in store.list_sessions() if session_id != "parent")
+            child_factory_calls = [task for session_id, task in factory_calls if session_id == child_session_id]
+            assert child_factory_calls
+            assert all(task is not None and task.task_id for task in child_factory_calls)
+            assert ("parent", "after_drive") in hook_calls
+            assert (child_session_id, "after_drive") in hook_calls
         finally:
             driver.close()
 

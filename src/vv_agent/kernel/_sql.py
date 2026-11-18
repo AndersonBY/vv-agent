@@ -375,11 +375,13 @@ class SQLStore:
         root = self._root_store or self
         if all_tenants and self._root_store is not None:
             raise ValueError("cross-tenant worker policy must be configured on the root store")
+        worker_level = _level(level, "worker level")
         root._worker_supports = WorkerSupports(
-            max_level=_level(level, "worker level"),
+            max_level=worker_level,
             handler_versions=handler_versions,
             capabilities=capabilities,
         )
+        root._reader_level = max(root._reader_level, worker_level)
         if self._root_store is None:
             root._all_tenants = bool(all_tenants)
 
@@ -2838,17 +2840,15 @@ class SQLSessionTx:
             raise Conflict("session principal belongs to another tenant")
         with s._transaction():
             ceiling = s._write_ceiling()
-            parent_level = 1
             if spec.parent_session_id is not None:
                 parent = s._rows(
-                    f"SELECT level,deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s{s.lock_clause}",
+                    f"SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s{s.lock_clause}",
                     (tenant_id, spec.parent_session_id),
                 )
                 if len(parent) != 1:
                     raise Conflict("parent session not found in tenant")
-                if parent[0][1] != "live":
+                if parent[0][0] != "live":
                     raise SessionNotLive("parent session is fenced for deletion")
-                parent_level = _level(parent[0][0], "parent session level")
             if s._rows(
                 "SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s",
                 (tenant_id, spec.session_id),
@@ -2904,7 +2904,7 @@ class SQLSessionTx:
             )
             routing = _RoutingCache(
                 SessionRequirements.normalized(
-                    level=max(bootstrap.level, parent_level),
+                    level=bootstrap.level,
                     handler_version=bootstrap.handler_version,
                     capabilities=bootstrap.capabilities,
                 ),
@@ -2914,7 +2914,7 @@ class SQLSessionTx:
             s._write_routing_cache(
                 spec.session_id,
                 routing,
-                minimum_level=max(record.feature_level, parent_level),
+                minimum_level=record.feature_level,
             )
             chain_digest = _extend_chain_digest(_initial_chain_digest(tenant_id, spec.session_id), 1, record.digest)
             commit_digest = sha256(manifest).hexdigest()

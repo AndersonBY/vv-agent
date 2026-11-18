@@ -12,6 +12,7 @@ from vv_agent.kernel._content import Principal
 from vv_agent.kernel._tool_policy import apply_tool_context_policy
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.local_environment import LOCAL_ENVIRONMENT_CAPABILITIES_METADATA_KEY
 from vv_agent.tools.base import ToolContext
 from vv_agent.types import AgentTask
 
@@ -39,10 +40,14 @@ def begin_context(
     shared_state: dict[str, Any] | None,
 ) -> _PreparedContext:
     metadata = dict(task.metadata)
+    metadata.pop(LOCAL_ENVIRONMENT_CAPABILITIES_METADATA_KEY, None)
     if plan._payload["op_kind"] != "model":
         apply_tool_context_policy(
             metadata, agent_policy=runtime.agent.tool_policy, run_policy=runtime.config.tool_policy, shared_state=shared_state
         )
+    environment = runtime.turn_environment_binding()
+    if environment is not None:
+        metadata[LOCAL_ENVIRONMENT_CAPABILITIES_METADATA_KEY] = environment.capabilities
     ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
     if approved:
         ctx._approved_tool_approval = SimpleNamespace(call=approved_tool_call(plan))
