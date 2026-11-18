@@ -149,6 +149,7 @@ def test_runner_heartbeat_over_password_authenticated_tcp(password_postgres_dsn,
         else:
             store = stack.enter_context(PostgresStore.standalone(password_postgres_dsn))
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         assert store.connection.info.host == "127.0.0.1"
         assert store.connection.info.password
