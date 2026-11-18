@@ -213,30 +213,21 @@ and makes the principal, actor and content-reference shapes closed. Pre-S1
 stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
 migration or import tool is provided.
 
-The unreleased S1 branch contains the schema, tenant-bound store routing, the
-producer/codec boundary, explicit PostgreSQL tenant RLS installation, encrypted
-content and key-provider integration, declared content hydration, fenced
-forget/purge primitives, and checkpoint, input-admission and tombstone signing
-when a ledger signer is configured. The S1 cutover still depends on the
-documented host key-provider and signer policy, explicit deletion orchestration,
-and the exact upgrade procedure; none of those become automatic from installing
-the schema. The development `LocalKeyProvider` is not a production key service.
-Hash-only or unsigned modes are not proof of authenticity, deletion does not
-erase provider or host copies outside the store, and no import or in-place
-migration is provided. Hosts must not claim database credential isolation
-without the explicit tenant role installation and startup checks.
+The unreleased S1 branch contains tenant-bound routing, encrypted content,
+fenced forget/purge, checkpoint and input-admission verification, and the
+fail-closed ledger verifier. The development `LocalKeyProvider` is not a
+production key service. Hash-only mode is structural consistency only; it does
+not prove authenticity, and no import or in-place migration is provided.
 
-Under the W4 execution boundary, Runner/RunHandle, Interactive and App Server
-use the same declared child/provider wait semantics as other workers. A
-declaration may yield to steering; an absent declaration remains
-non-yieldable. Hosts should not add entry-point-specific wait handling.
+### 0.35.4 — 2026-11-15
 
-Contract 39 narrows failed closed-session diagnostics to
-`invalid session schema`. This is a public diagnostic change, but accepted and
-rejected values, validation order, and execution behavior do not change. Do not
-parse complete `jsonschema.ValidationError` text, paths, or schema dumps.
-Contract adoption remains separate from the S1 store boundary. See the
-[0.36.0 release notes](releases/0.36.0.md).
+The default runtime lease TTL is now 60 seconds (`Runtime.ttl_ms`). File-backed
+SQLite heartbeat connections use a separate configurable busy timeout and a
+bounded lock retry window. Hosts that set explicit `ttl_ms` values keep their
+existing behavior; no session store or wire migration is required.
+
+See the [release notes](releases/0.35.4.md).
+
 
 ### 0.35.0 — 2026-11-12
 

@@ -321,6 +321,8 @@ class Runtime:
     lease_retry_cap_seconds: float = 0.5
     lease_retry_jitter: Callable[[float, float], float] = random.uniform
     lease_retry_sleep: Callable[[float], None] = time.sleep
+    sqlite_heartbeat_retry_budget_seconds: float = 5.0
+    sqlite_heartbeat_retry_delay_seconds: float = 0.05
     model_timeout: float = 300
     tool_timeout: float = 300
     hook: Callable[[str, Record | None], None] = lambda _point, _record: None
@@ -346,6 +348,14 @@ class Runtime:
             for value in (self.lease_retry_base_seconds, self.lease_retry_cap_seconds)
         ) or not 0 < self.lease_retry_base_seconds <= self.lease_retry_cap_seconds < float("inf"):
             raise ValueError("lease retry delays must be finite, positive, and base <= cap")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in (self.sqlite_heartbeat_retry_budget_seconds, self.sqlite_heartbeat_retry_delay_seconds)
+        ) or not all(
+            0 < value < float("inf")
+            for value in (self.sqlite_heartbeat_retry_budget_seconds, self.sqlite_heartbeat_retry_delay_seconds)
+        ):
+            raise ValueError("SQLite heartbeat retry settings must be finite and positive")
         if not 0 < self.heartbeat_seconds <= 1 or self.ttl_ms <= self.heartbeat_seconds * 2000:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
         if self.content_reader is not None and not isinstance(self.content_reader, ContentReader):
@@ -480,6 +490,8 @@ class Runtime:
             lease_retry_cap_seconds=self.lease_retry_cap_seconds,
             lease_retry_jitter=self.lease_retry_jitter,
             lease_retry_sleep=self.lease_retry_sleep,
+            sqlite_heartbeat_retry_budget_seconds=self.sqlite_heartbeat_retry_budget_seconds,
+            sqlite_heartbeat_retry_delay_seconds=self.sqlite_heartbeat_retry_delay_seconds,
             model_timeout=self.model_timeout,
             tool_timeout=self.tool_timeout,
             wake=self.wake,

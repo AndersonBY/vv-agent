@@ -127,9 +127,9 @@ write host rows in the drive transaction:
   `drive(store, session_id, runtime=lambda sid: build_runtime(store))` on the
   worker thread. The closure binds the supplied `store` to the runtime, and the
   rebuilt callbacks use that same store and transaction.
-- A managed local worker uses
-  `SessionDriver(..., runtime_factory=runtime_factory)`. The factory receives
-  the claimed tenant-bound drive store and rebuilds callbacks against it.
+- A managed local worker uses `SessionDriver(..., runtime_factory=runtime_factory)`.
+  The factory receives the claimed tenant-bound drive store and rebuilds
+  callbacks against it.
 
 In either form, the failure is a callback that captured another store or worker
 connection. `SessionDriver` is not required for a host queue to bind callbacks
@@ -143,13 +143,15 @@ must provide the drive connection opener used by direct `drive` or
 Resolve thread-bound connection setup on the worker thread that opens the
 store. Never use the foreground drive connection for renewal.
 
-The default lease TTL is 15 seconds (`ttl_ms=15000`) and renewal interval is
+The default lease TTL is 60 seconds (`ttl_ms=60000`) and renewal interval is
 250 ms (`heartbeat_seconds=0.25`). The interval must be at most 1 second and
-less than half the TTL. Configure the model client for one external attempt per
-logical call because the kernel owns retry accounting. Set `wake` to the host
-enqueue function or local-worker wake. Bind live stream sinks separately from
-durable projection consumers (see
-[streaming](#streaming-and-cancellation)).
+less than half the TTL. File-backed SQLite heartbeat connections use a separate
+250 ms busy timeout by default; set `heartbeat_busy_timeout_ms` to tune it, and
+use the runtime's bounded SQLite heartbeat retry settings for lock contention.
+Configure the model client for one external attempt per logical call because
+the kernel owns retry accounting. Set `wake` to the host enqueue function or
+local-worker wake. Bind live stream sinks separately from durable projection
+consumers (see [streaming](#streaming-and-cancellation)).
 
 ## Submitting input and waking
 
