@@ -17,7 +17,7 @@ from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session.kernel import Runtime, drive, read_state
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.store import LeaseLost
 from vv_agent.session.supervisor import tick
 from vv_agent.tools.function import FunctionTool, function_tool
@@ -27,6 +27,8 @@ from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
 from .controlled import ControlledProvider
+from .helpers import content_ref, create_fixture_session, principal, push_fixture_input, wrap_fixture_store
+from .helpers import item as helper_item
 
 MODEL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}
 
@@ -43,9 +45,20 @@ def runtime(database, steps, tools=(), **kwargs):
 
 
 def start(store, sid="s"):
-    with store.atomic() as tx:
-        tx.create(SessionSpec(sid, "test", "/tmp"), consumers=("events",))
-        tx.push(sid, InboxItem("initial", "user", {"content": "go"}))
+    store = wrap_fixture_store(store)
+    create_fixture_session(
+        store,
+        sid,
+        attributes={
+            "seed": {
+                "messages": [],
+                "shared_state": {},
+                "unseen_input_protection": True,
+                "response_rejection": True,
+            }
+        },
+    )
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
 
 
 def test_completed_results_are_reused(store, database):
@@ -279,7 +292,10 @@ def test_heartbeat_cancels_blocked_tool_under_two_seconds(store, database, coope
         receive(pipe, "tool_running")
         before = time.monotonic()
         with store.atomic() as tx:
-            tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/initial"))
+            tx.push(
+                "s",
+                helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+            )
         observed = receive(pipe, "token", 2)
         assert observed - before <= 2
         receive(pipe, "done")
@@ -427,8 +443,8 @@ def test_steer_during_batch_follow_up_and_final_watermark(store, database):
         receive(pipe, "barrier")
         kill(proc, pipe, database)
         with store.atomic() as tx:
-            tx.push("s", InboxItem("steer", "steer", {"content": "steer now"}, target_turn_id="s/turn/initial"))
-            tx.push("s", InboxItem("follow", "follow_up", {"content": "next task"}))
+            tx.push("s", helper_item("steer", "steer", actor=principal("test"), target_turn_id="s/turn/initial"))
+            tx.push("s", helper_item("follow", "follow_up", actor=principal("test")))
         requests = []
         inserted = False
 
@@ -437,7 +453,10 @@ def test_steer_during_batch_follow_up_and_final_watermark(store, database):
             if point == "before_turn_end" and not inserted:
                 inserted = True
                 with store.atomic() as tx:
-                    tx.push("s", InboxItem("last", "steer", {"content": "at final boundary"}, target_turn_id=record.turn_id))
+                    tx.push(
+                        "s",
+                        helper_item("last", "steer", actor=principal("test"), target_turn_id=record.turn_id),
+                    )
 
         def answer(request):
             requests.append(request)
@@ -475,10 +494,9 @@ def test_approval_park_restart_deny_and_exact_reply(store, database):
     assert provider.counts() == (0, 0)
     park = records_of(store, "op_parked")[0]
     h = park.payload["handle"]
-    answer = InboxItem(
-        "approval",
-        "approval_answer",
-        {
+    answer = replace(
+        helper_item("approval", "approval_answer", actor=principal("test")),
+        payload={
             "operation_id": park.operation_id,
             "attempt": park.attempt,
             "request_id": h["request_id"],
@@ -489,7 +507,7 @@ def test_approval_park_restart_deny_and_exact_reply(store, database):
         target_turn_id=park.turn_id,
     )
     with store.atomic() as tx:
-        tx.push("s", replace(answer, input_id="wrong", payload=answer.payload | {"scope": ["other"]}))
+        tx.push("s", replace(answer, input_id="wrong", payload=answer.payload | {"scope": content_ref("other")}))
         tx.push("s", answer)
         tx.push("s", answer)
     drive(store, "s", runtime=runtime(database, [LLMResponse("done")], [tool], providers={"effect": provider}))
@@ -507,16 +525,9 @@ def test_ask_user_is_same_turn_parked_interaction(store, database):
     with store.atomic() as tx:
         tx.push(
             "s",
-            InboxItem(
-                "reply",
-                "user",
-                {
-                    "content": {
-                        "operation_id": park.operation_id,
-                        "interaction_id": park.payload["handle"]["interaction_id"],
-                        "text": "blue",
-                    }
-                },
+            replace(
+                helper_item("reply", actor=principal("test")),
+                payload={"content": content_ref("blue-answer")},
                 target_turn_id=park.turn_id,
                 generation=0,
             ),
@@ -574,7 +585,10 @@ def test_cancel_parked_provider_keeps_unknown_and_audit_late_result(store, datab
         ),
     )
     with store.atomic() as tx:
-        tx.push("s", InboxItem("cancel", "control", {"action": "cancel"}, target_turn_id="s/turn/initial"))
+        tx.push(
+            "s",
+            helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+        )
     drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
     assert len(records_of(store, "op_unknown")) == 1
     assert records_of(store, "turn_ended")[0].payload["status"] == "cancelled"
@@ -633,10 +647,9 @@ def test_tool_admission_reuses_approval_policy_validation_and_version(store, dat
         with store.atomic() as tx:
             tx.push(
                 "s",
-                InboxItem(
-                    "answer",
-                    "approval_answer",
-                    {
+                replace(
+                    helper_item("answer", "approval_answer", actor=principal("test")),
+                    payload={
                         "operation_id": parked.operation_id,
                         "attempt": parked.attempt,
                         "request_id": handle["request_id"],
@@ -936,8 +949,8 @@ def test_repair_missing_plans_uses_retained_response_without_model_replay(store,
         plan = next(iter(state.operations.values())).attempts[1].plan
         assert plan.turn_id is not None and plan.operation_id is not None
         lease = store.acquire("s", owner="retained-result", ttl_ms=15000)
-        result = {"content": "", "tool_calls": [ToolCall("a", "effect", {}).to_dict()], "raw": {}}
         with store.atomic() as tx:
+            result_ref = content_ref("retained-model-result")
             tx.append(
                 "s",
                 lease=lease,
@@ -948,8 +961,8 @@ def test_repair_missing_plans_uses_retained_response_without_model_replay(store,
                         "op_completed",
                         tid=plan.turn_id,
                         oid=plan.operation_id,
-                        result=result,
-                        result_digest=digest(result),
+                        result=result_ref,
+                        result_digest=digest(result_ref),
                         request_digest=plan.payload["request_digest"],
                         provider_binding="model",
                     ),
@@ -973,7 +986,10 @@ def test_abort_before_heartbeat_retains_durable_action(store, database):
         if not fired and point == "after_commit" and record.kind == "turn_started":
             fired = True
             with store.atomic() as tx:
-                tx.push("s", InboxItem("abort", "control", {"action": "abort"}, target_turn_id=record.turn_id))
+                tx.push(
+                    "s",
+                    helper_item("abort", "control", actor=principal("test"), action="abort", target_turn_id=record.turn_id),
+                )
 
     drive(store, "s", runtime=runtime(database, [], hook=hook))
     assert records_of(store, "turn_ended")[0].payload["status"] == "aborted"
@@ -991,10 +1007,10 @@ def test_projection_identity_is_scoped_to_session(store, database):
         turn_id="same-turn",
         payload={
             "input_ids": [],
-            "definition": {"task": {"user_prompt": "x"}},
-            "definition_digest": digest({"task": {"user_prompt": "x"}}),
+            "definition": content_ref("definition"),
+            "definition_digest": digest(content_ref("definition")),
             "handler_version": "1",
-            "budget": {},
+            "budget": content_ref("budget"),
             "binding": None,
             "generation": 0,
         },
@@ -1048,7 +1064,10 @@ def test_steer_during_model_retry_waits_for_next_unfrozen_request(store, databas
         if point == "after_commit" and r.kind == "op_unknown" and not inserted:
             inserted = True
             with store.atomic() as tx:
-                tx.push("s", InboxItem("during-retry", "steer", {"content": "new instruction"}, target_turn_id=r.turn_id))
+                tx.push(
+                    "s",
+                    helper_item("during-retry", "steer", actor=principal("test"), target_turn_id=r.turn_id),
+                )
 
     drive(store, "s", runtime=runtime(database, [lost, answer, answer], hook=hook))
     assert len(requests) == 3

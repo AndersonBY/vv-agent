@@ -6,50 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
+from vv_agent.kernel._tool_result_checks import DefinitiveResultInvalid as DefinitiveResultInvalid
+from vv_agent.kernel._tool_result_checks import validate_definitive_result
+from vv_agent.types import ToolDirective, ToolExecutionResult
 
 if TYPE_CHECKING:
     from vv_agent.interaction import HostInteractionRequest
-
-
-def _is_ambiguous_tool_error(result: Any) -> bool:
-    """Return whether a tool error lacks an adapter-proven definitive outcome."""
-    return (
-        isinstance(result, ToolExecutionResult)
-        and result.status_code is ToolResultStatus.ERROR
-        and result.error_code
-        in {
-            "tool_timeout",
-            "tool_cancelled",
-            "tool_connection_lost",
-            "tool_execution_failed",
-            "tool_orchestrator_error",
-        }
-        and result.metadata.get("definitive_outcome") is not True
-    )
-
-
-class DefinitiveResultInvalid(ValueError):
-    def __init__(
-        self,
-        message: str = "deferred resolution result is not definitive",
-        *,
-        code: str = "deferred_resolution_result_invalid",
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def validate_definitive_result(result: Any) -> None:
-    if not isinstance(result, ToolExecutionResult) or result.status_code not in {
-        ToolResultStatus.SUCCESS,
-        ToolResultStatus.ERROR,
-    }:
-        raise DefinitiveResultInvalid()
-    if result.status_code is ToolResultStatus.SUCCESS and result.error_code is not None:
-        raise DefinitiveResultInvalid("tool_result_invalid", code="tool_result_invalid")
-    if result.status_code is ToolResultStatus.ERROR and _is_ambiguous_tool_error(result):
-        raise DefinitiveResultInvalid()
 
 
 TOOL_CALL_OUTCOME_SCHEMA = "vv-agent.tool-call-outcome.v3"

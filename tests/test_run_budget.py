@@ -289,7 +289,7 @@ def _scripted_response(step: dict[str, Any]) -> LLMResponse:
 
 @pytest.mark.parametrize("case", _fixture()["runner_cases"], ids=lambda case: case["name"])
 def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("vv_agent.session.kernel.time.monotonic_ns", lambda: 100_000_000)
+    monkeypatch.setattr("vv_agent.session.timing.time.monotonic_ns", lambda: 100_000_000)
     model_calls = 0
     scripted_steps: list[ScriptStep] = []
     for step in case["steps"]:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.records import InboxItem, Record, SessionSpec
 from vv_agent.session.tool_results import prepare_tool_resources, project_tool_result

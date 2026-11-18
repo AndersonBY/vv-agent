@@ -1,13 +1,21 @@
 """Tool results from the real JSON-RPC App Server and immutable-version workspace."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import base64
 import hashlib
 import json
+import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from scripts.s1_fixture_values import deterministic_content_producer, fixture_key_provider_for_store
 from vv_agent import (
     Agent,
     RunConfig,
@@ -18,7 +26,7 @@ from vv_agent import (
     function_tool,
 )
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.outputs import ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.tools.registry import ToolRegistry
@@ -177,7 +185,13 @@ class ResultServer:
     def __init__(self, store, host):
         self.host = host
         self.transport = ChannelTransport(connection_id="result-owner", outbound_capacity=10000)
-        self.server = AppServer(transport=self.transport, host=host, store=store)
+        self.content_key_provider = fixture_key_provider_for_store(store)
+        self.server = AppServer(
+            transport=self.transport,
+            host=host,
+            store=store,
+            content_key_provider=self.content_key_provider,
+        )
         self.messages, self.identity = [], 0
         self.rpc("initialize", {"clientInfo": {"name": "results"}})
         self.server.processor.process_message(self.transport.connection_id, {"jsonrpc": "2.0", "method": "initialized"})
@@ -253,12 +267,17 @@ class ResultServer:
         self.server.run_adapter.join()
         self.server.run_adapter.close()
         self.server.kernel.close()
+        self.content_key_provider.close()
 
 
+@deterministic_content_producer
 def produce():
     backend = VersionWorkspace()
     host = ResultHost(backend)
-    with SQLiteStore.standalone(":memory:") as store:
+    with (
+        TemporaryDirectory(prefix="app-server-tool-result-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         server = ResultServer(store, host)
         try:
             server.start()

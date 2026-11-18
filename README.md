@@ -631,12 +631,22 @@ uv run python examples/24_workspace_backends.py
 
 ```bash
 uv sync --dev
-uv run pytest                              # unit tests, no network
+uv run pytest -k "not simulation_smoke"     # correctness tests, regular temporary filesystem
 uv run ruff check .                        # lint
 uv run ty check                            # type check
 
 VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # calls a real LLM
 ```
+
+Run the Linux simulator performance gate separately on the remote test host:
+
+```bash
+TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
+```
+
+Only this smoke command uses RAM-backed temporary files. SQLite retains WAL/FULL
+and all invariant checks; this does not prove host-power-loss durability. Keep
+disk process/transaction tests and PostgreSQL acceptance on their regular paths.
 
 Live tests read these environment variables:
 

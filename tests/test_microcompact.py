@@ -476,3 +476,26 @@ def test_existing_artifact_validation_uses_bounded_memory(monkeypatch: pytest.Mo
     assert peak < 1_000_000
     monkeypatch.setitem(backend._files, backend._norm(artifact.path), b"changed tail")
     assert not manager._artifact_is_intact(artifact)
+
+
+def test_compaction_text_helpers_share_the_kernel_implementation() -> None:
+    from vv_agent.kernel import _compaction_text
+    from vv_agent.kernel import _microcompaction_apply as apply
+    from vv_agent.kernel import _reducer as reducer
+    from vv_agent.memory import manager, microcompact
+
+    for name in (
+        "COMPACT_MARKER_OPENING",
+        "COMPACT_MARKER_CLOSING",
+        "build_compacted_tool_content",
+        "is_microcompacted_tool_content",
+        "has_recovery_envelope",
+        "content_without_recovery_envelope",
+    ):
+        assert name in microcompact.__all__
+        assert getattr(microcompact, name) is getattr(_compaction_text, name)
+    assert microcompact.plan_microcompact.__globals__["build_compacted_tool_content"] is build_compacted_tool_content
+    assert apply.build_compacted_tool_content is _compaction_text.build_compacted_tool_content
+    assert manager.has_recovery_envelope is _compaction_text.has_recovery_envelope
+    assert reducer.build_compacted_tool_content is _compaction_text.build_compacted_tool_content
+    assert build_compacted_tool_content.__module__ == "vv_agent.kernel._compaction_text"

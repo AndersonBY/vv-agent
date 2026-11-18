@@ -12,46 +12,15 @@ from vv_agent.context_providers import (
     ContextRequest,
     collect_context_fragments,
 )
+from vv_agent.kernel._tool_policy import _apply_tool_policy_metadata
 from vv_agent.memory.session_memory import load_session_memory_context
 from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.prompt.builder import inject_session_memory_section
 from vv_agent.prompt.templates import render_sub_agents
-from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int
+from vv_agent.run_config import RunConfig, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import FunctionTool
-from vv_agent.tools.metadata import ToolSideEffect
 from vv_agent.types import AgentTask
-
-_TASK_TOOL_POLICY_METADATA_KEYS = (
-    "_vv_agent_allowed_tools",
-    "_vv_agent_disallowed_tools",
-    "_vv_agent_denied_side_effects",
-    "_vv_agent_denied_capability_tags",
-    "_vv_agent_deny_terminal_tools",
-    "_vv_agent_denied_cost_dimensions",
-)
-
-
-def _apply_tool_policy_metadata(
-    metadata: dict[str, Any],
-    policy: ToolPolicy | None,
-) -> None:
-    for key in _TASK_TOOL_POLICY_METADATA_KEYS:
-        metadata.pop(key, None)
-    if policy is None:
-        return
-    if policy.allowed_tools is not None:
-        metadata["_vv_agent_allowed_tools"] = list(policy.allowed_tools)
-    if policy.disallowed_tools:
-        metadata["_vv_agent_disallowed_tools"] = list(policy.disallowed_tools)
-    if policy.denied_side_effects:
-        metadata["_vv_agent_denied_side_effects"] = [ToolSideEffect(item).value for item in policy.denied_side_effects]
-    if policy.denied_capability_tags:
-        metadata["_vv_agent_denied_capability_tags"] = list(policy.denied_capability_tags)
-    if policy.deny_terminal_tools:
-        metadata["_vv_agent_deny_terminal_tools"] = True
-    if policy.denied_cost_dimensions:
-        metadata["_vv_agent_denied_cost_dimensions"] = list(policy.denied_cost_dimensions)
 
 
 class AgentCompiler:

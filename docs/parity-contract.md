@@ -118,7 +118,7 @@ next frozen endpoint only when multiple endpoints exist; 429 retains backoff and
 one retry even with a single endpoint. Explicit adapter retryability overrides
 these defaults. Unknown retains its separate retry rules. The normative
 classification order, content string limits and summary failure behavior live in the contract's
-`docs/model-rejection.md`.
+[model-rejection.md](https://github.com/AndersonBY/vv-agent-contract/blob/1f4e6ff891996f1199f02e6b65edb1305ec7d8ae/docs/model-rejection.md).
 `scripts/model_rejection_fixtures.py` and the matching rejection tests pin this
 behavior. Contract 35.0.0 adds no store or frozen-definition boundary.
 
@@ -128,18 +128,43 @@ immutable release lock or vendored snapshot. After publication, synchronize
 them with the commands above. A local gate is not release or central adoption
 evidence.
 
+Execution/task/usage/result values are implemented once in
+`kernel/_execution_values.py`. Existing module and root exports resolve to those
+actual objects; the public inventory target `vv_agent.types.AgentResult` remains
+valid. This ownership change preserves wire versions, fields, bounds, diagnostics
+and bytes. `core_types.py` holds the same 47 value exports; `types.py` explicitly
+forwards every existing binding, including consumed private helpers, to those
+same objects. The canonical W9.6 exception retains `vv_agent.types` until the
+next Python package major release; it adds no wire reader, defaults or fixture
+version. See the contract's [allowed adaptations](https://github.com/AndersonBY/vv-agent-contract/blob/09e348b/docs/parity-contract.md#allowed-adaptations-and-evidence).
+
+When imported as top-level `types` from the package working directory, the old
+file loads the interpreter's actual standard-library module without loading
+`vv_agent`. Its bootstrap uses public `PathFinder` and the stdlib location of
+`os.__file__`, without `sysconfig`, `importlib.util`, private `sys` attributes or
+layout fallbacks. This bounded mapping covers the tested ordinary CPython
+installations; Windows, PyPy and frozen/embedded or zip-only distributions have
+not been verified. `tests/test_core_types_forwarding.py` checks real-cwd startup,
+export identity and stdlib metadata; the existing public manifest remains valid.
+
+After-cycle values and durable denial-state validation are implemented once in
+`kernel/_cycle_values.py`; existing lifecycle and root bindings resolve to the
+same objects. Snapshot copy behavior, control-state mutations, limits, errors and
+canonical boundary bytes are unchanged. Hook callbacks and their composition
+remain in the outer `AfterCycleHookManager`.
+
 Paths are relative to `src/vv_agent/` and `tests/`.
 
 | Surface | Producer | Tests |
 | --- | --- | --- |
 | Public API v15 | package exports, `Runner`, `RunConfig`, interactive sessions, App Server | `test_parity_evidence_manifests.py` |
-| Strict wire formats | `events.py`, `types.py`, `message_codec.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
-| Prompt and run definition | `runtime/compiler.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
+| Strict wire formats | `events.py`, `types.py`, `kernel/_execution_values.py`, `kernel/_message_values.py`, `kernel/_message_codec.py`, `kernel/_tool_values.py`, `kernel/_model_settings.py`, `kernel/_microcompaction_policy.py`, `kernel/_tool_metadata.py`, `kernel/_prompt_values.py`, `app_server/protocol/` | event validation, protocol type and session codec tests |
+| Prompt and run definition | `runtime/compiler.py`, `kernel/_prompt_values.py`, `prompt/`, `session/runtime.py` | `test_run_definition_producer.py`, prompt and session fixture tests |
 | Execution and recovery | `session/kernel.py`, `session/sql.py`, `session/reducer.py` | `tests/session/`, App Server durable resume tests |
 | Events, results and tracing | `session/projection.py`, `session/result.py`, `session/tracing.py` | Runner event, terminal, trace and result tests |
 | Child sessions and handoff | `session/delegation.py`, `session/children.py` | configured child, continuation, agent tool and handoff tests |
 | Memory and compaction | `session/compaction.py`, `session/memory.py`, `memory/` | memory lifecycle, local compaction and token usage tests |
-| Budgets | `budget.py`, `session/kernel.py` | `test_run_budget.py`, budget and session fixtures |
+| Budgets | `kernel/_budget_values.py`, `budget.py`, `session/kernel.py` | `test_run_budget.py`, budget and session fixtures |
 | Model selection | `session/kernel.py`, `session/runtime.py`, `session/app_server.py` | `tests/session/test_model_selection.py`, `test_app_server_model_selection.py` |
 | Provider usage | `session/kernel.py`, `session/providers.py` | `tests/session/test_provider_usage.py`, `tests/session/test_recovery_matrix.py` |
 | Session supervision and dispatch | `session/supervisor.py`, `session/children.py`, `session/kernel.py` | `tests/session/test_batch_children.py`, `test_supervisor.py`, `test_dispatch.py` |
@@ -398,7 +423,7 @@ logic in `session.records`; no record, inbox or SQL version changes.
 ## Contract 38.0.0 yieldable waits
 
 Python 0.35.0 adds yieldable waits in the SQL kernel and L1 lease lock ordering.
-The canonical rule is `docs/yieldable-waits.md` in the contract repository.
+The canonical rule is [yieldable-waits.md](https://github.com/AndersonBY/vv-agent-contract/blob/1f4e6ff891996f1199f02e6b65edb1305ec7d8ae/docs/yieldable-waits.md) in the contract repository.
 Local App Server, Interactive and Runner retain declarations but wait for real
 results; they do not yield. Shared raw connections require exclusive host use,
 and concurrent native transactions are unsupported without promised detection.

@@ -8,6 +8,7 @@ import pytest
 from support.compaction import assert_case, case_manager
 from support.compaction import messages as current_messages
 
+from vv_agent.kernel import _summary_compaction
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.memory.token_utils import count_messages_tokens, count_tokens
@@ -219,18 +220,15 @@ def test_memory_local_session_prompt_truncation_matches_fixture() -> None:
 
 def test_memory_local_summary_and_excerpt_match_fixture() -> None:
     summary_contract = _CONTRACT["summary"]
-    manager = MemoryManager(
-        summary_event_limit=int(summary_contract["event_limit"]),
-        summary_callback=None,
+    summary = _summary_compaction._build_local_summary(
+        _messages_from_fixture(summary_contract["messages"]), [], event_limit=int(summary_contract["event_limit"])
     )
-
-    summary = manager._build_local_summary(_messages_from_fixture(summary_contract["messages"]), [])
     assert _first_json_object(summary) == summary_contract["expected"]
 
     excerpt_contract = _CONTRACT["unicode_excerpt"]
     unit = str(excerpt_contract["content_unit"])
     suffix = str(excerpt_contract["suffix"])
-    excerpt = manager._summarize_message_content(
+    excerpt = _summary_compaction._summarize_message_content(
         unit * int(excerpt_contract["repeat"]),
         limit=int(excerpt_contract["limit_chars"]),
     )
@@ -384,8 +382,7 @@ def test_relative_transcript_microcompact_contract(case: dict[str, Any]) -> None
 
 
 def test_standalone_summary_helpers_match_current_contract() -> None:
-    manager = MemoryManager()
     parse = _CONTRACT["summary_parse"]
-    assert manager._parse_summary_payload(parse["raw"]) == parse["expected"]
+    assert _summary_compaction._parse_summary_payload(parse["raw"]) == parse["expected"]
     originals = _CONTRACT["recompression_originals"]
-    assert manager._collect_original_user_messages(current_messages(originals["messages"])) == originals["expected"]
+    assert _summary_compaction._collect_original_user_messages(current_messages(originals["messages"])) == originals["expected"]

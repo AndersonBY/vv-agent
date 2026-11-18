@@ -6,7 +6,10 @@ import hashlib
 import json
 from pathlib import PurePosixPath
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._tool_result_checks import provider_result_identity as provider_result_identity
+from vv_agent.kernel._tool_result_checks import result_kind
+from vv_agent.kernel._tool_result_checks import validate_output_body as validate_output_body
 from vv_agent.types import ToolArtifactRef, ToolExecutionResult
 from vv_agent.workspace.artifacts import (
     BOUNDED_TEXT_CHARS,
@@ -33,40 +36,6 @@ def result_owner(record):
     return hashlib.sha256(
         canonical_json_bytes([record.session_id, record.turn_id, record.operation_id, record.attempt])
     ).hexdigest()
-
-
-def result_kind(result):
-    kind = result.metadata.get("output_type", "text")
-    return kind if isinstance(kind, str) and kind in {"text", "json", "image", "file", "error"} else "text"
-
-
-def _reject_json_constant(value):
-    raise ValueError("non-finite JSON constant")
-
-
-def validate_output_body(result):
-    kind = result_kind(result)
-    if kind == "text" or result.truncated:
-        return
-    body = json.loads(result.content, parse_constant=_reject_json_constant)
-    if kind == "json":
-        return
-    if not isinstance(body, dict):
-        raise ValueError("structured tool body must be an object")
-    if kind in {"file", "image"}:
-        fields = {"path", "mime_type"} | ({"url"} if kind == "image" else set())
-        if set(body) != fields or any(value is not None and not isinstance(value, str) for value in body.values()):
-            raise ValueError("invalid file/image body")
-        if kind == "file" and not body["path"]:
-            raise ValueError("file output needs a path")
-    elif (
-        set(body) != {"ok", "error", "error_code", "retryable"}
-        or body["ok"] is not False
-        or not isinstance(body["error"], str)
-        or (body["error_code"] is not None and not isinstance(body["error_code"], str))
-        or type(body["retryable"]) is not bool
-    ):
-        raise ValueError("invalid error body")
 
 
 def output_location(result):
@@ -202,19 +171,6 @@ def prepare_tool_resources(record, raw, backend):
         resources.append(entry)
     metadata["app_server_resources"] = resources
     return raw | {"metadata": metadata}
-
-
-def provider_result_identity(raw):
-    """Retention is kernel-owned enrichment, not part of the provider's original receipt."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("metadata"), dict):
-        return raw
-    result = dict(raw)
-    metadata = {k: v for k, v in raw["metadata"].items() if k not in {"app_server_resources", "vv_artifact"}}
-    if metadata:
-        result["metadata"] = metadata
-    else:
-        result.pop("metadata", None)
-    return result
 
 
 def resource_entries(result):

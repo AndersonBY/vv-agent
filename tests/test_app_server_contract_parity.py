@@ -468,6 +468,7 @@ def test_shared_fixture_duplicate_id_disconnect_cleanup_and_case_sensitivity() -
     assert contract["approval"]["caseSensitive"] is True
 
 
+@pytest.mark.capability("app-server-schema")
 def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surface) -> None:
     from vv_agent.app_server.server import AppServer
 

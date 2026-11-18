@@ -1,20 +1,21 @@
 """Shared host-controlled at-least-once transport for dispatch tests and soak."""
 
 from vv_agent.session.children import child_delivery
+from vv_agent.session.content_runtime import durable_content_reader
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Definitive
-from vv_agent.session.records import SessionSpec
 from vv_agent.session.supervisor import tick
 from vv_agent.types import ToolExecutionResult
 
 from .conftest import open_store
 from .controlled import ControlledProvider
+from .helpers import create_fixture_session, push_fixture_input, wrap_fixture_store
 from .test_recovery_matrix import runtime
 
 
 class Transport:
     def __init__(self, store, database):
-        self.store, self.database = store, database
+        self.store, self.database = wrap_fixture_store(store), database
         self.queue = []
         self.wakes = []
         self.runtimes = {}
@@ -25,13 +26,17 @@ class Transport:
         self.queue.append(sid)
 
     def create(self, sid="s", steps=(), tools=(), consumers=("host",)):
-        with self.store.atomic() as tx:
-            tx.create(SessionSpec(sid, "test", "/tmp"), consumers=consumers)
-        self.runtimes[sid] = runtime(self.database, steps, tools, wake=self.wake)
+        create_fixture_session(self.store, sid, consumers=consumers)
+        self.runtimes[sid] = runtime(
+            self.database,
+            steps,
+            tools,
+            wake=self.wake,
+            content_reader=durable_content_reader(self.store, tenant_id=self.store.tenant_id, session_id=sid),
+        )
 
     def push(self, sid, item):
-        with self.store.atomic() as tx:
-            tx.push(sid, item)
+        push_fixture_input(self.store, sid, item)
         self.wake(sid)
 
     def deliver(self, index=0):

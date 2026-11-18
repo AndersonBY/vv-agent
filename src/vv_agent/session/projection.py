@@ -1,7 +1,10 @@
 """Pure durable-record -> existing RunEvent projection. Never executes or acknowledges."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetExhaustion, BudgetUsageSnapshot
@@ -36,6 +39,17 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.interaction import HostInteractionRequest
+from vv_agent.kernel._boundary_hydration import (
+    SessionHydration,
+    hydrate_session_input,
+    hydrate_session_input_payload,
+    hydrate_session_record_payload,
+    hydrate_session_records,
+    hydrate_session_stored_record,
+)
+from vv_agent.kernel._boundary_hydration import (
+    fold_hydrated_records as fold_hydrated_records,
+)
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .children import child_handles
@@ -46,14 +60,33 @@ from .store import StoredRecord
 from .tool_results import project_tool_result
 
 
-def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
+def hydration_for_store(store: Any, *, tenant_id: str, session_id: str) -> SessionHydration:
+    return SessionHydration.from_store(store, tenant_id=tenant_id, session_id=session_id)
+
+
+def hydration_for_session_store(store: Any, session_id: str) -> SessionHydration:
+    tenant_id = getattr(store, "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise ValueError("session store requires a tenant binding for content hydration")
+    return hydration_for_store(store, tenant_id=tenant_id, session_id=session_id)
+
+
+hydrate_input_payload = hydrate_session_input_payload
+hydrate_input = hydrate_session_input
+hydrate_record_payload = hydrate_session_record_payload
+hydrate_stored_record = hydrate_session_stored_record
+hydrate_records = hydrate_session_records
+
+
+def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydration | None = None) -> list[RunEvent]:
     """Pass a prefix including plans; callers filter emitted metadata.session_seq by cursor."""
     plans, events, turns = {}, [], {}
     delegations: dict[tuple[str, int], dict] = {}
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
     compactions: dict[str, str | None] = {}
     for stored in records:
-        r, p = stored.record, stored.record._payload
+        r = stored.record
+        p = hydrate_record_payload(stored, hydration)
         identity_digest = digest([r.session_id, r.record_id])
         common: dict[str, Any] = {
             "run_id": r.turn_id or r.session_id,
@@ -351,7 +384,9 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         **common, **tool, arguments=copy_json(request["arguments"]), tool_metadata=copy_json(plan["tool"]) or None
                     )
                 elif r.kind == "op_completed":
-                    descriptor = project_tool_result(stored)
+                    projected_record = replace(r, payload=p)
+                    object.__setattr__(projected_record, "_body", r.encode())
+                    descriptor = project_tool_result(replace(stored, record=projected_record))
                     common["metadata"] = common["metadata"] | {"tool_result": descriptor}
                     result = ToolExecutionResult.from_dict(p["result"])
                     tool_result_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/diagnostic"}

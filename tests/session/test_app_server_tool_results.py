@@ -14,7 +14,7 @@ import pytest
 
 from vv_agent import Agent, ScriptedModelProvider, ToolResultResourceRef
 from vv_agent.app_server import AppServerClient, ToolResultReadParams, ToolResultRef
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.types import LLMResponse, ToolCall
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 

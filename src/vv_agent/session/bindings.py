@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 
 
 class MissingHostBinding(ValueError):

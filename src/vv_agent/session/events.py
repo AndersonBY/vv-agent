@@ -8,7 +8,7 @@ from vv_agent.event_store import RunEventReplayQuery, _resolve_replay_query
 from vv_agent.events import RunEvent
 
 from .children import child_handles
-from .projection import project_records
+from .projection import hydration_for_session_store, project_records
 from .store import ConsumerBatch, SessionStore, SessionTx
 
 
@@ -25,7 +25,8 @@ class SessionRunEventStore:
     def replay(self, query: RunEventReplayQuery | None = None, *, run_id: str | None = None) -> Iterator[RunEvent]:
         resolved = _resolve_replay_query(query, run_id=run_id)
         _, records, _ = self.store.read_state(self.session_id)
-        for event in project_records(records):
+        hydration = hydration_for_session_store(self.store, self.session_id)
+        for event in project_records(records, hydration=hydration):
             if event.run_id == resolved.run_id:
                 yield event
         if resolved.include_children:
@@ -47,7 +48,8 @@ class SessionRunEventStore:
         if batch is None:
             return None
         _, records, _ = self.store.read_state(self.session_id)
-        events = project_records(r for r in records if r.seq <= batch.through_seq)
+        hydration = hydration_for_session_store(self.store, self.session_id)
+        events = project_records((r for r in records if r.seq <= batch.through_seq), hydration=hydration)
         return batch, [e for e in events if batch.from_seq <= e.metadata["session_seq"] <= batch.through_seq]
 
     def consume(self, sink: Callable[[RunEvent], None], *, limit: int = 256) -> int:

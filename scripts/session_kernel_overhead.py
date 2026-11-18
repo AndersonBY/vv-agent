@@ -93,7 +93,10 @@ def run_case(scenario: str, workspace: Path) -> float | None:
             return elapsed_ms
         finally:
             kernel.close()
-    with SQLiteStore.standalone(":memory:") as store:
+    with (
+        TemporaryDirectory(prefix="vv-session-store-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         store.install_schema()
         with store.atomic() as tx:
             tx.create(SessionSpec("bench", "test", str(workspace)), consumers=("events",))

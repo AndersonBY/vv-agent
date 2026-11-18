@@ -1,9 +1,8 @@
 """Bounded durable event pages over existing record positions."""
 
-from hashlib import sha256
 from typing import Any
 
-from .projection import project_records
+from .projection import hydrate_record_payload, hydration_for_session_store, project_records
 from .store import SessionStore
 
 
@@ -15,19 +14,26 @@ def list_events(store: SessionStore, sid: str, *, limit: int, after=None, throug
     if type(limit) is not int or not 1 <= limit <= 256:
         raise ValueError("limit must be in 1..256")
     first = store.read(sid, limit=1)
-    if not first.records or "app_server" not in first.records[0].record._payload.get("attributes", {}):
+    if not first.records:
+        raise KeyError(sid)
+    hydration = hydration_for_session_store(store, sid)
+    if "app_server" not in hydrate_record_payload(first.records[0], hydration)["attributes"]:
         raise KeyError(sid)
     cache = {}
 
     def projected(row):
         if row.seq not in cache:
             cache[row.seq] = [
-                e for e in project_records(store.projection_context(sid, (row,))) if e.metadata["session_seq"] == row.seq
+                e
+                for e in project_records(store.projection_context(sid, (row,)), hydration=hydration)
+                if e.metadata["session_seq"] == row.seq
             ]
         return cache[row.seq]
 
     def cursor(row, offset):
-        return {"threadId": sid, "seq": row.seq, "offset": offset, "recordDigest": sha256(row.record.encode()).hexdigest()}
+        # This binds the cursor to committed reference-form record bytes. It is a
+        # public integrity token, while S1 content remains represented by ContentRef.
+        return {"threadId": sid, "seq": row.seq, "offset": offset, "recordDigest": row.record.digest}
 
     def validate(value):
         if not isinstance(value, dict) or set(value) != {"threadId", "seq", "offset", "recordDigest"}:
@@ -42,7 +48,7 @@ def list_events(store: SessionStore, sid: str, *, limit: int, after=None, throug
         ):
             raise InvalidCursor()
         rows = store.read(sid, after_seq=value["seq"] - 1, through_seq=value["seq"], limit=1).records
-        if not rows or sha256(rows[0].record.encode()).hexdigest() != value["recordDigest"]:
+        if not rows or rows[0].record.digest != value["recordDigest"]:
             raise InvalidCursor()
         events = projected(rows[0])
         if value["offset"] > len(events):

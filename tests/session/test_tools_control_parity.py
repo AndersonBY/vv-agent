@@ -9,15 +9,17 @@ from typing import Any
 import pytest
 from support import FixedModelProvider
 from support.interactions import displayed_target
+from support.s1_fixture_values import clear_fixture_state_cache
 
 from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker, ApprovalDecision
 from vv_agent.llm.scripted import ScriptedLLM, ScriptStep
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch
+from vv_agent.session.content_runtime import content_key_provider_for
 from vv_agent.session.kernel import Runtime, drive, read_state
-from vv_agent.session.projection import project_records
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.projection import hydration_for_session_store, project_records
+from vv_agent.session.records import InboxItem
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure
@@ -25,6 +27,14 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
 from .conftest import open_store
+from .helpers import (
+    create_fixture_session,
+    fixture_child_spec,
+    fixture_content_reader,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 from .test_runner_parity import RESOLVED, echo, observe
 
 
@@ -32,65 +42,83 @@ class Restart(BaseException):
     pass
 
 
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
+
+
 def admit(store, config, sid="control"):
-    with store.atomic() as tx:
-        tx.create(
-            SessionSpec(
-                sid,
-                "test",
-                str(config.workspace),
-                attributes={
-                    "seed": {
-                        "messages": [m.to_dict() for m in config.initial_messages or []],
-                        "shared_state": config.shared_state or {},
-                        "unseen_input_protection": not bool(config.initial_messages),
-                    }
-                },
-            ),
-            consumers=("events",),
-        )
-        tx.push(sid, InboxItem("initial", "user", {"content": "go"}))
+    create_fixture_session(
+        store,
+        sid,
+        workspace=str(config.workspace),
+        attributes={
+            "seed": {
+                "messages": [m.to_dict() for m in config.initial_messages or []],
+                "shared_state": config.shared_state or {},
+                "unseen_input_protection": not bool(config.initial_messages),
+            }
+        },
+    )
+    push_fixture_input(store, sid, InboxItem("initial", "user", {"content": "go"}))
 
 
 def runtime(store, database, agent, config, llm, **kwargs):
+    session_id = kwargs.pop("sid", "control")
+    kwargs.setdefault("content_reader", fixture_content_reader(store, session_id))
     return Runtime(agent, config, RESOLVED, llm, lambda: open_store(database), **kwargs)
 
 
 @pytest.fixture
 def database_clock(store, monkeypatch):
+    target = type(store._root)
+    original = target.clock_sql
     now = 1_000_000
-    monkeypatch.setattr(type(store), "clock_sql", str(now))
 
-    def advance(milliseconds):
-        nonlocal now
-        now += milliseconds
-        monkeypatch.setattr(type(store), "clock_sql", str(now))
+    class Clock:
+        def set(self, milliseconds):
+            nonlocal now
+            now = milliseconds
+            monkeypatch.setattr(target, "clock_sql", str(now))
 
-    return advance
+        def advance(self, milliseconds):
+            nonlocal now
+            now += milliseconds
+            monkeypatch.setattr(target, "clock_sql", str(now))
+
+        def reset(self):
+            monkeypatch.setattr(target, "clock_sql", original)
+
+    return Clock()
+
+
+def raw_records(store, sid="control", kind=None):
+    return [row.record for row in read_state(store, sid)[1] if kind is None or row.record.kind == kind]
 
 
 def records(store, sid="control", kind=None):
-    return [r.record for r in read_state(store, sid)[1] if kind is None or r.record.kind == kind]
+    _, hydrated, _ = read_fixture_state(store, sid)
+    return [row.record for row in hydrated if kind is None or row.record.kind == kind]
 
 
 def reply(store, park, *, text="blue", input_id="reply", sid="control"):
-    with store.atomic() as tx:
-        tx.push(
-            sid,
-            InboxItem(
-                input_id,
-                "user",
-                {
-                    "content": {
-                        "interaction_id": park.payload.get("interaction_id") or park.payload["handle"]["interaction_id"],
-                        **({"operation_id": park.operation_id} if park.operation_id else {}),
-                        "text": text,
-                    }
-                },
-                park.turn_id,
-                0,
-            ),
-        )
+    push_fixture_input(
+        store,
+        sid,
+        InboxItem(
+            input_id,
+            "user",
+            {
+                "content": {
+                    "interaction_id": park.payload.get("interaction_id") or park.payload["handle"]["interaction_id"],
+                    **({"operation_id": park.operation_id} if park.operation_id else {}),
+                    "text": text,
+                }
+            },
+            park.turn_id,
+            0,
+        ),
+    )
 
 
 def approval_answer(store, park, decision="approve", input_id="answer"):
@@ -109,8 +137,7 @@ def approval_answer(store, park, decision="approve", input_id="answer"):
         park.turn_id,
         0,
     )
-    with store.atomic() as tx:
-        tx.push("control", answer)
+    push_fixture_input(store, "control", answer)
     return answer
 
 
@@ -119,6 +146,7 @@ def finish(text: str) -> ToolExecutionResult:
     return ToolExecutionResult("", content=text, directive=ToolDirective.FINISH)
 
 
+@pytest.mark.capability("hidden-tools")
 @pytest.mark.parametrize("visible", [False, True])
 def test_hidden_tool_exposure_parity(tmp_path, visible):
     @function_tool(exposure=ToolExposure.DIRECT if visible else ToolExposure.HIDDEN)
@@ -137,6 +165,7 @@ def test_hidden_tool_exposure_parity(tmp_path, visible):
         assert "not allowed" in new["tools"][0][1]
 
 
+@pytest.mark.capability("hidden-tools")
 def test_dynamic_schema_new_turn_parity(store, database, tmp_path):
     schema_seen = []
 
@@ -158,8 +187,7 @@ def test_dynamic_schema_new_turn_parity(store, database, tmp_path):
     rt = runtime(store, database, agent, config, ScriptedLLM([first, first]))
     drive(store, "control", runtime=rt)
     changed_registry(rt.registry)
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("second", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("second", "user", {"content": "go"}))
     drive(store, "control", runtime=rt)
     assert schema_seen == ["first", "second", "first", "second"]
 
@@ -171,6 +199,7 @@ def changed_registry(registry):
     return registry
 
 
+@pytest.mark.capability("hidden-tools")
 def test_dynamic_schema_active_turn_rejected(store, database, tmp_path):
     config = RunConfig(workspace=tmp_path)
     admit(store, config)
@@ -188,6 +217,8 @@ def test_dynamic_schema_active_turn_rejected(store, database, tmp_path):
     assert records(store, kind="turn_ended")[0].payload["reason"] == "handler_schema_or_capability_mismatch"
 
 
+@pytest.mark.capability("ask-user")
+@pytest.mark.capability("no-tool-wait")
 @pytest.mark.parametrize("no_tools", [False, True], ids=["ask_user", "no_tool"])
 @pytest.mark.parametrize("pending", [False, True])
 def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pending):
@@ -228,14 +259,17 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
     reply(store, park)
     reply(store, park, input_id="duplicate")
     reply(store, park, text="red", input_id="conflict")
-    store._fold_cache = None
+    clear_fixture_state_cache(store)
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     assert len(records(store, kind="turn_started")) == 1
     assert records(store, kind="turn_ended")[0].payload["result"] == resumed.final_output
     applied = records(store, kind="input_applied")
     assert [r.payload["disposition"] for r in applied] == ["queued", "applied", "noop", "rejected"]
     if not no_tools:
-        events = project_records(read_state(store, "control")[1])
+        events = project_records(
+            read_state(store, "control")[1],
+            hydration=hydration_for_session_store(store, "control"),
+        )
         assert [e.type for e in events].count("host_interaction_requested") == 1
         assert [e.type for e in events].count("host_interaction_response_consumed") == 1
         assert len([r for r in records(store, kind="op_completed") if r.operation_id == park.operation_id]) == 1
@@ -245,6 +279,7 @@ def test_user_wait_sdk_lifecycle_parity(store, database, tmp_path, no_tools, pen
     assert records(store, kind="input_applied")[-1].payload["disposition"] == "noop"
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize(
     "policy",
     [
@@ -276,6 +311,7 @@ def test_tool_policy_matrix_parity(tmp_path, policy, text):
     assert observe(agent, steps, config, kernel=True) == observe(agent, steps, config, kernel=False)
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize("frozen_denied", [False, True])
 @pytest.mark.parametrize(
     "denial,source",
@@ -340,6 +376,7 @@ class Decisions:
         return self.decision
 
 
+@pytest.mark.capability("approval-modes")
 @pytest.mark.parametrize("mode", ["default", "always", "never", "on_request"])
 @pytest.mark.parametrize("needs", [False, True])
 @pytest.mark.parametrize("action", ["allow", "deny", "allow_session", "timeout"])
@@ -367,6 +404,7 @@ def test_approval_mode_provider_parity(tmp_path, mode, needs, action):
     assert run(True) == run(False)
 
 
+@pytest.mark.capability("approval-modes")
 def test_approval_broker_restart_session_and_conflicting_answer(store, database, tmp_path):
     @function_tool(needs_approval=True)
     def approved(text: str) -> str:
@@ -409,8 +447,7 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
     assert result.payload["result"] == old["output"]
     assert len(records(store, kind="op_parked")) == 1
     # Replace both runtime and broker; session grants come from durable answers.
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("next", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("next", "user", {"content": "go"}))
     drive(
         store,
         "control",
@@ -423,15 +460,22 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
         ),
     )
     assert len(records(store, kind="op_parked")) == 1
-    retained = next(r for r in records(store, kind="input_applied") if r.payload["input"]["kind"] == "approval_answer")
+    retained = next(r for r in raw_records(store, kind="input_applied") if r.payload["input"]["kind"] == "approval_answer")
+    retained_logical = next(r for r in records(store, kind="input_applied") if r.record_id == retained.record_id)
     incoming = InboxItem(**retained.payload["input"])
-    with store.atomic() as tx:
-        tx.push("control", replace(incoming, input_id="duplicate"))
-        tx.push("control", replace(incoming, input_id="conflict", payload=incoming.payload | {"decision": "deny"}))
+    incoming = replace(incoming, payload=InboxItem(**retained_logical.payload["input"]).payload)
+    push_fixture_input(store, "control", replace(incoming, input_id="duplicate"), preserve_actor=True)
+    push_fixture_input(
+        store,
+        "control",
+        replace(incoming, input_id="conflict", payload=incoming.payload | {"decision": "deny"}),
+        preserve_actor=True,
+    )
     drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
-    assert [r.payload["disposition"] for r in records(store, kind="input_applied")[-2:]] == ["noop", "rejected"]
+    assert [r.payload["disposition"] for r in raw_records(store, kind="input_applied")[-2:]] == ["noop", "rejected"]
 
 
+@pytest.mark.capability("approval-modes")
 def test_approval_timeout_restart_parity(store, database, tmp_path, database_clock):
     @function_tool(needs_approval=True)
     def approved() -> str:
@@ -442,13 +486,14 @@ def test_approval_timeout_restart_parity(store, database, tmp_path, database_clo
     old = observe(
         agent, steps, RunConfig(workspace=tmp_path, approval_provider=Decisions(None), approval_timeout_seconds=0), kernel=False
     )
+    database_clock.set(1_000_000)
     config = RunConfig(workspace=tmp_path, approval_provider=Decisions(None), approval_timeout_seconds=0.01)
     admit(store, config)
     llm = ScriptedLLM(steps)
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     # An expired durable deadline is evaluated by the new driver, not a fresh timeout.
     assert records(store, kind="op_parked")[0].payload["deadline_ms"] == 1_000_010
-    database_clock(11)
+    database_clock.advance(11)
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     results = [r.payload["result"] for r in records(store, kind="op_completed") if r.payload["result"].get("tool_call_id") == "a"]
     assert results[0]["error_code"] == "tool_approval_timeout"
@@ -456,6 +501,7 @@ def test_approval_timeout_restart_parity(store, database, tmp_path, database_clo
     assert records(store, kind="turn_ended")[0].payload["result"] == old["output"]
 
 
+@pytest.mark.capability("tool-hooks")
 @pytest.mark.parametrize("short", [False, True])
 @pytest.mark.parametrize("approval", [False, True])
 @pytest.mark.parametrize("cut_kind", ["op_prepared", "op_completed"])
@@ -517,6 +563,7 @@ def test_tool_hooks_state_approval_restart_parity(store, database, tmp_path, sho
     assert records(store, kind="op_completed")[-1].payload["shared_state"] == old["shared"]
 
 
+@pytest.mark.capability("tool-stop")
 @pytest.mark.parametrize("behavior", ["run_llm_again", "stop_on_first_tool", "stop_at_tool_names"])
 @pytest.mark.parametrize("native_finish", [False, True])
 def test_tool_stop_pending_batch_native_finish_parity(tmp_path, behavior, native_finish):
@@ -534,6 +581,9 @@ def test_tool_stop_pending_batch_native_finish_parity(tmp_path, behavior, native
     assert new == old
 
 
+@pytest.mark.capability("background-ownership")
+@pytest.mark.capability("check-background")
+@pytest.mark.capability("stop-background")
 @pytest.mark.parametrize("terminal", [False, True])
 def test_background_process_restart_owner_parity(store, database, tmp_path, terminal):
     from vv_agent.runtime.background_sessions import background_session_manager as manager
@@ -581,17 +631,13 @@ def test_background_process_restart_owner_parity(store, database, tmp_path, term
                 llm = ScriptedLLM(steps)
 
                 def cut(point, record):
-                    if (
-                        point == "after_commit"
-                        and record.kind == "op_completed"
-                        and record.payload["result"].get("tool_call_id") == "bash"
-                    ):
+                    if point == "after_commit" and record.kind == "op_completed" and "/tool/" in (record.operation_id or ""):
                         raise Restart
 
                 with pytest.raises(Restart):
                     drive(store, "control", runtime=runtime(store, database, agent, config, llm, hook=cut))
-                # Rebuild runtime and SQL fold; reuse only provider-owned process handles.
-                store._fold_cache = None
+                    # Rebuild runtime and SQL fold; reuse only provider-owned process handles.
+                    clear_fixture_state_cache(store)
                 drive(store, "control", runtime=runtime(store, database, agent, config, llm))
                 values = [
                     normalized_process_result(ToolExecutionResult.from_dict(r.payload["result"]))
@@ -616,6 +662,7 @@ def test_background_process_restart_owner_parity(store, database, tmp_path, term
     assert scenario(True) == scenario(False)
 
 
+@pytest.mark.capability("check-background")
 @pytest.mark.parametrize("operation", ["check_background_command", "stop_background_command"])
 def test_background_forbidden_owner_parity(tmp_path, operation):
     from vv_agent.runtime.background_sessions import background_session_manager as manager
@@ -634,6 +681,7 @@ def test_background_forbidden_owner_parity(tmp_path, operation):
         assert manager.stop_for_tool(sid, backend, "another-task", "cleanup", workspace=tmp_path)["status"] == "stopped"
 
 
+@pytest.mark.capability("stop-background")
 def test_background_unknown_stop_is_not_confirmed_parity(tmp_path, monkeypatch):
     import vv_agent.runtime.background_sessions as background
 
@@ -675,6 +723,7 @@ def test_background_unknown_stop_is_not_confirmed_parity(tmp_path, monkeypatch):
     assert run(True) == run(False)
 
 
+@pytest.mark.capability("cancellation")
 @pytest.mark.parametrize("cooperative", [False, True], ids=["unknown", "cooperative"])
 def test_cancellation_control_result_event_parity(store, database, tmp_path, cooperative):
     def setup():
@@ -732,13 +781,15 @@ def test_cancellation_control_result_event_parity(store, database, tmp_path, coo
     worker.start()
     try:
         assert entered.wait(3)
-        with store.atomic() as tx:
-            tx.push("control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
+        push_fixture_input(store, "control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
         worker.join(3)
         assert not worker.is_alive() and not errors
         end = records(store, kind="turn_ended")[0]
         assert end.payload["status"] == "cancelled"
-        events = project_records(read_state(store, "control")[1])
+        events = project_records(
+            read_state(store, "control")[1],
+            hydration=hydration_for_session_store(store, "control"),
+        )
         assert [e.type for e in events].count("run_cancelled") == 1
         assert [e.type for e in old_events].count("run_cancelled") == 1
         assert [e.type for e in events].count("tool_call_started") == [e.type for e in old_events].count("tool_call_started") == 1
@@ -776,6 +827,7 @@ def background_registry():
     return registry
 
 
+@pytest.mark.capability("cancellation")
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("child_started", [False, True])
 def test_cancellation_descendant_control_result_events_parity(store, database, tmp_path, background, child_started):
@@ -808,8 +860,8 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
         assert [e.type for e in sdk_events].count("tool_call_started") == 1
     finally:
         release.set()
-        handle._thread.join(3)
-        assert not handle._thread.is_alive()
+        handle.join(3)
+        assert handle.done()
 
     @function_tool
     def delegate(task_description: str) -> str:
@@ -819,7 +871,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
     agent = Agent("parent", "parent", tools=[delegate])
     admit(store, config)
     children = {
-        "delegate": lambda plan: ChildSession(SessionSpec("child", "test", str(tmp_path)), "child", background=background)
+        "delegate": lambda plan: ChildSession(fixture_child_spec(store, plan.session_id, "child"), "child", background=background)
     }
     steps: list[ScriptStep] = [LLMResponse("", [call])]
     if background:
@@ -836,9 +888,13 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
         finally:
             child_exited.set()
 
+    child_content_provider = content_key_provider_for(store)
+    assert child_content_provider is not None
+
     def run_child():
         try:
             with open_store(database) as child_store:
+                child_store = wrap_fixture_store(child_store, child_content_provider)
                 drive(
                     child_store,
                     "child",
@@ -850,6 +906,7 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
                         ScriptedLLM([waiting]),
                         heartbeat_seconds=0.01,
                         cancellation_grace=0.01,
+                        sid="child",
                     ),
                 )
         except BaseException as exc:
@@ -858,17 +915,20 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
     child_worker = Thread(target=run_child)
     if child_started:
         child_worker.start()
-        assert child_entered.wait(3)
+        assert child_entered.wait(3), child_errors
     try:
-        with store.atomic() as tx:
-            tx.push("control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
+        push_fixture_input(store, "control", InboxItem("cancel", "control", {"action": "cancel"}, "control/turn/initial"))
         drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([]), children=children))
         assert records(store, kind="turn_ended")[0].payload["status"] == "cancelled"
         if child_started:
             child_worker.join(3)
             assert not child_worker.is_alive() and not child_errors
         else:
-            drive(store, "child", runtime=runtime(store, database, Agent("child", "child"), config, ScriptedLLM([])))
+            drive(
+                store,
+                "child",
+                runtime=runtime(store, database, Agent("child", "child"), config, ScriptedLLM([]), sid="child"),
+            )
         child_end = records(store, "child", "turn_ended")[0]
         assert child_end.payload["status"] == "cancelled"
         assert bool(records(store, "child", "op_started")) == child_started
@@ -879,12 +939,16 @@ def test_cancellation_descendant_control_result_events_parity(store, database, t
             child_worker.join(3)
             assert child_exited.wait(3)
     for sid in ("control", "child"):
-        events = project_records(read_state(store, sid)[1])
+        events = project_records(
+            read_state(store, sid)[1],
+            hydration=hydration_for_session_store(store, sid),
+        )
         assert any(e.type == "run_cancelled" for e in events)
     # Child cancellation never sends a cancel back to the parent.
     assert not store.peek_inbox("control")
 
 
+@pytest.mark.capability("approval-modes")
 @pytest.mark.parametrize("action", ["allow", "deny", "allow_session", "timeout"])
 def test_provider_decision_receipt_events_restart(store, database, tmp_path, action):
     @function_tool(needs_approval=True)
@@ -909,7 +973,10 @@ def test_provider_decision_receipt_events_restart(store, database, tmp_path, act
     assert replacement.requests == []
     answer = next(r for r in records(store, kind="input_applied") if r.payload["input"]["kind"] == "approval_answer")
     assert answer.payload["input"]["payload"]["metadata"] == {"policy": "host"}
-    events = project_records(read_state(store, "control")[1])
+    events = project_records(
+        read_state(store, "control")[1],
+        hydration=hydration_for_session_store(store, "control"),
+    )
     approvals = [e for e in events if e.type in {"approval_requested", "approval_resolved"}]
     assert [e.type for e in approvals] == ["approval_requested", "approval_resolved"]
     assert approvals[-1].to_dict()["action"] == action
@@ -917,6 +984,7 @@ def test_provider_decision_receipt_events_restart(store, database, tmp_path, act
     assert approvals[-1].metadata["decision_metadata"] == {"policy": "host"}
 
 
+@pytest.mark.capability("tool-stop")
 @pytest.mark.parametrize("success", [False, True])
 @pytest.mark.parametrize("native_finish", [False, True])
 @pytest.mark.parametrize("behavior", ["run_llm_again", "stop_on_first_tool", "stop_at_tool_names"])
@@ -999,11 +1067,12 @@ def test_expired_approval_answer_cannot_authorize_effect(store, database, tmp_pa
 
     config = RunConfig(workspace=tmp_path, approval_provider=Decisions(None), approval_timeout_seconds=0.02)
     agent = Agent("test", "test", tools=[effect])
+    database_clock.set(1_000_000)
     admit(store, config)
     llm = ScriptedLLM([LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")])
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     park = records(store, kind="op_parked")[0]
-    database_clock(21)
+    database_clock.advance(21)
     approval_answer(store, park, decision=decision)
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     assert effects == []
@@ -1012,6 +1081,7 @@ def test_expired_approval_answer_cannot_authorize_effect(store, database, tmp_pa
     result = next(r for r in records(store, kind="op_completed") if r.payload["result"].get("tool_call_id") == "a")
     assert result.payload["result"]["error_code"] == "tool_approval_timeout"
     # SDK's already timed-out request is no longer resolvable either.
+    database_clock.reset()
     broker = ApprovalBroker()
 
     class Capture(Decisions):
@@ -1043,17 +1113,17 @@ def test_rejected_broker_session_grant_cannot_authorize_next_tool(store, databas
         workspace=tmp_path, approval_provider=Decisions(None), approval_broker=broker, approval_timeout_seconds=0.02
     )
     agent = Agent("test", "test", tools=[effect])
+    database_clock.set(1_000_000)
     admit(store, config)
     llm = ScriptedLLM([LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")])
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     park = records(store, kind="op_parked")[0]
-    database_clock(21)
+    database_clock.advance(21)
     assert broker.resolve(park.payload["handle"]["request_id"], "allow_session")
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     assert effects == []
     assert broker.is_session_allowed("effect")
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("next", "user", {"content": "go"}))
+    push_fixture_input(store, "control", InboxItem("next", "user", {"content": "go"}))
     drive(
         store,
         "control",
@@ -1070,6 +1140,7 @@ def test_rejected_broker_session_grant_cannot_authorize_next_tool(store, databas
     assert not [r for r in records(store, kind="op_started") if "/tool/" in (r.operation_id or "")]
 
 
+@pytest.mark.capability("tool-policy")
 @pytest.mark.parametrize("initially_allowed", [False, True])
 def test_current_policy_predicate_rechecked_after_restart(store, database, tmp_path, initially_allowed):
     effects = []
@@ -1102,7 +1173,7 @@ def test_current_policy_predicate_rechecked_after_restart(store, database, tmp_p
     with pytest.raises(Restart):
         drive(store, "control", runtime=runtime(store, database, agent, config, llm, hook=cut))
     current = replace(config, tool_policy=ToolPolicy(can_use_tool=lambda name, args: not initially_allowed))
-    store._fold_cache = None
+    clear_fixture_state_cache(store)
     drive(store, "control", runtime=runtime(store, database, agent, current, llm))
     result = next(
         r.payload["result"] for r in records(store, kind="op_completed") if r.payload["result"].get("tool_call_id") == "a"
@@ -1140,11 +1211,20 @@ def test_approval_absolute_deadline_includes_provider_time(store, database, tmp_
     assert effects == [] and provider.requests == []
     assert result["error_code"] == "tool_approval_timeout"
     assert records(store, kind="turn_ended")[0].payload["result"] == old["output"]
-    approvals = [e for e in project_records(read_state(store, "control")[1]) if e.type.startswith("approval_")]
+    approvals = [
+        e
+        for e in project_records(
+            read_state(store, "control")[1],
+            hydration=hydration_for_session_store(store, "control"),
+        )
+        if e.type.startswith("approval_")
+    ]
     assert [e.type for e in approvals] == ["approval_requested", "approval_resolved"]
     assert approvals[-1].to_dict()["action"] == "timeout"
 
 
+@pytest.mark.capability("hidden-tools")
+@pytest.mark.capability("tool-hooks")
 @pytest.mark.parametrize("visible", [False, True])
 def test_hook_patch_preserves_hidden_tool_boundary(store, database, tmp_path, visible):
     def setup():
@@ -1180,7 +1260,7 @@ def test_hook_patch_preserves_hidden_tool_boundary(store, database, tmp_path, vi
 
     with pytest.raises(Restart):
         drive(store, "control", runtime=runtime(store, database, agent, config, llm, hook=cut))
-    store._fold_cache = None
+    clear_fixture_state_cache(store)
     drive(store, "control", runtime=runtime(store, database, agent, config, llm))
     result = next(
         r.payload["result"] for r in records(store, kind="op_completed") if r.payload["result"].get("tool_call_id") == "a"

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+from session.app_server_s1_helpers import bind_development_content
 from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig
@@ -19,6 +20,11 @@ from vv_agent.types import LLMResponse
 pytestmark = pytest.mark.usefixtures("surface")
 
 
+@pytest.fixture(autouse=True)
+def explicit_development_content_keys(surface) -> None:
+    bind_development_content(surface)
+
+
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
     return ResolvedModelConfig(
@@ -30,11 +36,7 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     )
 
 
-def test_thread_read_replays_emitted_items(surface, monkeypatch) -> None:
-    from vv_agent.session.events import SessionRunEventStore
-
-    consume = SessionRunEventStore.consume
-    monkeypatch.setattr(SessionRunEventStore, "consume", lambda self, sink, **kwargs: consume(self, sink, limit=1))
+def test_thread_read_replays_emitted_items(surface) -> None:
     server, transport = _server_with_steps([_finish_response("first")])
     _initialize_and_start_thread(server, transport)
     outbound = _start_turn_and_drain(server, transport, text="hello")
@@ -54,10 +56,8 @@ def test_thread_read_replays_emitted_items(surface, monkeypatch) -> None:
 
     assert replayed_items == emitted_items
     cast(Any, server.run_adapter).join()
-    cursor = surface.store.connection.execute(
-        "SELECT last_seq FROM sk_consumer WHERE session_id='thread_1' AND consumer='app_server'"
-    ).fetchone()[0]
-    assert cursor == surface.store.read_state("thread_1")[1][-1].seq
+    head_seq = surface.store.read_state("thread_1")[1][-1].seq
+    assert server.kernel._observer_cursors["thread_1"] == head_seq
 
 
 def test_thread_resume_replays_timeline_and_subscribes_to_live_events() -> None:

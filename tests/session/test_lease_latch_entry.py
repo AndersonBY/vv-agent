@@ -1,341 +1,162 @@
-"""Latch guards cover entry, waiting, ownership and the release tail per Scope."""
+"""Current lease ownership and content transaction entry contracts."""
 
-import ast
-import inspect
-import json
-import os
-import subprocess
-import sys
-import textwrap
-import threading
-import traceback
-from contextlib import contextmanager, nullcontext
 from dataclasses import replace
-from pathlib import Path
-from typing import cast
 
 import pytest
 
-from vv_agent.session import kernel
-from vv_agent.session.store import Lease, LeasePoll, SessionStore
+from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
+from vv_agent.kernel._content_runtime import bind_content_runtime, wrap_session_content_store
+from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership
+from vv_agent.kernel._reducer import Fold
+from vv_agent.kernel._sqlite import SQLiteStore
+from vv_agent.kernel._store import ContentSessionTx, Lease, LeaseLost, LeasePoll
 
-MESSAGE = "poll while holding commit/poll latch"
+
+class _Clock:
+    def __init__(self, monotonic_value: float = 10.0) -> None:
+        self.monotonic_value = monotonic_value
+
+    def now_ms(self) -> int:
+        return 1_000
+
+    def monotonic(self) -> float:
+        return self.monotonic_value
+
+    def monotonic_ns(self) -> int:
+        return int(self.monotonic_value * 1_000_000_000)
+
+    def sleep(self, seconds: float) -> None:
+        raise AssertionError(f"unexpected sleep: {seconds}")
 
 
-def _heartbeat():
-    return kernel._LeaseHeartbeat(
-        Lease("s", "owner", 1, 15000), lambda: nullcontext(cast(SessionStore, _Store())), 15000, 0.25, now_ms=0
-    )
+class _Signal:
+    def __init__(self) -> None:
+        self.flag = False
+
+    def is_set(self) -> bool:
+        return self.flag
+
+    def set(self) -> None:
+        self.flag = True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        del timeout
+        return self.flag
 
 
 class _Store:
-    def renew(self, lease, *, ttl_ms):
-        return LeasePoll(replace(lease, expires_at_ms=lease.expires_at_ms + 1), 1, 0, ())
+    def __init__(self, receipt: LeasePoll | None = None, *, owner: str | None = None) -> None:
+        self.receipt = receipt
+        self.owner = owner
+        self.renewals = 0
+
+    def renew(self, lease: Lease, *, ttl_ms: int) -> LeasePoll:
+        del lease, ttl_ms
+        self.renewals += 1
+        if self.receipt is None:
+            raise AssertionError("renewal was not configured")
+        if self.owner is None:
+            return self.receipt
+        return replace(self.receipt, lease=replace(self.receipt.lease, owner=self.owner))
 
 
-@contextmanager
-def _operation(heartbeat, kind):
-    if kind == "commit":
-        with heartbeat.committing():
-            yield
-    else:
-        heartbeat.poll(_Store())
-        yield
+def _ownership(clock: _Clock | None = None) -> tuple[LeaseOwnership, _Clock, Lease]:
+    clock = clock or _Clock()
+    lease = Lease("s", "owner", 1, 5_000)
+    state = LeaseOwnership(
+        lease,
+        4_000,
+        0.04,
+        clock=clock,
+        stop=_Signal(),
+        ready=_Signal(),
+        now_ms=clock.now_ms(),
+    )
+    return state, clock, lease
 
 
-def _reject(heartbeat):
-    with pytest.raises(RuntimeError) as caught:
-        heartbeat.poll(_Store())
-    assert str(caught.value) == MESSAGE
+def test_lease_ownership_has_no_deleted_latch_api_and_anchors_commits():
+    state, _clock, lease = _ownership()
+    assert not any(hasattr(state, name) for name in ("lock", "poll_lock", "commit_lock", "_latch_entry"))
+    assert state.latest_poll is None
+    with state.committing() as leased:
+        assert leased is lease
 
 
-def _clean(heartbeat):
-    assert not heartbeat.poll_lock.locked() and not heartbeat.commit_lock.locked()
-    assert heartbeat._poll_thread is None and heartbeat._commit_thread is None
-    heartbeat.poll(_Store())
-    with heartbeat.committing():
+def test_renewal_snapshot_is_the_commit_authority():
+    state, _clock, lease = _ownership()
+    receipt = LeasePoll(replace(lease, expires_at_ms=6_000), 1_100, 3, ())
+    store = _Store(receipt)
+
+    assert state.poll(store) is receipt
+    assert state.latest_poll is receipt
+    with state.committing() as committed:
+        assert committed is receipt.lease
+    assert store.renewals == 1
+
+
+def test_renewal_identity_change_loses_authority_without_a_latch_release_path():
+    state, _clock, lease = _ownership()
+    receipt = LeasePoll(replace(lease, expires_at_ms=6_000), 1_100, 3, ())
+    store = _Store(receipt, owner="replacement")
+
+    with pytest.raises(LeaseLost, match="changed lease identity"):
+        state.poll(store)
+    assert state.lost
+    with pytest.raises(LeaseLost, match="lost ownership"), state.committing():
         pass
 
 
-def _case_trace(kind):
-    heartbeat = _heartbeat()
-    fn = kernel._LeaseHeartbeat.poll if kind == "poll" else inspect.unwrap(kernel._LeaseHeartbeat.committing)
-    lines, start = inspect.getsourcelines(fn)
-    tree = ast.parse(textwrap.dedent("".join(lines)))
-    name = kind + "_lock"
-    held = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.With)
-        and any(isinstance(item.context_expr, ast.Attribute) and item.context_expr.attr == name for item in node.items)
-    )
-    target = start + held.body[0].lineno - 1
-    facts, errors = [], []
+def test_stopped_and_expired_scopes_fail_closed():
+    stopped, _clock, _lease = _ownership()
+    stopped.request_stop()
+    with pytest.raises(HeartbeatStopped, match="heartbeat stopped"), stopped.committing():
+        pass
 
-    def trace(frame, event, arg):
-        if frame.f_code is fn.__code__ and event == "line" and frame.f_lineno == target:
-            sys.settrace(None)
-            fact = {"kind": kind, "line": target, "locked": getattr(heartbeat, name).locked()}
-            facts.append(fact)
-            assert fact["locked"], "trace did not reach the acquired-latch window"
-            try:
-                heartbeat.poll(_Store())
-            except RuntimeError as error:
-                assert str(error) == MESSAGE
-                fact["rejected"] = True
-            else:
-                fact["rejected"] = False
-        return trace
-
-    def worker():
-        try:
-            sys.settrace(trace)
-            with _operation(heartbeat, kind):
-                pass
-            sys.settrace(None)
-            _clean(heartbeat)
-        except BaseException:
-            errors.append(traceback.format_exc())
-        finally:
-            sys.settrace(None)
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    thread.join(1)
-    print("LATCH_WINDOW " + json.dumps({"facts": facts, "alive": thread.is_alive(), "errors": errors}), flush=True)
-    if thread.is_alive():
-        os._exit(70)
-    assert not errors, errors
-    assert len(facts) == 1 and facts[0]["locked"] and facts[0]["rejected"], facts
-    _clean(heartbeat)
+    expired, clock, _lease = _ownership()
+    clock.monotonic_value = expired.expires_deadline
+    with pytest.raises(LeaseLost, match="expired"), expired.committing():
+        pass
 
 
-def _case_exit(kind, path):
-    heartbeat = _heartbeat()
-    original = getattr(heartbeat, kind + "_lock")
-    primary = ValueError("controlled latch body failure")
-    if path == "acquire":
-        # This adapter really times out acquiring an already-held stdlib Lock;
-        # its own context protocol raises, without changing stdlib semantics.
-        entered, release = threading.Event(), threading.Event()
-        errors = []
+class _KeyProvider:
+    provider_id = "lease-entry-test"
 
-        def holder():
-            try:
-                with original:
-                    entered.set()
-                    assert release.wait(3)
-            except BaseException:
-                errors.append(traceback.format_exc())
+    def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
+        return WrappedDataKey(tenant_id, session_id, f"key/{session_id}", b"wrapped-key")
 
-        thread = threading.Thread(target=holder, daemon=True)
-        thread.start()
-        try:
-            assert entered.wait(3)
+    def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
+        del tenant_id, session_id
+        return wrapped_key.wrapped_key
 
-            class TimedLatch:
-                def __enter__(self):
-                    _reject(heartbeat)
-                    acquired = original.acquire(timeout=0.05)
-                    assert not acquired, "holder released before acquisition failure"
-                    raise TimeoutError("test adapter acquisition timed out")
-
-                def __exit__(self, *_):
-                    raise AssertionError("failed acquisition must not exit")
-
-            setattr(heartbeat, kind + "_lock", TimedLatch())
-            with pytest.raises(TimeoutError, match="test adapter acquisition timed out"), _operation(heartbeat, kind):
-                pass
-        finally:
-            release.set()
-            thread.join(3)
-            setattr(heartbeat, kind + "_lock", original)
-        assert not thread.is_alive() and not errors, errors
-    elif kind == "commit":
-        with pytest.raises(ValueError) as caught, heartbeat.committing():
-            raise primary
-        assert caught.value is primary
-    else:
-
-        class FailingStore:
-            def renew(self, lease, *, ttl_ms):
-                raise primary
-
-        with pytest.raises(ValueError) as caught:
-            heartbeat.poll(FailingStore())
-        assert caught.value is primary
-    _clean(heartbeat)
+    def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"destroy/{tenant_id}/{key_id}")
 
 
-def _case_interval(kind, phase):
-    heartbeat = _heartbeat()
-    actual = getattr(heartbeat, kind + "_lock")
-    observed = []
+class _Cipher:
+    def encrypt(self, key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
+        del key, nonce, aad
+        return plaintext
 
-    class ObservedLatch:
-        def __enter__(self):
-            if phase == "enter":
-                _reject(heartbeat)
-                observed.append("enter")
-            actual.acquire()
+    def decrypt(self, key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        del key, nonce, aad
+        return ciphertext
 
-        def __exit__(self, *_):
-            actual.release()
-            if phase == "released":
-                assert not actual.locked()
-                _reject(heartbeat)
-                observed.append("released")
-
-    setattr(heartbeat, kind + "_lock", ObservedLatch())
-    try:
-        with _operation(heartbeat, kind):
-            pass
-    finally:
-        setattr(heartbeat, kind + "_lock", actual)
-    assert observed == [phase]
-    _clean(heartbeat)
+    def random_bytes(self, count: int) -> bytes:
+        return b"r" * count
 
 
-def _case_threads(kind):
-    heartbeat = _heartbeat()
-    original = getattr(heartbeat, kind + "_lock")
-    first, release, attempting = threading.Event(), threading.Event(), threading.Event()
-    inputs, outputs, errors = [], [], []
-    active = maximum = 0
-
-    class Store:
-        def renew(self, lease, *, ttl_ms):
-            nonlocal active, maximum
-            active += 1
-            maximum = max(maximum, active)
-            inputs.append(lease)
-            if kind == "poll" and len(inputs) == 1:
-                first.set()
-                assert release.wait(3)
-            result = _Store().renew(lease, ttl_ms=ttl_ms)
-            outputs.append(result.lease)
-            active -= 1
-            return result
-
-    class WaitingLatch:
-        def __enter__(self):
-            if threading.current_thread().name == "second":
-                _reject(heartbeat)
-                attempting.set()
-            original.acquire()
-
-        def __exit__(self, *_):
-            original.release()
-
-    setattr(heartbeat, kind + "_lock", WaitingLatch())
-
-    def worker(which):
-        try:
-            if kind == "poll":
-                heartbeat.poll(Store())
-            else:
-                with heartbeat.committing():
-                    if which == "first":
-                        first.set()
-                        assert release.wait(3)
-        except BaseException:
-            errors.append(traceback.format_exc())
-
-    a = threading.Thread(target=worker, args=("first",), name="first", daemon=True)
-    b = threading.Thread(target=worker, args=("second",), name="second", daemon=True)
-    a.start()
-    try:
-        assert first.wait(3)
-        owner = heartbeat._poll_thread if kind == "poll" else heartbeat._commit_thread
-        assert owner == a.ident
-        b.start()
-        assert attempting.wait(3), errors
-        assert (heartbeat._poll_thread if kind == "poll" else heartbeat._commit_thread) == a.ident
-        if kind == "commit":
-            # Another thread's C marker must not reject this thread's poll.
-            heartbeat.poll(Store())
-    finally:
-        release.set()
-        a.join(3)
-        if b.ident is not None:
-            b.join(3)
-        setattr(heartbeat, kind + "_lock", original)
-    assert not a.is_alive() and not b.is_alive() and not errors, errors
-    if kind == "poll":
-        assert maximum == 1 and len(inputs) == 2 and inputs[1] is outputs[0]
-        assert heartbeat.lease is outputs[1]
-    _clean(heartbeat)
-
-
-def _case_scopes(kind):
-    first, second = _heartbeat(), _heartbeat()
-    assert first is not second
-    if kind == "commit":
-        with first.committing():
-            second.poll(_Store())
-    else:
-
-        class Store:
-            def renew(self, lease, *, ttl_ms):
-                second.poll(_Store())
-                return _Store().renew(lease, ttl_ms=ttl_ms)
-
-        first.poll(Store())
-    _clean(first)
-    _clean(second)
-
-
-def _run_child(tmp_path, case, *args):
-    source = str(Path(kernel.__file__).resolve().parents[2])
-    code = (
-        "import runpy,sys;sys.path.insert(0,"
-        + repr(source)
-        + ");"
-        + "scope=runpy.run_path("
-        + repr(str(Path(__file__).resolve()))
-        + ");"
-        + "scope["
-        + repr("_case_" + case)
-        + "](*"
-        + repr(args)
-        + ")"
-    )
-    result = subprocess.run(
-        [sys.executable, "-B", "-I", "-W", "error", "-c", code],
-        cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "LANG": "C.UTF-8"},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=10,
-    )
-    print(result.stdout, end="")
-    assert result.returncode == 0, "latch child failed: " + result.stdout
-    assert "Exception in thread" not in result.stdout and "Exception ignored in" not in result.stdout
-
-
-@pytest.mark.parametrize("kind", ["poll", "commit"])
-def test_trace_acquired_latch_rejects_poll_before_owner_registration(tmp_path, kind):
-    _run_child(tmp_path, "trace", kind)
-
-
-@pytest.mark.parametrize("kind", ["poll", "commit"])
-@pytest.mark.parametrize("path", ["body", "acquire"])
-def test_entry_mark_clears_after_body_or_acquisition_failure(tmp_path, kind, path):
-    _run_child(tmp_path, "exit", kind, path)
-
-
-@pytest.mark.parametrize("kind", ["poll", "commit"])
-@pytest.mark.parametrize("phase", ["enter", "released"])
-def test_entry_mark_covers_lock_entry_and_release_tail(tmp_path, kind, phase):
-    _run_child(tmp_path, "interval", kind, phase)
-
-
-@pytest.mark.parametrize("kind", ["poll", "commit"])
-def test_waiters_are_thread_local_and_poll_remains_serial(tmp_path, kind):
-    _run_child(tmp_path, "threads", kind)
-
-
-@pytest.mark.parametrize("kind", ["poll", "commit"])
-def test_independent_scopes_do_not_reject_each_other(tmp_path, kind):
-    _run_child(tmp_path, "scopes", kind)
+def test_wrapped_store_atomic_yields_content_capable_transaction(tmp_path):
+    with SQLiteStore.standalone(
+        str(tmp_path / "content-tx.sqlite"),
+        fold_factory=Fold,
+        clock=_Clock(),
+    ) as raw_store:
+        raw_store.install_schema()
+        binding = bind_content_runtime(raw_store, key_provider=_KeyProvider(), cipher=_Cipher())
+        store = wrap_session_content_store(raw_store, binding)
+        with store.atomic() as tx:
+            assert isinstance(tx, ContentSessionTx)
+            writer = tx.content_writer(tenant_id=store.tenant_id, session_id="s")
+            assert writer.tenant_id == store.tenant_id
+            assert writer.session_id == "s"

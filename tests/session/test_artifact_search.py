@@ -11,9 +11,10 @@ from support.contract import fixture_root
 
 from vv_agent import Agent, RunConfig
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._content import ContentRef
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.kernel import drive
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import Runtime
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.base import ToolContext
@@ -24,6 +25,14 @@ from vv_agent.types import LLMResponse, ToolCall
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 from vv_agent.workspace.artifacts import _artifact_task_segment, _session_artifact_scope, persist_text_artifact
 from vv_agent.workspace.base import DiscoveryFilteredWorkspaceBackend
+
+from .helpers import (
+    create_fixture_session,
+    fixture_content_reader,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 
 PRODUCER = runpy.run_path(str(Path(__file__).parents[2] / "scripts/artifact_search_fixtures.py"))
 TASK = PRODUCER["TASK"]
@@ -238,11 +247,11 @@ def test_real_kernel_search_completion_uses_unified_projection_without_repeating
     scope = _session_artifact_scope("artifact-search", TASK) if compaction else getattr(backend, "task_id", TASK)
     ref = persist_text_artifact(backend, scope, "call", text, reuse_existing=True)
     arguments = {"path": ref.path, "pattern": "needle", "output_mode": "content", "head_limit": 0}
-    with SQLiteStore.standalone(":memory:") as store:
-        store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec("artifact-search", "test", str(tmp_path)), consumers=())
-            tx.push("artifact-search", InboxItem("initial", "user", {"content": "search"}))
+    with SQLiteStore.standalone(str(tmp_path / "artifact-search.sqlite")) as raw_store:
+        raw_store.install_schema()
+        store = wrap_fixture_store(raw_store)
+        create_fixture_session(store, "artifact-search", workspace=str(tmp_path))
+        push_fixture_input(store, "artifact-search", InboxItem("initial", "user", {"content": "search"}))
         runtime = Runtime(
             agent=Agent(name="search", instructions="Search."),
             config=RunConfig(
@@ -253,11 +262,19 @@ def test_real_kernel_search_completion_uses_unified_projection_without_repeating
             resolved=ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", []),
             llm=ScriptedLLM([LLMResponse("", [ToolCall("search", "search_files", arguments)]), LLMResponse("done")]),
             heartbeat_store=lambda: nullcontext(store),
+            content_reader=fixture_content_reader(store, "artifact-search"),
         )
         drive(store, "artifact-search", runtime=runtime)
         records = [row.record for row in store.read("artifact-search", limit=100).records]
+        raw_results = [record.payload["result"] for record in records if record.kind == "op_completed"]
+        assert raw_results
+        for raw_result in raw_results:
+            ContentRef.from_dict(raw_result)
+        _, hydrated, _ = read_fixture_state(store, "artifact-search")
         result = next(
-            r.payload["result"] for r in records if r.kind == "op_completed" and r.payload["result"].get("tool_call_id")
+            row.record.payload["result"]
+            for row in hydrated
+            if row.record.kind == "op_completed" and row.record.payload["result"].get("tool_call_id")
         )
         assert result["status_code"] == "SUCCESS", result
         assert result["truncated"] and len(result["content"]) == 12000

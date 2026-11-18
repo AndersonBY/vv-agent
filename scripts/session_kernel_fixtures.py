@@ -1,4 +1,4 @@
-"""Author v24 vectors from the private kernel; never modify the vendored snapshot."""
+"""Author current S1 vectors from the private kernel; never modify the vendored snapshot."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConf
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.budget import BudgetEvaluator, RunBudgetLimits, UnavailableMetricPolicy
-from vv_agent.events import event_from_dict
+from vv_agent.events import ModelCallCompletedEvent, event_from_dict
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
 from vv_agent.llm.scripted import ScriptedLLM
@@ -36,7 +36,7 @@ from vv_agent.session.children import ChildSession, child_delivery, child_handle
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import (
     APP_SERVER_ATTRIBUTES,
@@ -57,6 +57,7 @@ from vv_agent.session.records import (
 )
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.result import project_result
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict, LeaseLost
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
@@ -80,6 +81,22 @@ for (const x of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   process.stdout.write(Buffer.from(jcs(x), 'utf8').toString('base64') + '\n');
 }
 """
+
+
+def _load_s1_fixture_values():
+    spec = importlib.util.spec_from_file_location(
+        "_session_kernel_s1_fixture_values",
+        Path(__file__).with_name("s1_fixture_values.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+S1_FIXTURE_VALUES = _load_s1_fixture_values()
+deterministic_content_secrets = S1_FIXTURE_VALUES.deterministic_content_secrets
+fixture_key_provider_for_store = S1_FIXTURE_VALUES.fixture_key_provider_for_store
 NOW = 1_000_000
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 APPROVED_EFFECTS = []
@@ -90,6 +107,25 @@ class FixedDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
         return datetime.fromtimestamp(NOW / 1000, tz=tz or UTC)
+
+
+class _FixtureClock:
+    """Give every S1 connection the fixture's deterministic wall and monotonic time."""
+
+    def __init__(self, fixtures: Fixtures):
+        self.fixtures = fixtures
+
+    def now_ms(self) -> int:
+        return self.fixtures.clock
+
+    def monotonic(self) -> float:
+        return self.fixtures.clock / 1000
+
+    def monotonic_ns(self) -> int:
+        return self.fixtures.clock * 1_000_000
+
+    def sleep(self, seconds: float) -> None:
+        self.fixtures.clock += int(seconds * 1000)
 
 
 def independent_bytes(values: list[Any]) -> list[bytes]:
@@ -229,9 +265,25 @@ def wait_turn() -> ToolExecutionResult:
 
 class Fixtures:
     def __init__(self):
-        self.kernel = SessionDriver()
         self.clock = NOW
-        self.kernel.store.connection.create_function("session_now_ms", 0, lambda: self.clock)
+        self._clock = _FixtureClock(self)
+        self._state_directory = TemporaryDirectory(prefix="vva-s1-fixture-state-")
+        self._raw_store = SQLiteStore(
+            str(Path(self._state_directory.name) / "sessions.sqlite3"),
+            clock=self._clock,
+        )
+        self.content_key_provider = fixture_key_provider_for_store(self._raw_store)
+        self._deterministic_secrets = deterministic_content_secrets()
+        self._deterministic_secrets.__enter__()
+        self.kernel = SessionDriver(store=self._raw_store, content_key_provider=self.content_key_provider)
+
+        def close_fixture_store():
+            self.content_key_provider.close()
+            self._raw_store.connection.close()
+            self._deterministic_secrets.__exit__(None, None, None)
+            self._state_directory.cleanup()
+
+        self.kernel._on_close(close_fixture_store)
         self.runtimes: dict[str, Any] = {}
         self.inbox: dict[tuple[str, str], InboxItem] = {}
         self.semantics = []
@@ -255,34 +307,56 @@ class Fixtures:
         return replace(config, tool_registry_factory=config.tool_registry_factory or partial(cls.registry, names))
 
     def push(self, sid, item):
-        self.inbox[(sid, item.input_id)] = item
-        return self.kernel.push(sid, item)
+        """Push through SQL admission and retain the exact published inbox item."""
+
+        receipt = self.kernel.push(sid, item)
+        stored = self.kernel.store.read_input(sid, item.input_id)
+        if stored is None:
+            raise AssertionError("published inbox input is missing")
+        self.inbox[(sid, item.input_id)] = stored.item
+        return receipt
 
     def admit(self, sid, steps, *, agent=None, config=None, attributes=None, memory=None, content="go", **kwargs):
+        """Create one S1 session and bind its real SDK runtime and content reader."""
+
         agent = agent or Agent("fixture", "Be precise.", model="m", tools=[echo])
         provider = ScriptedModelProvider("scripted", "m", ScriptedLLM(steps), context_length=None, max_output_tokens=None)
         config = replace(self.config(config, steps), model_provider=provider, workspace="/fixture")
-        rt = self.kernel.runtime(agent, config)
-        rt.__dict__.update(kwargs)
-        if memory is not None:
-            rt.memory_manager = memory
-        self.runtimes[sid] = rt
         if config.initial_messages and attributes is None:
             # Retain the imported-history fixtures' original creation policy.
             attributes = {"seed": {"unseen_input_protection": False}}
         self.kernel.create(sid, "/fixture", attributes)
+        rt = self.kernel.runtime(agent, config, session_id=sid)
+        rt.__dict__.update(kwargs)
+        rt.clock = kwargs.get("clock", self._clock)
+        if memory is not None:
+            rt.memory_manager = memory
+        self.runtimes[sid] = rt
         self.push(sid, InboxItem("initial", "user", {"content": content}))
         return rt
 
     def run(self, sid):
+        """Drive one real turn without synthesizing terminal or usage records."""
+
         drive(self.kernel.store, sid, runtime=self.runtimes[sid], _one_turn=True)
 
     def state(self, sid):
-        return self.kernel.store.read_state(sid)[0]
+        """Return the hydrated typed state from the SDK snapshot reader."""
+
+        return self.kernel._read_state(sid)[0]
 
     def result(self, sid):
-        state = self.state(sid)
-        return project_result(self.kernel.store, sid, next(reversed(state.turns)), runtime=self.runtimes[sid])
+        """Project a typed result from one hydrated ledger snapshot."""
+
+        snapshot = self.kernel._read_state(sid)
+        state = snapshot[0]
+        return project_result(
+            self.kernel.store,
+            sid,
+            next(reversed(state.turns)),
+            runtime=self.runtimes[sid],
+            snapshot=snapshot,
+        )
 
     def drain_children(self, sid, rt):
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
@@ -299,6 +373,8 @@ class Fixtures:
         drive(self.kernel.store, sid, runtime=rt, _one_turn=True)
 
     def model_selection(self):
+        from vv_agent.events import ModelCallCompletedEvent, ModelCallFailedEvent
+
         sid = "model_selection"
         selection = {
             "model": "B",
@@ -340,20 +416,58 @@ class Fixtures:
             )
 
         rt.model_resolver = resolve
-        self.run(sid)
-        assert calls == ["m", "m", "B"], calls
-        rows = self.kernel.store.read_state(sid)[1]
-        plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record.payload["purpose"] == "primary"]
-        assert plans[0].payload["request"] == plans[1].payload["request"]
-        assert plans[2].payload["request"]["route"] == selection["route"]
-        assert [c.backend for c in self.result(sid).token_usage.model_calls] == [
-            rt.resolved.backend,
-            rt.resolved.backend,
-            "anthropic",
-        ]
-        assert self.push(sid, selected).replayed
+
+        class StopAfterUnknown(BaseException):
+            pass
+
+        def stop_after_unknown(point, record):
+            if point == "after_commit" and record is not None and record.kind == "op_unknown":
+                raise StopAfterUnknown
+
+        rt.hook = stop_after_unknown
         try:
-            self.kernel.push(sid, replace(selected, payload={"selection": None}))
+            self.run(sid)
+        except StopAfterUnknown:
+            rt.hook = lambda _point, _record: None
+            self.run(sid)
+        else:
+            rt.hook = lambda _point, _record: None
+        assert calls == ["m", "m", "B"], calls
+        snapshot = self.kernel._read_state(sid)
+        state, source_records, _ = snapshot
+        hydration = hydration_for_session_store(self.kernel.store, sid)
+        records = [(row.record, hydrate_record_payload(row, hydration)) for row in source_records]
+        plans = [
+            (record, payload) for record, payload in records if record.kind == "op_planned" and payload["purpose"] == "primary"
+        ]
+        assert plans[0][1]["request"] == plans[1][1]["request"]
+        assert plans[2][1]["request"]["route"] == selection["route"]
+        model_events = [
+            event
+            for event in project_records(source_records, hydration=hydration)
+            if isinstance(event, (ModelCallCompletedEvent, ModelCallFailedEvent))
+        ]
+        assert [(event.model, event.backend) for event in model_events] == [
+            ("m", rt.resolved.backend),
+            ("m", rt.resolved.backend),
+            ("B", "anthropic"),
+        ]
+        model_calls = project_result(
+            self.kernel.store,
+            sid,
+            next(reversed(state.turns)),
+            runtime=rt,
+            snapshot=snapshot,
+        ).token_usage.model_calls
+        selection_record = next(
+            record
+            for record in source_records
+            if record.record.kind == "input_applied" and record.record.payload["input"]["input_id"] == "select-B"
+        )
+        assert self.push(sid, selected).replayed
+        stored_selected = self.inbox[(sid, selected.input_id)]
+        try:
+            self.kernel.push(sid, replace(stored_selected, payload={"selection": None}))
         except Conflict:
             pass
         else:
@@ -365,7 +479,7 @@ class Fixtures:
                 "layer": "input_conflict",
                 "reason": "input_id bytes conflict",
                 "audit_record_id": "input/select-B/applied",
-                **facts(replace(selected, payload={"selection": None}).encode()),
+                **facts(replace(stored_selected, payload={"selection": None}).encode()),
             }
         )
         self.semantics.append(
@@ -373,13 +487,13 @@ class Fixtures:
                 "case": "model_selection_mid_session_retry",
                 "session_id": sid,
                 "models": calls,
-                "plan_ids": [p.record_id for p in plans],
-                "plans": [p.to_dict() for p in plans],
-                "selection_record": self.state(sid).applied_inputs["select-B"].to_dict(),
-                "calls": [c.to_dict() for c in self.result(sid).token_usage.model_calls],
+                "plan_ids": [record.record_id for record, _ in plans],
+                "plans": [record.to_dict() for record, _ in plans],
+                "selection_record": selection_record.record.to_dict(),
+                "calls": [call.to_dict() for call in model_calls],
                 "retry_request_unchanged": True,
                 "route": selection["route"],
-                "billable_models": [c.model for c in self.result(sid).token_usage.model_calls],
+                "billable_models": [call.model for call in model_calls],
             }
         )
 
@@ -388,6 +502,7 @@ class Fixtures:
 
         sid = "endpoint-routing"
         routes = {"m": ["B"], "selected": ["A", "B"]}
+        selection = {"model": "selected", "route": {}}
         calls, preferences = [], []
 
         class HostOrder(VvLlmClient):
@@ -406,39 +521,62 @@ class Fixtures:
             if (
                 point == "after_commit"
                 and record.kind == "op_planned"
+                and record.payload["op_kind"] == "model"
+                and record.payload["purpose"] == "primary"
+                and record.turn_id == f"{sid}/turn/followup"
                 and routes["selected"] == ["A", "B"]
-                and record.payload["request"].get("model") == "selected"
             ):
                 routes["selected"] = ["C", "B"]
+            elif (
+                point == "after_commit"
+                and record.kind == "op_completed"
+                and record.turn_id == f"{sid}/turn/followup"
+                and record.payload["execution_started"] is False
+                and routes["selected"] == ["C", "B"]
+            ):
+                routes["selected"] = ["B"]
 
         rt.hook = remove
 
         def complete(current, request):
             calls.append(current.endpoint_targets[0].endpoint_id)
-            if len(calls) == 1:
-                self.push(sid, InboxItem("select", "model_selection", {"selection": {"model": "selected", "route": {}}}))
-                return LLMResponse("", [ToolCall("echo", "echo", {"text": "continue"})], raw={"usage": USAGE})
-            return LLMResponse("done", raw={"usage": USAGE})
+            return LLMResponse("done" if request.model == "selected" else "first", raw={"usage": USAGE})
 
         with patch.object(VvLlmClient, "complete", complete):
             self.run(sid)
-        records = [r.record for r in self.kernel.store.read_state(sid)[1]]
-        plans = [r for r in records if r.kind == "op_planned" and r.payload["op_kind"] == "model"]
-        missing = next(
-            r for r in records if r.kind == "op_completed" and r.payload["result"].get("error_code") == "endpoint_unavailable"
+            self.push(sid, InboxItem("select", "model_selection", {"selection": selection}))
+            self.push(sid, InboxItem("followup", "user", {"content": "continue"}))
+            self.run(sid)
+        _, source_records, _ = self.kernel._read_state(sid)
+        hydration = hydration_for_session_store(self.kernel.store, sid)
+        records = [(row.record, hydrate_record_payload(row, hydration)) for row in source_records]
+        plans = [payload for record, payload in records if record.kind == "op_planned" and payload["op_kind"] == "model"]
+        selected_plans = [payload for payload in plans if payload["request"]["model"] == "selected"]
+        missing_record, missing = next(
+            (record, payload)
+            for record, payload in records
+            if record.kind == "op_completed" and payload["result"].get("error_code") == "endpoint_unavailable"
         )
-        assert calls == ["B", "C"] and preferences == [None, "B", "B"]
-        assert plans[1].payload["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
-        assert not missing.payload["execution_started"] and missing.payload["usage"] == {} and missing.payload["evidence"] == []
-        assert not any(r.kind == "op_unknown" for r in records)
-        assert self.result(sid).final_output == "done"
+        terminal = next(
+            payload for record, payload in records if record.kind == "turn_ended" and record.turn_id == f"{sid}/turn/followup"
+        )
+        assert calls == ["B", "B"] and preferences == [None, "B", "B"]
+        assert selected_plans[0]["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
+        assert not missing["execution_started"] and missing["usage"] == {} and missing["evidence"] == []
+        assert not any(
+            record.kind == "op_unknown"
+            and record.operation_id == missing_record.operation_id
+            and record.attempt == missing_record.attempt
+            for record, _ in records
+        )
+        assert terminal["status"] == "completed" and terminal["result"] == "done"
         self.semantics.append(
             {
                 "case": "endpoint_routing",
                 "session_id": sid,
                 "calls": calls,
                 "preferences": preferences,
-                "missing": missing.to_dict(),
+                "missing": missing_record.to_dict(),
             }
         )
 
@@ -1494,18 +1632,28 @@ class Fixtures:
             self.push(sid, provider.callback("provider_result", f"{sid}/turn/initial", "replay"))
             rt.hook = lambda *_: None
             self.run(sid)
-            state, rows, _ = self.kernel.store.read_state(sid)
+            state, rows, _ = self.kernel._read_state(sid)
             assert state.applied_inputs["replay"].payload["disposition"] == "noop"
             completions = [r.record for r in rows if r.record.kind == "op_completed" and r.record.attempt == 1]
             assert len(completions) == 1
-            assert independent_bytes([completions[0].payload["usage"]])[0] == independent_bytes([usage])[0]
-            events = [e for e in project_records(rows) if e.type == "model_call_completed" and e.attempt == 1]
+            hydration = hydration_for_session_store(self.kernel.store, sid)
+            completion = next(
+                hydrate_record_payload(row, hydration)
+                for row in rows
+                if row.record.kind == "op_completed" and row.record.attempt == 1
+            )
+            assert independent_bytes([completion["usage"]])[0] == independent_bytes([usage])[0]
+            events = [
+                event
+                for event in project_records(rows, hydration=hydration)
+                if isinstance(event, ModelCallCompletedEvent) and event.attempt == 1
+            ]
             assert len(events) == 1 and events[0].usage == first.usage
             assert self.result(sid).token_usage == result.token_usage
             self.semantics.append(
                 {
                     "case": sid,
-                    "context": completions[0].payload["context"],
+                    "context": completion["context"],
                     "usage": usage,
                     "projected_usage": first.usage.to_dict(),
                     "billable_call_id": first.call_id,
@@ -2001,7 +2149,7 @@ def generate(output: Path):
     output.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         # Fixed elapsed-time observations do not affect deadlines, which use store time.
-        stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
+        stack.enter_context(patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000))
         # The evaluator's default captured the real clock when budget.py was imported.
         stack.enter_context(
             patch("vv_agent.session.kernel.BudgetEvaluator", partial(BudgetEvaluator, clock_ns=lambda: 100_000_000))

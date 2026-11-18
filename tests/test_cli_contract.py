@@ -229,6 +229,7 @@ def test_task_cli_process_uses_contract_exit_codes_and_channels() -> None:
     assert "Traceback" not in configuration.stderr
 
 
+@pytest.mark.capability("cli")
 def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, tmp_path):
     from support import FixedModelProvider
 
@@ -258,12 +259,16 @@ def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, t
     assert payload["cycles"] == 1
     assert "[run_started]" in captured.err
     assert "run_completed" in captured.err
-    assert surface.path == ":memory:"
+    assert surface.path != ":memory:"
+    assert Path(surface.path).is_file()
+    assert surface.store.connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     assert surface.store.connection.execute("SELECT count(*) FROM sk_session").fetchone()[0] == 1
 
 
+@pytest.mark.capability("cli")
 def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsys, tmp_path):
     from support import FixedModelProvider
+    from support.s1_fixture_values import fixture_key_provider
 
     from vv_agent.llm import ScriptedLLM
     from vv_agent.session.surfaces import SessionDriver
@@ -290,7 +295,8 @@ def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsy
     monkeypatch.setattr(cli, "VvLlmModelProvider", ConfiguredProvider)
     path = tmp_path / "persistent.sqlite"
     for prompt in ("first", "second"):
-        kernel = SessionDriver(path)
+        kernel = SessionDriver(path, content_key_provider=fixture_key_provider())
+        kernel.store.configure_input_admission(allow_unsigned=True)
         try:
             assert (
                 cli._run_task_cli(

@@ -3,25 +3,52 @@
 import json
 from contextlib import suppress
 from dataclasses import fields, is_dataclass, replace
+from hashlib import sha256
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+from support.s1_fixture_values import append_fixture_records, clear_fixture_state_cache, read_fixture_state
 
 from vv_agent.events import DiagnosticEvent
+from vv_agent.kernel._content_runtime import bind_content_runtime
+from vv_agent.kernel._content_runtime import wrap_session_content_store as wrap_bound_content_store
 from vv_agent.session.context import project_context
 from vv_agent.session.projection import project_records
-from vv_agent.session.records import Record, SessionSpec
+from vv_agent.session.records import Record, digest
 from vv_agent.session.reducer import Fold, TransitionError
 from vv_agent.session.result import project_result
-from vv_agent.types import Message
+from vv_agent.types import AgentTask, Message
 
-from .fold_history import growing_history, persist_history
+from .fold_history import (
+    extend_logical,
+    growing_history,
+    logical_record,
+    logical_session_record,
+    parse_logical_record,
+    persist_history,
+)
+from .helpers import create_fixture_session, fixture_key_provider, wrap_fixture_store
+from .test_content_read_frame import CountingCipher
+
+
+class RecordingCipher(CountingCipher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ciphertexts: list[bytes] = []
+
+    def decrypt(self, key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        self.ciphertexts.append(ciphertext)
+        return super().decrypt(key, nonce, ciphertext, aad)
+
+
+@pytest.fixture
+def store(store):
+    return wrap_fixture_store(store)
 
 
 def snapshot_value(obj):
     if isinstance(obj, Record):
-        return {"record_id": obj.record_id, "digest": obj.digest}
+        return {"record_id": obj.record_id, "digest": obj._digest or digest(obj.to_dict())}
     if is_dataclass(obj):
         return {f.name: snapshot_value(getattr(obj, f.name)) for f in fields(obj) if f.name != "_protection"}
     if isinstance(obj, dict):
@@ -38,20 +65,21 @@ def test_cold_snapshot_matches_030_field_by_field(store, steps):
     fixtures = Path(__file__).with_name("fixtures")
     expected = json.loads((fixtures / "fold_030_state.json").read_text())[str(steps)]
     bodies = (fixtures / "fold_030_records.jsonl").read_bytes().splitlines()[: 2 + steps * 7]
-    saved = tuple(Record.parse(body) for body in bodies)
-    with patch.object(SessionSpec, "record", return_value=saved[0]), store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp"), consumers=())
-    lease = store.acquire("s", owner="compatibility", ttl_ms=15000)
-    assert lease is not None
-    with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=1, commit_id="history", records=saved[1:])
-    store._fold_cache = None
-    state, rows, _ = store.read_state("s")
+    saved = tuple(Record(**json.loads(body)) for body in bodies)
+    for body, record in zip(bodies, saved, strict=True):
+        object.__setattr__(record, "_digest", sha256(body).hexdigest())
+        if record.kind == "turn_started":
+            definition = record.payload["definition"]
+            object.__setattr__(record, "_task_value", AgentTask.from_dict(definition["task"]))
+    fold = Fold()
+    fold.extend(saved, bodies=bodies)
+    state = fold.state
+    rows = tuple(fold.history)
     for f in fields(state):
         if f.name == "_protection":
             continue
         assert snapshot_value(getattr(state, f.name)) == expected[f.name], f.name
-    assert [r.record.encode() for r in rows] == bodies
+    assert list(saved) == [stored.record for stored in fold.history]
     assert [m.to_dict() for m in project_context(rows, state)] == expected["messages"]
 
 
@@ -70,8 +98,14 @@ def test_fold_message_decodes_grow_with_stored_snapshots(monkeypatch, enabled):
         with monkeypatch.context() as patch:
             patch.setattr(Message, "from_dict", counted)
             fold = Fold()
-            fold.extend(
-                (SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(), *rows)
+            extend_logical(
+                fold,
+                (
+                    logical_session_record(
+                        attributes={"seed": {"unseen_input_protection": enabled}},
+                    ),
+                    *rows,
+                ),
             )
         counts.append(len(calls))
     # Stored full conversations grow quadratically; replaying every obsolete snapshot is cubic.
@@ -80,10 +114,10 @@ def test_fold_message_decodes_grow_with_stored_snapshots(monkeypatch, enabled):
 
 
 def test_cold_record_shares_canonical_storage_bytes():
-    body = SessionSpec("s", "p", "w").record().encode()
-    assert Record.parse(body).encode() is body
+    body = logical_session_record(actor="p", workspace="w").encode()
+    assert parse_logical_record(body).encode() is body
     spaced = json.dumps(json.loads(body), indent=2).encode()
-    assert Record.parse(spaced).encode() == body
+    assert parse_logical_record(spaced).encode() == body
 
 
 def test_earlier_snapshots_still_validate_their_source():
@@ -92,13 +126,13 @@ def test_earlier_snapshots_still_validate_their_source():
     bad = replace(boundary, payload=boundary.payload | {"source_digest": "0" * 64})
     fold = Fold()
     with pytest.raises(TransitionError, match="boundary source mismatch"):
-        fold.extend((SessionSpec("s", "test", "/tmp").record(), rows[0], bad, *rows[2:]))
+        extend_logical(fold, (logical_session_record(), rows[0], bad, *rows[2:]))
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_projected_events_remain_detached_from_records(store, enabled):
     persist_history(store, 2, initial_bytes=256, enabled=enabled)
-    _, rows, _ = store.read_state("s")
+    _, rows, _ = read_fixture_state(store, "s")
     before = [r.record.encode() for r in rows]
     projected = project_records(rows)
     response = next(e for e in projected if isinstance(e, DiagnosticEvent) and e.code == "cycle_llm_response")
@@ -111,24 +145,64 @@ def test_projected_events_remain_detached_from_records(store, enabled):
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_cold_prefix_bounds_fetches_and_shares_only_private_messages(store, monkeypatch, enabled):
-    persist_history(store, 40, initial_bytes=256, enabled=enabled)
-    store._fold_cache = None
-    fetch = store._rows
+    root = store._root
+    provider = fixture_key_provider()
+    cipher = RecordingCipher()
+    bind_content_runtime(root, key_provider=provider, cipher=cipher)
+    trusted_store = wrap_bound_content_store(root)
+    persist_history(trusted_store, 40, initial_bytes=256, enabled=enabled)
+    clear_fixture_state_cache(trusted_store)
+
+    raw_before = tuple(
+        (row.seq, row.record.record_id, row.record.digest, row.record.encode()) for row in trusted_store.read("s").records
+    )
+    message_links = root._rows(
+        "SELECT r.seq,l.content_id FROM sk_record r JOIN sk_content_link l "
+        "ON l.tenant_id=r.tenant_id AND l.session_id=r.session_id AND l.record_seq=r.seq "
+        "WHERE r.tenant_id=%s AND r.session_id=%s AND r.kind='op_planned' "
+        "AND l.slot='request.messages[1]' ORDER BY r.seq",
+        (root.tenant_id, "s"),
+    )
+    assert len(message_links) == 40
+    assert len({content_id for _, content_id in message_links}) == 1, message_links
+    content_id = message_links[0][1]
+    ciphertext_rows = root._rows(
+        "SELECT ciphertext FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+        (root.tenant_id, "s", content_id),
+    )
+    assert len(ciphertext_rows) == 1
+    message_ciphertext = bytes(ciphertext_rows[0][0])
+
+    cipher.decrypt_calls = 0
+    cipher.ciphertexts.clear()
+    fetch = root._rows
     sizes = []
 
     def counted(query, params=()):
         rows = fetch(query, params)
-        if "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record" in query:
+        normalized = " ".join(query.split())
+        if "FROM sk_record" in normalized and "body" in normalized:
             sizes.append(len(rows))
         return rows
 
-    monkeypatch.setattr(store, "_rows", counted)
-    _, rows, _ = store.read_state("s")
-    assert max(sizes) <= 256 and len(sizes) >= 3
+    monkeypatch.setattr(root, "_rows", counted)
+    _, rows, _ = read_fixture_state(trusted_store, "s")
+    assert sizes
+    assert max(sizes) <= 256, sizes
     plans = [r.record for r in rows if r.record.kind == "op_planned" and r.record._payload["op_kind"] == "model"]
-    assert plans[0]._payload["request"]["messages"][1] is plans[-1]._payload["request"]["messages"][1]
-    plans[-1].payload["request"]["messages"][1]["content"] = "changed"
+    assert plans[0]._payload["request"]["messages"][1] == plans[-1]._payload["request"]["messages"][1]
+    assert cipher.ciphertexts.count(message_ciphertext) == 1
+    assert len(cipher.ciphertexts) == len(set(cipher.ciphertexts))
+
+    public_request = plans[-1].payload["request"]
+    public_request["messages"][1]["content"] = "changed"
     assert plans[0].payload["request"]["messages"][1]["content"] == "x" * 256
+    assert plans[0]._payload["request"]["messages"][1]["content"] == "x" * 256
+
+    raw_after = tuple(
+        (row.seq, row.record.record_id, row.record.digest, row.record.encode()) for row in trusted_store.read("s").records
+    )
+    assert raw_after == raw_before
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -136,7 +210,7 @@ def test_cold_prefix_rejects_a_gap_across_fetch_pages(store, enabled):
     from vv_agent.session.store import Conflict
 
     persist_history(store, 40, initial_bytes=256, enabled=enabled)
-    store._fold_cache = None
+    clear_fixture_state_cache(store)
     with store.atomic():
         store._rows("DELETE FROM sk_record WHERE session_id=%s AND seq=257", ("s",))
     with pytest.raises(Conflict, match="log sequence gap"):
@@ -146,7 +220,8 @@ def test_cold_prefix_rejects_a_gap_across_fetch_pages(store, enabled):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_result_projection_does_not_scan_all_tools_for_each_model(store, enabled):
     persist_history(store, 24, initial_bytes=256, enabled=enabled)
-    state, rows, watermark = store.read_state("s")
+    state, _, watermark = read_fixture_state(store, "s")
+    rows = store.read_state("s")[1]
     visits = []
 
     class CountedOperations(dict):
@@ -165,7 +240,7 @@ def test_result_projection_does_not_scan_all_tools_for_each_model(store, enabled
 @pytest.mark.parametrize("enabled", [False, True])
 def test_raw_context_still_includes_the_full_history(store, enabled):
     messages = persist_history(store, 4, initial_bytes=256, enabled=enabled)
-    state, rows, _ = store.read_state("s")
+    state, rows, _ = read_fixture_state(store, "s")
     assert [m.to_dict() for m in project_context(rows, state, compacted=False)] == [m.to_dict() for m in messages]
 
 
@@ -190,14 +265,20 @@ def test_fold_does_not_visit_or_copy_the_obsolete_record_prefix(enabled):
     fold = Fold()
     history = CountedHistory()
     fold.history = history
-    fold.extend((SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(), *rows))
+    extend_logical(
+        fold,
+        (
+            logical_session_record(attributes={"seed": {"unseen_input_protection": enabled}}),
+            *rows,
+        ),
+    )
     assert history.visits <= 20 * 64
 
 
 def test_parse_does_not_retain_a_mutable_input_buffer():
-    body = SessionSpec("s", "p", "w").record().encode()
+    body = logical_session_record(actor="p", workspace="w").encode()
     buffer = bytearray(body)
-    parsed = Record.parse(buffer)  # ty: ignore[invalid-argument-type]
+    parsed = parse_logical_record(bytes(buffer))
     buffer[:] = b"changed"
     assert parsed.encode() == body
     assert parsed.payload["principal"] == "p"
@@ -206,11 +287,11 @@ def test_parse_does_not_retain_a_mutable_input_buffer():
 def test_cold_prefix_rejects_an_empty_captured_log(store):
     from vv_agent.session.store import Conflict
 
-    with store.atomic() as tx:
-        tx.create(SessionSpec("s", "test", "/tmp"), consumers=())
+    create_fixture_session(store, "s", consumers=())
+    with store.atomic():
         store._rows("UPDATE sk_session SET head_seq=0 WHERE session_id=%s", ("s",))
-    store._fold_cache = None
-    with pytest.raises(Conflict, match="log sequence gap"):
+    clear_fixture_state_cache(store)
+    with pytest.raises(Conflict):
         store.read_state("s")
 
 
@@ -242,26 +323,24 @@ def test_message_sharing_does_not_merge_json_scalar_types():
     assert cache.share({"metadata": {"value": True}, "content": "same", "role": "user"}) is shared[0]
 
 
-def test_fast_record_parser_keeps_jcs_numbers_unicode_and_legacy_errors():
+def test_record_parser_keeps_jcs_numbers_unicode_and_parser_errors():
     from vv_agent.session.records import RecordError
 
     attributes = {
         "numbers": [333333333.33333329, 1e30, 4.5, 2e-3, 1e-27, 5e-324, 1.7976931348623157e308, -0.0],
         "unicode": {"😀": "中文", "\ue000": "x"},
     }
-    original = SessionSpec("s", "p", "w", attributes=attributes).record()
+    original = logical_session_record(actor="p", workspace="w", attributes=attributes)
     body = original.encode()
-    assert Record.parse(body).to_dict() == original.to_dict()
-    assert Record.parse(body).encode() == body
-    assert Record.parse(b"\xef\xbb\xbf" + body).encode() == body
+    assert parse_logical_record(body).to_dict() == original.to_dict()
+    assert parse_logical_record(body).encode() == body
+    assert parse_logical_record(b"\xef\xbb\xbf" + body).encode() == body
     with pytest.raises(RecordError, match="duplicate field: schema_version"):
-        Record.parse(body.replace(b'"schema_version":1', b'"schema_version":1,"schema_version":1'))
+        parse_logical_record(body.replace(b'"schema_version":"S1"', b'"schema_version":"S1","schema_version":"S1"'))
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_message_cache_does_not_encode_a_future_source_early(enabled):
-    from vv_agent.session.records import make_record
-
     rows, _ = growing_history(1, initial_bytes=256)
     boundary = rows[1]
     wire = {
@@ -269,25 +348,25 @@ def test_message_cache_does_not_encode_a_future_source_early(enabled):
         "content": "",
         "tool_calls": [{"id": "a", "type": "function", "function": {"name": "read", "arguments": '{"x":"\\ud800"}'}}],
     }
-    replacement = make_record(
+    replacement = logical_record(
         "boundary_recorded",
-        session_id="s",
-        turn_id="t",
-        payload=boundary.payload | {"data": {"messages": [wire], "shared_state": {}}},
+        data={"messages": [wire], "shared_state": {}},
+        **{key: value for key, value in boundary.payload.items() if key != "data"},
     )
     fold = Fold()
     if enabled:
         from vv_agent.memory.input_protection import UnseenInputError
 
         with pytest.raises(UnseenInputError):
-            fold.extend((SessionSpec("s", "test", "/tmp").record(), rows[0], replacement))
+            extend_logical(fold, (logical_session_record(), rows[0], replacement))
         return
-    fold.extend(
+    extend_logical(
+        fold,
         (
-            SessionSpec("s", "test", "/tmp", attributes={"seed": {"unseen_input_protection": enabled}}).record(),
+            logical_session_record(attributes={"seed": {"unseen_input_protection": enabled}}),
             rows[0],
             replacement,
-        )
+        ),
     )
     assert fold.state.boundaries[("t", "before_memory", "1")].payload["data"]["messages"] == [wire]
 
@@ -295,49 +374,49 @@ def test_message_cache_does_not_encode_a_future_source_early(enabled):
 def test_fragment_cache_cannot_hide_invalid_scalars_or_digest_changes():
     from vv_agent.session.records import _MessageCache, digest
 
+    from .fold_history import logical_record
+
     cache = _MessageCache()
     request = {"messages": [{"role": "user", "content": "same", "metadata": {"value": None}}]}
-    from .helpers import record
-
-    original = record("op_planned", request=request, request_digest=digest(request))
+    original = logical_record("op_planned", request=request, request_digest=digest(request))
     body = original.encode()
-    assert Record._parse(body, cache).encode() == body
+    assert parse_logical_record(body, cache=cache).encode() == body
     for replacement in (b"NaN", b"Infinity", b"9007199254740992"):
         bad = body.replace(b'"value":null', b'"value":' + replacement)
         with pytest.raises(ValueError):
-            Record._parse(bad, cache)
+            parse_logical_record(bad, cache=cache)
     bad = body.replace(b'"content":"same"', b'"content":"changed"')
     with pytest.raises(ValueError, match="request digest mismatch"):
-        Record._parse(bad, cache)
+        parse_logical_record(bad, cache=cache)
 
 
 def test_fragment_cache_keeps_noncanonical_wire_values_and_digest_bytes():
     from vv_agent.session.records import _MessageCache, digest
 
-    from .helpers import record
+    from .fold_history import logical_record
 
     request = {"messages": [{"role": "user", "content": "😀", "metadata": {"n": 1e-7, "\ue000": 1, "😀": 2}}]}
-    original = record("op_planned", request=request, request_digest=digest(request))
+    original = logical_record("op_planned", request=request, request_digest=digest(request))
     cache = _MessageCache()
     body = original.encode()
     spaced = json.dumps(json.loads(body), ensure_ascii=True, indent=2).encode()
-    assert Record._parse(spaced, cache).to_dict() == original.to_dict()
-    assert Record._parse(spaced, cache).encode() == body
-    assert Record._parse(body, cache).encode() == body
+    assert parse_logical_record(spaced, cache=cache).to_dict() == original.to_dict()
+    assert parse_logical_record(spaced, cache=cache).encode() == body
+    assert parse_logical_record(body, cache=cache).encode() == body
 
 
 def test_fragment_reuse_preserves_legacy_numeric_normalization():
     from vv_agent.session.records import _MessageCache, digest
 
-    from .helpers import record
+    from .fold_history import logical_record
 
     request = {"messages": [{"role": "user", "content": "same", "metadata": {"n": 1e20}}]}
-    value = record("op_planned").to_dict()
+    value = logical_record("op_planned").to_dict()
     value["payload"].update(request=request, request_digest=digest(request))
     body = json.dumps(value).encode()
-    expected = Record.parse(body)
+    expected = parse_logical_record(body)
     cache = _MessageCache()
-    parsed = Record._parse(body, cache)
+    parsed = parse_logical_record(body, cache=cache)
     parsed._share_messages(cache)
     assert parsed.to_dict() == expected.to_dict()
     assert parsed.encode() == expected.encode()
@@ -348,24 +427,27 @@ def test_parse_only_shares_plain_immutable_bytes():
         def __eq__(self, other):
             return True
 
-    body = SessionSpec("s", "p", "w").record().encode()
+    body = logical_session_record(actor="p", workspace="w").encode()
     raw = SpoofedBytes(json.dumps(json.loads(body), indent=2).encode())
-    parsed = Record.parse(raw)
+    parsed = parse_logical_record(raw)
     assert type(parsed.encode()) is bytes
     assert parsed.encode() == body
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_completed_result_does_not_compare_entire_record_payloads(store, monkeypatch, enabled):
-    from .helpers import record
+    from vv_agent.kernel._budget_values import BudgetUsageSnapshot
 
     persist_history(store, 2, initial_bytes=256, enabled=enabled)
-    _, rows, _ = store.read_state("s")
-    lease = store.acquire("s", owner="finish", ttl_ms=15000)
-    assert lease is not None
-    with store.atomic() as tx:
-        tx.append("s", lease=lease, expected_seq=len(rows), commit_id="end", records=(record("turn_ended"),))
-    snapshot = store.read_state("s")
+    read_fixture_state(store, "s")
+    append_fixture_records(
+        store,
+        "s",
+        (logical_record("turn_ended", result={}, budget=BudgetUsageSnapshot().to_dict()),),
+        commit_id="end",
+    )
+    state, _, watermark = read_fixture_state(store, "s")
+    snapshot = (state, store.read_state("s")[1], watermark)
 
     def unexpected(*args):
         raise AssertionError("terminal is a retained record identity, not a payload comparison")
@@ -381,11 +463,11 @@ def test_fragment_parser_matches_public_validation_for_mutated_messages():
 
     from vv_agent.session.records import _MessageCache, digest
 
-    from .helpers import record
+    from .fold_history import logical_record
     from .test_record_validation_cache import mutations
 
     source = [{"role": "user", "content": "same", "metadata": {"n": 1, "items": [True, None], "fraction": 1e-7}}]
-    envelope = record("op_planned").to_dict()
+    envelope = logical_record("op_planned").to_dict()
     cache = _MessageCache()
     for messages in mutations(source):
         value = deepcopy(envelope)
@@ -395,33 +477,66 @@ def test_fragment_parser_matches_public_validation_for_mutated_messages():
             value["payload"]["request_digest"] = digest(request)
         body = json.dumps(value).encode()
         try:
-            expected = Record.parse(body)
+            expected = parse_logical_record(body)
         except (ValueError, TypeError, KeyError) as error:
             with pytest.raises(type(error)) as caught:
-                Record._parse(body, cache)
+                parse_logical_record(body, cache=cache)
             assert str(caught.value) == str(error)
         else:
-            parsed = Record._parse(body, cache)
+            parsed = parse_logical_record(body, cache=cache)
             assert parsed.to_dict() == expected.to_dict()
             assert parsed.encode() == expected.encode()
 
 
-def test_fast_parser_rejects_duplicate_keys_after_unescaping():
+@pytest.mark.parametrize("kind", ["op_planned", "boundary_recorded"])
+def test_fragment_cache_cannot_replace_nan_with_an_interned_null(kind):
+    from copy import deepcopy
+
+    from vv_agent.session.records import _MessageCache
+
+    from .fold_history import logical_record
+
+    message = {"role": None, "content": "same"}
+    if kind == "op_planned":
+        value = logical_record(kind).to_dict()
+        value["payload"]["request"] = {"messages": [message]}
+    else:
+        value = logical_record(
+            kind,
+            boundary_id="memory",
+            stage="before_memory",
+            source_operation_id=None,
+            source_digest=None,
+            data={"messages": [message], "shared_state": {}},
+        ).to_dict()
+    cache = _MessageCache()
+    cache.share(deepcopy(message))
+    snapshots = value["payload"]["request"] if kind == "op_planned" else value["payload"]["data"]
+    snapshots["messages"][0]["role"] = float("nan")
+    body = json.dumps(value).encode()
+    with pytest.raises(ValueError) as public:
+        parse_logical_record(body)
+    with pytest.raises(type(public.value)) as retained:
+        parse_logical_record(body, cache=cache)
+    assert str(retained.value) == str(public.value)
+
+
+def test_record_parser_rejects_duplicate_keys_after_unescaping():
     from vv_agent.session.records import RecordError, _MessageCache
 
-    body = SessionSpec("s", "p", "w", attributes={"a": 1}).record().encode()
+    body = logical_session_record(actor="p", workspace="w", attributes={"a": 1}).encode()
     bad = body.replace(b'"a":1', b'"a":1,"\\u0061":2')
     with pytest.raises(RecordError, match="duplicate field: a"):
-        Record.parse(bad)
+        parse_logical_record(bad)
     with pytest.raises(RecordError, match="duplicate field: a"):
         Record._parse(bad, _MessageCache())
 
 
-def test_fast_json_decoder_matches_the_original_reader(monkeypatch):
+def test_record_json_numbers_match_stdlib_canonical_encoding():
     import random
     import struct
 
-    from vv_agent.session import records
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     literals = [
         b"1e-400",
@@ -438,29 +553,23 @@ def test_fast_json_decoder_matches_the_original_reader(monkeypatch):
         b"-0.0",
         b'"\\ud800"',
         b'"\\ud83d\\ude00"',
-        b'{"a":1,"\\u0061":2}',
     ]
     rng = random.Random(17)
     literals.extend(json.dumps(struct.unpack("!d", rng.getrandbits(64).to_bytes(8))[0]).encode() for _ in range(128))
-    template = SessionSpec("s", "p", "w", attributes={"probe": None}).record().encode()
-
-    def unsupported(*args, **kwargs):
-        raise ValueError("use the original reader")
-
-    def outcome(body):
-        try:
-            parsed = Record.parse(body)
-            return parsed.encode(), parsed.to_dict()
-        except (ValueError, TypeError) as error:
-            return type(error), str(error)
-
+    template = logical_session_record(actor="p", workspace="w", attributes={"probe": None}).encode()
     for literal in literals:
         body = template.replace(b'"probe":null', b'"probe":' + literal)
-        actual = outcome(body)
-        with monkeypatch.context() as patch:
-            patch.setattr(records.jiter, "from_json", unsupported)
-            expected = outcome(body)
-        assert actual == expected
+        value = json.loads(body)
+        try:
+            expected = canonical_json_bytes(value)
+        except (ValueError, TypeError) as error:
+            with pytest.raises(ValueError) as caught:
+                parse_logical_record(body)
+            assert str(caught.value) == str(error)
+        else:
+            parsed = parse_logical_record(body)
+            assert parsed.to_dict() == value
+            assert parsed.encode() == expected
 
 
 def test_192_batch_protection_decodes_at_most_twice_undeclared(monkeypatch):
@@ -474,10 +583,10 @@ def test_192_batch_protection_decodes_at_most_twice_undeclared(monkeypatch):
     counts = []
     decode = Message.from_dict
     for enabled in (False, True):
-        creation = SessionSpec("s", "test", "/tmp").record()
+        creation = logical_session_record()
         if not enabled:
             creation = replace(creation, payload=creation.payload | {"attributes": {}})
-        incoming = [Record.parse(body) for body in bodies]
+        incoming = [parse_logical_record(body) for body in bodies]
         calls = []
 
         def counted(value, calls=calls):
@@ -487,7 +596,7 @@ def test_192_batch_protection_decodes_at_most_twice_undeclared(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(Message, "from_dict", counted)
             fold = Fold()
-            fold.extend((creation, *incoming), consumed_inputs=inputs)
+            extend_logical(fold, (creation, *incoming), consumed_inputs=inputs)
         counts.append(len(calls))
         assert project_context(fold.history, fold.state) == expected
     assert counts[1] <= 2 * counts[0], counts

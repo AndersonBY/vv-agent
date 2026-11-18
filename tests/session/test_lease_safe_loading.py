@@ -7,13 +7,12 @@ from queue import Queue
 import pytest
 
 from vv_agent.session import kernel
-from vv_agent.session.records import InboxItem
 from vv_agent.session.reducer import Fold
 from vv_agent.session.store import LeaseLost, SequenceConflict
 from vv_agent.types import LLMResponse
 
 from .conftest import open_store
-from .helpers import record, runtime_turn_record
+from .helpers import item, principal, record, runtime_turn_record
 from .test_recovery_matrix import runtime, start
 
 
@@ -227,7 +226,7 @@ def test_slow_fold_allows_renew_and_returns_captured_prefix(store, database, clo
                 tx.append(
                     "s", lease=lease, expected_seq=2, commit_id="input", records=(application,), consume_input_ids=("initial",)
                 )
-                tx.push("s", InboxItem("later", "user", {"content": "later"}))
+                tx.push("s", item("later", actor=principal("test")))
             clock(10000)  # the full read has now exceeded the original lease TTL
             lease = store.renew(lease, ttl_ms=15000).lease
         finally:
@@ -273,7 +272,7 @@ def test_schedule_preparation_does_not_hold_session_row(store, database, clock, 
             clock(10000)
             current = store.renew(lease, ttl_ms=15000).lease
             with store.atomic() as tx:
-                tx.push("s", InboxItem("racing", "user", {"content": "later"}))
+                tx.push("s", item("racing", actor=principal("test")))
         finally:
             finish.set()
         if operation == "idle":
@@ -438,7 +437,7 @@ def test_compaction_admission_rechecks_inbox_watermark(store, database, monkeypa
         result = read_context(sid)
         if not raced:
             with open_store(database) as other, other.atomic() as tx:
-                tx.push(sid, InboxItem("concurrent", "user", {"content": "new context"}))
+                tx.push(sid, item("concurrent", actor=principal("test")))
             raced.append(True)
         return result
 

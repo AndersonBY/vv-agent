@@ -89,6 +89,7 @@ def test_generic_server_overload_disconnects_and_cleans_pending_and_subscription
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
     )
     transport.receive_outbound(timeout=1)
+    server.processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
     server.processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 2, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},

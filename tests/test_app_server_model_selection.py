@@ -12,6 +12,7 @@ from vv_agent.app_server.schema import json_schema_bundle
 from vv_agent.model import ScriptedModelProvider
 
 
+@pytest.mark.capability("app-server-model-selection")
 def test_model_selection_method_admission_replay_conflict_and_schema():
     transport = ChannelTransport(connection_id="test")
     server = AppServer(
@@ -209,7 +210,15 @@ def test_default_surfaces_resolve_exact_model_id_and_bill_actual_model(
         usage = project_result(driver.store, sid, next(reversed(state.turns))).token_usage.model_calls
         assert len(usage) == 1 and usage[0].model == expected_model and usage[0].backend == "test"
         if surface == "app":
-            assert state.applied_inputs["unknown"].payload["reason"] == "model_selection_unresolvable"
+            from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+
+            rejected = next(
+                row
+                for row in records
+                if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "unknown"
+            )
+            payload = hydrate_record_payload(rejected, hydration_for_session_store(driver.store, sid))
+            assert payload["reason"] == "model_selection_unresolvable"
     finally:
         driver.close()
 
@@ -315,8 +324,16 @@ def test_ambiguous_model_id_rejects_selection_in_real_runtime(tmp_path, monkeypa
         )
         request(server, 3, "turn/start", submission())
         server.run_adapter.join()
-        state = server.kernel.store.read_state("thread")[0]
-        assert state.applied_inputs["ambiguous"].payload["reason"] == "model_selection_unresolvable"
+        from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+
+        _, records, _ = server.kernel.store.read_state("thread")
+        rejected = next(
+            row
+            for row in records
+            if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "ambiguous"
+        )
+        payload = hydrate_record_payload(rejected, hydration_for_session_store(server.kernel.store, "thread"))
+        assert payload["reason"] == "model_selection_unresolvable"
         assert seen == ["a-2024"]
     finally:
         server.kernel.close()

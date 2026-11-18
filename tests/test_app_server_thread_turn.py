@@ -11,8 +11,11 @@ from vv_agent import Agent, InteractionAnswer, RunConfig
 from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.kernel._content import ContentRef
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
+from vv_agent.session.projection import hydrate_input, hydrate_record_payload, hydration_for_session_store
+from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
@@ -29,7 +32,7 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     )
 
 
-def test_processor_starts_thread_and_streams_turn_items() -> None:
+def test_processor_starts_thread_and_streams_turn_items(monkeypatch) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -102,6 +105,60 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     model_calls = cast(list[dict[str, object]], token_usage["modelCalls"])
     assert len(model_calls) == 1
     assert model_calls[0]["backend"] == "test"
+    thread_names = {thread.name for thread in threading.enumerate()}
+    assert "app-server-notifications" not in thread_names
+    assert "session-app-server-pump" not in thread_names
+    assert not hasattr(server.store, "runtimes")
+
+    projection = server.kernel.handles[0].runtime
+
+    def reject_execution_wake(_thread_id: str) -> None:
+        raise AssertionError("projection runtime attempted to wake the execution worker")
+
+    monkeypatch.setattr(server.kernel._worker, "wake", reject_execution_wake)
+    projection.wake("thread_1")
+
+
+def test_runtime_factory_runs_after_inbox_commit_on_worker_thread() -> None:
+    server, transport = _server_with_scripted_steps([LLMResponse(content="done")])
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def runtime_factory(store, agent, config, task, session_id):
+        calls.append(
+            (
+                threading.current_thread().name,
+                tuple(entry.item.input_id for entry in store.peek_inbox(session_id)),
+            )
+        )
+        return server.kernel.runtime(agent, config, task, session_id=session_id, store=store)
+
+    server.kernel.runtime_factory = runtime_factory
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"inputId": "thread_1", "agentKey": "default"}},
+    )
+    assert calls == []
+
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "hello"}],
+            },
+        },
+    )
+    _drain_until_turn_completed(transport)
+
+    assert calls == [("session-local-worker", ("turn_1",))]
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:
@@ -138,6 +195,13 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
             status_changes.append(cast(dict[str, object], params).get("status"))
 
     assert status_changes == ["running", "terminal"]
+    records = server.kernel.store.read("thread_1").records
+    applied = next(row for row in records if row.record.kind == "input_applied")
+    content_ref = applied.record._payload["input"]["payload"]["content"]
+    assert ContentRef.from_dict(content_ref).content_id
+    planned = next(row for row in records if row.record.kind == "op_planned")
+    hydrated = hydrate_record_payload(planned, hydration_for_session_store(server.kernel.store, "thread_1"))
+    assert "hello" in [message.get("content") for message in hydrated["request"]["messages"]]
 
 
 def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
@@ -439,6 +503,7 @@ def _drain_until_turn_completed(transport: ChannelTransport, *, count: int = 1) 
     return outbound
 
 
+@pytest.mark.capability("app-server-turns")
 def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     from vv_agent import function_tool
     from vv_agent.types import SubAgentConfig, ToolDirective, ToolExecutionResult
@@ -524,11 +589,15 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
 
     input_id = "controller/" + derive_controller_command_id("thread_1", parent_tid, "reply-child")
     child_state = surface.store.read_state(wait["sessionId"])[0]
-    assert child_state.applied_inputs[input_id]._payload["input"]["payload"]["content"]["text"] == "approved child answer"
+    applied = child_state.applied_inputs[input_id]
+    stored_item = InboxItem(**applied._payload["input"])
+    assert ContentRef.from_dict(stored_item.payload["content"]).content_id
+    hydrated = hydrate_input(stored_item, hydration_for_session_store(surface.store, wait["sessionId"]))
+    assert hydrated.payload["content"]["text"] == "approved child answer"
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
     receipt = surface.answer(
         "thread_1",
-        cast(Any, server.store).runtimes["thread_1"],
+        server.kernel._runtime_view("thread_1"),
         target_of(wait),
         InteractionAnswer("text", text="approved child answer"),
         input_id,
@@ -539,7 +608,7 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     with pytest.raises(Conflict):
         surface.answer(
             "thread_1",
-            cast(Any, server.store).runtimes["thread_1"],
+            server.kernel._runtime_view("thread_1"),
             target_of(wait),
             InteractionAnswer("text", text="different answer"),
             input_id,

@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=46.0.0",
     "deepseek-tokenizer>=0.3.0",
     "httpx2>=2.7,<3",
     "jiter>=0.15.0",
@@ -29,6 +30,7 @@ s3 = ["boto3>=1.35"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1,<1",
     "psycopg[binary]>=3.2",
     "pytest>=8.4.0",
     "pytest-cov>=6.2.1",
@@ -50,7 +52,9 @@ module-name = "vv_agent"
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
+    "capability(id): explicit capability ID mapped to a test node in the session kernel matrix",
     "live: tests that call real remote LLM endpoints",
     "postgres: PostgreSQL host transaction integration",
     "persistent_store: process death or independent-connection persistence requires a file or PostgreSQL",

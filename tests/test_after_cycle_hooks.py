@@ -248,13 +248,21 @@ def test_after_cycle_permission_narrowing_hides_schema_and_blocks_dispatch(
     assert "_vv_agent_disallowed_tools" not in task.metadata
 
 
-def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("host.policy_stop", "Host policy stopped this run."),
+        ("host.custom_policy", "Private host policy detail."),
+    ],
+    ids=["registered", "host-defined"],
+)
+def test_after_cycle_stop_is_always_non_success(tmp_path: Path, code: str, message: str) -> None:
     events: list[str] = []
     hook = RecordingHook(
         decisions=[
             AfterCycleDecision.stop_non_success(
-                code="host.policy_stop",
-                message="Host policy stopped this run.",
+                code=code,
+                message=message,
             )
         ]
     )
@@ -281,7 +289,7 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
     assert result.final_answer is None
     assert result.error == {
         "code": "agent_failed",
-        "message": "host.policy_stop: Host policy stopped this run.",
+        "message": f"{code}: {message}",
         "retryable": False,
     }
     assert "run_failed" in events

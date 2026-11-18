@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 
 from vv_agent.app_server.host import ToolResultResourceAuthorizationRequest
 from vv_agent.app_server.protocol.tool_result import ToolResultReadResponse, ToolResultRef
@@ -11,6 +12,7 @@ from vv_agent.types import ToolExecutionResult
 from vv_agent.workspace.resources import ToolResultResourceRef
 
 from .children import child_handles
+from .projection import hydrate_record_payload, hydration_for_session_store
 from .store import Conflict
 from .tool_results import PAGE_BYTES, project_tool_result, public_content, resource_entries, result_owner
 
@@ -30,10 +32,13 @@ def validate_child_graph(store, root, sid, *, active=False):
         visited.add(sid)
         chain.append(sid)
         try:
-            created = store.read(sid, limit=1).records[0].record
+            created_stored = store.read(sid, limit=1).records[0]
+            hydration = hydration_for_session_store(store, sid)
+            created_payload = hydrate_record_payload(created_stored, hydration)
+            created = created_stored.record
             parent = created._payload["parent_session_id"]
             oid = created._payload["parent_operation_id"]
-            handle = created._payload["attributes"]["child_handle"]
+            handle = created_payload["attributes"]["child_handle"]
             if not parent:
                 raise KeyError("parent")
             state, _, _ = store.read_state(parent)
@@ -86,8 +91,10 @@ def read_tool_result(adapter, host, connection_id, params):
     if not isinstance(part, str):
         raise ToolResultReadError("invalid_result_ref")
     try:
-        root = store.read(sid, limit=1).records[0].record
-        if "app_server" not in root._payload["attributes"]:
+        root_stored = store.read(sid, limit=1).records[0]
+        root_hydration = hydration_for_session_store(store, sid)
+        root_payload = hydrate_record_payload(root_stored, root_hydration)
+        if "app_server" not in root_payload["attributes"]:
             raise ToolResultReadError("invalid_result_ref")
     except (KeyError, IndexError, Conflict):
         raise ToolResultReadError("invalid_result_ref") from None
@@ -107,14 +114,20 @@ def read_tool_result(adapter, host, connection_id, params):
     record = stored.record
     if record.kind != "op_completed":
         raise ToolResultReadError("invalid_result_ref")
+    hydration = hydration_for_session_store(store, ref.session_id)
+    payload = hydrate_record_payload(stored, hydration)
+    hydrated_record = replace(record, payload=payload)
+    object.__setattr__(hydrated_record, "_body", record.encode())
+    object.__setattr__(hydrated_record, "_digest", record.digest)
+    hydrated_stored = replace(stored, record=hydrated_record)
     # Model receipts have a different result shape and are never tool results.
     try:
-        descriptor = project_tool_result(stored)
+        descriptor = project_tool_result(hydrated_stored)
     except (KeyError, ValueError, TypeError):
         raise ToolResultReadError("invalid_result_ref") from None
     if descriptor["ref"] != ref.to_dict():
         raise ToolResultReadError("invalid_result_ref")
-    result = ToolExecutionResult.from_dict(record._payload["result"])
+    result = ToolExecutionResult.from_dict(payload["result"])
     offset, limit = params["offset"], params["limit"]
     if part == "content":
         content = public_content(result)
@@ -186,7 +199,7 @@ def read_tool_result(adapter, host, connection_id, params):
     return ToolResultReadResponse(
         ref,
         descriptor["kind"],
-        record._payload["context"],
+        payload["context"],
         part,
         base64.b64encode(data).decode("ascii"),
         offset,

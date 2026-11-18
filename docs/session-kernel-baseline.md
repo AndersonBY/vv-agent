@@ -69,16 +69,17 @@ The default workload:
 
 - uses histories of 100, 1000, 5000 and 20000 records, and catalogs of 1000
   and 10000 sessions;
-- takes seven measurement samples and three cold samples;
+- takes seven measurement samples and three runtime-reload drive samples;
 - stores completed tool triples with bounded 1 KiB receipts.
 
-"Cold drive" opens a new connection, rebuilds the runtime and commits the final
-record. It does not flush OS or PostgreSQL caches. "Steady append" appends to
-successive log heads. "Pagination" scans the whole catalog in pages of 100.
-The run creates disposable PostgreSQL databases and removes them afterwards.
-The transaction that resets fixtures is not timed.
+"Runtime-reload drive" opens a new connection, rebuilds the runtime and commits
+the final record. It does not flush OS or PostgreSQL caches, so the output now
+names it `runtime_reload_drive` instead of calling a new connection "cold".
+"Steady append" appends to successive log heads. "Pagination" scans the whole
+catalog in pages of 100. The run creates disposable PostgreSQL databases and
+removes them afterwards. The transaction that resets fixtures is not timed.
 
-| Records | Logical bytes | Append p50/max ms | Steady append p50/max ms | Fold p50/max ms | Read/fold p50/max ms | Cold drive p50/max ms |
+| Records | Logical bytes | Append p50/max ms | Steady append p50/max ms | Fold p50/max ms | Read/fold p50/max ms | Runtime-reload drive p50/max ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 100 | 99967 | 13.584/15.045 | 3.620/5.094 | 0.666/0.960 | 18.674/19.666 | 41.106/41.349 |
 | 1000 | 864931 | 96.996/98.806 | 4.221/5.698 | 6.642/7.134 | 97.632/155.602 | 121.539/179.224 |
@@ -92,12 +93,93 @@ The transaction that resets fixtures is not timed.
 
 `--assert-capacity` checks these thresholds, and all of them passed:
 
-- no lease failures during cold drives and no provider call dispatched twice;
+- no lease failures during runtime-reload drives and no provider call dispatched twice;
 - steady append median at most 50 ms;
-- cold drive maximum at most 1 ms per record for histories of 2000 records or more;
+- runtime-reload drive maximum at most 1 ms per record for histories of 2000 records or more;
 - full catalog scan maximum at most 1000 ms.
 
 The benchmark uses a lease TTL of 15000 ms and a heartbeat interval of 0.25 s.
+For a short legacy check, pass `--sizes 100 --samples 1`; this selects only the
+synthetic history case and reports its honest logical byte count.
+
+## Reproducible S1-A12 content history
+
+The checked-in benchmark can construct the 100-turn workload directly:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 taskset -c 8,9 uv run python \
+  scripts/session_kernel_benchmark.py \
+  --turns 100 --history-mb-per-turn 10 --samples 7 \
+  --assert-capacity --output /tmp/a12.json
+```
+
+`--history-mb-per-turn` is the complete logical history carried by every turn.
+One identical assistant JSON message is referenced in full by each completed
+turn's definition. With the planned arguments, each turn carries a 10485760-byte
+canonical JSON message, so the workload contains 1000 MiB of logical message
+history. Deduplication keeps one 10 MiB physical content row and adds one link
+per turn; it does not divide the target into smaller per-turn messages.
+
+The output reports `target_history_bytes_per_turn`,
+`logical_history_bytes_per_turn`, `logical_history_bytes_total`, and
+`message_plaintext_bytes_each`. The fixture uses a deterministic
+benchmark-only Ed25519 admission key and AES-GCM content storage.
+`fixture_security` reports the signed inbox rows and encrypted content rows,
+`bytes_and_reuse.relations` reports PostgreSQL relation sizes, and
+`bytes_and_reuse.message_reuse` distinguishes linked logical bytes from the sum
+of distinct physical content rows. The A12 assertion requires the per-turn and
+total logical targets, one physical message, one link per completed turn, and
+encrypted signed fixture rows.
+
+For a local smoke run that exercises the same byte and reuse relations without
+the full 1000 MiB logical workload:
+
+```bash
+uv run python scripts/session_kernel_benchmark.py \
+  --turns 2 --history-mb-per-turn 1 --samples 1 --assert-capacity \
+  --output /tmp/a12-smoke.json
+```
+
+New connections and cleared Python caches are reported as warm-buffer runtime
+reloads. For a real cold cache measurement, use:
+
+```bash
+uv run python scripts/session_kernel_benchmark.py \
+  --turns 100 --history-mb-per-turn 10 --cold-mode restart --cold-samples 3 \
+  --pg-ctl /path/to/pg_ctl --pgdata /path/to/data --pg-log /tmp/a12-pg.log
+```
+
+Restart mode measures first access after restarting the PostgreSQL cluster.
+This makes PostgreSQL shared buffers cold; it does not flush the OS page cache
+or CPU caches. An explicit baseline can enforce non-regression:
+
+```bash
+uv run python scripts/session_kernel_benchmark.py \
+  --turns 100 --history-mb-per-turn 10 --baseline-json /path/to/baseline.json
+```
+
+Each result records the S1 protocol, workload signature, warm and cold sample
+counts, PostgreSQL version and performance-relevant settings, and the code
+revision plus a content fingerprint of tracked diffs and untracked `src/` and
+`scripts/` files. Source revision and dirty fingerprints may differ because the
+A12 comparison measures a code change, but both sides must carry complete
+fingerprints. The comparison runs only when protocol, semantic workload,
+sample counts, cold mode, and PostgreSQL server/config match.
+
+The comparator reads standard timing objects only and separately reports
+diagnostic values such as `postgres_restart_ms`. It does not compare the
+`warm_drive` timing twice through an alias. By default it rejects a higher
+median or observed maximum for every standard timing, larger gated table sizes,
+or lower message reuse. `--regression-tolerance` can widen the ratio when a
+noisy environment needs an explicit allowance.
+
+Without a baseline, `--assert-capacity` enforces the A12 byte, reuse, relation,
+signature, encryption, and timing-object shape checks. Warm and restart-cold
+timings also have broad 60 s and 120 s hang guards; these are not machine
+performance targets. The command prints the comparison object to stdout on
+success as well as failure and returns nonzero on a rejected comparison.
+Disposable databases are dropped with
+`DROP DATABASE IF EXISTS ... WITH (FORCE)` in a `finally` path.
 
 ## Seeded fault repetition
 

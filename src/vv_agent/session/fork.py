@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import replace
 from hashlib import sha256
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
+from vv_agent.kernel._content import ContentRef, ContentUnavailable
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
 from .compaction import memory_settings
+from .content_runtime import SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE
 from .context_view import context_messages, project_view
-from .records import InboxItem, SessionSpec, copy_json, digest, inherited_seed_policies
-from .reducer import fold
+from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
+from .records import SessionSpec, copy_json, digest, inherited_seed_policies
+from .reducer import _fold_factory_for
 from .store import Conflict
+from .surfaces import _persisted_principal, _principal_payload
+
+if TYPE_CHECKING:
+    from .content_runtime import SessionContentWriter
+    from .surfaces import PrincipalInput
 
 
 def validate_params(params):
@@ -33,14 +43,17 @@ def validate_params(params):
     digest(params)  # Enforce I-JSON before looking up an identity.
 
 
-def _replay(store, sid, params):
+def _replay(kernel, sid, params):
     from .app_server import SubmissionConflict
 
+    store = kernel.store
     try:
-        creation = store.read(sid, limit=1).records[0].record._payload
+        created = store.read(sid, limit=1).records[0]
     except (KeyError, Conflict):
         return None
-    fork = creation["attributes"].get("app_server_fork")
+    creation = created.record._payload
+    attributes = kernel.read_record_content(sid, created.seq, creation["attributes"], slot=SESSION_ATTRIBUTES)
+    fork = attributes.get("app_server_fork")
     if fork is None or digest(fork["params"]) != digest(params):
         raise SubmissionConflict("submission_conflict")
     return {"threadId": sid, "accepted": True, "replayed": True, "lineage": copy_json(fork["lineage"])}
@@ -54,10 +67,42 @@ def _artifact_backend(kernel, host, sid, binding):
     return runtime.memory_manager.workspace_backend or runtime.config.workspace_backend or runtime.workspace_backend
 
 
-def fork_thread(kernel, host, params):
+def _destination_principal(
+    principal: PrincipalInput | None,
+    writer: SessionContentWriter,
+    source_writer: SessionContentWriter,
+) -> dict[str, Any]:
+    if principal is None:
+        bound, _ = writer.service_principal("app-server")
+        return bound
+    persisted = _persisted_principal(principal)
+    if persisted is not None:
+        if persisted.tenant_id != writer.tenant_id:
+            raise PermissionError("fork principal tenant does not match the session tenant")
+        attributes = persisted.attributes
+        if attributes in writer._published_refs:
+            attributes_ref = attributes
+        else:
+            try:
+                verified = source_writer.assert_record(1, attributes, SESSION_PRINCIPAL_ATTRIBUTES)
+            except ContentUnavailable as exc:
+                raise ValueError("persisted fork principal requires target-session content proof") from exc
+            attributes_ref = writer.copy_json_from(source_writer, verified)
+        return persisted.to_dict() | {"attributes": attributes_ref.to_dict()}
+    payload = _principal_payload(principal)
+    if payload["tenant_id"] != writer.tenant_id:
+        raise PermissionError("fork principal tenant does not match the session tenant")
+    attributes = payload["attributes"]
+    if isinstance(attributes, ContentRef):
+        raise ValueError("host ingress principal attributes must be a plaintext mapping")
+    attributes_ref = writer.put_json(dict(attributes))
+    return dict(payload) | {"attributes": attributes_ref.to_dict()}
+
+
+def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
     source = params["threadId"]
     sid = "fork/" + digest([source, params["forkId"]])
-    previous = _replay(kernel.store, sid, params)
+    previous = _replay(kernel, sid, params)
     if previous is not None:
         return previous
     try:
@@ -69,7 +114,9 @@ def fork_thread(kernel, host, params):
     records = page.records
     while records[-1].seq < page.head_seq:
         records += kernel.store.read(source, after_seq=records[-1].seq, through_seq=page.head_seq).records
-    attributes = records[0].record._payload["attributes"]
+    created = records[0]
+    attributes_ref = created.record._payload["attributes"]
+    attributes = kernel.read_record_content(source, created.seq, attributes_ref, slot=SESSION_ATTRIBUTES)
     if "app_server" not in attributes:
         raise KeyError(source)
     ended = [r for r in records if r.record.kind == "turn_ended"]
@@ -82,12 +129,17 @@ def fork_thread(kernel, host, params):
             raise ValueError("Fork cut turn has not ended")
         ended = [r for r in ended if r.seq <= terminal.seq and ("beforeTurnId" not in params or r.seq < terminal.seq)]
     cut = ended[-1] if ended else records[0]
-    records = tuple(r for r in records if r.seq <= cut.seq)
-    state = fold(
-        (r.record for r in records),
-        consumed_inputs=(InboxItem(**r.record._payload["input"]) for r in records if r.record.kind == "input_applied"),
+    source_records = tuple(r for r in records if r.seq <= cut.seq)
+    factory = _fold_factory_for(kernel.store)
+    hydration = hydration_for_session_store(kernel.store, source)
+    records = hydrate_records(source_records, hydration)
+    state = fold_hydrated_records(records, source_records, factory, hydration)
+    view = project_view(
+        source,
+        source_records,
+        _fold_factory=factory,
+        _hydration=hydration,
     )
-    view = project_view(source, records)
     definition = copy_json(
         state.turns[next(reversed(state.turns))].start._payload["definition"]
         if state.turns
@@ -107,7 +159,13 @@ def fork_thread(kernel, host, params):
             "route": {},
             "binding": definition["model_binding"],
         }
-    messages = context_messages(records, state, definition)
+    messages = context_messages(
+        records,
+        state,
+        definition,
+        _fold_factory=factory,
+        _source_records=source_records,
+    )
     copied = [m.to_dict() for m in messages]
     lineage = {
         "sourceThreadId": source,
@@ -174,9 +232,31 @@ def fork_thread(kernel, host, params):
     )
     try:
         with kernel.store.atomic() as tx:
-            receipt = tx.create(spec, consumers=("events", "app_server", "traces"))
+            content_writer = getattr(tx, "content_writer", None)
+            if not callable(content_writer):
+                raise ValueError("fork requires a transaction with trusted content capability")
+            destination = content_writer(tenant_id=kernel.tenant_id, session_id=sid)
+            source_content = content_writer(tenant_id=kernel.tenant_id, session_id=source)
+            source_principal = page.records[0].record._payload["principal"]
+            source_workspace = page.records[0].record._payload["workspace"]
+
+            def destination_spec(writer):
+                source_content.assert_record(1, source_principal["attributes"], SESSION_PRINCIPAL_ATTRIBUTES)
+                source_content.assert_record(1, source_workspace, SESSION_WORKSPACE)
+                workspace = writer.copy_json_from(source_content, source_workspace)
+                return replace(
+                    spec,
+                    principal=_destination_principal(principal, writer, source_content),
+                    workspace=workspace.to_dict(),
+                    attributes=spec.attributes,
+                )
+
+            receipt = destination.create_session(
+                destination_spec,
+                consumers=("events", "app_server", "traces"),
+            )
     except Conflict:
-        previous = _replay(kernel.store, sid, params)
+        previous = _replay(kernel, sid, params)
         if previous is None:
             raise
         return previous

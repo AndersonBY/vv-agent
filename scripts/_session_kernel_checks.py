@@ -14,6 +14,7 @@ from urllib.parse import unquote
 from vv_agent import events, types
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.interaction import CONTROLLER_COMMAND_ID_SCHEMA, HOST_OUTCOME_SCHEMA, HOST_REQUEST_SCHEMA
+from vv_agent.kernel._event_validation import _EVENT_FIELDS, _EVENT_REQUIRED_FIELDS
 from vv_agent.prompt import PromptSection
 from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_SCHEMA
 from vv_agent.session.records import INPUT_SCHEMA, RECORD_SCHEMA
@@ -202,7 +203,7 @@ def validate_outputs(values, base: Path, keep, replacements):
                     owner = owners.get((name, path))
                     if key == "optional_source_fields":
                         wire_type = node["wire_type"]
-                        owner = events._EVENT_FIELDS[wire_type] - events._EVENT_REQUIRED_FIELDS[wire_type]
+                        owner = _EVENT_FIELDS[wire_type] - _EVENT_REQUIRED_FIELDS[wire_type]
                     assert owner is not None, f"{location}/{key}: missing closed-schema owner"
                     assert set(item) <= owner, f"{location}/{key}: unknown optional fields {set(item) - owner}"
                     if (name, path) == ("app_server_observable.json", "/terminal"):

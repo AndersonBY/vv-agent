@@ -2,17 +2,26 @@
 
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic, sleep
 
 from support.kernel_runtime import start_runner
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, SubAgentConfig
 from vv_agent.session.children import child_handles
 from vv_agent.session.delegation import status_with_store
-from vv_agent.session.kernel import drive
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.base import ToolContext
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
+
+
+def _wait_for(predicate, timeout: float = 8.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        sleep(0.02)
+    raise AssertionError("condition was not reached before timeout")
 
 
 def _completed_child(driver, workspace, continuation):
@@ -30,7 +39,6 @@ def _completed_child(driver, workspace, continuation):
         run_config=RunConfig(workspace=workspace, model_provider=ScriptedModelProvider.from_steps("test", "m", steps)),
     )
     assert parent.result().status is AgentStatus.COMPLETED
-    parent._schedule_background = lambda: None
     rows = driver.store.read_state(parent.session_id)[1]
     parked = next(
         row.record for row in rows if row.record.kind == "op_parked" and row.record.payload["handle"]["kind"] == "child"
@@ -69,15 +77,14 @@ def test_sub_task_status_queues_continuation_without_replacing_history(tmp_path)
     requests = []
     driver = SessionDriver()
     try:
-        parent, child, manager, context = _completed_child(
+        _, child, manager, context = _completed_child(
             driver, tmp_path, lambda request: requests.append(request) or LLMResponse("continued")
         )
         original = driver.store.read_state(child)[1]
         result = status_with_store(context, {"task_ids": [child], "message": "appendix"})
         assert result.metadata["interaction"]["action"] == "continued"
         assert result.metadata["tasks"][0]["status"] == "running"
-        drive(driver.store, child, runtime=parent.runtime.child_runtime(driver.store, child))
-        assert manager.get(child).outcome.final_answer == "continued"
+        _wait_for(lambda: manager.get(child).outcome.final_answer == "continued")
         assert driver.store.read_state(child)[1][: len(original)] == original
         assert any(message.content == "child done" for message in requests[0].messages)
         assert any(message.content == "appendix" for message in requests[0].messages)
@@ -90,7 +97,7 @@ def test_sub_task_status_waits_for_the_retained_continuation(tmp_path):
     errors = []
     driver = SessionDriver()
     try:
-        parent, child, manager, context = _completed_child(driver, tmp_path, LLMResponse("continued"))
+        _, child, manager, context = _completed_child(driver, tmp_path, LLMResponse("continued"))
         original_message = manager.message
 
         def message(*args):
@@ -114,8 +121,7 @@ def test_sub_task_status_waits_for_the_retained_continuation(tmp_path):
         worker = Thread(target=status)
         worker.start()
         assert ready.wait(2) and not finished.is_set()
-        drive(driver.store, child, runtime=parent.runtime.child_runtime(driver.store, child))
-        worker.join(2)
+        worker.join(8)
         assert not worker.is_alive() and not errors
         assert results[0].metadata["tasks"][0]["final_answer"] == "continued"
         assert results[0].metadata["tasks"][0]["status"] == "completed"

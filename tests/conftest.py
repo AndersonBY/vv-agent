@@ -4,6 +4,15 @@ import pytest
 
 from vv_agent.session.surfaces import SessionDriver
 
+_B8_UNCONFIGURED_STORAGE_MARKER = "b8_unconfigured_storage"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{_B8_UNCONFIGURED_STORAGE_MARKER}: keep disposable SQLite stores unconfigured for fail-closed integrity tests",
+    )
+
 
 @pytest.fixture
 def surface(request, monkeypatch):

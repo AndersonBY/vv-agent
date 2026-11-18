@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.canonical_json import MAX_WIRE_INTEGER, _jcs_encode, _stdlib_compatible, canonical_json_bytes
-from vv_agent.session.records import _json_bytes
+from vv_agent.kernel._canonical_json import MAX_WIRE_INTEGER, _jcs_encode, _stdlib_compatible, canonical_json_bytes
+from vv_agent.kernel._records import _json_bytes
 
 FIXTURES = Path(__file__).parent / "fixtures" / "parity"
 

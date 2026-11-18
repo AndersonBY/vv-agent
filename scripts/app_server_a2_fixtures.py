@@ -78,7 +78,7 @@ def produce() -> dict:
     with ExitStack() as stack:
         stack.callback(server.kernel.close)
         stack.callback(fixtures.kernel.close)
-        stack.enter_context(patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000))
+        stack.enter_context(patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000))
         stack.enter_context(patch("vv_agent.prompt.builder.datetime", FixedDatetime))
         assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         with fixtures.kernel.store.atomic() as tx:
@@ -162,7 +162,7 @@ def exports(output):
     with (
         TemporaryDirectory(prefix="a2-fixtures-") as workspace,
         patch("vv_agent.memory.session_memory.SessionMemory.storage_path", return_value=Path(workspace) / "session_memory.json"),
-        patch("vv_agent.session.kernel.time.monotonic_ns", return_value=100_000_000),
+        patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000),
         patch("vv_agent.prompt.builder.datetime", FixedDatetime),
     ):
         fixtures = Fixtures()

@@ -5,28 +5,40 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import httpx2
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+
+from scripts.s1_fixture_values import (
+    create_fixture_session,
+    fixture_content_reader,
+    push_fixture_input,
+    wrap_fixture_store,
+)
 from tests.model_context_cases import CONTEXT_QUOTA_CASES
-from tests.session.test_compaction import SUMMARY, configured, start
+from tests.session.test_compaction import SUMMARY, configured, history
 from tests.session.test_endpoint_routing import host
 from tests.session.test_model_http_observation import local_vendor_transport
 from tests.session.test_model_rejection import adapter_error, context_http_error, fail, http_error
 from tests.session.test_model_rejection_retry_policy import retry_transport
 from tests.session.test_model_response_completion import local_response_transport
 from tests.session.test_recovery_matrix import records_of, runtime
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.errors import ModelRequestRejected, ModelStreamInterrupted
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
+from vv_agent.session.records import InboxItem
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
@@ -53,9 +65,9 @@ def produce() -> dict:
         ("context_payload", context_http_error("payload"), True, False),
         ("context_content_string", context_http_error("content_string"), True, False),
     ]
-    routes = {}
-    quota_transports = {}
-    quota_expected = {}
+    routes: dict[str, list[str]] = {}
+    quota_transports: dict[str, tuple[int, dict[str, Any]]] = {}
+    quota_expected: dict[str, tuple[int, bool]] = {}
     for label, status, detail, too_long in CONTEXT_QUOTA_CASES:
         name = f"context_quota_{label}" if too_long else f"quota_rejected_{label}"
         error = http_error(status, detail.get("message", "Rejected"))
@@ -122,9 +134,9 @@ def produce() -> dict:
             False,
         )
     )
-    transport_cases = {}
-    completion_cases = {}
-    retry_cases = {}
+    transport_cases: dict[str, tuple[str, str]] = {}
+    completion_cases: dict[str, tuple[str, str, int]] = {}
+    retry_cases: dict[str, tuple[str, str, int, dict[str, str]]] = {}
     for provider in ("openai", "anthropic"):
         for case in ("timeout_then_400", "500_then_400", "always_429", "single_400"):
             name = f"transport_{provider}_{case}"
@@ -154,19 +166,42 @@ def produce() -> dict:
             completion_cases[name] = (provider, case, status)
             cases.append((name, None, False, False))
     for name, error, succeeds, compaction in cases:
-        with SQLiteStore.standalone(":memory:") as store, patch("vv_agent.session.kernel.MODEL_REJECTION_BACKOFF_SECONDS", 0):
+        with (
+            TemporaryDirectory(prefix="model-rejection-") as directory,
+            SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+            patch("vv_agent.kernel._driver_outcomes.MODEL_REJECTION_BACKOFF_SECONDS", 0),
+        ):
+            uses_frozen_history = name.startswith("context_") or compaction
             store.install_schema()
+            database = Path(store.path)
             calls = []
             endpoint_calls = []
             rejected = fail(error, calls)
-            start(store)
+            store = wrap_fixture_store(store)
+            create_fixture_session(
+                store,
+                "s",
+                attributes={
+                    "seed": {
+                        "messages": [message.to_dict() for message in history()] if uses_frozen_history else [],
+                        "shared_state": {},
+                        "unseen_input_protection": not uses_frozen_history,
+                        "response_rejection": True,
+                    }
+                },
+            )
+            push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
             if name.startswith("context_"):
-                rt = configured(store, [rejected, LLMResponse(SUMMARY), LLMResponse("done")])
+                rt = configured(database, [rejected, LLMResponse(SUMMARY), LLMResponse("done")])
                 rt.memory_manager.compact_threshold = 999999
             else:
-                rt = (configured if compaction else runtime)(store, [rejected, LLMResponse("done") if succeeds else rejected])
+                rt = (configured if uses_frozen_history else runtime)(
+                    database, [rejected, LLMResponse("done") if succeeds else rejected]
+                )
+            rt.content_reader = fixture_content_reader(store, "s")
             if name == "repair_private_diagnostic":
-                rt = runtime(store, [LLMResponse("invalid")])
+                rt = runtime(database, [LLMResponse("invalid")])
+                rt.content_reader = fixture_content_reader(store, "s")
                 rt.agent.output_validation_enabled = True
                 rt.agent.output_validator = lambda value, context: OutputValidationResult.reject("invalid")
                 rt.agent.output_repair = rejected
@@ -185,7 +220,8 @@ def produce() -> dict:
                 else:
                     provider, completion_case, status = completion_cases[name]
                     transport = local_response_transport(completion_case, status)
-                rt = runtime(store, [])
+                rt = runtime(database, [])
+                rt.content_reader = fixture_content_reader(store, "s")
                 rt.llm = VvLlmClient([EndpointTarget("a", "synthetic-unused", "https://provider.invalid")], backend=provider)
                 with transport as evidence:
                     requests, clients = (evidence[0], evidence[3] if name in retry_cases else evidence[-1])
@@ -195,7 +231,8 @@ def produce() -> dict:
                 assert all(client.is_closed for client in clients)
                 http_requests = len(requests)
             elif name in routes:
-                rt = host(store, {"scripted": routes[name]})
+                rt = host(database, {"scripted": routes[name]})
+                rt.content_reader = fixture_content_reader(store, "s")
 
                 def create(*, endpoint_id, endpoint_calls=endpoint_calls, succeeds=succeeds, calls=calls, error=error, **_kwargs):
                     def complete(**_payload):
@@ -203,7 +240,10 @@ def produce() -> dict:
                         if len(endpoint_calls) == 1 or not succeeds:
                             calls.append(endpoint_id)
                             raise adapter_error(
-                                http_error(error.status_code, f"Denied at {endpoint_id}. Authorization: Bearer sk-secret")
+                                http_error(
+                                    getattr(error, "status_code", 400),
+                                    f"Denied at {endpoint_id}. Authorization: Bearer sk-secret",
+                                )
                                 if not isinstance(error, ModelRequestRejected)
                                 else error
                             )
@@ -215,23 +255,42 @@ def produce() -> dict:
                     drive(store, "s", runtime=rt)
             else:
                 drive(store, "s", runtime=rt)
-            wire = {
+            stored_records = read_state(store, "s")[1]
+            hydrated_payloads = {
+                row.record.record_id: hydrate_record_payload(
+                    row,
+                    hydration_for_session_store(store, "s"),
+                )
+                for row in stored_records
+            }
+            wire: dict[str, Any] = {
                 "id": name,
                 "rejected_calls": len(calls),
                 "plans": [
-                    {"attempt": r.attempt, "purpose": r.payload["purpose"], "not_before_ms": r.payload["not_before_ms"]}
+                    {
+                        "attempt": r.attempt,
+                        "purpose": hydrated_payloads[r.record_id]["purpose"],
+                        "not_before_ms": hydrated_payloads[r.record_id]["not_before_ms"],
+                    }
                     for r in records_of(store, "op_planned")
                 ],
                 "receipts": [
-                    {"attempt": r.attempt, "result": r.payload["result"], "execution_started": r.payload["execution_started"]}
+                    {
+                        "attempt": r.attempt,
+                        "result": hydrated_payloads[r.record_id]["result"],
+                        "execution_started": hydrated_payloads[r.record_id]["execution_started"],
+                    }
                     for r in records_of(store, "op_completed")
                 ],
-                "unknowns": [r.payload for r in records_of(store, "op_unknown")],
-                "terminal": records_of(store, "turn_ended")[-1].payload,
+                "unknowns": [hydrated_payloads[r.record_id] for r in records_of(store, "op_unknown")],
+                "terminal": hydrated_payloads[records_of(store, "turn_ended")[-1].record_id],
                 "context_compacted": len(records_of(store, "context_compacted")),
                 "events": [
                     {k: v for k, v in e.to_dict().items() if k in {"type", "error", "error_code", "outcome", "metadata"}}
-                    for e in project_records(read_state(store, "s")[1])
+                    for e in project_records(
+                        stored_records,
+                        hydration=hydration_for_session_store(store, "s"),
+                    )
                     if e.type in {"model_call_failed", "model_retry_duplicate_risk", "run_failed"}
                 ],
             }

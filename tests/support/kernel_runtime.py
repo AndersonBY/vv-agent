@@ -95,7 +95,20 @@ class KernelRuntime:
         }
         task = replace(task, initial_messages=None, initial_shared_state=None)
         agent = Agent(task.metadata.get("agent_name", "test"), task.prompt_bundle, model=task.model, sub_agents=task.sub_agents)
-        driver = SessionDriver()
+        memory_manager = build_memory_manager(
+            tool_registry=self.tool_registry,
+            task=task,
+            workspace_path=workspace,
+            workspace_backend=self._workspace_backend,
+            ctx=context,
+        )
+
+        def runtime_factory(store, agent, config, frozen_task, session_id):
+            runtime = driver.runtime(agent, config, frozen_task, session_id=session_id, store=store)
+            runtime.memory_manager = memory_manager
+            return runtime
+
+        driver = SessionDriver(runtime_factory=runtime_factory)
         try:
             sid = task.task_id
             task.metadata["session_id"] = sid
@@ -107,13 +120,6 @@ class KernelRuntime:
                 task.metadata.setdefault("vv_session", {})["memory_initial_state"] = memory.state.to_dict()
             driver.create(sid, str(workspace), {"seed": seed | {"unseen_input_protection": False}})
             handle = driver.start(sid, agent, config, kwargs.get("user_message") or task.user_prompt, task=task, autostart=False)
-            handle.runtime.memory_manager = build_memory_manager(
-                tool_registry=self.tool_registry,
-                task=task,
-                workspace_path=workspace,
-                workspace_backend=self._workspace_backend,
-                ctx=context,
-            )
             handle.start()
             return handle.result().raw_result
         finally:

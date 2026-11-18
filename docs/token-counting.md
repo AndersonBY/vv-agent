@@ -43,7 +43,8 @@ retains no message bodies.
 
 The verified pairs are vv-llm `0.8.3`, `0.8.4`, `0.8.5` or `0.10.1` with DeepSeek tokenizer
 `0.3.0`, or with tiktoken `0.14.0`. Versions are listed individually in
-`memory/token_utils.py`. A newer dependency version counts the whole text
+`src/vv_agent/_token_counting.py`. The existing memory counter exports share
+that host implementation. A newer dependency version counts the whole text
 locally and logs one warning per encoding per process.
 
 Empty text parts use a whole count. DeepSeek also uses a whole count if a

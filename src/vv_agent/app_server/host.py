@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -23,10 +23,13 @@ from vv_agent.app_server.protocol.tool_result import ToolResultRef
 from vv_agent.approval import ApprovalDecision as RuntimeApprovalDecision
 from vv_agent.approval import ApprovalProvider, ApprovalRequest
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._content import Principal
 from vv_agent.llm.base import LLMClient
 from vv_agent.model import resolve_model_selection
 from vv_agent.run_config import RunConfig
 from vv_agent.workspace.resources import ToolResultResourceRef
+
+TrustedPrincipal = Principal | Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,19 @@ class AppServerHost(Protocol):
     def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
         raise NotImplementedError
 
+    def resolve_principal(
+        self,
+        connection_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> TrustedPrincipal | None:
+        """Return the connection's authenticated principal for a thread/turn request.
+
+        Implementations derive identity from authenticated connection state. The
+        wire params must never be treated as a caller-supplied identity.
+        """
+        return None
+
     def resolve_model(self, request: dict[str, Any]) -> tuple[LLMClient, ResolvedModelConfig]:
         raise NotImplementedError
 
@@ -89,6 +105,16 @@ class DefaultAppServerHost:
     def authorize(self, connection_id: str, method: str, params: dict[str, Any]) -> bool:
         """Local, single-user host: all initialized connections are trusted."""
         return True
+
+    def resolve_principal(
+        self,
+        connection_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> TrustedPrincipal | None:
+        """Keep the local host on its existing service identity semantics."""
+        del connection_id, method, params
+        return None
 
     def authorize_tool_result_resource(self, request: ToolResultResourceAuthorizationRequest) -> bool:
         return request.resource.workspace_id == getattr(request.workspace_backend, "retained_workspace_id", None)
@@ -190,7 +216,7 @@ class AppServerApprovalProvider(ApprovalProvider):
             ApprovalRequestParams(
                 request_id=request.request_id,
                 thread_id=self._thread_id,
-                turn_id=self._turn_id,
+                turn_id=request.run_id,
                 tool_call_id=request.tool_call_id,
                 tool_name=request.tool_name,
                 preview=f"Approval required for tool {request.tool_name}.",

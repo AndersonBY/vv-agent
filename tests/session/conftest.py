@@ -1,6 +1,6 @@
 import os
 from collections.abc import Iterator
-from contextlib import nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -11,16 +11,16 @@ import pytest
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.sqlite import SQLiteStore
 
-Database = str | Path | SQLiteStore
+Database = str | Path
 
 
-def open_store(database: Database):
-    if isinstance(database, SQLiteStore):
-        # In-memory heartbeat and control threads share the owner's locked connection.
-        return nullcontext(database)
-    if isinstance(database, Path):
-        return SQLiteStore.standalone(str(database))
-    return PostgresStore.standalone(database)
+@contextmanager
+def open_store(database: Database, *, allow_unsigned: bool = True) -> Iterator[SQLiteStore | PostgresStore]:
+    manager = SQLiteStore.standalone(str(database)) if isinstance(database, Path) else PostgresStore.standalone(database)
+    with manager as store:
+        if allow_unsigned:
+            store.configure_input_admission(allow_unsigned=True)
+        yield store
 
 
 def pytest_generate_tests(metafunc):
@@ -33,7 +33,7 @@ def pytest_generate_tests(metafunc):
     elif metafunc.definition.get_closest_marker("persistent_store"):
         backends = ["postgres", "sqlite"]
     else:
-        backends = ["postgres", "sqlite", "sqlite_memory"]
+        backends = ["postgres", "sqlite"]
     metafunc.parametrize("store_backend", backends)
 
 
@@ -55,10 +55,6 @@ def database(store_backend, tmp_path: Path, request) -> Iterator[Database]:
     """Only store tests allocate databases; each PostgreSQL test owns a disposable database."""
     if store_backend == "sqlite":
         yield tmp_path / "session.sqlite"
-        return
-    if store_backend == "sqlite_memory":
-        with SQLiteStore.standalone(":memory:") as memory:
-            yield memory
         return
     dsn = request.getfixturevalue("postgres_admin_dsn")
     import psycopg

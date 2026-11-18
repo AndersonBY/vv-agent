@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from support.contract import fixture_root
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Definitive
 from vv_agent.session.records import InboxItem, digest
@@ -87,7 +87,7 @@ def test_long_result_head_tail_utf8_integrity_and_source(text, named):
     }
     assert namespace["source_complete"] is True
     assert namespace["capture_incomplete_reason"] is None
-    assert receipt._payload["result_digest"] == hashlib.sha256(canonical_json_bytes(raw)).hexdigest()
+    assert receipt._retained_payload["result_digest"] == digest(receipt._retained_payload["result"])
     assert max(backend.chunk_lengths) <= 65536
     assert backend.writes == 1
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -12,13 +13,17 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.s1_fixture_values import create_fixture_session, fixture_content_reader, push_fixture_input, wrap_fixture_store
 from vv_agent import Agent, RunConfig, function_tool
-from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.session.kernel import drive
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.providers import Definitive
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import Runtime
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.tool_results import prepare_tool_resources
@@ -115,11 +120,23 @@ def produce(text, *, backend=None, truncated=False, named=False, forged=False, t
         def submit(self, plan, *, context):
             return Definitive(result().to_dict())
 
-    with SQLiteStore.standalone(":memory:") as store:
+        def query(self, handle):
+            raise AssertionError("fixed provider does not query")
+
+        def cancel(self, handle):
+            raise AssertionError("fixed provider does not cancel")
+
+        def authenticate(self, item, plan):
+            return False
+
+    with (
+        TemporaryDirectory(prefix="tool-result-session-") as directory,
+        SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+    ):
         store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec("s1", "test", "/tmp"), consumers=())
-            tx.push("s1", InboxItem("initial", "user", {"content": "go"}))
+        store = wrap_fixture_store(store)
+        create_fixture_session(store, "s1", consumers=())
+        push_fixture_input(store, "s1", InboxItem("initial", "user", {"content": "go"}))
         runtime = Runtime(
             agent=Agent(name="s1", instructions="Collect output.", tools=[output]),
             config=RunConfig(workspace_backend=backend, session_memory_enabled=False),
@@ -127,11 +144,24 @@ def produce(text, *, backend=None, truncated=False, named=False, forged=False, t
             llm=ScriptedLLM([LLMResponse("", [ToolCall("call-s1", "output", {})]), LLMResponse("done")]),
             heartbeat_store=lambda: nullcontext(store),
             providers={"output": NamedProvider()} if named else {},
+            content_reader=fixture_content_reader(store, "s1"),
         )
         drive(store, "s1", runtime=runtime)
-        records = [entry.record for entry in store.read("s1", limit=100).records]
-        receipt = next(r for r in records if r.kind == "op_completed" and r._payload["result"].get("tool_call_id"))
-        plan = next(r for r in records if r.kind == "op_planned" and r.operation_id == receipt.operation_id)
+        stored_records = store.read("s1", limit=100).records
+        records = [entry.record for entry in stored_records]
+        hydration = hydration_for_session_store(store, "s1")
+        logical = [
+            SimpleNamespace(
+                kind=entry.record.kind,
+                operation_id=entry.record.operation_id,
+                attempt=entry.record.attempt,
+                _payload=hydrate_record_payload(entry, hydration),
+                _retained_payload=entry.record._payload,
+            )
+            for entry in stored_records
+        ]
+        receipt = next(r for r in logical if r.kind == "op_completed" and r._payload["result"].get("tool_call_id"))
+        plan = next(r for r in logical if r.kind == "op_planned" and r.operation_id == receipt.operation_id)
         before = [r.encode() for r in records]
         drive(store, "s1", runtime=runtime)
         assert effects == ["effect"]

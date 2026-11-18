@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from scripts.s1_fixture_values import deterministic_content_producer, fixture_key_provider_for_store
 from vv_agent import Agent, AppServerUserInteraction, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
-from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
+from vv_agent.kernel._canonical_json import canonical_json_bytes, canonical_json_sha256
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools import build_default_registry
 from vv_agent.tools.registry import RegistryToolExecutor
@@ -76,7 +78,13 @@ class InteractionServer:
     def __init__(self, store, host=None, *, connection="interaction-owner"):
         self.host = host or InteractionHost()
         self.transport = ChannelTransport(connection_id=connection, outbound_capacity=10000)
-        self.server = AppServer(transport=self.transport, host=self.host, store=store)
+        self.content_key_provider = fixture_key_provider_for_store(store)
+        self.server = AppServer(
+            transport=self.transport,
+            host=self.host,
+            store=store,
+            content_key_provider=self.content_key_provider,
+        )
         self.messages, self.identity = [], 0
         self.rpc("initialize", {"clientInfo": {"name": "interactions"}})
         self.server.processor.process_message(connection, {"jsonrpc": "2.0", "method": "initialized"})
@@ -150,9 +158,11 @@ class InteractionServer:
         self.join()
         self.server.run_adapter.close()
         self.server.kernel.close()
+        self.content_key_provider.close()
         self.join()
 
 
+@deterministic_content_producer
 def produce():
     cases = []
     for kind, args, answer in (
@@ -166,7 +176,10 @@ def produce():
         ("custom", {"options": ["A"], "allow_custom_options": True}, {"kind": "single", "selected": [], "custom": ["  Other  "]}),
         ("choice-free-text", {"options": ["A", "B"], "allow_custom_options": False}, {"kind": "text", "text": "NOT_AN_OPTION"}),
     ):
-        with SQLiteStore.standalone(":memory:") as store:
+        with (
+            TemporaryDirectory(prefix="app-server-interaction-") as directory,
+            SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
+        ):
             store.install_schema()
             server = InteractionServer(store, InteractionHost(args))
             try:

@@ -15,6 +15,14 @@ from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 from vv_agent.workspace.artifacts import _session_artifact_scope, persist_text_artifact
 
+from .helpers import (
+    create_fixture_session,
+    fixture_content_reader,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
+
 
 def test_d10_current_compaction_scope_can_be_searched(tmp_path):
     backend = MemoryWorkspaceBackend()
@@ -290,7 +298,7 @@ def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_
     from vv_agent.config import ResolvedModelConfig
     from vv_agent.llm.scripted import ScriptedLLM
     from vv_agent.session.kernel import drive
-    from vv_agent.session.records import InboxItem, SessionSpec
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.runtime import Runtime
     from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.tools.handlers import bash as bash_handler
@@ -324,11 +332,11 @@ def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_
     counter = tmp_path / "effect-counter"
     program = f"from pathlib import Path; Path({str(counter)!r}).open('a').write('effect\\n'); print('x'*12001, end='')"
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(program)}"
-    with SQLiteStore.standalone(":memory:") as store:
-        store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec("retention", "test", str(tmp_path)), consumers=())
-            tx.push("retention", InboxItem("initial", "user", {"content": "run once"}))
+    with SQLiteStore.standalone(str(tmp_path / "retention.sqlite")) as raw_store:
+        raw_store.install_schema()
+        store = wrap_fixture_store(raw_store)
+        create_fixture_session(store, "retention", workspace=str(tmp_path))
+        push_fixture_input(store, "retention", InboxItem("initial", "user", {"content": "run once"}))
         runtime = Runtime(
             agent=Agent("capture", "Run the command once."),
             config=RunConfig(
@@ -337,10 +345,16 @@ def test_kernel_retention_failure_commits_success_without_replaying_command(tmp_
             resolved=ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", []),
             llm=ScriptedLLM([LLMResponse("", [ToolCall("capture", "bash", {"command": command})]), LLMResponse("done")]),
             heartbeat_store=lambda: nullcontext(store),
+            content_reader=fixture_content_reader(store, "retention"),
         )
         drive(store, "retention", runtime=runtime)
         before = [row.record for row in store.read("retention", limit=100).records]
-        result = next(r.payload["result"] for r in before if r.kind == "op_completed" and r.payload["result"].get("tool_call_id"))
+        _, hydrated, _ = read_fixture_state(store, "retention")
+        result = next(
+            row.record.payload["result"]
+            for row in hydrated
+            if row.record.kind == "op_completed" and row.record.payload["result"].get("tool_call_id")
+        )
         assert result["status_code"] == "SUCCESS" and result["directive"] == "continue", result
         assert "error_code" not in result and result["metadata"]["exit_code"] == 0
         assert result["metadata"]["retention"]["status"] == "unavailable"

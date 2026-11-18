@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 import pytest
+from session.app_server_s1_helpers import bind_development_content, declared_content_ref, hydrate_stored_payload
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, SQLiteStore
 from vv_agent.app_server import AppServer, ChannelTransport
@@ -10,10 +11,11 @@ from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.types import LLMResponse, ToolCall
 
 
-@pytest.fixture(params=["memory", "file"])
-def server(request, tmp_path):
-    with SQLiteStore.standalone(":memory:" if request.param == "memory" else str(tmp_path / "threads.sqlite")) as store:
+@pytest.fixture
+def server(tmp_path):
+    with SQLiteStore.standalone(str(tmp_path / "threads.sqlite")) as store:
         store.install_schema()
+        bind_development_content(store)
         value = AppServer(
             transport=ChannelTransport(connection_id="owner"),
             store=store,
@@ -57,7 +59,9 @@ def test_create_thread_returns_stable_id_and_stores_metadata(server):
     assert thread.cwd == "/tmp/project"
     assert thread.metadata == {"source": "test"}
     rows = server.kernel.store.read_state(thread.thread_id)[1]
-    assert rows[0].record.payload["attributes"]["app_server"]["metadata"] == thread.metadata
+    assert declared_content_ref(rows[0].record.payload["attributes"])
+    creation = hydrate_stored_payload(server.kernel.store, thread.thread_id, rows[0])
+    assert creation["attributes"]["app_server"]["metadata"] == thread.metadata
 
 
 def test_real_turn_links_to_thread_and_retains_wire_input(server):

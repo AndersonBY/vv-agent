@@ -18,7 +18,9 @@ def run_script(script: str) -> None:
 def test_storage_and_app_server_imports_do_not_load_model_sdks():
     run_script("""
         import importlib.abc
+        from hashlib import sha256
         import sys
+        from tempfile import TemporaryDirectory
 
         forbidden = {
             "vv_llm", "openai", "anthropic", "tiktoken",
@@ -36,14 +38,40 @@ def test_storage_and_app_server_imports_do_not_load_model_sdks():
         from vv_agent.session.sqlite import SQLiteStore
         from vv_agent.session.surfaces import SessionDriver
 
+        def content_ref(label):
+            payload = label.encode("utf-8")
+            return {
+                "content_id": f"content/test/{label}",
+                "mac": sha256(payload).hexdigest(),
+                "size": len(payload),
+                "key_id": "key/test",
+                "labels": {"source": [], "classification": "internal"},
+            }
+
+        def principal():
+            return {
+                "tenant_id": "default",
+                "subject_id": "test",
+                "subject_kind": "user",
+                "attributes": content_ref("principal/test"),
+            }
+
         assert "VvLlmClient" in dir(vv_agent)
         assert {"VvLlmClient", "EndpointTarget"} <= set(dir(vv_agent.llm))
-        with SQLiteStore.standalone(":memory:") as store:
-            store.install_schema()
-            with store.atomic() as tx:
-                tx.create(SessionSpec("thread", "test", "/tmp"), consumers=("events",))
-                tx.push("thread", InboxItem("selection", "model_selection", {"selection": None}))
-            assert len(store.peek_inbox("thread")) == 1
+        with TemporaryDirectory() as directory:
+            with SQLiteStore.standalone(f"{directory}/sessions.sqlite") as store:
+                store.configure_input_admission(allow_unsigned=True)
+                store.install_schema()
+                with store.atomic() as tx:
+                    tx.create(
+                        SessionSpec("thread", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
+                        consumers=("events",),
+                    )
+                    tx.push(
+                        "thread",
+                        InboxItem("selection", "model_selection", {"selection": None}, actor=principal()),
+                    )
+                assert len(store.peek_inbox("thread")) == 1
         driver = SessionDriver()
         try:
             assert driver.store is not None

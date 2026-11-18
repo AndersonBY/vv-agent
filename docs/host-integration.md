@@ -10,6 +10,11 @@ vv-agent ships no Celery or Redis code and no integration extra. The Celery
 example below lives in the host. A single-process host can use SQLite instead
 of PostgreSQL.
 
+The core relocation to `vv_agent.kernel` does not require host SQL or API
+changes. Contract 39 changes a failed closed-session diagnostic to exactly
+`invalid session schema`; stored formats and canonical bytes remain unchanged.
+Do not parse complete `jsonschema.ValidationError` text or schema dumps.
+
 A few terms used throughout:
 
 - A session's inbox holds inputs waiting to be applied: user messages, replies,
@@ -63,9 +68,29 @@ Rules for host writes:
 ### Schema
 
 `PostgresStore.install_schema()` runs the current DDL, which is the `DDL`
-string in `vv_agent/session/postgres.py`. A host that manages its own DDL must
-copy that literal from the installed release. SQLite files carry
-`PRAGMA user_version` 3, and the store refuses to open any other version.
+string owned by `src/vv_agent/kernel/_postgres.py` and exported by
+`src/vv_agent/session/postgres.py`. A host that manages its own DDL must copy
+that literal from the installed release. SQLite files carry
+`PRAGMA user_version` 4 for the S1 store, and the store refuses to open any other version.
+
+The PostgreSQL DDL is the unisolated base schema. For credential-level tenant
+isolation, call `install_tenant_rls()` after schema installation and use
+`tenant_standalone()` when starting tenant work. Worker and shared-gateway
+logins are separate explicit modes; neither satisfies the tenant credential
+boundary. See [PostgreSQL tenant RLS](postgres-rls.md).
+
+The store checks the complete S1 catalog fingerprint when it opens or installs
+a non-empty database. SQLite uses an equivalent fingerprint and does not
+reconfigure the journal on heartbeat connections. Both adapters carry the
+worker feature level and input-admission configuration onto independent
+heartbeat connections, so a worker can renew a higher-level session without
+sharing its foreground connection.
+
+For App Server integrations, return the authenticated identity from
+`AppServerHost.resolve_principal(connection_id, method, params)`. The hook is
+a trusted host boundary; request parameters remain closed and cannot contain
+an actor or principal field. The runtime persists the identity and passes its
+immutable form to tools and model adapters outside the prompt.
 
 vv-agent has no schema migrator. Finish old sessions with the release that
 created them, then provision the current schema. Any schema change the host
@@ -75,75 +100,115 @@ an upgrade means for stored sessions.
 
 ## Runtime factory
 
-`build_runtime(sid, wake=...)` is a host function. It rebuilds what a session
-needs to run: the agent, `RunConfig`, the exact model and client, tools and
-providers, workspace, child factories, host bindings and handler version. A
-resumed turn runs on the definition it retained when it started. If the rebuilt
-binding no longer matches, the session stops explicitly instead of continuing
-on different settings.
+Host-bound runs use `SessionDriver(..., runtime_factory=...)`. Its callable has
+the signature `runtime_factory(store, agent, config, task, session_id)` and must
+return a `Runtime`. `SessionDriver` calls it after a worker claim, passing the
+exact tenant-bound drive store. The factory must rebuild everything the drive
+uses: the exact model and client, tools and providers, workspace, child
+factories, host bindings, callbacks and handler version. A callback that keeps a
+different store or raw connection is not bound to this drive.
 
-Built-in stores expose `heartbeat_store()` independently of a Runtime. A custom
-store (including a PostgreSQL subclass with host connection management) must
-supply a context manager opening the same session database on the heartbeat
-thread. The method itself runs on the driving thread, so thread-bound connection
-metadata can be captured safely. Hosts can remove `RuntimeFactoryStore` or an
-equivalent lease-swapping wrapper. Avoid holding an outer session write lock or
-SQLite write transaction around history reads; no inner read can release a
-caller's lock.
+A resumed turn runs on the definition it retained when it started. The factory
+must reproduce the retained logical model, tools, handler behavior and host
+authorization. If a compatible worker rebuilds a different definition, the
+session stops explicitly instead of continuing on different settings.
 
-When you build the `Runtime`:
+The worker's trusted support set is separate from persisted requirements.
+Declare the worker feature level, every accepted handler version and every
+statically reachable model/tool capability in `SessionDriver`. Include support
+needed by configured sub-agents. Persisted bootstrap and input requirements are
+checks against that declaration; they never add capabilities to a worker's
+support set.
 
-- Give each driving thread its own store connection. Set `heartbeat_store` to a
-  factory that opens an independent connection to the same database; the
-  heartbeat thread uses it to renew the lease.
-- The lease TTL defaults to 60 seconds (`ttl_ms=60000`) and the heartbeat to
-  250 ms (`heartbeat_seconds=0.25`). The heartbeat must be at most 1 second
-  and less than half the TTL.
-- File-backed SQLite heartbeat connections use a separate 250 ms busy timeout
-  by default. Set `heartbeat_busy_timeout_ms` when constructing `SQLiteStore`
-  to tune it; `Runtime.sqlite_heartbeat_retry_budget_seconds` and
-  `Runtime.sqlite_heartbeat_retry_delay_seconds` control the retry window.
-- Configure the model client to make one external attempt per call. The kernel
-  logs and retries attempts itself, and client retries would stack on top.
-- Set `wake` to the host's enqueue function. The kernel calls it when a session
-  still has work after a drive.
-- Bind live stream sinks separately from durable projection consumers (see
-  [streaming](#streaming-and-cancellation)).
+There are two supported worker integrations, and both may build callbacks that
+write host rows in the drive transaction:
+
+- A direct host queue calls
+  `drive(store, session_id, runtime=lambda sid: build_runtime(store))` on the
+  worker thread. The closure binds the supplied `store` to the runtime, and the
+  rebuilt callbacks use that same store and transaction.
+- A managed local worker uses `SessionDriver(..., runtime_factory=runtime_factory)`.
+  The factory receives the claimed tenant-bound drive store and rebuilds
+  callbacks against it.
+
+In either form, the failure is a callback that captured another store or worker
+connection. `SessionDriver` is not required for a host queue to bind callbacks
+to its supplied drive store.
+
+`Runtime.heartbeat_store` is a factory that opens an independent connection to
+the same session database. Built-in stores implement the needed factories. A
+custom store, including a PostgreSQL subclass with host connection management,
+must provide the drive connection opener used by direct `drive` or
+`SessionDriver(open_store=...)`, plus an equivalent heartbeat-store factory.
+Resolve thread-bound connection setup on the worker thread that opens the
+store. Never use the foreground drive connection for renewal.
+
+The default lease TTL is 60 seconds (`ttl_ms=60000`) and renewal interval is
+250 ms (`heartbeat_seconds=0.25`). The interval must be at most 1 second and
+less than half the TTL. File-backed SQLite heartbeat connections use a separate
+250 ms busy timeout by default; set `heartbeat_busy_timeout_ms` to tune it, and
+use the runtime's bounded SQLite heartbeat retry settings for lock contention.
+Configure the model client for one external attempt per logical call because
+the kernel owns retry accounting. Set `wake` to the host enqueue function or
+local-worker wake. Bind live stream sinks separately from durable projection
+consumers (see [streaming](#streaming-and-cancellation)).
 
 ## Submitting input and waking
 
-1. In a host transaction, push an inbox input with a stable `input_id` owned by
-   the source (for example a message ID or command ID).
-2. After that transaction commits, call `wake(sid)`.
+1. In a host transaction, write the business row and push an inbox input with a
+   stable `input_id` owned by the source (for example a message ID or command
+   ID).
+2. Commit that transaction.
+3. Call `wake(sid)`.
 
 A wake carries only the session ID. It gives the receiver no right to execute;
-the worker still has to take the lease. If a wake is lost, the periodic
+the worker still has to take the lease. A host transaction must not wait for the
+drive it woke. If a wake is lost, the `LocalWorker` scan or a host
 [tick](#periodic-tick) finds the session.
 
-An input with a future `available_ms` is not applied before that time. The tick
-picks it up when it becomes due.
+`RunHandle` and App Server ingress follow the same boundary. They write inbox
+inputs and wake the worker; their cursor reads never turn the caller into the
+lease holder.
+
+An input with a future `available_ms` is not applied before that time. The
+`LocalWorker` scan or host tick picks it up when it becomes due.
 
 ## Workers: drive
 
-A worker calls `drive(store, sid, runtime=runtime_factory)`. Pass the factory
-itself, not a built `Runtime`, so preparation runs after the lease is taken and
-takes part in scheduled backoff.
+`SessionDriver` owns a `LocalWorker` with one coordinator and one single-slot
+drive executor. The coordinator reuses its own store for scans, observations
+and projections. It claims runnable work with a database lease and filters the
+claim by the worker's level, handler versions and capabilities. PostgreSQL
+worker claims use `FOR NO KEY UPDATE ... SKIP LOCKED`; the lease epoch and
+expiry remain the write-safety fence.
 
-1. `drive` tries to take the lease. If another worker holds it, `drive` returns
-   at once without waking anyone.
-2. It opens `store.heartbeat_store()` and starts renewal before calling the
-   factory. The explicit starting TTL is 15 seconds (`FACTORY_LEASE_TTL_MS`),
-   renewed every 250 ms (`FACTORY_HEARTBEAT_SECONDS`); preparation can exceed the
-   starting TTL. Every exit joins this heartbeat and uses its latest Lease.
-   Before execution, it renews to the returned runtime's `ttl_ms` and starts
-   that runtime's heartbeat. A lost lease or fenced epoch prevents use of
-   the factory result. Give host callbacks and SQL their own I/O timeouts.
-3. It applies inputs and runs operations until nothing is runnable.
+1. A wake hints the coordinator to scan. A wake is not a lease and may be
+   dropped.
+2. If the drive slot is free, the coordinator submits one claimed session to
+   the executor. While a drive is active, the worker still scans observation
+   and projection work but does not start a second drive.
+3. The executor opens a fresh drive store on its own thread and invokes the
+   drive callback with the claimed lease. Once invoked, that callback owns
+   defer, release and error handling for the claim.
+4. The drive applies inputs and runs operations until nothing is runnable.
    Duplicate, reordered or concurrent deliveries never redispatch committed
    work.
-4. It releases the lease and then checks, in a fresh transaction, whether the
-   session is still runnable. Only then does it call `wake`. Idle sessions and
-   finished turns with no remaining work do not wake themselves.
+5. The worker records completion or failure and wakes the coordinator. The
+   periodic scan recovers due work, expired leases and lost wakes even without
+   another hint.
+
+A direct host queue uses its own scanner and transport instead of the
+`LocalWorker` coordinator. Each `drive` call receives that queue task's store,
+and its runtime closure binds callbacks to the same store on the worker thread.
+
+Lease renewal is not another executor. `ThreadLeaseKeeper` registers heartbeats
+with the process-wide scheduler. Each registration opens one independent
+heartbeat connection on first renewal, reuses it for the registration lifetime,
+and closes it when renewal stops. A heartbeat for runtime-factory preparation
+starts at 15 seconds (`FACTORY_LEASE_TTL_MS`) and renews every 250 ms
+(`FACTORY_HEARTBEAT_SECONDS`). The runtime's own TTL applies before execution.
+A lost lease or changed epoch prevents use of the factory result, and every
+append still checks the database fence.
 
 A session is runnable when no live lease holds it, `drive_retry_at_ms <= now`,
 and either `next_drive_ms <= now` or an unconsumed inbox input has
@@ -153,6 +218,13 @@ predicate, evaluated in database time.
 An input that arrives while the holder is exiting is safe. If its wake finds the
 lease still held, the holder's check after release sees the committed input. If
 it arrives after that check, its own wake can take the released lease.
+
+An App Server subscription is an observation view, not an execution owner.
+Subscriptions select notification recipients and cursor positions; they do not
+hold a drive slot or control the coordinator lifecycle. An observer-only
+App Server can keep scanning without starting drives. Losing the last local
+subscriber drops the live notification position; it does not stop or complete
+the durable session.
 
 ### Readiness and failure backoff
 
@@ -201,14 +273,15 @@ See [recovery semantics](session-kernel.md#repair-inputs-and-provider-evidence).
 runnable sessions and lagging consumers, in cursor order. For each runnable
 session it calls `dispatch(sid)`; for each lagging consumer it calls the
 `project` callback inline. In dispatch mode it never calls the runtime factory
-or drives anything itself. Passing `runtime=build_runtime` instead of
-`dispatch` drives each session synchronously inside the scan.
+or drives anything itself. Passing `runtime=callable_sid_to_runtime` instead of
+`dispatch` drives each session synchronously inside the scan. A running
+`LocalWorker` performs its own scans and does not need an external tick for
+execution, though a host may still use `tick` for a separate queue integration.
 
-Run tick periodically even with a reliable broker. Future-available inputs, due
-provider polls, dropped wakes and expired worker leases are only found by this
-scan. The tick interval bounds how long it takes to discover work after it
-becomes due or after a lease expires. Queue backlog and execution time come on
-top of that.
+Hosts that use `tick` must schedule it periodically even with a reliable broker.
+Future-available inputs, due provider polls, dropped wakes and expired worker
+leases are recovered by a scan. For `LocalWorker`, `scan_interval` supplies that
+periodic scan. Queue backlog and execution time come on top of discovery time.
 
 ### Host dispatch example
 
@@ -232,6 +305,8 @@ def enqueue_drive(sid):
 def runtime_factory(sid):
     if not child_inputs_ready(sid):
         raise RuntimeNotReady(retry_after_ms=500)
+    # This callback has no drive-store argument. Put host database callbacks on
+    # the SessionDriver runtime_factory when they must use the claimed store.
     return build_runtime(sid, wake=enqueue_drive)
 
 
@@ -274,10 +349,11 @@ queue latency nor total drive duration.
 ### Timeouts and errors in tick
 
 In dispatch mode, scan time does not depend on drive duration. In inline mode
-the scan is synchronous and its time includes every drive. The kernel does not
-interrupt host callbacks and starts no background scan threads, so the host
-must put finite timeouts on SQL locks and statements, broker publishes and
-projection I/O. Keep projections short and transactional.
+the scan is synchronous and its time includes every drive. `tick` itself starts
+no thread; `LocalWorker`, when used, owns the coordinator and drive threads. The
+kernel does not interrupt host callbacks, so the host must put finite timeouts
+on SQL locks and statements, broker publishes and projection I/O. Keep
+projections short and transactional.
 
 Tick isolates each item. If a drive or projection fails, tick sets a backoff
 for that item (`failure_backoff_ms`, default 1000) and moves on. Projection
@@ -304,11 +380,12 @@ result into the parent's inbox and acks the child's cursor in one transaction.
 Wake the parent after that transaction commits. A child that is itself waiting
 is not finished and sends nothing to the parent.
 
-Local `RunHandle` execution schedules children through the `after_drive` and
-`after_input` hooks, separately from `wake`. An exiting background child driver
-rechecks runnable work under the child scheduling lock when marking itself done.
-This hands off inputs that arrived during lease release even if its parent has
-already ended.
+The `LocalWorker` scans child sessions independently. Child admission records
+the new session and its input in the parent transaction; child completion is
+delivered by the `child_delivery` projection consumer. `RunHandle` observes the
+durable result and does not own a second child driver. An input that arrives
+during lease release remains in SQL for the next coordinator scan or explicit
+host wake.
 
 ### Provider waits
 
@@ -329,11 +406,12 @@ provider accepts a job, the turn parks with a `poll_at_ms` of now plus
   the deferred poll, unless a retry gate is active.
 - An authenticated `provider_result` input can continue the turn immediately.
 
-Local `RunHandle`, `Runner`, interactive and App Server execution return when a
-turn parks on a provider wait. If `poll_at_ms` is in the future, they return
-without querying and leave no thread waiting. The host tick, a later wake or
-`Runner.resume` runs the query at or after the due time. Broker workers return
-from an idle `drive` and rely on host wakes and ticks.
+Local `RunHandle`, `Runner`, interactive and App Server execution report the
+parked turn when a provider wait is recorded. If `poll_at_ms` is in the future,
+the worker releases its lease without querying; no drive slot remains occupied.
+The `LocalWorker` scan, a host tick, a later wake or `Runner.resume` runs the
+query at or after the due time. Broker workers return from an idle `drive` and
+rely on their host scan and wakes.
 
 ### Custom child admission
 
@@ -381,21 +459,35 @@ commit an independent business transaction or start a child execution loop.
 Database rollback does not undo object storage requests or changes to Python
 objects.
 
-The worker uses the store instance passed to public `drive`; dispatch-only
-`tick` scans its supplied store. Custom subclasses and per-instance acquire or
-inbox hooks are preserved. Heartbeats still use the independent connection
-factory.
+A `SessionDriver` drive uses the fresh store opened by `LocalWorker`; the
+registered `runtime_factory` must rebuild host callbacks against that store.
+Direct `drive` uses its supplied store, and `tick` scans the store supplied by
+the host. Custom subclasses and per-instance acquire or inbox hooks remain part
+of whichever store instance owns the work. Heartbeats use an independent
+connection factory.
 
-Renewal holds the poll latch through snapshot, database renewal and publication,
-and releases the short state lock before database calls. It never holds the
-commit latch while renewing. Do not drive or poll while holding a host write
-transaction: the SDK cannot detect every opaque host transaction. Synchronous
-poll reentry while entering, holding or releasing this heartbeat's commit or
-poll latch raises RuntimeError immediately.
-Do not run concurrent native transactions on the raw connection shared with the
-runtime; this is unsupported, and the SDK does not promise to detect it.
+An admission callback may write a business row and an inbox item in the kernel
+transaction. It must not wait for the drive that consumes that input, start an
+independent native transaction, or leave work relying on an external side
+effect. Wake the target session only after commit.
 
-For opt-in observation interruption and read-only rendering, see
+Lease renewal runs on the process-owned `ThreadLeaseKeeper` thread and uses one
+independent heartbeat store and connection for that registration. The drive
+callback keeps ownership of its foreground store on the drive thread. Database
+owner, epoch and expiry checks fence append, defer and release; the keeper never
+shares the foreground connection or grants write authority.
+
+Do not drive or poll while holding a host outer write transaction. It can hold
+database rows needed by independent renewal, and leaving a savepoint does not
+release the outer transaction's locks. Do not run concurrent native transactions
+on the raw connection shared with the runtime; this is unsupported, and the SDK
+does not promise to detect it.
+
+A declared provider or foreground-child wait follows the same yield-on-steer
+path for a direct host queue and a managed `LocalWorker`. The yield may commit
+observed results and applied steering without stopping the underlying work.
+`on_yield` renderers may read host state but must not publish files, bill or send
+messages. Undeclared waits remain pending until their normal result. See
 [yielding an observation](session-kernel.md#yielding-an-observation-to-steering).
 Child admission remains `admit(plan)`, or `admit(plan, summary)` for summary
 bindings; `Runtime.hook` remains `(point, record)`.
@@ -561,6 +653,68 @@ result is a conflict, even after the operation completed.
 Keep billing rows in the same transaction as the consumer `ack`, so
 deduplication stays with the cursor.
 
+## Ledger integrity
+
+Configure every SQL connection used by a signed deployment with the trusted
+ledger signer for writes and the verifier that retains the required public keys
+for reads and exports. Signed sessions require checkpoints for every record and
+a valid admission proof for every inbox item. Missing signer material, partial
+proofs, an unavailable key or a key identifier that does not verify the stored
+bytes fails closed. A duplicate input may carry its original proof for replay;
+the store compares it with the first admission and rejects a changed proof or
+body.
+
+For a rollback-resistant recovery, retain a head anchor outside the session
+database and pass it as `expected_head` when reading or appending. Check it
+before signing the next record. `export_session` accepts the same anchor, while
+`verify_ledger` verifies the complete SQL prefix and returns the observed head.
+Without an independent anchor, signature checks still find altered retained
+bytes but cannot prove that a signed tail was not deleted or rolled back.
+
+`configure_input_admission(allow_unsigned=True)` selects the local hash-only
+mode explicitly. It reports structural consistency only and must not be used to
+claim database tamper resistance, historical authenticity or input identity.
+Signed evidence cannot be exported under that mode. Export with a verifier that
+holds the relevant historical public keys; current writes use the active key
+identifier returned by the signer binding.
+
+### CLI verification
+
+The local SQLite verifier is an explicit hash-only inspection path:
+
+```bash
+vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned
+vv-agent ledger verify --sqlite ./sessions.sqlite --tenant TENANT_ID --allow-unsigned
+vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned \
+  --expected-head SEQ,DIGEST
+```
+
+`--session` reads the default tenant. `--tenant` enumerates only live sessions
+visible through that tenant-bound store. The command never scans other tenants.
+`--expected-head` is valid only with one session. The digest is a lowercase
+SHA-256 value and must match that session's head exactly.
+
+Before enabling `--allow-unsigned`, the command performs a read-only metadata
+check for checkpoints or admission proofs in every target session. If any are
+present, it returns `signed_evidence_requires_host_verifier`, exits nonzero,
+and does not configure hash-only mode or run ledger verification. A host with
+the appropriate verifier must use its configured store to verify that evidence.
+
+The command emits JSON on every executable verification attempt. Its checked
+scope and observed heads identify what was read; `authenticity` is `hash-only`,
+and `error` preserves the first ledger or input-proof failure. Exit status is
+zero only when every requested session verifies, one when verification fails,
+and two for command-line usage errors. Without `--expected-head`,
+`suffix_completeness` is always false because the database cannot prove that a
+valid signed tail was not removed. An exact expected head sets it to true after
+verification succeeds.
+
+The CLI has no safe verifier or KMS credential loader. Without
+`--allow-unsigned` it fails closed with an unconfigured-verifier error instead of
+claiming a signed result. Hosts that need signature verification must perform it
+through their configured store, signer and retained public-key material; this
+CLI does not add a second unsigned fallback or signing path.
+
 ## What to keep in your own database
 
 The session store is an execution ledger. Its records are readable only by the
@@ -573,6 +727,36 @@ messages to show the user and to seed a follow-up session, shared state, the
 final outcome and usage. Write them in the same projection transaction that
 acks the consumer cursor. See
 [session data and upgrades](upgrading.md#session-data-and-upgrades).
+
+### Encrypted content lifecycle
+
+Bind content reads and writes to the exact tenant, session and content
+reference. S1 encryption authenticates those boundaries in the key-wrap AAD,
+content AAD and HMAC framing, so moving a ciphertext, reference, key or content
+line to another tenant or session fails closed. Content export defaults to the
+skeleton. Hydration is an explicit include-content operation: call
+`SQLContentStore.export_content_lines(...)` only with the references selected
+from an already verified session snapshot. Missing content raises
+`ContentUnavailable`; an unavailable or destroyed key raises `KeyUnavailable`.
+The skeleton path must not call either read or hydration.
+
+The development `LocalKeyProvider` persists active and destroyed key identity in
+a local SQLite state file. Configure its location with the provider's
+`state_path` argument or `VV_AGENT_LOCAL_KEY_STATE`; preserve that file across
+process restarts. Losing it fails reads closed because wrapped keys no longer
+have active lifecycle state. It is still a development provider, not a
+production KMS.
+
+`SessionDeletionStore` fences a root and all descendants before deleting their
+keys, content and SQL rows. Forget retains the reference-form ledger skeleton and
+one complete tombstone per session; purge removes the registered session tables
+and retains only those tombstones. Repeating either operation is idempotent.
+The SQL content store deletes local ciphertext rows itself. A row with an
+external object locator also requires an idempotent cleaner attached with
+`set_object_locator_cleaner(...)`; without that capability deletion raises
+`ContentCleanupUnavailable`, and any cleaner exception remains a failed,
+retryable deletion rather than an assumed remote success. Provider copies, host
+tables, logs, exports and backups remain outside this deletion boundary.
 
 ## Model selection
 

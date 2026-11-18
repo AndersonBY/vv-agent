@@ -1,0 +1,781 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "vv-agent.session-storage-lifecycle.v1"
+    },
+    "status": {
+      "const": "contract-allocation-only"
+    },
+    "key_capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "destroying",
+            "destroyed"
+          ]
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "key_id",
+        "provider_id",
+        "capability_id",
+        "state"
+      ]
+    },
+    "destroy_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "domain": {
+                "const": "vv-agent/S1/key-destroy"
+              },
+              "tenant_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "key_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "domain",
+              "tenant_id",
+              "key_id"
+            ]
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "destroyed",
+              "already_destroyed",
+              "key_unavailable",
+              "binding_mismatch"
+            ]
+          },
+          "evidence_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "request",
+          "accepted",
+          "status",
+          "evidence_id",
+          "reason"
+        ]
+      }
+    },
+    "forget_tombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "chain_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "deleted_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 4,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "complete"
+          ]
+        },
+        "scope_root_session_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "final_seq",
+        "chain_digest",
+        "deleted_ms",
+        "actor",
+        "key_id",
+        "signature",
+        "state",
+        "scope_root_session_id"
+      ]
+    },
+    "forget_verification_cases": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tombstone": {
+                "$ref": "#/$defs/Tombstone"
+              },
+              "accepted": {
+                "const": true,
+                "type": "boolean"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "tombstone",
+              "accepted",
+              "reason"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tombstone": {
+                "type": "object"
+              },
+              "accepted": {
+                "const": false,
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "tombstone",
+              "accepted",
+              "reason"
+            ]
+          }
+        ]
+      }
+    },
+    "export_cases": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "accepted": {
+                "const": true,
+                "type": "boolean"
+              },
+              "header": {
+                "$ref": "#/$defs/ExportHeader"
+              },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ExportLine"
+                }
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "accepted",
+              "header",
+              "lines",
+              "reason"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "accepted": {
+                "const": false,
+                "type": "boolean"
+              },
+              "header": {
+                "type": "object"
+              },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "accepted",
+              "header",
+              "lines",
+              "reason"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "key_capability",
+    "destroy_cases",
+    "forget_tombstone",
+    "forget_verification_cases",
+    "export_cases"
+  ],
+  "$defs": {
+    "Principal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subject_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subject_kind": {
+          "type": "string",
+          "enum": [
+            "user",
+            "service",
+            "agent"
+          ]
+        },
+        "attributes": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "subject_id",
+        "subject_kind",
+        "attributes"
+      ]
+    },
+    "ContentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mac": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "labels": {
+          "$ref": "#/$defs/ContentLabels"
+        }
+      },
+      "required": [
+        "content_id",
+        "mac",
+        "size",
+        "key_id",
+        "labels"
+      ]
+    },
+    "ContentLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user",
+              "internal",
+              "untrusted"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "classification"
+      ]
+    },
+    "StorageEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "record_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "chain_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "writer_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema_version",
+        "tenant_id",
+        "session_id",
+        "seq",
+        "record_digest",
+        "chain_digest",
+        "writer_epoch",
+        "created_ms"
+      ]
+    },
+    "Tombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "chain_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "deleted_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 4,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "complete"
+          ]
+        },
+        "scope_root_session_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "final_seq",
+        "chain_digest",
+        "deleted_ms",
+        "actor",
+        "key_id",
+        "signature",
+        "state",
+        "scope_root_session_id"
+      ]
+    },
+    "ExportHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "const": "header"
+        },
+        "export_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "storage_major": {
+          "const": "S1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chain_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "content_mode": {
+          "type": "string",
+          "enum": [
+            "skeleton",
+            "include-content"
+          ]
+        }
+      },
+      "required": [
+        "line",
+        "export_version",
+        "storage_major",
+        "tenant_id",
+        "session_id",
+        "head_seq",
+        "chain_digest",
+        "content_mode"
+      ]
+    },
+    "ExportLine": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line": {
+              "const": "record"
+            },
+            "storage_envelope": {
+              "$ref": "#/$defs/StorageEnvelope"
+            },
+            "record": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "line",
+            "storage_envelope",
+            "record"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line": {
+              "const": "inbox"
+            },
+            "input_seq": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "received_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "consumed_seq": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "line",
+            "input_seq",
+            "received_ms",
+            "consumed_seq",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line": {
+              "const": "content"
+            },
+            "content_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "key_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "slot": {
+              "type": "string",
+              "minLength": 1
+            },
+            "decoded_value": {}
+          },
+          "required": [
+            "line",
+            "content_id",
+            "key_id",
+            "slot",
+            "decoded_value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line": {
+              "const": "checkpoint"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "chain_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "key_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "signature": {
+              "type": "string",
+              "minLength": 4,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            },
+            "signed_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "line",
+            "seq",
+            "chain_digest",
+            "key_id",
+            "signature",
+            "signed_ms"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line": {
+              "const": "manifest"
+            },
+            "record_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inbox_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "checkpoint_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "head_seq": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chain_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "line",
+            "record_lines",
+            "inbox_lines",
+            "checkpoint_lines",
+            "head_seq",
+            "chain_digest"
+          ]
+        }
+      ]
+    }
+  }
+}

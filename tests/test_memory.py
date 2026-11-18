@@ -8,6 +8,7 @@ import pytest
 from support.compaction import fixture, section
 from support.compaction import messages as current_messages
 
+from vv_agent.kernel import _summary_compaction
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig, SessionMemoryEntry
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.microcompaction import MicrocompactionPolicy
@@ -54,13 +55,15 @@ def _build_manager(**overrides: Any) -> MemoryManager:
 
 
 def test_memory_compress_prompt_includes_original_user_messages_and_file_fields() -> None:
-    manager = _build_manager(summary_event_limit=7)
-    prompt = manager._build_compress_memory_prompt(
+    prompt = _summary_compaction._build_compress_memory_prompt(
         [
             Message(role="system", content="sys"),
             Message(role="user", content="Preserve my exact words."),
             Message(role="assistant", content="Working on it."),
-        ]
+        ],
+        previous=None,
+        language="zh-CN",
+        event_limit=7,
     )
 
     assert '"original_user_messages"' in prompt
@@ -70,7 +73,6 @@ def test_memory_compress_prompt_includes_original_user_messages_and_file_fields(
 
 
 def test_memory_file_action_summary_uses_edit_file_for_modified_files() -> None:
-    manager = MemoryManager()
     messages = [
         Message(
             role="assistant",
@@ -88,7 +90,7 @@ def test_memory_file_action_summary_uses_edit_file_for_modified_files() -> None:
         )
     ]
 
-    actions = manager._collect_file_actions(messages)
+    actions = _summary_compaction._collect_file_actions(messages, first_path_wins=False)
 
     assert actions == [{"path": "src/app.py", "action": "modified", "summary": "Modified src/app.py"}]
 
@@ -378,9 +380,8 @@ def test_summary_control_failures_propagate(variant: dict[str, Any]) -> None:
 
 
 def test_prompt_substitution_does_not_reinterpret_history() -> None:
-    manager = MemoryManager(language="en-US", summary_event_limit=0)
     message = Message(role="user", content="{event_limit} {previous_summary_jcs} {conversation_prefix_jcs}")
-    prompt = manager._build_compress_memory_prompt([message])
+    prompt = _summary_compaction._build_compress_memory_prompt([message], previous=None, language="en-US", event_limit=0)
     assert section(prompt, "Conversation Prefix")[0]["content"] == message.content
     assert "Preserve up to 1 critical events" in prompt
 

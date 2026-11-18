@@ -5,14 +5,25 @@ from hashlib import sha256
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, ThreadForkParams
 from vv_agent.app_server import AppServer, AppServerClient, ChannelTransport, DefaultAppServerHost
+from vv_agent.kernel._content import Principal
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef
+from vv_agent.session.content_runtime import SESSION_PRINCIPAL_ATTRIBUTES, SessionContentWriter
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.context import project_context
 from vv_agent.session.context_view import context_view
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.fork import fork_thread
+from vv_agent.session.projection import (
+    fold_hydrated_records,
+    hydrate_record_payload,
+    hydrate_records,
+    hydration_for_session_store,
+)
+from vv_agent.session.reducer import _fold_factory_for
 from vv_agent.types import LLMResponse, Message, ToolArtifactRef, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
+from .helpers import create_fixture_session, wrap_fixture_store
 from .test_compaction import SUMMARY, tool_history
 
 
@@ -24,8 +35,13 @@ def send(server, identity, method, params):
     return wire["result"]
 
 
-def server_for(store, host):
-    server = AppServer(store=store, host=host, transport=ChannelTransport(connection_id="test", outbound_capacity=10000))
+def server_for(store, host, state_path):
+    server = AppServer(
+        store=store,
+        content_key_provider=LocalKeyProvider(b"f" * 32, state_path=state_path),
+        host=host,
+        transport=ChannelTransport(connection_id="test", outbound_capacity=10000),
+    )
     send(server, "init", "initialize", {"clientInfo": {"name": "test"}})
     return server
 
@@ -53,7 +69,7 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
     monkeypatch.setattr(
         host, "resolve_model", lambda req: (selected.llm, selected_config) if req["model"] == "small" else original(req)
     )
-    a = server_for(store, host)
+    a = server_for(store, host, tmp_path / "selected-model-keys.sqlite3")
     try:
         send(a, "create", "thread/start", {"inputId": "source"})
         send(
@@ -83,13 +99,72 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         assert calls[-1].model == "base"
         send(a, "clear", "thread/model/select", {"threadId": sid, "inputId": "clear", "selection": None})
         run_turn(a, sid, "restore", t2)
+        cleared_state, cleared_records, _ = store.read_state(sid)
+        hydration = hydration_for_session_store(store, sid)
+        clear_payload = next(
+            payload
+            for row in cleared_records
+            if row.record.kind == "input_applied"
+            and (payload := hydrate_record_payload(row, hydration))["input"]["input_id"] == "clear"
+        )
+        assert clear_payload["disposition"] == "applied"
+        assert clear_payload["input"]["payload"] == {"selection": None}
+        assert "model_binding" not in clear_payload
+        assert cleared_state.model_selection is None
         assert calls[-1].model == "small" and calls[-1].model_settings.max_tokens == 1000
         assert store.read_state("source")[1] == original_records
     finally:
         a.kernel.close()
 
 
+def test_direct_fork_copies_persisted_principal_attributes_once(store, tmp_path):
+    host = DefaultAppServerHost(
+        agent=Agent("test", "Be precise."),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("unused")]),
+            workspace=tmp_path,
+        ),
+    )
+    server = server_for(store, host, tmp_path / "fork-keys.sqlite3")
+    try:
+        send(server, "create", "thread/start", {"inputId": "source"})
+        source_created = store.read("source", limit=1).records[0].record.payload
+        source_principal = Principal.from_dict(source_created["principal"])
+
+        forked = fork_thread(
+            server.kernel,
+            host,
+            {"threadId": "source", "forkId": "principal-copy"},
+            principal=source_principal,
+        )
+        destination = forked["threadId"]
+        destination_created = store.read(destination, limit=1).records[0].record.payload
+        source_ref = source_principal.attributes
+        destination_ref = Principal.from_dict(destination_created["principal"]).attributes
+
+        with store.atomic() as tx:
+            source_writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id="source")
+            destination_writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=destination)
+            assert destination_writer.get_json(destination_ref) == source_writer.get_json(source_ref)
+            principal_links = [
+                link
+                for link in destination_writer.durable.read_links(
+                    store.tenant_id,
+                    destination,
+                    record_seq=1,
+                )
+                if link.slot == SESSION_PRINCIPAL_ATTRIBUTES
+            ]
+
+        assert destination_ref.key_id != source_ref.key_id
+        assert destination_ref.labels == source_ref.labels
+        assert [link.ref for link in principal_links] == [destination_ref]
+    finally:
+        server.kernel.close()
+
+
 def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_grant(store, tmp_path, monkeypatch):
+    store = wrap_fixture_store(store)
     backend = LocalWorkspaceBackend(tmp_path / "source")
     target = LocalWorkspaceBackend(tmp_path / "prepared")
     artifact_path = ".vv-agent/artifacts/session-source/old.txt"
@@ -125,25 +200,23 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
         return replace(host._run_config, workspace_backend=target if req.metadata.get("workspace") else backend)
 
     monkeypatch.setattr(host, "build_run_config", binding)
-    a = server_for(store, host)
+    a = server_for(store, host, tmp_path / "summary-keys.sqlite3")
     try:
-        with store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "source",
-                    "local",
-                    ".",
-                    attributes={
-                        "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
-                        "seed": {"messages": [m.to_dict() for m in history], "shared_state": {}},
-                    },
-                ),
-                consumers=("events", "traces", "app_server"),
-            )
+        create_fixture_session(
+            store,
+            "source",
+            attributes={
+                "app_server": {"agent_key": "default", "cwd": None, "metadata": {}},
+                "seed": {"messages": [message.to_dict() for message in history], "shared_state": {}},
+            },
+            consumers=("events", "traces", "app_server"),
+            subject_id="source-user",
+        )
         first = run_turn(a, "source", "first")
         send(a, "compact", "thread/compact/start", {"threadId": "source", "actionId": "summary"})
         a.run_adapter.join()
-        state, records, _ = store.read_state("source")
+        _, records, _ = store.read_state("source")
+        hydration = hydration_for_session_store(store, "source")
         compactions = [r for r in records if r.record.kind == "context_compacted"]
         assert compactions, str(
             [
@@ -159,15 +232,25 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
             ]
         )
         compact = compactions[-1]
-        assert compact.record._payload["evidence_manifest"]["artifacts"][0]["artifact_ref"] == artifact.to_dict()
+        compact_payload = hydrate_record_payload(compact, hydration)
+        assert compact_payload["evidence_manifest"]["artifacts"][0]["artifact_ref"] == artifact.to_dict()
         params = {"threadId": "source", "forkId": "copy", "workspace": {"snapshot": "prepared"}}
         fork = send(a, "fork", "thread/fork", params)
         sid = fork["threadId"]
-        baseline = store.read_state(sid)[1][0].record._payload["attributes"]["app_server_context"]["task"]
+        fork_creation = store.read_state(sid)[1][0]
+        fork_attributes = hydrate_record_payload(fork_creation, hydration_for_session_store(store, sid))["attributes"]
+        baseline = fork_attributes["app_server_context"]["task"]
         assert baseline["initial_messages"] == [] and baseline["initial_shared_state"] == {}
         assert baseline["user_prompt"] == "" and "vv_session" not in baseline["metadata"]
-        copied = project_context(store.read_state(sid)[1], store.read_state(sid)[0])
-        assert [m.to_dict() for m in copied] == [m.to_dict() for m in project_context(records, state)]
+        copied = [Message.from_dict(message) for message in fork_attributes["seed"]["messages"]]
+        hydrated_records = hydrate_records(records, hydration)
+        logical_state = fold_hydrated_records(hydrated_records, records, _fold_factory_for(store), hydration)
+        source_messages = project_context(
+            hydrated_records,
+            logical_state,
+            _fold_factory=_fold_factory_for(store),
+        )
+        assert [m.to_dict() for m in copied] == [m.to_dict() for m in source_messages]
         assert MemoryManager().compaction_evidence(copied)["artifacts"][0]["artifact_ref"] == artifact.to_dict()
         assert context_view(store, sid)["lastCompaction"] == context_view(store, "source")["lastCompaction"]
         assert target.read_bytes(artifact_path) == body.encode()
@@ -178,10 +261,12 @@ def test_accepted_summary_artifacts_preserve_bytes_without_cross_session_read_gr
         assert context_view(store, early["threadId"])["lastCompaction"] is None
         run_turn(a, sid, "fork-turn")
         assert any(m.name == "memory_summary" for m in calls[-1].messages)
+        fork_hydration = hydration_for_session_store(store, sid)
         recovery = next(
-            row.record.payload["result"]
+            hydrate_record_payload(row, fork_hydration)["result"]
             for row in store.read_state(sid)[1]
-            if row.record.kind == "op_completed" and row.record.payload["result"].get("tool_call_id") == "recover"
+            if row.record.kind == "op_completed"
+            and hydrate_record_payload(row, fork_hydration)["result"].get("tool_call_id") == "recover"
         )
         assert recovery["error_code"] == "artifact_read_denied", recovery
         assert not any(m.role == "tool" and body in m.content for m in calls[-1].messages)

@@ -1,6 +1,7 @@
 """F2d-3 SDK producers versus durable child admission and reconstruction."""
 
 import json
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
@@ -12,22 +13,43 @@ from support import FixedModelProvider, ModelMapProvider
 from support.interactions import displayed_target
 from test_workspace_backends import _FakeS3Client, _make_s3_backend
 
-from vv_agent import Agent, InteractionAnswer, RunConfig, Runner, handoff
+from vv_agent import (
+    Agent,
+    AgentSessionOptions,
+    InteractionAnswer,
+    InteractiveAgentClient,
+    RunConfig,
+    Runner,
+    ScriptedModelProvider,
+    handoff,
+)
 from vv_agent.budget import RunBudgetLimits
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.config import ResolvedModelConfig
 from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._child_store import completion_input
+from vv_agent.kernel._requirements import SessionRequirements, model_capability_tag, normalize_requirements
+from vv_agent.kernel._sql import UnsupportedWorkerCapabilities
+from vv_agent.llm.base import LLMClient
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import ToolPolicy
 from vv_agent.session.bindings import MissingHostBinding
-from vv_agent.session.children import child_delivery, child_handles, completion_input
+from vv_agent.session.children import child_delivery, child_handles
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.records import InboxItem, Record, RecordError, digest
+from vv_agent.session.projection import SessionHydration, hydrate_records
+from vv_agent.session.records import InboxItem, Record, RecordError, copy_json, digest
 from vv_agent.session.result import project_result
+from vv_agent.session.runtime import _resolved_model_binding, static_worker_supports
 from vv_agent.session.store import Conflict
-from vv_agent.session.surfaces import SessionDriver
+from vv_agent.session.surfaces import (
+    SessionDriver,
+    _static_agent_tree,
+    _static_worker_requirement_level,
+    _static_worker_supports_tree,
+)
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.function import function_tool
 from vv_agent.types import (
@@ -41,8 +63,40 @@ from vv_agent.types import (
 )
 
 from .conftest import open_store
+from .helpers import push_fixture_input, wrap_fixture_store
 from .test_runner_parity import RESOLVED
-from .test_tools_control_parity import Restart, admit, runtime
+from .test_tools_control_parity import Restart, admit
+from .test_tools_control_parity import runtime as _runtime
+
+
+@pytest.fixture
+def store(store):
+    wrapped = wrap_fixture_store(store)
+    with wrapped.atomic():
+        wrapped._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    return wrapped
+
+
+@contextmanager
+def open_fixture_store(database):
+    with open_store(database) as raw_store:
+        yield wrap_fixture_store(raw_store)
+
+
+def runtime(store, database, agent, config, llm, **kwargs):
+    worker_store = getattr(store, "_root", store)
+    worker_store.configure_worker(
+        level=_static_worker_requirement_level(
+            agent,
+            config,
+            handler_version="1",
+            extra_capabilities=(),
+        ),
+        handler_versions=("1",),
+        capabilities=_static_worker_supports_tree(agent, config, extra_capabilities=()),
+    )
+    result = _runtime(store, database, agent, config, llm, **kwargs)
+    return replace(result, heartbeat_store=lambda: open_fixture_store(database))
 
 
 def normalize(value):
@@ -105,6 +159,246 @@ def parent_llm(config):
     return config.model_provider.routes["parent"][0]
 
 
+def test_configured_sub_agent_uses_child_static_config_without_provider_client():
+    class NoClientProvider(ModelMapProvider):
+        def client(self, resolved: ResolvedModelConfig) -> LLMClient:
+            del resolved
+            raise AssertionError("static support discovery must not construct a provider client")
+
+    provider = routed([], [])
+    provider = NoClientProvider(provider.routes, default_model="parent")
+    agent = configured()
+    config = RunConfig(model="parent", model_provider=provider)
+    supports = set(_static_worker_supports_tree(agent, config, extra_capabilities=()))
+    child = provider.routes["m"][1]
+    assert model_capability_tag(_resolved_model_binding(child)) in supports
+    assert {"parent", "m"} <= set(provider.resolved_models)
+
+
+def test_persisted_requirements_do_not_widen_configured_child_support(store, tmp_path):
+    writer = SessionDriver(store=store)
+    try:
+        required = SessionRequirements(2, "1", ("future:worker",))
+        writer._configure_static_worker(
+            level=2,
+            capabilities=required.capabilities,
+            requirements=required,
+        )
+        writer.create("incompatible", str(tmp_path))
+    finally:
+        writer.close()
+
+    model_calls, tool_calls, factory_calls = [], [], []
+
+    @function_tool
+    def effect() -> str:
+        tool_calls.append(True)
+        return "unexpected"
+
+    def model(*args, **kwargs):
+        model_calls.append((args, kwargs))
+        return LLMResponse("", [ToolCall("effect", "effect", {})])
+
+    def runtime_factory(*args, **kwargs):
+        factory_calls.append((args, kwargs))
+        raise AssertionError("incompatible sessions must not construct a runtime")
+
+    driver = SessionDriver(store=store, runtime_factory=runtime_factory)
+    agent = Agent(
+        "parent",
+        "Parent instructions.",
+        model="parent",
+        tools=[effect],
+        sub_agents={"worker": SubAgentConfig(model="m", description="Worker instructions.")},
+    )
+    provider = ScriptedModelProvider.from_callback("scripted", "parent", model)
+    try:
+        with pytest.raises(UnsupportedWorkerCapabilities, match="future:worker"):
+            driver.start(
+                "incompatible",
+                agent,
+                RunConfig(model="parent", model_provider=provider),
+                "go",
+            )
+        state, _, _ = driver.store.read_state("incompatible")
+        assert state.phase == "idle"
+        assert not state.turns
+        assert (model_calls, tool_calls, factory_calls) == ([], [], [])
+        _, epoch, remaining_ms = driver.store.lease_status("incompatible")
+        assert epoch == remaining_ms == 0
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("provider_mode", ["fixed", "routed"])
+def test_configured_sub_agent_public_worker_claims_and_runs(provider_mode, tmp_path):
+    child_calls = 0
+
+    def child_step(request):
+        nonlocal child_calls
+        assert request.model in {"m", "routed-child"}
+        child_calls += 1
+        return LLMResponse("child done")
+
+    parent_step = LLMResponse(
+        "",
+        [ToolCall("delegate", "create_sub_task", {"agent_id": "worker", "task_description": "work"})],
+    )
+    if provider_mode == "fixed":
+        resolved = replace(RESOLVED, requested_model="m", selected_model="m", model_id="m")
+        provider = FixedModelProvider(ScriptedLLM([parent_step, child_step, LLMResponse("parent done")]), resolved)
+        agent = Agent(
+            "parent",
+            "Parent instructions.",
+            model="m",
+            sub_agents={"worker": SubAgentConfig(model="m", description="Worker instructions.")},
+        )
+    else:
+        child_model = "routed-child"
+        parent = Agent(
+            "parent",
+            "Parent instructions.",
+            sub_agents={"worker": SubAgentConfig(model=child_model, description="Worker instructions.")},
+        )
+        provider = ModelMapProvider(
+            {
+                "parent": (
+                    ScriptedLLM([parent_step, LLMResponse("parent done")]),
+                    replace(RESOLVED, requested_model="parent", selected_model="parent", model_id="parent"),
+                ),
+                child_model: (
+                    ScriptedLLM([child_step]),
+                    replace(
+                        RESOLVED,
+                        requested_model=child_model,
+                        selected_model=child_model,
+                        model_id=child_model,
+                    ),
+                ),
+            },
+            default_model="parent",
+        )
+        agent = parent
+    config = RunConfig(model_provider=provider, model="parent" if provider_mode == "routed" else None)
+    driver = SessionDriver()
+    try:
+        driver.create("configured-parent", str(tmp_path))
+        handle = driver.start("configured-parent", agent, config, "go")
+        result = handle.result(10)
+        assert result.final_output == "parent done"
+        assert child_calls == 1
+        child_ids = [sid for sid in driver.store.list_sessions() if sid != "configured-parent"]
+        assert len(child_ids) == 1
+        child_id = child_ids[0]
+        child_state, _, _ = read_state(driver.store, child_id)
+        assert child_state.active_turn_id is None
+        assert child_state.turns and all(turn.ended for turn in child_state.turns.values())
+        created = driver.store.read(child_id, limit=1).records[0].record
+        assert created.feature_level == 2
+        requirements = normalize_requirements(created._payload["bootstrap"])
+        assert requirements.handler_version == "1"
+        assert not set(requirements.capabilities) - set(driver._worker.support.capabilities)
+        assert requirements.level <= driver._worker.support.level
+        _, epoch, remaining_ms = driver.store.lease_status(child_id)
+        lease_owner = driver.store._one(
+            "SELECT lease_owner FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (driver.store.tenant_id, child_id),
+        )[0]
+        assert epoch == 1
+        assert (lease_owner, remaining_ms) == (None, 0)
+        assert driver.store.peek_inbox(child_id) == ()
+    finally:
+        driver.close()
+
+
+def test_configured_child_metadata_priorities_reach_static_supports_and_claim(store, tmp_path):
+    child_calls = 0
+
+    def child_step(request):
+        nonlocal child_calls
+        assert request.model == "child"
+        child_calls += 1
+        return LLMResponse("child done")
+
+    models = {
+        "parent",
+        "child",
+        "parent-agent-summary",
+        "parent-agent-extract",
+        "parent-config-summary",
+        "parent-config-extract",
+        "child-summary",
+        "child-extract",
+    }
+    provider = ModelMapProvider(
+        {
+            name: (
+                ScriptedLLM(
+                    [
+                        LLMResponse(
+                            "",
+                            [ToolCall("delegate", "create_sub_task", {"agent_id": "worker", "task_description": "work"})],
+                        ),
+                        LLMResponse("parent done"),
+                    ]
+                    if name == "parent"
+                    else [child_step]
+                    if name == "child"
+                    else []
+                ),
+                replace(RESOLVED, requested_model=name, selected_model=name, model_id=name),
+            )
+            for name in models
+        },
+        default_model="parent",
+    )
+    agent = Agent(
+        "parent",
+        "Parent instructions.",
+        model="parent",
+        metadata={
+            "memory_summary_model": "parent-agent-summary",
+            "session_memory_extraction_model": "parent-agent-extract",
+        },
+        sub_agents={
+            "worker": SubAgentConfig(
+                model="child",
+                description="Worker instructions.",
+                metadata={
+                    "memory_summary_model": "child-summary",
+                    "session_memory_extraction_model": "child-extract",
+                },
+            )
+        },
+    )
+    config = RunConfig(
+        model="parent",
+        model_provider=provider,
+        metadata={
+            "memory_summary_model": "parent-config-summary",
+            "session_memory_extraction_model": "parent-config-extract",
+        },
+    )
+    child_agent, child_config = next(
+        (current, current_config) for current, current_config in _static_agent_tree(agent, config) if current.name == "worker"
+    )
+    child_supports = set(static_worker_supports(child_agent, child_config))
+    for model in {"child", "child-summary", "child-extract"}:
+        assert model_capability_tag(_resolved_model_binding(provider.routes[model][1])) in child_supports
+    for model in {"parent-agent-summary", "parent-agent-extract", "parent-config-summary", "parent-config-extract"}:
+        assert model_capability_tag(_resolved_model_binding(provider.routes[model][1])) not in child_supports
+
+    driver = SessionDriver(store=store)
+    try:
+        driver.create("configured-metadata", str(tmp_path))
+        result = driver.start("configured-metadata", agent, config, "go").result(10)
+        assert result.status == AgentStatus.COMPLETED
+        assert result.final_output == "parent done"
+        assert child_calls == 1
+    finally:
+        driver.close()
+
+
 def drain(store, sid, rt):
     # Host scheduler: every drive releases its own lease before descendants run.
     drive(store, sid, runtime=rt)
@@ -139,6 +433,8 @@ def paired(store, database, agent, config, steps, *, cut=None):
     return old, new, rt
 
 
+@pytest.mark.capability("child-lifecycle")
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("batch", [False, True])
 @pytest.mark.parametrize("cut_at", ["before", "after", None])
 def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, batch, cut_at):
@@ -165,10 +461,12 @@ def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, b
         child_rows = read_state(store, h["session_id"])[1]
         terminal = next(r for r in child_rows if r.record.kind == "turn_ended")
         item = completion_input(h, terminal)
+        applied = store.read_state("control")[0].applied_inputs[item.input_id]
+        stored = InboxItem(**applied.payload["input"])
         with store.atomic() as tx:
-            assert tx.push("control", item).replayed
+            assert tx.push("control", stored).replayed
         with pytest.raises(Conflict), store.atomic() as tx:
-            tx.push("control", replace(item, payload=item.payload | {"result": "forged"}))
+            tx.push("control", replace(stored, payload=stored.payload | {"status": "failed"}))
     drive(store, "control", runtime=rt)
     assert len([r for r in read_state(store, "control")[1] if r.record.kind == "turn_ended"]) == 1
     assert len([e for e in new.events if e.type == "sub_run_completed"]) == len(
@@ -184,6 +482,78 @@ def test_configured_child_atomic_sdk_restart_parity(store, database, tmp_path, b
     assert set(store.read_state("control")[0].child_completions) == keys
 
 
+@pytest.mark.parametrize("entry", ["runner", "interactive"])
+def test_background_status_wait_keeps_public_run_active(store, tmp_path, monkeypatch, entry):
+    driver = SessionDriver(store=store)
+    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda *args, **kwargs: driver)
+
+    def status_step(_request):
+        parent_sid = driver.handles[0].session_id
+        children = [
+            child_sid
+            for child_sid in store.list_sessions()
+            if store.read(child_sid, limit=1).records[0].record._payload.get("parent_session_id") == parent_sid
+        ]
+        assert len(children) == 1
+        return LLMResponse(
+            "",
+            [
+                ToolCall(
+                    "status",
+                    "sub_task_status",
+                    {
+                        "task_ids": children,
+                        "wait_for_completion": True,
+                        "max_wait_seconds": 60,
+                    },
+                )
+            ],
+        )
+
+    agent = configured()
+    agent.model = "parent"
+    provider = routed(
+        [
+            LLMResponse(
+                "",
+                [
+                    ToolCall(
+                        "delegate",
+                        "create_sub_task",
+                        {
+                            "agent_id": "worker",
+                            "task_description": "work",
+                            "wait_for_completion": False,
+                        },
+                    )
+                ],
+            ),
+            status_step,
+            LLMResponse("parent observed child"),
+        ],
+        [LLMResponse("child done")],
+    )
+    try:
+        if entry == "runner":
+            result = Runner.run_sync(
+                agent,
+                "go",
+                run_config=RunConfig(model_provider=provider, workspace=tmp_path),
+            )
+        else:
+            client = InteractiveAgentClient(
+                options=AgentSessionOptions(model_provider=provider, workspace=tmp_path),
+            )
+            session = client.create_session(agent=agent, workspace=tmp_path)
+            result = session.prompt("go")
+        assert result.status == AgentStatus.COMPLETED
+        assert result.final_output == "parent observed child"
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("child-inheritance")
 @pytest.mark.parametrize("mode", ["as_tool", "configured"])
 def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database, tmp_path, mode):
     seen = []
@@ -240,7 +610,10 @@ def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database,
     child_id = child_handles(
         next(r.record.payload["handle"] for r in store.read_state("control")[1] if r.record.kind == "op_parked")
     )[0]["session_id"]
-    admission = store.read(child_id, limit=1).records[0].record.payload["attributes"]["child_admission"]
+    raw_created = store.read(child_id, limit=1).records[0]
+    child_hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=child_id)
+    created = hydrate_records((raw_created,), child_hydration)[0].record
+    admission = created.payload["attributes"]["child_admission"]
     assert admission["budget"]["max_tool_calls"] == 4
     assert "forbidden" in admission["definition"]["task"]["metadata"]["_vv_agent_disallowed_tools"]
     if mode == "configured":
@@ -259,6 +632,7 @@ def test_child_hooks_policy_budget_workspace_inheritance_frozen(store, database,
     assert new.budget_usage.tool_calls == old.budget_usage.tool_calls
 
 
+@pytest.mark.capability("agent-as-tool")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 def test_sdk_children_never_recursive_runner_or_parent_lease(store, database, tmp_path, monkeypatch, mode):
     child = Agent("worker", "Worker instructions.")
@@ -288,6 +662,7 @@ def test_sdk_children_never_recursive_runner_or_parent_lease(store, database, tm
     assert project_result(store, "control", "control/turn/initial", runtime=rt).final_output == old.final_output
 
 
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -309,6 +684,7 @@ def test_configured_child_argument_failure_parity(store, database, tmp_path, inv
     assert store.list_sessions() == ("control",)
 
 
+@pytest.mark.capability("sub-task-status")
 def test_sub_task_status_records_projection_parity(store, database, tmp_path):
     def status(request):
         child = json.loads(next(m.content for m in request.messages if m.role == "tool"))
@@ -336,6 +712,7 @@ def test_sub_task_status_records_projection_parity(store, database, tmp_path):
     assert rebuilt.child_tasks(store, "control").get("missing") is None
 
 
+@pytest.mark.capability("background-task")
 @pytest.mark.parametrize("cancel", [False, True])
 def test_background_handle_start_poll_wait_cancel_reconstruction(store, database, tmp_path, cancel):
     entered, release = Event(), Event()
@@ -392,6 +769,7 @@ def test_background_handle_start_poll_wait_cancel_reconstruction(store, database
     assert len([r for r in store.read_state("control")[1] if r.record.kind == "turn_ended"]) == 1
 
 
+@pytest.mark.capability("handoff")
 @pytest.mark.parametrize("depth", [0, 1, 2])
 def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, depth):
     third = Agent("third", "Third.")
@@ -421,7 +799,13 @@ def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, 
         rt = runtime(store, database, first, replace(config, max_handoffs=depth + 100), llm_for(config))
         store._fold_cache = None
     drain(store, "control", rt)
-    rows = [store.read(s, limit=1).records[0].record for s in store.list_sessions() if s != "control"]
+    rows = []
+    for sid in store.list_sessions():
+        if sid == "control":
+            continue
+        raw_created = store.read(sid, limit=1).records[0]
+        hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=sid)
+        rows.append(hydrate_records((raw_created,), hydration)[0].record)
     assert sorted(r.payload["attributes"]["child_admission"]["handoff_count"] for r in rows) == list(range(1, depth + 1))
     result = project_result(store, "control", "control/turn/initial", runtime=rt)
     if depth == 2:
@@ -435,6 +819,7 @@ def test_handoff_durable_transfer_and_maximum_parity(store, database, tmp_path, 
     assert before == {s: store.read(s).head_seq for s in store.list_sessions()}
 
 
+@pytest.mark.capability("shared-state")
 def test_shared_state_host_binding_restart_intentional_difference(store, database, tmp_path):
     class Host:
         def __deepcopy__(self, memo):
@@ -451,7 +836,7 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
 
     agent = Agent("bound", "Bound.", tools=[bound])
     steps = [LLMResponse("", [ToolCall("a", "bound", {}), ToolCall("b", "bound", {})]), LLMResponse("done")]
-    with pytest.raises(RecordError):
+    with pytest.raises(ValueError, match="unsupported JSON value type Host"):
         Runner.run_sync(
             agent,
             "go",
@@ -484,6 +869,7 @@ def test_shared_state_host_binding_restart_intentional_difference(store, databas
     assert seen == [original, supplied]
 
 
+@pytest.mark.capability("shared-state")
 @pytest.mark.parametrize("change", ["replace", "delete", "arbitrary", "collision"])
 def test_host_binding_json_boundary_rejects_invalid_state(store, database, tmp_path, change):
     obj = object()
@@ -519,6 +905,7 @@ def test_host_binding_json_boundary_rejects_invalid_state(store, database, tmp_p
     )
 
 
+@pytest.mark.capability("workspace-backends")
 @pytest.mark.parametrize("streaming", [False, True])
 def test_s3_streaming_workspace_paired_producers(store, database, tmp_path, streaming):
     bodies = []
@@ -583,6 +970,8 @@ def test_s3_streaming_workspace_paired_producers(store, database, tmp_path, stre
     assert bodies and all(b.closed for b in bodies if b.source)
 
 
+@pytest.mark.capability("background-task")
+@pytest.mark.capability("child-lifecycle")
 @pytest.mark.parametrize("mode", ["configured", "batch", "async", "as_tool", "background"])
 def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, tmp_path, mode):
     entered, release = Event(), Event()
@@ -638,8 +1027,11 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
         drive(store, "control", runtime=rt)
     store._fold_cache = None
     rt = runtime(store, database, parent, config, parent_llm(config))
-    with store.atomic() as tx:
-        tx.push("control", InboxItem("cancel-parent", "control", {"action": "cancel"}, "control/turn/initial"))
+    push_fixture_input(
+        store,
+        "control",
+        InboxItem("cancel-parent", "control", {"action": "cancel"}, "control/turn/initial"),
+    )
     drive(store, "control", runtime=rt)
     ids = [sid for sid in store.list_sessions() if sid != "control"]
     assert len(ids) == (2 if mode == "batch" else 1)
@@ -664,6 +1056,7 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
     )
 
 
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("batch", [False, True])
 def test_configured_async_admission_status_and_late_delivery_parity(store, database, tmp_path, batch):
     entered, release = Event(), Event()
@@ -692,9 +1085,12 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
         handle.join(5)
     for sid in sdk_handle.kernel.store.list_sessions():
         if sid != old.raw_result.session_id:
-            child_rt = sdk_handle.runtime.child_runtime(sdk_handle.kernel.store, sid)
             child_state, _, _ = sdk_handle.kernel.store.read_state(sid)
-            child_result = project_result(sdk_handle.kernel.store, sid, next(reversed(child_state.turns)), runtime=child_rt)
+            child_result = project_result(
+                sdk_handle.kernel.store,
+                sid,
+                next(reversed(child_state.turns)),
+            )
             assert child_result.final_output == "child done"
 
     config = RunConfig(
@@ -724,6 +1120,7 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
     )
 
 
+@pytest.mark.capability("sub-task-status")
 def test_sub_task_status_message_continuation_and_wait_projection_parity(store, database, tmp_path):
     def status(request):
         payload = json.loads(next(m.content for m in request.messages if m.role == "tool"))
@@ -762,8 +1159,8 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
 
     def parent_worker():
         try:
-            with open_store(database) as worker_store:
-                drive(worker_store, "control", runtime=rt)
+            with open_store(database) as raw_store:
+                drive(wrap_fixture_store(raw_store), "control", runtime=rt)
         except BaseException as exc:
             errors.append(exc)
 
@@ -802,6 +1199,8 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
     assert len([r for r in store.read_state(sid)[1] if r.record.kind == "turn_ended"]) == 2
 
 
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 def test_blocking_child_user_wait_is_durable_intentional_difference(store, database, tmp_path, mode):
     @function_tool
@@ -855,6 +1254,7 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
     assert rt.child_tasks(store, "control").get(sid).outcome.final_answer == "child done"
 
 
+@pytest.mark.capability("handoff")
 @pytest.mark.parametrize("blocked", [False, True])
 def test_handoff_target_validation_state_and_events_parity(store, database, tmp_path, blocked):
     seen = []
@@ -944,7 +1344,9 @@ def test_child_admission_closed_fields_and_rollback(store, database, tmp_path, m
     sid = next(s for s in store.list_sessions() if s != "control")
     retained = store.read(sid, limit=1).records[0].record
     assert retained.encode() == canonical_json_bytes(retained.to_dict())
-    created = retained.to_dict()
+    hydration = SessionHydration.from_store(store, tenant_id=store.tenant_id, session_id=sid)
+    hydrated = hydrate_records((store.read(sid, limit=1).records[0],), hydration)[0].record
+    created = retained.to_dict() | {"payload": copy_json(hydrated.payload)}
     admission = created["payload"]["attributes"]["child_admission"]
     if mutation in {"extra", "sub_config", "digest"}:
         if mutation == "extra":
@@ -970,6 +1372,8 @@ def test_child_admission_closed_fields_and_rollback(store, database, tmp_path, m
     assert digest(admission["definition"]) == admission["definition_digest"] or mutation == "digest"
 
 
+@pytest.mark.capability("agent-as-tool")
+@pytest.mark.capability("child-inheritance")
 @pytest.mark.parametrize("mode", ["configured", "as_tool"])
 @pytest.mark.parametrize("budget_stop", [False, True])
 def test_child_inherited_denial_and_budget_execute_real_producers(store, database, tmp_path, mode, budget_stop):
@@ -1006,6 +1410,7 @@ def test_child_inherited_denial_and_budget_execute_real_producers(store, databas
     assert new.status == old.status
 
 
+@pytest.mark.capability("child-lifecycle")
 def test_completion_projection_uses_authenticated_turn_not_later_continuation(store, database, tmp_path, monkeypatch):
     parent = configured()
     parent.model = "parent"
@@ -1050,6 +1455,7 @@ def test_completion_projection_uses_authenticated_turn_not_later_continuation(st
     assert len(builds) == 1, "only the executing parent needs tool registration; child result projection is read-only"
 
 
+@pytest.mark.capability("child-lifecycle")
 @pytest.mark.parametrize("cut", ["before_parent_inbox", "after_parent_inbox", "after_child_ack"])
 def test_sdk_completion_delivery_failure_cut_and_replay_parity(store, database, tmp_path, cut):
     steps = [

@@ -36,7 +36,7 @@ def ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionRe
     if options is not None:
         payload["options"] = options
 
-    from vv_agent.canonical_json import canonical_json_bytes
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
     if (
         len(question.encode("utf-8")) > 16_384

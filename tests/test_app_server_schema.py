@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import vv_agent.app_server.schema as schema_module
 from vv_agent.app_server import ChannelTransport, OutgoingRouter
 from vv_agent.app_server.processor import CLIENT_METHODS
@@ -150,6 +152,7 @@ def test_every_internal_schema_reference_resolves() -> None:
             assert reference.removeprefix("#/$defs/") in definitions, f"{name}: {reference}"
 
 
+@pytest.mark.capability("app-server-schema")
 def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> None:
     from vv_agent.app_server.server import AppServer
 

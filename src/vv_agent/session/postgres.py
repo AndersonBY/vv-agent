@@ -1,163 +1,191 @@
-"""Internal PostgreSQL reference store, bound to caller-owned psycopg v3 connections."""
+"""SDK defaults and host transaction assembly for the actual core PostgreSQL adapter."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from threading import RLock
-from typing import TYPE_CHECKING, Any, LiteralString, cast
+from typing import TYPE_CHECKING, Any, Literal
 
+from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._postgres import CLOCK as CLOCK
+from vv_agent.kernel._postgres import DDL as DDL
+from vv_agent.kernel._postgres import UNBOUND_INTERNAL_BINDING, CorePostgresContentStore, RuntimeBinding, _read_runtime_binding
+from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
+from vv_agent.kernel._postgres import _connection_conninfo as _connection_conninfo
+from vv_agent.kernel._sql import LedgerIntegrityError, _level
+
+from .content_store import AESGCMCipher
+from .reducer import Fold
 from .sql import SQLSessionTx, SQLStore
-from .store import Lease
 
 if TYPE_CHECKING:
     from psycopg import Connection
 
-CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
-DDL = """
-CREATE TABLE sk_session (
-    session_id text PRIMARY KEY,
-    schema_version smallint NOT NULL CHECK (schema_version = 1),
-    parent_session_id text REFERENCES sk_session(session_id), parent_operation_id text,
-    head_seq bigint NOT NULL DEFAULT 0 CHECK (head_seq >= 0),
-    inbox_seq bigint NOT NULL DEFAULT 0 CHECK (inbox_seq >= 0),
-    lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
-    lease_owner text, lease_until_ms bigint,
-    phase text NOT NULL CHECK (phase IN ('idle','active','parked','suspended','closed')),
-    active_turn_id text, next_drive_ms bigint,
-    drive_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (drive_retry_at_ms >= 0), terminal_seq bigint NOT NULL DEFAULT 0,
-    CHECK ((lease_owner IS NULL) = (lease_until_ms IS NULL)),
-    CHECK (terminal_seq BETWEEN 0 AND head_seq)
-);
-CREATE INDEX sk_session_due ON sk_session(next_drive_ms,session_id) WHERE next_drive_ms IS NOT NULL;
-CREATE INDEX sk_session_parent ON sk_session(parent_session_id);
-CREATE TABLE sk_record (
-    session_id text NOT NULL REFERENCES sk_session(session_id), seq bigint NOT NULL CHECK (seq > 0),
-    record_id text NOT NULL, schema_version smallint NOT NULL CHECK (schema_version = 1),
-    kind text NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
-        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
-    turn_id text, operation_id text, attempt integer CHECK (attempt > 0), body bytea NOT NULL,
-    digest text NOT NULL CHECK (length(digest)=64), commit_id text NOT NULL,
-    commit_digest text NOT NULL CHECK (length(commit_digest)=64),
-    commit_position integer NOT NULL CHECK (commit_position >= 0), writer_epoch bigint NOT NULL, created_ms bigint NOT NULL,
-    PRIMARY KEY(session_id,seq), UNIQUE(session_id,record_id), UNIQUE(session_id,commit_id,commit_position)
-);
-CREATE INDEX sk_record_operation ON sk_record(session_id,operation_id,attempt,seq) WHERE operation_id IS NOT NULL;
-CREATE INDEX sk_record_turn ON sk_record(session_id,turn_id,seq);
-CREATE TABLE sk_inbox (
-    session_id text NOT NULL REFERENCES sk_session(session_id), input_id text NOT NULL,
-    input_seq bigint NOT NULL CHECK (input_seq > 0),
-    kind text NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer','child_result',
-        'control','provider_evidence','model_selection')),
-    body bytea NOT NULL, digest text NOT NULL CHECK (length(digest)=64),
-    available_ms bigint NOT NULL, received_ms bigint NOT NULL, consumed_seq bigint,
-    PRIMARY KEY(session_id,input_id), UNIQUE(session_id,input_seq),
-    FOREIGN KEY(session_id,consumed_seq) REFERENCES sk_record(session_id,seq)
-);
-CREATE INDEX sk_inbox_ready ON sk_inbox(session_id,available_ms,input_seq) WHERE consumed_seq IS NULL;
-CREATE TABLE sk_consumer (
-    session_id text NOT NULL REFERENCES sk_session(session_id), consumer text NOT NULL,
-    last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
-    project_retry_at_ms bigint NOT NULL DEFAULT 0 CHECK (project_retry_at_ms >= 0), PRIMARY KEY(session_id,consumer)
-);
--- Commit metadata is necessary for empty/fully overlapping commits and their original head_seq.
--- It owns no execution state; record bodies remain solely in sk_record.
-CREATE TABLE sk_commit (
-    session_id text NOT NULL REFERENCES sk_session(session_id), commit_id text NOT NULL,
-    body bytea NOT NULL, digest text NOT NULL CHECK(length(digest)=64),
-    record_sequences bytea NOT NULL, head_seq bigint NOT NULL CHECK(head_seq >= 0), created_ms bigint NOT NULL,
-    PRIMARY KEY(session_id,commit_id)
-);
-"""
+
+_SETTINGS_LOCK_VIEW = "vv_settings_ceiling"
 
 
-def _connection_conninfo(connection: Connection[Any]) -> str:
-    from psycopg.conninfo import make_conninfo
+class PostgresStore(CorePostgresStore, SQLStore):
+    def __init__(
+        self,
+        connection: Connection[Any],
+        *,
+        tenant_id: str | None = None,
+        runtime_binding: RuntimeBinding | None = None,
+        fold_factory: Callable[[], Fold] = Fold,
+    ):
+        if tenant_id is not None:
+            if runtime_binding is not None and runtime_binding != RuntimeBinding("tenant", tenant_id):
+                raise ValueError("session tenant conflicts with the PostgreSQL runtime binding")
+            runtime_binding = RuntimeBinding("tenant", tenant_id)
+        elif runtime_binding is None:
+            runtime_binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+        super().__init__(connection, fold_factory=fold_factory, runtime_binding=runtime_binding)
+        self._conninfo = _connection_conninfo(connection)
+        if self.credential_tenant_id is not None:
+            self._tenant_id = self.credential_tenant_id
 
-    info = connection.info
-    # ConnectionInfo.dsn deliberately omits the password.
-    return make_conninfo(info.dsn, password=info.password) if info.password else info.dsn
+    def for_tenant(self, tenant_id: str):
+        """Return an explicit tenant view that binds transaction-local RLS context."""
 
+        credential_tenant = self.credential_tenant_id
+        if credential_tenant is not None and tenant_id != credential_tenant:
+            raise ValueError("tenant-isolated PostgreSQL stores cannot be routed to another tenant")
+        return super().for_tenant(tenant_id)
 
-class PostgresStore(SQLStore):
-    """A serialized connection; atomic() nests as a savepoint in host transactions."""
+    def install_schema(self) -> None:
+        super().install_schema()
+        self._ensure_settings_lock_view()
 
-    # Session keys never change. This still serializes writers while allowing
-    # child inserts to retain their parent foreign-key KEY SHARE locks.
-    lock_clause = " FOR NO KEY UPDATE"
-    clock_sql = CLOCK
-
-    def __init__(self, connection: Connection[Any]):
-        self.connection = connection
-        self._connection_lock = RLock()
-
-    def heartbeat_store(self):
-        from psycopg.conninfo import conninfo_to_dict, make_conninfo
-
-        conninfo = _connection_conninfo(self.connection)
-        options = conninfo_to_dict(conninfo).get("options", "")
-        return PostgresStore.standalone(
-            make_conninfo(
-                conninfo,
-                connect_timeout=3,
-                options=f"{options} -c lock_timeout=250ms -c statement_timeout=1000ms",
-            )
+    def _install_runtime_role(
+        self,
+        *,
+        role: str,
+        password: str,
+        mode: Literal["tenant", "worker", "shared-gateway"],
+        tenant_id: str | None,
+    ):
+        self._ensure_settings_lock_view()
+        installed = super()._install_runtime_role(
+            role=role,
+            password=password,
+            mode=mode,
+            tenant_id=tenant_id,
         )
+        self._grant_settings_lock(role)
+        return installed
 
-    @contextmanager
-    def _bound_append(self, lease: Lease) -> Iterator[None]:
-        # Rollback restores settings on failure; success must restore them explicitly.
+    def _ensure_settings_lock_view(self) -> None:
+        from psycopg import sql
+
+        view = sql.Identifier(_SETTINGS_LOCK_VIEW)
         with self._transaction():
-            previous = self._one("SELECT current_setting('lock_timeout'),current_setting('statement_timeout')")
-            self._rows(
-                f"WITH remaining AS (SELECT GREATEST(1,%s-({self.clock_sql})) AS ms) "
-                "SELECT set_config('lock_timeout',ms::text || 'ms',true), "
-                "set_config('statement_timeout',ms::text || 'ms',true) FROM remaining",
-                (lease.expires_at_ms,),
+            self._execute(
+                sql.SQL(
+                    "CREATE OR REPLACE VIEW {} AS "
+                    "SELECT singleton,storage_major,write_level,1::integer AS lock_token "
+                    "FROM sk_settings WHERE singleton=1"
+                ).format(view)
             )
-            yield
-            self._rows(
-                "SELECT set_config('lock_timeout',%s,true),set_config('statement_timeout',%s,true)",
-                previous,
-            )
+            self._execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM PUBLIC").format(view))
+
+    def _grant_settings_lock(self, role: str) -> None:
+        from psycopg import sql
+
+        view = sql.Identifier(_SETTINGS_LOCK_VIEW)
+        runtime_role = sql.Identifier(role)
+        with self._transaction():
+            self._execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM {}").format(view, runtime_role))
+            self._execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(view, runtime_role))
+            # FOR SHARE requires an UPDATE privilege even though the lock does not write.
+            # This view column is constant, so PostgreSQL rejects attempts to update it.
+            self._execute(sql.SQL("GRANT UPDATE (lock_token) ON TABLE {} TO {}").format(view, runtime_role))
+
+    def _write_ceiling(self) -> int:
+        if self.runtime_mode != "unbound-internal":
+            # FOR SHARE requires UPDATE privilege even though it does not write. Use the
+            # base relation where that privilege already exists, otherwise the owner-defined
+            # view supplies the lock without granting runtime roles a writable settings column.
+            can_lock_base = self._one("SELECT has_table_privilege(current_user,'sk_settings','UPDATE')")[0]
+            relation = "sk_settings" if can_lock_base else _SETTINGS_LOCK_VIEW
+            rows = self._rows(f"SELECT storage_major,write_level FROM {relation} WHERE singleton=1 FOR SHARE")
+            if len(rows) != 1 or rows[0][0] != "S1":
+                raise LedgerIntegrityError("settings do not identify an S1 store")
+            return _level(rows[0][1], "write_level")
+        return super()._write_ceiling()
 
     @classmethod
     @contextmanager
-    def standalone(cls, conninfo: str) -> Iterator[PostgresStore]:
-        import psycopg
+    def standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold] = Fold) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+            yield cls(connection, runtime_binding=binding, fold_factory=fold_factory)
 
-        with psycopg.connect(conninfo, autocommit=True) as connection:
-            yield cls(connection)
-
-    def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        from psycopg.rows import tuple_row
-
-        with self._connection_lock, self.connection.cursor(row_factory=tuple_row) as cursor:
-            cursor.execute(cast(LiteralString, query), params, binary=query.lstrip().startswith("SELECT"))
-            return cursor.fetchall() if cursor.description is not None else []
-
+    @classmethod
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
-        try:
-            with self._connection_lock, self.connection.transaction():
-                yield
-        except BaseException:
-            self._fold_cache = None
-            self._previous_prefix = None
-            raise
+    def tenant_standalone(
+        cls,
+        conninfo: str,
+        *,
+        tenant_id: str,
+        fold_factory: Callable[[], Fold] = Fold,
+    ) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, tenant_id=tenant_id, fold_factory=fold_factory)
 
-    def _transaction_id(self) -> object:
-        from psycopg.pq import TransactionStatus
+    @classmethod
+    @contextmanager
+    def worker_standalone(cls, conninfo: str, *, fold_factory: Callable[[], Fold] = Fold) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=RuntimeBinding("worker"), fold_factory=fold_factory)
 
-        if self.connection.info.transaction_status != TransactionStatus.INTRANS:
-            raise RuntimeError("SessionTx requires an open transaction")
-        return self._one("SELECT pg_current_xact_id()::text")[0]
+    @classmethod
+    @contextmanager
+    def shared_gateway_standalone(
+        cls,
+        conninfo: str,
+        *,
+        fold_factory: Callable[[], Fold] = Fold,
+    ) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=RuntimeBinding("shared-gateway"), fold_factory=fold_factory)
 
-    def install_schema(self) -> None:
-        with self._transaction():
-            self._rows(DDL)
+    @classmethod
+    @contextmanager
+    def schema_admin_standalone(
+        cls,
+        conninfo: str,
+        *,
+        fold_factory: Callable[[], Fold] = Fold,
+    ) -> Iterator[PostgresStore]:
+        with cls._connect(conninfo) as connection:
+            yield cls(connection, runtime_binding=UNBOUND_INTERNAL_BINDING, fold_factory=fold_factory)
 
 
 def join_transaction(connection: Connection[Any]) -> SQLSessionTx:
     """Join the host's open transaction; never open a connection or commit it."""
-    return SQLSessionTx(PostgresStore(connection))
+
+    from psycopg.pq import TransactionStatus
+
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("join_transaction requires an open INTRANS PostgreSQL transaction")
+    binding = _read_runtime_binding(connection, allow_unbound_internal=False)
+    return SQLSessionTx(PostgresStore(connection, runtime_binding=binding))
+
+
+class PostgresContentStore(CorePostgresContentStore):
+    """SDK PostgreSQL adapter with the production cipher bound by default."""
+
+    def __init__(
+        self,
+        source: PostgresStore | SQLSessionTx | Connection[Any],
+        key_provider: KeyProvider,
+        *,
+        provider_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            source,
+            key_provider,
+            AESGCMCipher(),
+            provider_id=provider_id,
+        )

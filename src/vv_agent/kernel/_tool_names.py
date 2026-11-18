@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+ASK_USER_TOOL_NAME = "ask_user"
+READ_FILE_TOOL_NAME = "read_file"
+WRITE_FILE_TOOL_NAME = "write_file"
+FIND_FILES_TOOL_NAME = "find_files"
+EDIT_FILE_TOOL_NAME = "edit_file"
+SEARCH_FILES_TOOL_NAME = "search_files"
+BASH_TOOL_NAME = "bash"
+CHECK_BACKGROUND_COMMAND_TOOL_NAME = "check_background_command"
+STOP_BACKGROUND_COMMAND_TOOL_NAME = "stop_background_command"
+CREATE_SUB_TASK_TOOL_NAME = "create_sub_task"
+SUB_TASK_STATUS_TOOL_NAME = "sub_task_status"
+TODO_WRITE_TOOL_NAME = "todo_write"
+READ_IMAGE_TOOL_NAME = "read_image"
+FILE_INFO_TOOL_NAME = "file_info"
+ACTIVATE_SKILL_TOOL_NAME = "activate_skill"
+
+# Contract workspace-tool order, shared by planning and generated schema exports.
+WORKSPACE_TOOLS = [
+    FIND_FILES_TOOL_NAME,
+    FILE_INFO_TOOL_NAME,
+    READ_FILE_TOOL_NAME,
+    WRITE_FILE_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
+    SEARCH_FILES_TOOL_NAME,
+    TODO_WRITE_TOOL_NAME,
+]

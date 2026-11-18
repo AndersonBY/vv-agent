@@ -1,0 +1,258 @@
+"""Pure microcompaction planning requests host estimates while suspended."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Generator, Mapping
+from dataclasses import dataclass, replace
+from typing import Any
+
+from vv_agent.kernel import _summary_compaction
+from vv_agent.kernel._compaction_text import (
+    build_compacted_tool_content,
+    has_recovery_envelope,
+    is_microcompacted_tool_content,
+)
+from vv_agent.kernel._compaction_threshold import compute_compaction_threshold
+from vv_agent.kernel._context_messages import atomic_start
+from vv_agent.kernel._message_values import Message, ToolArtifactRef
+from vv_agent.kernel._microcompaction_policy import MicrocompactionPolicy
+from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
+from vv_agent.kernel._tool_metadata import ToolResultRetention
+
+EXCERPT_METADATA_KEY = "_vv_agent_microcompact_excerpt"
+
+
+@dataclass(frozen=True, slots=True)
+class MicrocompactCandidate:
+    message_index: int
+    tool_name: str
+    tool_call_id: str
+    existing_artifact: ToolArtifactRef | None
+    estimated_reclaimable_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class MicrocompactPlan:
+    candidates: tuple[MicrocompactCandidate, ...] = ()
+    current_tokens: int = 0
+    target_tokens: int = 0
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.candidates)
+
+    @property
+    def estimated_reclaimable_tokens(self) -> int:
+        return sum(candidate.estimated_reclaimable_tokens for candidate in self.candidates)
+
+
+def plan_microcompact(
+    messages: list[Message],
+    *,
+    current_cycle: int,
+    current_tokens: int,
+    target_tokens: int,
+    policy: MicrocompactionPolicy,
+    result_retentions: Mapping[str, ToolResultRetention],
+    artifact_path_estimate_for: Callable[[str], str],
+    excerpt_head_chars: int = 200,
+    excerpt_tail_chars: int = 200,
+    model: str = "",
+) -> Generator[TokenCount, int, MicrocompactPlan]:
+    if not messages or current_tokens <= target_tokens:
+        return MicrocompactPlan(current_tokens=max(current_tokens, 0), target_tokens=max(target_tokens, 0))
+
+    del current_cycle
+    tool_call_names: dict[str, str] = {}
+    inferred_cycles = _infer_message_cycles(messages)
+    max_inferred_cycle = inferred_cycles[-1] if inferred_cycles else 0
+    effective_current_cycle = max_inferred_cycle + 1
+    protected_cycle = max(effective_current_cycle - policy.keep_recent_cycles, 0)
+    candidates: list[MicrocompactCandidate] = []
+
+    for index, (message, inferred_cycle) in enumerate(zip(messages, inferred_cycles, strict=False)):
+        if message.role == "assistant":
+            tool_call_names = _build_tool_call_name_map([message])
+        tool_name = _candidate_tool_name(
+            message,
+            inferred_cycle=inferred_cycle,
+            protected_cycle=protected_cycle,
+            min_result_chars=policy.min_result_chars,
+            tool_call_names=tool_call_names,
+            result_retentions=result_retentions,
+        )
+        if tool_name is None:
+            continue
+        tool_call_id = str(message.tool_call_id or "").strip()
+        existing_artifact = _existing_artifact(message)
+        try:
+            artifact_path = existing_artifact.path if existing_artifact is not None else artifact_path_estimate_for(tool_call_id)
+        except StopIteration as error:
+            raise _StopIterationTransport(error) from error
+        excerpt_value = message.metadata.get(EXCERPT_METADATA_KEY)
+        excerpt_source = excerpt_value if isinstance(excerpt_value, str) else message.content
+        marker = build_compacted_tool_content(
+            excerpt_source,
+            artifact_path=artifact_path,
+            tool_name=tool_name,
+            excerpt_head_chars=excerpt_head_chars,
+            excerpt_tail_chars=excerpt_tail_chars,
+        )
+        marker_message = replace(message, content=marker)
+        original_tokens = yield TokenCount(message, model)
+        marker_tokens = yield TokenCount(marker_message, model)
+        reclaimable = max(original_tokens - marker_tokens, 0)
+        if reclaimable == 0:
+            continue
+        candidates.append(
+            MicrocompactCandidate(
+                message_index=index,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                existing_artifact=existing_artifact,
+                estimated_reclaimable_tokens=reclaimable,
+            )
+        )
+
+    return MicrocompactPlan(
+        candidates=tuple(candidates),
+        current_tokens=max(current_tokens, 0),
+        target_tokens=max(target_tokens, 0),
+    )
+
+
+def replace_with_compacted_marker(
+    message: Message,
+    candidate: MicrocompactCandidate,
+    *,
+    artifact: ToolArtifactRef,
+    marker: str,
+) -> Message:
+    return _replace_content(
+        message,
+        marker,
+        artifact=artifact,
+        tool_name=candidate.tool_name,
+    )
+
+
+def _candidate_tool_name(
+    message: Message,
+    *,
+    inferred_cycle: int,
+    protected_cycle: int,
+    min_result_chars: int,
+    tool_call_names: dict[str, str],
+    result_retentions: Mapping[str, ToolResultRetention],
+) -> str | None:
+    if message.role != "tool" or inferred_cycle >= protected_cycle:
+        return None
+    if len(message.content) <= min_result_chars or is_microcompacted_tool_content(message.content):
+        return None
+    if _existing_artifact(message) is None and has_recovery_envelope(message.content):
+        return None
+    tool_name = tool_call_names.get(str(message.tool_call_id or "").strip())
+    if tool_name is None:
+        return None
+    if result_retentions.get(tool_name, ToolResultRetention.ARCHIVE) == ToolResultRetention.PRESERVE:
+        return None
+    return tool_name
+
+
+def _replace_content(
+    message: Message,
+    content: str,
+    *,
+    artifact: ToolArtifactRef,
+    tool_name: str,
+) -> Message:
+    del tool_name
+    metadata = dict(message.metadata)
+    metadata.pop(EXCERPT_METADATA_KEY, None)
+    return replace(message, content=content, metadata=metadata, artifact_ref=artifact)
+
+
+def _existing_artifact(message: Message) -> ToolArtifactRef | None:
+    return message.artifact_ref if isinstance(message.artifact_ref, ToolArtifactRef) else None
+
+
+def _build_tool_call_name_map(messages: list[Message]) -> dict[str, str]:
+    tool_call_names: dict[str, str] = {}
+    for message in messages:
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        for tool_call in message.tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_call_id = str(tool_call.get("id") or "").strip()
+            function_payload = tool_call.get("function")
+            if not tool_call_id or not isinstance(function_payload, dict):
+                continue
+            tool_name = str(function_payload.get("name") or "").strip()
+            if tool_name:
+                tool_call_names[tool_call_id] = tool_name
+    return tool_call_names
+
+
+def _infer_message_cycles(messages: list[Message]) -> list[int]:
+    current_cycle = 0
+    inferred_cycles: list[int] = []
+    for message in messages:
+        if message.role == "assistant" and message.name != "memory_summary":
+            current_cycle += 1
+        inferred_cycles.append(current_cycle)
+    return inferred_cycles
+
+
+def estimate_tool_artifact_path(tool_call_id: str) -> str:
+    del tool_call_id
+    return ".vv-agent/artifacts/estimate/call-00000000000000000000000000000000.txt"
+
+
+def plan_memory_microcompact(
+    messages: list[Message],
+    *,
+    cycle_index: int | None,
+    current_tokens: int,
+    settings: Mapping[str, Any],
+    protected_start: int | None,
+    recovery_tool_available: bool,
+    artifact_path_estimate_for: Callable[[str], str],
+    model: str = "",
+) -> Generator[TokenCount, int, MicrocompactPlan | None]:
+    if not recovery_tool_available or cycle_index is None:
+        return None
+    threshold = compute_compaction_threshold(
+        configured_threshold=settings["compact_threshold"],
+        model_context_window=settings["model_context_window"],
+        reserved_output_tokens=settings["reserved_output_tokens"],
+        autocompact_buffer_tokens=settings["autocompact_buffer_tokens"],
+    )
+    if threshold <= 0:
+        return None
+    policy = MicrocompactionPolicy.from_dict(settings["microcompaction_policy"])
+    trigger = int(threshold * policy.trigger_ratio)
+    if trigger <= 0 or current_tokens <= trigger:
+        return None
+    plan = yield from plan_microcompact(
+        messages,
+        current_cycle=cycle_index,
+        current_tokens=current_tokens,
+        target_tokens=int(threshold * policy.target_ratio),
+        policy=policy,
+        result_retentions=settings["tool_result_retentions"],
+        artifact_path_estimate_for=artifact_path_estimate_for,
+        model=model,
+        excerpt_head_chars=settings["tool_result_excerpt_head"],
+        excerpt_tail_chars=settings["tool_result_excerpt_tail"],
+    )
+    if protected_start is not None:
+        start = atomic_start(messages, protected_start)
+        plan = replace(plan, candidates=tuple(c for c in plan.candidates if c.message_index < start))
+    if current_tokens > threshold:
+        parts = _summary_compaction._summary_parts(messages, settings["keep_recent_messages"], protected_start=protected_start)
+        if parts is None:
+            return None
+        protected = {id(message) for message in parts[3]}
+        plan = replace(plan, candidates=tuple(c for c in plan.candidates if id(messages[c.message_index]) not in protected))
+    return plan

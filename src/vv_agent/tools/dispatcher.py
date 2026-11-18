@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-from typing import Any
-
+from vv_agent.kernel._tool_admission import _error_result, _parse_arguments
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.outcomes import HostToolOutcome
 from vv_agent.tools.registry import ToolNotFoundError, ToolRegistry
@@ -14,49 +12,6 @@ def _needs_tool_call_id(value: str | None) -> bool:
         return True
     stripped = value.strip()
     return stripped == "" or stripped == "pending"
-
-
-def _error_result(tool_call_id: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        tool_call_id=tool_call_id,
-        status_code=ToolResultStatus.ERROR,
-        error_code=error_code,
-        content=json.dumps({"ok": False, "error": message, "error_code": error_code}, ensure_ascii=False),
-    )
-
-
-def _parse_arguments(
-    tool_call_id: str,
-    raw_arguments: Any,
-) -> tuple[dict[str, Any], ToolExecutionResult | None]:
-    if raw_arguments is None:
-        return {}, None
-
-    if isinstance(raw_arguments, dict):
-        return raw_arguments, None
-
-    if isinstance(raw_arguments, str):
-        stripped = raw_arguments.strip()
-        if not stripped:
-            return {}, None
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            return {}, _error_result(tool_call_id, f"Invalid tool arguments JSON: {exc}", error_code="invalid_arguments_json")
-
-        if isinstance(parsed, dict):
-            return parsed, None
-        return {}, _error_result(
-            tool_call_id,
-            "Tool arguments must decode to an object",
-            error_code="invalid_arguments_payload",
-        )
-
-    return {}, _error_result(
-        tool_call_id,
-        f"Unsupported tool argument type: {type(raw_arguments).__name__}",
-        error_code="invalid_arguments_type",
-    )
 
 
 def dispatch_tool_call(

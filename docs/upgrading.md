@@ -2,15 +2,141 @@
 
 This guide is for hosts that keep sessions in a durable store (SQLite file or
 PostgreSQL) and want to move to a newer vv-agent release. If your runs only use
-the default in-memory store, upgrading is an ordinary dependency bump; read the
-[version notes](#version-notes) for API changes and skip the rest.
+the driver-owned temporary SQLite file, upgrading is an ordinary dependency
+bump; read the [version notes](#version-notes) for API changes and skip the
+rest. The temporary file exists only for the driver lifetime. An explicit
+`:memory:` session store is rejected.
 
 ## Session data and upgrades
 
-vv-agent reads exactly one version of each stored shape. There are no decoders
-for older versions and no in-place migrations. When a release bumps the record
-or inbox schema, the new runtime rejects rows written by the old one with
-`RecordError`. That covers finished sessions too, not only running ones.
+The unreleased 0.36 line introduces the S1 store boundary. S1 records and inbox
+items use `schema_version: "S1"`. The SQLite schema uses
+`PRAGMA user_version` 4 and `sk_settings.storage_major='S1'`. The initial
+database write level is 1; operations may raise it later to enable additive
+formats. PostgreSQL uses the same storage major and exact table set. Missing,
+stale, unknown or partially initialized schemas are not selected for
+compatibility, and old rows are not rewritten in place. SQLite also compares a
+versioned fingerprint of the tables, columns, constraints and indexes that form
+its read/write contract, so a matching table list cannot hide schema drift.
+
+Within S1, a release may add optional fields, enum values and record kinds only
+with a higher feature level. The defaults for omitted additions must preserve
+the previous behavior. Unknown fields and kinds remain rejected by the closed
+codec and reducer, and removing or changing an existing field still requires a
+new store major and the full boundary procedure below.
+
+For a rolling upgrade, install the same S1 schema, start workers configured for
+their maximum supported level, and keep the database `write_level` at its old
+value until every worker that can claim work has been upgraded. Then raise
+`write_level` transactionally. A worker below a session's level skips the
+session when claiming work and is fenced from renewing its lease, appending,
+deferring work or advancing a consumer projection. It may release an existing
+lease so an upgraded worker can take over. The worker level is a capability
+gate; it does not replace the database write ceiling or the exact schema checks.
+
+A host moving a worker to `SessionDriver` must replace any cached runtime with
+its per-claim `runtime_factory` and rebuild callbacks against that claim's drive
+store. The host must redeclare its worker level, accepted handler versions and
+complete trusted capability set, including configured statically reachable
+sub-agents. Persisted bootstrap and input requirements cannot supplement that
+declaration. See [runtime factory](host-integration.md#runtime-factory) for the
+exact signature and connection obligations.
+
+Tenant identity is part of the persisted key. Session, record, inbox, consumer,
+commit, checkpoint, key, content, content-link and tombstone rows carry
+`tenant_id`, with composite tenant/session keys and foreign keys. A
+`SessionSpec` carries a closed principal (`tenant_id`, `subject_id`,
+`subject_kind` and a content reference for principal attributes); an
+`InboxItem` carries an `actor` principal, and host ingress requires that actor
+to use the session tenant. The tenant-bound store facade scopes its SQL
+operations by `tenant_id`. The low-level codec validates each shape; it does
+not itself authenticate a tenant or repair a mismatched actor.
+
+That facade is an application routing boundary. The base S1 DDL intentionally
+does not install tenant roles or enable RLS. A deployment that claims database
+credential isolation must call the explicit tenant installer after schema
+creation and open runtime sessions through tenant startup validation. See
+[PostgreSQL tenant RLS](postgres-rls.md). A shared gateway remains an explicitly
+weaker trust mode and does not provide tenant credential isolation.
+
+S1 stores content positions as `ContentRef` values instead of host, user or
+model plaintext. A provider-bound SQLite or PostgreSQL store now creates the
+session data key, encrypts session creation, input and record content, records
+the owning slot link, and verifies the tenant, session, key, size, labels, HMAC
+and AEAD authentication tag when reading it back. Kernel, projection and App
+Server paths hydrate declared content slots through that store, including
+nested links and records reopened from a durable file. Missing links, an
+unbound key provider, a cross-tenant or cross-session reference, tampering and
+an unavailable or destroying key fail closed.
+
+The included `LocalKeyProvider` is for development and tests. Production hosts
+must inject a key provider whose wrapped-key storage, credential isolation and
+irreversible destroy operation meet their security model. Content follows the
+links created by the runtime; arbitrary plaintext in an undeclared field is not
+protected by this path. The development provider now persists non-secret key
+lifecycle state in SQLite instead of process memory. Preserve its `state_path`
+file, or the file selected by `VV_AGENT_LOCAL_KEY_STATE`, across restarts so a
+destroyed key cannot be unwrapped by a new process. Omitting or losing that state
+fails closed; it does not make wrapped keys readable again.
+
+Durable `SessionDriver` and `AppServer` stores must receive an explicit
+`content_key_provider`. Only a driver-owned ephemeral SQLite store gets a
+temporary development provider, which is removed when the driver closes.
+
+S1 key wrapping, content AAD and content HMAC now include versioned purpose and
+tenant/session framing. Content and wrapped keys created before this W2d framing
+are not accepted by this branch. The branch remains an unreleased S1 cutover, so
+hosts must create a fresh exact S1 store rather than carrying an earlier local S1
+file across this revision.
+
+Authenticity is a separate opt-in boundary. A signed deployment configures the
+ledger signer before opening a SQL connection. It writes one checkpoint for
+each record from `session_created` onward and signs the complete immutable inbox
+envelope, including original sequence, receive time and body digest. Recovery
+and append verify those proofs before signing new bytes. Missing or invalid
+proofs, a partial checkpoint set or a signing key that does not match its
+identifier fail closed and roll back the attempted transaction. Historical
+checkpoints, input proofs and tombstones remain verifiable after key rotation
+when the injected verifier retains their public keys.
+
+An independently retained `expected_head` must be supplied to read, append,
+verify or export when the caller needs protection from deletion of the latest
+signed tail. Without that external anchor, retained altered bytes are detected
+by the chain and signatures, but the result makes no rollback or complete-tail
+claim. Structural hashes and explicitly configured `allow_unsigned` hash-only
+mode establish only hash consistency; they do not establish database tamper
+resistance, historical authenticity or input identity/approval attribution.
+Signed evidence cannot be exported in that hash-only mode.
+
+The `vv-agent ledger verify` command exposes the local SQLite hash-only path.
+It requires `--session` or `--tenant` and only proceeds without an independent
+`expected_head` when `--allow-unsigned` is explicit. The CLI has no verifier or
+KMS credential loader, so signed verification fails closed with an
+unconfigured-verifier diagnostic. Before selecting hash-only mode it scans only
+the target sessions and rejects any checkpoint or admission proof with
+`signed_evidence_requires_host_verifier`. A tenant run is scoped to that tenant.
+An exact expected head can establish suffix completeness for one session;
+without it the JSON result reports `suffix_completeness: false`.
+
+`SessionDeletionStore` provides explicit, fenced forget and purge operations
+with cascading tombstones and key/content destruction, but the runtime does not
+schedule retention or expose an implicit public deletion operation. Callers
+must provide an authorized actor and a signer unless they deliberately accept
+the documented `allow_unsigned` hash-only mode. Provider copies, host tables,
+logs and backups outside the store remain separate retention domains. A SQL row
+backed by an external object locator is not
+considered deleted until the host attaches an idempotent object cleaner and that
+cleaner succeeds. Missing capability and unknown or failed remote outcomes stop
+the deletion with the session still fenced and retryable.
+
+The S1 upgrade boundary remains strict. There are no decoders for pre-S1
+versions, no import tool and no in-place migration on this branch. The new
+runtime rejects old record and inbox envelopes; a store file or PostgreSQL
+schema that fails the exact S1 checks is also rejected. Those rules cover
+finished sessions as well as running ones. Hosts must quiesce and copy the
+product history they need before crossing the boundary, then use a fresh exact
+S1 store. An old runtime cannot read S1 rows, and rollback cannot make those
+rows old-compatible.
 
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
@@ -33,8 +159,9 @@ the cursor commit together and a replay writes the same rows again. Record the
 vv-agent version that produced the session next to the copy; you will want it
 when you upgrade.
 
-vv-agent does not yet ship a versioned export format for this. Hosts own the
-shape of their copy.
+vv-agent ships a versioned S1 skeleton export for this. Use `export_session`
+for the verified ledger/archive form described below; hosts still own the shape
+of any product projection or UI history copy.
 
 ### When a session no longer needs the store
 
@@ -77,6 +204,21 @@ old-version session.
 
 ## Version notes
 
+### 0.36.0 — Unreleased
+
+**Store boundary**: P2 S1 changes the logical record and inbox envelopes from
+record schema 1 and inbox schema 3 to `schema_version: "S1"`. It changes the
+SQL layouts to tenant-scoped composite keys, sets SQLite `user_version` to 4,
+and makes the principal, actor and content-reference shapes closed. Pre-S1
+stored bytes, IDs, digests and SQL layouts are not compatible with S1, and no
+migration or import tool is provided.
+
+The unreleased S1 branch contains tenant-bound routing, encrypted content,
+fenced forget/purge, checkpoint and input-admission verification, and the
+fail-closed ledger verifier. The development `LocalKeyProvider` is not a
+production key service. Hash-only mode is structural consistency only; it does
+not prove authenticity, and no import or in-place migration is provided.
+
 ### 0.35.4 — 2026-11-15
 
 The default runtime lease TTL is now 60 seconds (`Runtime.ttl_ms`). File-backed
@@ -85,6 +227,7 @@ bounded lock retry window. Hosts that set explicit `ttl_ms` values keep their
 existing behavior; no session store or wire migration is required.
 
 See the [release notes](releases/0.35.4.md).
+
 
 ### 0.35.0 — 2026-11-12
 
@@ -566,7 +709,7 @@ with real PostgreSQL, review the formatter, model routing and tokenizer
 boundaries, then add the exact version pair to the verified set. Versions are
 listed individually; a newer version is not assumed safe. The gates are
 `_VERIFIED_DEEPSEEK_VERSIONS` and `_VERIFIED_TIKTOKEN_VERSIONS` in
-`memory/token_utils.py`. The repository lock
+`src/vv_agent/_token_counting.py`. The repository lock
 uses vv-llm 0.8.5, deepseek-tokenizer 0.3.0, tiktoken 0.14.0 and
 qwen-tokenizer 0.3.0.
 
@@ -793,7 +936,7 @@ the [contract 24.0.0 changelog](https://github.com/AndersonBY/vv-agent-contract/
 | `ApprovalSnapshot`, `RunResult.approval_snapshot` | Pending approvals on the live handle or session, and App Server approval requests |
 | `Runner.start_distributed`, `start_distributed_compiled`, `finalize_distributed` | The host creates a session and pushes inputs with stable IDs; a worker calls `drive`; consumers project committed records |
 | `AgentRuntime`, `ToolCallRunner` | `Runner.run_sync`, `Runner.start`, `Runner.stream_sync`; low-level code uses `session.kernel.drive` with `session.runtime.Runtime` |
-| `ExecutionBackend`, `InlineBackend`, `ThreadBackend`, `CeleryBackend.start/advance` | One kernel driver. `RunHandle` runs locally in the background; the host's queue dispatches workers |
+| `ExecutionBackend`, `InlineBackend`, `ThreadBackend`, `CeleryBackend.start/advance` | One kernel driver. `SessionDriver` owns a `LocalWorker`; `RunHandle` submits inbox work and reads the durable cursor, while the host queue may dispatch separate workers |
 
 ```python
 # Before

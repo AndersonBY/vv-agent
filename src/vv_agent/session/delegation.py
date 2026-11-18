@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import time
+from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -16,6 +15,12 @@ from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskSna
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.config import project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME
+from vv_agent.kernel._child_delegation import error as error
+from vv_agent.kernel._child_delegation import success as success
+from vv_agent.kernel._child_store import (
+    _store_tenant_id,
+    ordinary_result_for_children,
+)
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -24,8 +29,15 @@ from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.handlers.sub_agents import create_sub_task
+from vv_agent.tools.handlers.sub_task_status import (
+    SubTaskStatusRequest,
+    parse_sub_task_status,
+    snapshot_sub_task_status,
+    sub_task_status,
+)
+from vv_agent.tools.handlers.sub_task_status import _add_wait_metadata as add_wait_metadata
 from vv_agent.tools.handlers.sub_task_status import _error as status_error
-from vv_agent.tools.handlers.sub_task_status import sub_task_status
+from vv_agent.tools.handlers.sub_task_status import _running_task_ids as running_task_ids
 from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import (
@@ -43,7 +55,15 @@ from vv_agent.workspace import DiscoveryFilteredWorkspaceBackend
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
-from .records import CHILD_ADMISSION, InboxItem, Record, SessionSpec, copy_json, digest, validate
+from .content_runtime import (
+    INPUT_ACTOR_ATTRIBUTES,
+    INPUT_CONTENT,
+    SessionContentWriter,
+    durable_content_reader,
+)
+from .projection import SessionHydration, hydrate_records
+from .providers import Accepted, Definitive, Outcome, Unknown
+from .records import CHILD_ADMISSION, InboxItem, Record, copy_json, validate
 from .reducer import ExecutionState
 from .result import project_result
 from .store import Conflict, SessionStore, StoredRecord
@@ -54,15 +74,14 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 
-def error(code: str, message: str) -> ToolExecutionResult:
-    payload = {"ok": False, "error": message, "error_code": code}
-    return ToolExecutionResult(
-        "", json.dumps(payload, ensure_ascii=False), ToolResultStatus.ERROR, error_code=code, metadata=payload
-    )
+def _hydrated_records(store: SessionStore, sid: str, records):
+    hydration = SessionHydration.from_store(store, tenant_id=_store_tenant_id(store), session_id=sid)
+    return hydrate_records(records, hydration)
 
 
-def success(payload: dict[str, Any]) -> ToolExecutionResult:
-    return ToolExecutionResult("", json.dumps(payload, ensure_ascii=False), metadata=payload)
+def _created_record(store: SessionStore, sid: str) -> Record:
+    stored = store.read(sid, limit=1).records[0]
+    return _hydrated_records(store, sid, (stored,))[0].record
 
 
 def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:
@@ -70,6 +89,8 @@ def register_adapters(runtime: Runtime, registry: ToolRegistry) -> None:
         executor = registry.get_executor("sub_task_status")
         if isinstance(executor, RegistryToolExecutor) and executor.handler is sub_task_status:
             executor.handler = child_status
+    if SUB_TASK_STATUS_TOOL_NAME not in runtime.providers:
+        runtime.providers[SUB_TASK_STATUS_TOOL_NAME] = SubTaskStatusProvider(runtime)
     register_handoffs(runtime, registry)
 
 
@@ -136,14 +157,19 @@ def register_handoffs(runtime: Runtime, registry: ToolRegistry) -> None:
 
 
 def configured_agent(runtime: Runtime, name: str, sub: SubAgentConfig) -> Agent:
+    return _configured_agent_for(runtime.agent, name, sub)
+
+
+def _configured_agent_for(parent: Agent, name: str, sub: SubAgentConfig) -> Agent:
     # Handlers remain host bindings; policy and prompt come from the admitted definition.
     return Agent(
         name,
         sub.system_prompt or sub.description or "Complete the delegated task.",
         model=sub.model,
+        metadata=copy_json(parent.metadata),
         tools=[
             tool
-            for tool in runtime.agent.tools
+            for tool in parent.tools
             if not isinstance(tool, FunctionTool) or tool.metadata.get("mode") not in {"agent_as_tool", "background_task"}
         ],
         max_cycles=max(1, sub.max_cycles),
@@ -165,19 +191,39 @@ def target_agent(runtime: Runtime, selector: str, mode: str, sub_config=None) ->
 
 
 def child_config(runtime: Runtime, context: ToolContext, agent: Agent, mode: str, sub: SubAgentConfig | None = None):
-    config = replace(
+    return _child_config(
         runtime.config,
+        mode,
+        sub,
+        shared_state=runtime.durable_state(context.shared_state),
+        workspace=context.workspace,
+        workspace_backend=context.workspace_backend,
+    )
+
+
+def _child_config(
+    config: RunConfig,
+    mode: str,
+    sub: SubAgentConfig | None,
+    *,
+    shared_state: dict[str, Any] | None,
+    workspace: str | Path | None,
+    workspace_backend: Any | None,
+) -> RunConfig:
+    config = replace(
+        config,
         model=None,
         model_settings=None,
+        metadata={**copy_json(config.metadata), **(copy_json(sub.metadata) if sub else {})},
         stream=None,
-        shared_state=runtime.durable_state(context.shared_state),
+        shared_state=shared_state,
         initial_messages=None,
         before_cycle_messages=None,
         interruption_messages=None,
         cancellation_token=None,
         host_cost_meter=None,
-        workspace=context.workspace,
-        workspace_backend=context.workspace_backend,
+        workspace=workspace,
+        workspace_backend=workspace_backend,
     )
     if sub:
         policy = merge_tool_policies(
@@ -204,195 +250,73 @@ def child_config(runtime: Runtime, context: ToolContext, agent: Agent, mode: str
     return config
 
 
+@dataclass(frozen=True, slots=True)
+class _StaticChildDeclaration:
+    agent: Agent
+    config: RunConfig
+
+
+def _static_child_declarations(parent: Agent, config: RunConfig) -> Iterator[_StaticChildDeclaration]:
+    """Return child agents and their effective trusted configuration without a Runtime."""
+
+    for name, sub in parent.sub_agents.items():
+        agent = _configured_agent_for(parent, name, sub)
+        yield _StaticChildDeclaration(
+            agent,
+            _child_config(
+                config,
+                "configured",
+                sub,
+                shared_state=None,
+                workspace=None,
+                workspace_backend=None,
+            ),
+        )
+    for transfer in parent.handoffs:
+        yield _StaticChildDeclaration(
+            transfer.agent,
+            _child_config(
+                config,
+                "handoff",
+                None,
+                shared_state=None,
+                workspace=None,
+                workspace_backend=None,
+            ),
+        )
+    for tool in parent.tools:
+        metadata = tool.metadata if isinstance(tool.metadata, Mapping) else {}
+        agent = metadata.get("agent")
+        if isinstance(agent, Agent):
+            mode = metadata.get("mode")
+            yield _StaticChildDeclaration(
+                agent,
+                _child_config(
+                    config,
+                    mode if isinstance(mode, str) else "agent_as_tool",
+                    None,
+                    shared_state=None,
+                    workspace=None,
+                    workspace_backend=None,
+                ),
+            )
+
+
 def assemble(
     runtime: Runtime, plan: Record, context: ToolContext, task: AgentTask, store: SessionStore
 ) -> list[ChildSession] | ToolExecutionResult | None:
-    name, args = plan._payload["request"]["name"], copy_json(plan._payload["request"]["arguments"])
-    executor = runtime.registry.get_executor(name) if runtime.registry.has_executor(name) else None
-    mode = executor.metadata.get("mode") if executor else None
-    transfer = next((t for t in runtime.agent.handoffs if t.tool_name == name), None)
-    if transfer:
-        mode = "handoff"
-    requests = []
-    sub = None
-    background = mode == "background_task"
-    if name == "create_sub_task" and task.sub_agents:
-        mode = "configured"
-        wait = args.get("wait_for_completion", True)
-        if not isinstance(wait, bool):
-            return error("invalid_tool_arguments", "`wait_for_completion` must be a boolean")
-        background = not wait
+    from vv_agent.kernel._child_delegation import assemble as assemble_steps
 
-        def collect(request):
-            requests.append(request)
-            if request.agent_name not in task.sub_agents:
-                return SubTaskOutcome(
-                    "pending",
-                    request.agent_name,
-                    AgentStatus.FAILED,
-                    completion_reason=CompletionReason.FAILED,
-                    error=f"Unknown sub-agent {request.agent_name!r}. Available: {', '.join(sorted(task.sub_agents))}",
-                    error_code="sub_task_failed",
-                )
-            return SubTaskOutcome("pending", request.agent_name, AgentStatus.COMPLETED)
+    from ._dispatch_delegation import ChildCompilationHost
 
-        parsed = create_sub_task(replace(context, sub_task_runner=collect), args | {"wait_for_completion": True})
-        if parsed.status_code == ToolResultStatus.ERROR:
-            return parsed
-        selector = requests[0].agent_name
-        sub = task.sub_agents.get(selector)
-        if sub is None:
-            return error("sub_task_failed", f"Unknown sub-agent {selector!r}. Available: {', '.join(sorted(task.sub_agents))}")
-    elif mode in {"agent_as_tool", "background_task"}:
-        selector = name
-
-        if context.ctx is not None:
-            context.ctx.metadata.setdefault("_vv_agent_input", task.user_prompt)
-        try:
-            prompt = child_agent_prompt(arguments=args, context=context)
-        except ValueError as exc:
-            return error("invalid_tool_arguments", str(exc))
-        requests = [SubTaskRequest(name, prompt)]
-    elif mode == "handoff":
-        selector = name
-        value = args.get("input")
-        if set(args) != {"input"} or not isinstance(value, str) or not value.strip():
-            return error("invalid_handoff_arguments", "handoff requires a non-empty input string and no additional arguments")
-        requests = [SubTaskRequest(name, value.strip())]
-    else:
-        return None
-    assert isinstance(mode, str)
-    created = store.read(plan.session_id, limit=1).records[0].record
-    parent_admission = created._payload["attributes"].get("child_admission", {})
-    count = parent_admission.get("handoff_count", 0)
-    maximum = parent_admission.get(
-        "max_handoffs", task.metadata.get("vv_session", {}).get("max_handoffs", runtime.config.max_handoffs)
-    )
-    assert maximum is not None
-    if mode == "handoff" and count >= maximum:
-        result = error("maximum_handoffs_exceeded", "maximum handoff depth exceeded")
-        result.directive = ToolDirective.FINISH
-        result.metadata["mode"] = "handoff"
-        return result
-    agent = target_agent(runtime, selector, mode, sub.to_dict() if sub else None)
-    if mode == "handoff" and agent.name != task.metadata.setdefault("vv_session", {})["handoff_targets"][selector]:
-        return error("handler_schema_or_capability_mismatch", "handoff target differs from frozen definition")
-    result = []
-    for index, request in enumerate(requests):
-        sid = (
-            f"{plan.session_id}/child/{digest({'operation_id': plan.operation_id, 'attempt': plan.attempt, 'index': index})[:24]}"
-        )
-        tid = f"{sid}/turn/start"
-        config = child_config(runtime, context, agent, mode, sub)
-        if request.exclude_files_pattern:
-            config = replace(
-                config,
-                workspace_backend=DiscoveryFilteredWorkspaceBackend(context.workspace_backend, request.exclude_files_pattern),
-            )
-        child_rt = runtime.for_agent(agent, config)
-        child_task = child_rt.compile(request.task_description, tid)
-        child_task.task_id = tid
-        if sub:
-            metadata = (
-                copy_json(child_task.metadata)
-                | {
-                    key: copy_json(task.metadata[key])
-                    for key in (
-                        "bash_shell",
-                        "windows_shell_priority",
-                        "bash_env",
-                        "allow_outside_workspace_paths",
-                        "language",
-                        "available_skills",
-                        "active_skills",
-                    )
-                    if task.metadata.get(key) is not None
-                }
-                | sub.metadata
-                | request.metadata
-                | {
-                    "is_sub_task": True,
-                    "parent_task_id": task.task_id,
-                    "sub_agent_name": selector,
-                    "parent_run_id": plan.turn_id,
-                    "parent_tool_call_id": plan._payload["request"]["id"],
-                    "session_id": sid,
-                    "workspace": str(context.workspace),
-                    "session_memory_enabled": sub.session_memory_enabled,
-                }
-            )
-            # Do not allow configured metadata to erase the compiled policy.
-            metadata.update({k: v for k, v in child_task.metadata.items() if k.startswith("_vv_agent_")})
-            if sub.system_prompt:
-                child_task.prompt_bundle = build_raw_system_prompt_bundle(sub.system_prompt)
-            else:
-                child_task.prompt_bundle = build_system_prompt_bundle(
-                    sub.description,
-                    language=str(task.metadata.get("language", "zh-CN")),
-                    allow_interruption=False,
-                    use_workspace=task.use_workspace,
-                    enable_todo_management=True,
-                    agent_type=task.agent_type,
-                    available_skills=task.metadata.get("available_skills"),
-                    workspace=context.workspace,
-                )
-            prompt = request.task_description
-            if request.output_requirements:
-                prompt += f"\n\n<Output Requirements>\n{request.output_requirements}\n</Output Requirements>"
-            if request.include_main_summary:
-                summary = [f"Parent task goal: {task.user_prompt}"]
-                todos = context.shared_state.get("todo_list")
-                if isinstance(todos, list) and todos:
-                    summary.append("Parent TODO status:")
-                    summary.extend(
-                        f"- [{item.get('status', 'pending')}] {item.get('title', 'Untitled')}"
-                        for item in todos
-                        if isinstance(item, dict)
-                    )
-                parent_summary = "\n".join(summary)
-                prompt += f"\n\n<Main Task Summary>\n{parent_summary}\n</Main Task Summary>"
-            child_task.user_prompt = prompt
-            child_task.metadata = metadata
-            child_task.exclude_tools = sorted(
-                set(task.exclude_tools) | set(sub.exclude_tools) | {"create_sub_task", "sub_task_status"}
-            )
-            child_task.sub_agents = {}
-            child_task.allow_interruption = False
-            child_task.memory_compact_threshold = task.memory_compact_threshold
-            child_task.memory_threshold_percentage = task.memory_threshold_percentage
-            child_task.microcompaction_policy = task.microcompaction_policy
-            child_task.extra_tool_names = list(task.extra_tool_names)
-            child_task.use_workspace = task.use_workspace
-            child_task.agent_type = task.agent_type
-        admission = {
-            "mode": mode,
-            "selector": selector,
-            "definition": child_rt.definition(child_task),
-            "definition_digest": child_rt.definition_digest(child_task),
-            "budget": (config.budget_limits or RunBudgetLimits()).to_dict(),
-            "handler_version": runtime.handler_version,
-            "sub_config": sub.to_dict() if sub else None,
-            "exclude_files_pattern": request.exclude_files_pattern,
-            "handoff_count": count + (mode == "handoff"),
-            "max_handoffs": maximum,
-            "handoff_metadata": copy_json(transfer.metadata) if transfer else {},
-        }
-        validate(admission, CHILD_ADMISSION)
-        result.append(
-            ChildSession(
-                SessionSpec(
-                    sid, created._payload["principal"], str(context.workspace), attributes={"child_admission": admission}
-                ),
-                child_task.user_prompt,
-                background=background,
-            )
-        )
-    return result
+    attributes = _created_record(store, plan.session_id).payload["attributes"]
+    return ChildCompilationHost(runtime, context, session_attributes=attributes).run(assemble_steps(store, plan, task))
 
 
-def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Record | None = None) -> Runtime:
-    created = created if created is not None else store.read(sid, limit=1).records[0].record
-    admission = created.payload["attributes"]["child_admission"]
+def reconstruct(runtime: Runtime, store: SessionStore, sid: str) -> Runtime:
+    created = _created_record(store, sid)
+    attributes = created.payload["attributes"]
+    admission = attributes["child_admission"]
     validate(admission, CHILD_ADMISSION)
     if admission["handler_version"] != runtime.handler_version:
         raise Conflict("child admission handler version mismatch")
@@ -401,7 +325,7 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Rec
     # Reapply current host restrictions; the task keeps the frozen restrictions as well.
     context = SimpleNamespace(
         shared_state=runtime.bind_state(task.initial_shared_state, task),
-        workspace=Path(created._payload["workspace"]),
+        workspace=Path(created.payload["workspace"]),
         workspace_backend=runtime.config.workspace_backend,
     )
     if context.workspace_backend is None:
@@ -415,6 +339,11 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str, *, created: Rec
         )
     config = replace(config, budget_limits=RunBudgetLimits.from_dict(admission["budget"]))
     child_rt = runtime.for_agent(agent, config)
+    child_rt.content_reader = durable_content_reader(
+        store,
+        tenant_id=_store_tenant_id(store),
+        session_id=sid,
+    )
     child_rt.frozen_task = task
     return child_rt
 
@@ -429,12 +358,17 @@ def outcome(
 ) -> SubTaskOutcome:
     snapshot = snapshot if snapshot is not None else store.read_state(sid)
     state, rows, _ = snapshot
+    created = _hydrated_records(store, sid, rows[:1])[0].record
+    attributes = created.payload["attributes"]
     turn_id = (
         turn_id
         or state.active_turn_id
-        or next(reversed(state.turns), rows[0].record._payload["attributes"]["child_handle"]["turn_id"])
+        or next(
+            reversed(state.turns),
+            attributes["child_handle"]["turn_id"],
+        )
     )
-    admission = rows[0].record._payload["attributes"].get("child_admission")
+    admission = attributes.get("child_admission")
     name = admission["definition"]["agent_name"] if admission else runtime.agent.name
     if turn_id not in state.turns:
         return SubTaskOutcome(sid, name, AgentStatus.RUNNING, session_id=sid)
@@ -467,31 +401,17 @@ def result_for_children(
     store: SessionStore, plan: Record, handles: list[dict[str, Any]], runtime: Runtime
 ) -> ToolExecutionResult:
     first = store.read_state(handles[0]["session_id"])
-    admission = first[1][0].record._payload["attributes"].get("child_admission")
+    admission = (
+        _hydrated_records(store, handles[0]["session_id"], first[1][:1])[0].record.payload["attributes"].get("child_admission")
+    )
     if admission is None:
-        from .children import child_outcome
-
-        results = []
-        for i, handle in enumerate(handles):
-            snapshot = first if i == 0 else store.read_state(handle["session_id"])
-            terminal = next(r for r in snapshot[1] if r.record.kind == "turn_ended" and r.record.turn_id == handle["turn_id"])
-            results.append(child_outcome(plan, terminal))
-        if len(results) == 1:
-            return results[0]
-        return ToolExecutionResult(
-            plan._payload["request"]["id"],
-            json.dumps([result.to_dict() for result in results]),
-            status_code=ToolResultStatus.ERROR
-            if any(r.status_code == ToolResultStatus.ERROR for r in results)
-            else ToolResultStatus.SUCCESS,
-            metadata={"children": [result.metadata for result in results]},
-        )
+        return ordinary_result_for_children(store, plan, handles, first_snapshot=first)
     mode = admission["mode"]
     if mode == "configured":
         outcomes = []
         for i, h in enumerate(handles):
             snapshot = first if i == 0 else store.read_state(h["session_id"])
-            rt = reconstruct(runtime, store, h["session_id"], created=snapshot[1][0].record)
+            rt = reconstruct(runtime, store, h["session_id"])
             outcomes.append(outcome(store, h["session_id"], rt, h["turn_id"], snapshot=snapshot))
         values = iter(outcomes)
         ctx = SimpleNamespace(
@@ -502,7 +422,7 @@ def result_for_children(
         )
     else:
         h = handles[0]
-        rt = reconstruct(runtime, store, h["session_id"], created=first[1][0].record)
+        rt = reconstruct(runtime, store, h["session_id"])
         projected = project_result(store, h["session_id"], h["turn_id"], runtime=rt, snapshot=first)
         result = ToolExecutionResult(
             "",
@@ -529,7 +449,8 @@ def result_for_children(
 
 
 def admitted_result(store: SessionStore, plan: Record, handles: list[dict[str, Any]]) -> ToolExecutionResult:
-    admission = store.read(handles[0]["session_id"], limit=1).records[0].record._payload["attributes"].get("child_admission")
+    created = _created_record(store, handles[0]["session_id"])
+    admission = created.payload["attributes"].get("child_admission")
     if not admission:
         if len(handles) > 1:
             return ToolExecutionResult(plan._payload["request"]["id"], json.dumps(handles), metadata={"children": handles})
@@ -595,7 +516,6 @@ class ChildTasks:
         snapshot = self.store.read_state(task_id)
         state, _, _ = snapshot
         value = outcome(self.store, task_id, rt, snapshot=snapshot)
-        latest_turn = state.turns[next(reversed(state.turns))] if state.turns else None
         if state.active_turn_id is not None and state.phase == "active":
             value = replace(value, status=AgentStatus.RUNNING)
         if state.active_turn_id is None and (
@@ -605,12 +525,19 @@ class ChildTasks:
             )
         ):
             value = replace(value, status=AgentStatus.RUNNING)
-        task = AgentTask.from_dict(created.payload["attributes"]["child_admission"]["definition"]["task"])
+        attributes = _created_record(self.store, task_id).payload["attributes"]
+        task = AgentTask.from_dict(attributes["child_admission"]["definition"]["task"])
+        latest_turn = state.turns[next(reversed(state.turns))] if state.turns else None
+        task_title = task.user_prompt
+        if latest_turn is not None:
+            stored_start = next(row for row in snapshot[1] if row.record.record_id == latest_turn.start.record_id)
+            hydrated_start = _hydrated_records(self.store, task_id, (stored_start,))[0].record
+            task_title = AgentTask.from_dict(hydrated_start.payload["definition"]["task"]).user_prompt
         return SimpleNamespace(
             task_id=task_id,
             session_id=task_id,
             agent_name=value.agent_name,
-            task_title=latest_turn.start._payload["definition"]["task"]["user_prompt"] if latest_turn else task.user_prompt,
+            task_title=task_title,
             parent_run_id=task.metadata.get("parent_run_id"),
             parent_tool_call_id=task.metadata.get("parent_tool_call_id"),
             outcome=value,
@@ -621,12 +548,12 @@ class ChildTasks:
         )
 
     def wait(self, task_id: str, timeout: float | None = None):
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = None if timeout is None else self.runtime.clock.monotonic() + timeout
         while True:
             record = self.get(task_id)
-            if record is None or not record.is_running() or (deadline is not None and time.monotonic() >= deadline):
+            if record is None or not record.is_running() or (deadline is not None and self.runtime.clock.monotonic() >= deadline):
                 return record
-            Event().wait(0.01)
+            self.runtime.clock.sleep(0.01)
 
     def handle(self, task_id: str) -> ChildTaskHandle:
         if self.get(task_id) is None:
@@ -636,13 +563,30 @@ class ChildTasks:
     def control(self, task_id: str, input_id: str, kind: str, payload: dict[str, Any]) -> None:
         if self.get(task_id) is None:
             raise KeyError(task_id)
-        created = self.store.read(task_id, limit=1).records[0].record
-        h = created._payload["attributes"]["child_handle"]
+        attributes = _created_record(self.store, task_id).payload["attributes"]
+        h = attributes["child_handle"]
         state, _, _ = self.store.read_state(task_id)
         turn_id = state.active_turn_id or h["turn_id"]
         generation = state.turns[turn_id].start._payload["generation"] if turn_id in state.turns else h["generation"]
         with self.store.atomic() as tx:
-            tx.push(task_id, InboxItem(input_id, kind, payload, turn_id, generation))
+            writer = SessionContentWriter.bind(
+                tx,
+                tenant_id=_store_tenant_id(self.store),
+                session_id=task_id,
+            )
+            actor, actor_attributes = writer.service_principal("child-tasks")
+            tx.push(
+                task_id,
+                InboxItem(
+                    input_id,
+                    kind,
+                    payload,
+                    turn_id,
+                    generation,
+                    actor=actor,
+                ),
+            )
+            writer.link_input(input_id, actor_attributes, INPUT_ACTOR_ATTRIBUTES)
 
     def message(self, task_id: str, input_id: str, text: str) -> str:
         if self.get(task_id) is None:
@@ -651,23 +595,264 @@ class ChildTasks:
         applied = state.applied_inputs.get(input_id)
         pending = next((i.item for i in self.store.peek_inbox(task_id) if i.item.input_id == input_id), None)
         previous = InboxItem(**applied._payload["input"]) if applied else pending
-        if previous is not None:
-            content = previous.payload.get("content")
-            previous_text = content.get("text") if isinstance(content, dict) else content
-            if previous_text != text:
-                raise Conflict("child message id reused with different content")
-            with self.store.atomic() as tx:
-                tx.push(task_id, previous)
-            return "continued" if previous.kind == "follow_up" else "message_queued"
         target = state.active_turn_id
         generation = state.turns[target].start._payload["generation"] if target else None
         action = "message_queued" if target else "continued"
-        kind, payload = ("steer", {"content": text}) if target else ("follow_up", {"content": text})
+        kind = ("steer", "follow_up")[target is None]
         with self.store.atomic() as tx:
-            tx.push(task_id, InboxItem(input_id, kind, payload, target, generation))
+            writer = SessionContentWriter.bind(
+                tx,
+                tenant_id=_store_tenant_id(self.store),
+                session_id=task_id,
+            )
+            content = writer.put_json(text)
+            actor, actor_attributes = writer.service_principal("child-tasks")
+            tx.push(
+                task_id,
+                InboxItem(
+                    input_id,
+                    kind,
+                    {"content": content.to_dict()},
+                    target,
+                    generation,
+                    actor=actor,
+                ),
+            )
+            writer.link_input(input_id, content, INPUT_CONTENT)
+            writer.link_input(input_id, actor_attributes, INPUT_ACTOR_ATTRIBUTES)
+        if previous is not None:
+            return "continued" if previous.kind == "follow_up" else "message_queued"
         self.runtime.wake(task_id)
         self.runtime.hook("after_input", None)
         return action
+
+
+class SubTaskStatusProvider:
+    """Accepted provider whose query observes child SQL without owning a second ledger."""
+
+    def __init__(self, runtime: Runtime, *, confirmed_poll: Callable[[], int] | None = None):
+        self.runtime = runtime
+        self.confirmed_poll = confirmed_poll
+
+    def bind_confirmed_poll(self, confirmed_poll: Callable[[], int]) -> SubTaskStatusProvider:
+        return SubTaskStatusProvider(self.runtime, confirmed_poll=confirmed_poll)
+
+    def _now_ms(self) -> int:
+        if self.confirmed_poll is None:
+            raise RuntimeError("sub_task_status provider requires a confirmed lease snapshot")
+        now_ms = self.confirmed_poll()
+        if isinstance(now_ms, bool) or not isinstance(now_ms, int):
+            raise TypeError("confirmed lease snapshot must expose integer database time")
+        return now_ms
+
+    @staticmethod
+    def _result(plan: Record, result: ToolExecutionResult, evidence: str) -> Definitive:
+        result.tool_call_id = plan._payload["request"]["id"]
+        return Definitive(result.to_dict(), (evidence,))
+
+    def _handle(self, plan: Record, state: dict[str, Any]) -> dict[str, Any]:
+        operation_id = plan.operation_id
+        attempt = plan.attempt
+        assert operation_id is not None and attempt is not None
+        evidence = f"sub-task-status/{operation_id}/{attempt}"
+        return {
+            "kind": "provider",
+            "provider": plan._payload["provider_binding"],
+            "job_id": evidence,
+            "operation_id": operation_id,
+            "attempt": attempt,
+            "request_digest": plan._payload["request_digest"],
+            "evidence": evidence,
+            "query_ref": state,
+            "cancel_ref": state,
+        }
+
+    @staticmethod
+    def _update_message_result(
+        result: ToolExecutionResult,
+        *,
+        target: str,
+        action: str,
+        previous_status: str,
+        wait_for_completion: bool,
+        check_interval_seconds: int,
+        max_wait_seconds: int,
+    ) -> None:
+        tasks = result.metadata["tasks"]
+        for entry in tasks:
+            if entry["task_id"] == target:
+                entry["status"] = AgentStatus.RUNNING.value
+                for key in ("final_answer", "wait_reason", "error", "error_code", "cycles", "todo_list", "resolved"):
+                    entry.pop(key, None)
+                break
+        currently_running = running_task_ids(tasks)
+        add_wait_metadata(
+            result.metadata,
+            wait_for_completion=wait_for_completion,
+            check_interval_seconds=check_interval_seconds,
+            max_wait_seconds=max_wait_seconds,
+            running_task_ids=currently_running,
+            wait_exceeded=False,
+        )
+        result.metadata["interaction"] = {"task_id": target, "action": action, "previous_status": previous_status}
+        result.content = json.dumps(result.metadata, ensure_ascii=False)
+
+    def submit(self, plan: Record, *, context: ToolContext) -> Outcome:
+        manager = context.sub_task_manager
+        if manager is None:
+            error = status_error("Sub-task manager is not available for this task", error_code="sub_task_manager_unavailable")
+            return self._result(plan, error, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
+        started_ms = self._now_ms()
+        with self.runtime.heartbeat_store() as store:
+            tasks = ChildTasks(store, manager.parent_id, self.runtime)
+            request = parse_sub_task_status(replace(context, sub_task_manager=tasks), plan._payload["request"]["arguments"])
+            if isinstance(request, ToolExecutionResult):
+                return self._result(plan, request, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
+
+            snapshot = snapshot_sub_task_status(request)
+            if snapshot.status_code == ToolResultStatus.ERROR:
+                return self._result(plan, snapshot, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
+
+            waiting_ids = running_task_ids(snapshot.metadata["tasks"])
+            interaction: dict[str, Any] | None = None
+            if request.message:
+                target = request.task_ids[0]
+                target_status = next(entry["status"] for entry in snapshot.metadata["tasks"] if entry["task_id"] == target)
+                if target_status == AgentStatus.MAX_CYCLES.value:
+                    error = status_error(
+                        f"Sub-task {target} reached max cycles and cannot continue.",
+                        error_code="sub_task_max_cycles_reached",
+                    )
+                    return self._result(plan, error, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
+                action = tasks.message(target, f"message/{context.idempotency_key}", request.message)
+                interaction = {"task_id": target, "action": action, "previous_status": target_status}
+                waiting = set(waiting_ids)
+                if request.wait_for_response or action == "continued":
+                    waiting.add(target)
+                order = {task_id: index for index, task_id in enumerate(request.task_ids)}
+                waiting_ids = sorted(waiting, key=order.__getitem__)
+                if not request.wait_for_response and not request.wait_for_completion:
+                    self._update_message_result(
+                        snapshot,
+                        target=target,
+                        action=action,
+                        previous_status=target_status,
+                        wait_for_completion=False,
+                        check_interval_seconds=request.check_interval_seconds,
+                        max_wait_seconds=request.max_wait_seconds,
+                    )
+                    snapshot.metadata["interaction"] = interaction
+                    snapshot.content = json.dumps(snapshot.metadata, ensure_ascii=False)
+
+            should_wait = request.wait_for_completion or request.wait_for_response
+            if not should_wait or not waiting_ids:
+                return self._result(plan, snapshot, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
+
+            state = {
+                "parent_id": manager.parent_id,
+                "tool_call_id": plan._payload["request"]["id"],
+                "task_ids": request.task_ids,
+                "detail_level": request.detail_level,
+                "workspace_file_limit": request.workspace_file_limit,
+                "wait_for_response": request.wait_for_response,
+                "wait_for_completion": request.wait_for_completion,
+                "waiting_task_ids": waiting_ids,
+                "check_interval_seconds": request.check_interval_seconds,
+                "max_wait_seconds": request.max_wait_seconds,
+                "deadline_ms": started_ms + request.max_wait_seconds * 1000,
+                "interaction": interaction,
+            }
+            return Accepted(self._handle(plan, state))
+
+    def query(self, handle: dict[str, Any]) -> Outcome:
+        state = handle.get("query_ref")
+        if type(state) is not dict:
+            return Unknown("sub_task_status handle has no query state")
+        try:
+            parent_id = state["parent_id"]
+            tool_call_id = state["tool_call_id"]
+            task_ids = state["task_ids"]
+            detail_level = state["detail_level"]
+            workspace_file_limit = state["workspace_file_limit"]
+            wait_for_response = state["wait_for_response"]
+            wait_for_completion = state["wait_for_completion"]
+            waiting_task_ids = state["waiting_task_ids"]
+            check_interval_seconds = state["check_interval_seconds"]
+            max_wait_seconds = state["max_wait_seconds"]
+            deadline_ms = state["deadline_ms"]
+            interaction = state["interaction"]
+        except KeyError:
+            return Unknown("sub_task_status handle query state is incomplete")
+        if (
+            not isinstance(parent_id, str)
+            or not isinstance(tool_call_id, str)
+            or type(task_ids) is not list
+            or not task_ids
+            or not all(isinstance(task_id, str) for task_id in task_ids)
+            or detail_level not in {"basic", "snapshot"}
+            or isinstance(workspace_file_limit, bool)
+            or not isinstance(workspace_file_limit, int)
+            or type(wait_for_response) is not bool
+            or type(wait_for_completion) is not bool
+            or type(waiting_task_ids) is not list
+            or not all(isinstance(task_id, str) for task_id in waiting_task_ids)
+            or isinstance(check_interval_seconds, bool)
+            or not isinstance(check_interval_seconds, int)
+            or isinstance(max_wait_seconds, bool)
+            or not isinstance(max_wait_seconds, int)
+            or isinstance(deadline_ms, bool)
+            or not isinstance(deadline_ms, int)
+            or (interaction is not None and type(interaction) is not dict)
+        ):
+            return Unknown("sub_task_status handle query state is invalid")
+
+        with self.runtime.heartbeat_store() as store:
+            tasks = ChildTasks(store, parent_id, self.runtime)
+            request = SubTaskStatusRequest(
+                manager=tasks,
+                task_ids=task_ids,
+                detail_level=detail_level,
+                workspace_file_limit=workspace_file_limit,
+                message="",
+                wait_for_response=wait_for_response,
+                wait_for_completion=wait_for_completion,
+                check_interval_seconds=check_interval_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
+            snapshot = snapshot_sub_task_status(request)
+            current_running = set(running_task_ids(snapshot.metadata["tasks"]))
+            still_waiting = any(task_id in current_running for task_id in waiting_task_ids)
+            timed_out = still_waiting and self._now_ms() >= deadline_ms
+            if timed_out and wait_for_completion:
+                add_wait_metadata(
+                    snapshot.metadata,
+                    wait_for_completion=True,
+                    check_interval_seconds=check_interval_seconds,
+                    max_wait_seconds=max_wait_seconds,
+                    running_task_ids=[task_id for task_id in waiting_task_ids if task_id in current_running],
+                    wait_exceeded=True,
+                )
+                snapshot.content = json.dumps(snapshot.metadata, ensure_ascii=False)
+            if interaction is not None:
+                snapshot.metadata["interaction"] = interaction
+                snapshot.content = json.dumps(snapshot.metadata, ensure_ascii=False)
+            if still_waiting and not timed_out:
+                return Accepted(handle)
+            if timed_out and wait_for_response and not wait_for_completion:
+                snapshot.metadata["wait_exceeded"] = True
+                snapshot.metadata["message"] = (
+                    "Sub-task(s) are still running after the maximum wait. "
+                    "Call sub_task_status again later instead of tight polling."
+                )
+                snapshot.content = json.dumps(snapshot.metadata, ensure_ascii=False)
+            snapshot.tool_call_id = tool_call_id
+            return Definitive(snapshot.to_dict(), (handle["evidence"],))
+
+    def cancel(self, handle: dict[str, Any]) -> Outcome:
+        return self.query(handle)
+
+    def authenticate(self, item: InboxItem, plan: Record) -> bool:
+        return False
 
 
 @dataclass
