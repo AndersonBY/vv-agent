@@ -745,7 +745,7 @@ still grows with the total stored data.
 
 Contract 31.0.0 requires renewal throughout runtime factory preparation and
 captured-prefix state reads that do not hold the session row while loading,
-folding or copying history. The factory starting TTL remains 15 seconds and
+folding or copying history. The factory starting TTL remains 60 seconds and
 renews every 250 ms; preparation may exceed that interval. The returned runtime's
 TTL applies before execution. Renewal failure discards the factory result.
 Deferral and release use the current lease and every renewal thread is joined.
