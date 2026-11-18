@@ -6,6 +6,7 @@ from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, Literal, cast
 
 from vv_agent.kernel._budget_values import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
@@ -21,6 +22,22 @@ _NO_TOOL_POLICIES = frozenset({"continue", "wait_user", "finish"})
 _MAX_U32 = (1 << 32) - 1
 _MAX_U64 = (1 << 64) - 1
 _MAX_U8 = (1 << 8) - 1
+
+
+def execution_id_for_values(tenant_id: str, environment_id: str, operation_key: str) -> str:
+    """Compute the canonical W3 execution identity from stable inputs."""
+    return sha256(
+        canonical_json_bytes(
+            {
+                "domain": "vv-agent/S1/execution-identity",
+                "framing_version": 1,
+                "operation_key": operation_key,
+                "tenant_id": tenant_id,
+                "environment_id": environment_id,
+            },
+            "execution identity",
+        )
+    ).hexdigest()
 
 
 def _trim_portable_whitespace(value: str) -> str:
