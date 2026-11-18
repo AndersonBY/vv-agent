@@ -146,8 +146,7 @@ Path('port').write_text(str(server.server_port))
 server.serve_forever()
 """
     command = python_command(tmp_path, body)
-    driver = SessionDriver(tmp_path / "session.sqlite")
-    store = driver.store
+    driver = SessionDriver()
     key = f"bash-{launch_case['name']}"
     seen: list[str] = []
     receipts: dict[str, Any] = {}
@@ -159,14 +158,20 @@ server.serve_forever()
         return "MIXED_TOOL_OK"
 
     def receipt(call_id: str):
-        rows = store.read_state(key)[1]
-        plans = {r.record.operation_id: r.record for r in rows if r.record.kind == "op_planned"}
-        completed = next(
-            r.record
+        rows = driver._read_state(key)[1]
+        plans = {
+            r.record.operation_id: driver.read_record_content(
+                key,
+                r.seq,
+                r.record.payload["request"],
+                slot="request",
+            )
             for r in rows
-            if r.record.kind == "op_completed" and plans[r.record.operation_id].payload["request"].get("id") == call_id
-        )
-        return SimpleNamespace(result=completed.payload["result"], result_digest=completed.payload["result_digest"])
+            if r.record.kind == "op_planned"
+        }
+        completed = next(r for r in rows if r.record.kind == "op_completed" and plans[r.record.operation_id].get("id") == call_id)
+        result = driver.read_record_content(key, completed.seq, completed.record.payload["result"], slot="result")
+        return SimpleNamespace(result=result, result_digest=completed.record.payload["result_digest"])
 
     def query_after_start(request: LlmRequest) -> LLMResponse:
         seen.append("model-after-start")
@@ -236,7 +241,7 @@ server.serve_forever()
             finish_after_stop,
         ]
     )
-    result = start_runner(
+    handle = start_runner(
         driver,
         key,
         Agent(
@@ -254,8 +259,12 @@ server.serve_forever()
             no_tool_policy="finish",
             tool_registry_factory=runner_registry,
         ),
-    ).result()
-    assert result.status is AgentStatus.COMPLETED, result.raw_result
+    )
+    try:
+        result = handle.result(timeout=15)
+    except TimeoutError:
+        raise AssertionError(f"runner did not settle: {driver._errors}") from None
+    assert result.status is AgentStatus.COMPLETED, (result.raw_result.error, seen)
     assert result.final_output == "NEXT_MODEL_CYCLE_OK"
     assert seen == ["mixed-tool", "model-after-start", "model-after-query", "model-after-stop"]
     for call_id, original in receipts.items():
