@@ -16,6 +16,27 @@ def tick(
     project: Callable[[str, str], None],
     runtime: Callable[[str], Runtime] | None = None,
     dispatch: Callable[[str], None] | None = None,
+    page_size: int = 100,
+    failure_backoff_ms: int = 1000,
+) -> int:
+    """Dispatch runnable work once through the public host boundary."""
+
+    return _tick(
+        store,
+        project=project,
+        runtime=runtime,
+        dispatch=dispatch,
+        page_size=page_size,
+        failure_backoff_ms=failure_backoff_ms,
+    )
+
+
+def _tick(
+    store: SessionStore,
+    *,
+    project: Callable[[str, str], None],
+    runtime: Callable[[str], Runtime] | None = None,
+    dispatch: Callable[[str], None] | None = None,
     dispatch_claimed: Callable[[str, Lease], None] | None = None,
     project_claimed: Callable[[str, str, str], None] | None = None,
     page_size: int = 100,
@@ -26,7 +47,7 @@ def tick(
     projection_consumers: ProjectionConsumers | None = None,
     stop_after_claimed_drive: bool = False,
 ) -> int:
-    """Dispatch runnable work once.
+    """Dispatch runnable work through the shared public/worker implementation.
 
     A claimed drive lease transfers to ``drive_with_runtime`` or
     ``dispatch_claimed`` at invocation. The receiver owns its defer/release

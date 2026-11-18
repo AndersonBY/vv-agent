@@ -33,7 +33,7 @@ from vv_agent.session.content_runtime import (
 )
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.deletion import SessionDeletionStore
-from vv_agent.session.supervisor import tick
+from vv_agent.session.supervisor import _tick
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -553,7 +553,7 @@ def test_supervisor_retry_gate_recovers_preturn_key_outage(tmp_path: Path) -> No
         reader.outage = True
 
         assert (
-            tick(
+            _tick(
                 driver.store,
                 runtime=lambda _sid: runtime,
                 project=lambda _sid, _consumer: None,
@@ -571,7 +571,7 @@ def test_supervisor_retry_gate_recovers_preturn_key_outage(tmp_path: Path) -> No
         reader.outage = False
         _wait_until(lambda: driver.store.is_runnable(session_id))
         assert (
-            tick(
+            _tick(
                 driver.store,
                 runtime=lambda _sid: runtime,
                 project=lambda _sid, _consumer: None,
