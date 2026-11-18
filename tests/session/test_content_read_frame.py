@@ -178,7 +178,7 @@ def _delete_session_from_other_connection(
         durable = durable_content_store(deleting_store)
         assert isinstance(durable, _ValidatedDurableContentStore)
         deletion = SessionDeletionStore(deleting_store, durable._durable, allow_unsigned=True)
-        actor = Principal(tenant_id, "fixture/deleter", "user", ref)
+        actor = Principal(tenant_id, "fixture/deleter", "service", ref)
         if operation == "forget":
             deletion.forget_session(tenant_id, SESSION, actor=actor)
         else:
