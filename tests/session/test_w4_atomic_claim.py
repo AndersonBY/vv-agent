@@ -89,10 +89,12 @@ def _start(store, session_id: str, *, consumers: tuple[str, ...] = (), push: boo
             tx.push(session_id, item("initial", actor=principal("test")))
 
 
+@contextmanager
 def _open_independent_store(database):
-    if isinstance(database, Path):
-        return SQLiteStore.standalone(str(database))
-    return PostgresStore.standalone(database)
+    manager = SQLiteStore.standalone(str(database)) if isinstance(database, Path) else PostgresStore.standalone(database)
+    with manager as store:
+        store.configure_input_admission(allow_unsigned=True)
+        yield store
 
 
 def _lease_row(store, session_id: str) -> tuple[int, str | None, int | None, int]:
@@ -147,6 +149,7 @@ def test_sqlite_file_workers_do_not_duplicate_claim(store, database) -> None:
 
     def claim(owner: str) -> str | None:
         with SQLiteStore.standalone(str(database)) as worker:
+            worker.configure_input_admission(allow_unsigned=True)
             worker.configure_worker(level=1, handler_versions=("1",), capabilities=())
             barrier.wait(timeout=10)
             claimed = worker.claim_runnable(owner=owner, ttl_ms=10_000, limit=1)
@@ -290,6 +293,7 @@ def test_claim_rejects_postgres_nonautocommit_transaction(store, database: str) 
     _start(store, "pg-nested")
     with psycopg.connect(database, autocommit=False) as connection:
         worker = PostgresStore(connection)
+        worker.configure_input_admission(allow_unsigned=True)
         worker._runtime_binding = RuntimeBinding("worker")
         worker.configure_worker(level=1, handler_versions=("1",), capabilities=())
         connection.execute("SELECT 1")
@@ -308,6 +312,7 @@ def test_local_worker_passes_claimed_lease_to_modern_callback(store, database) -
     @contextmanager
     def open_store():
         with SQLiteStore.standalone(str(database)) as worker_store:
+            worker_store.configure_input_admission(allow_unsigned=True)
             yield worker_store
 
     def drive(store: SessionStore, session_id: str, *, lease: Lease) -> None:
@@ -430,6 +435,7 @@ def test_local_worker_preserves_claim_after_core_owns_it(store, database, monkey
     @contextmanager
     def open_store():
         with SQLiteStore.standalone(str(database)) as worker_store:
+            worker_store.configure_input_admission(allow_unsigned=True)
             yield worker_store
 
     claimed_leases = []
@@ -479,6 +485,7 @@ def test_local_worker_returns_claim_when_drive_store_open_fails(store, database)
         if opens > 1:
             raise RuntimeError("drive store open failed")
         with SQLiteStore.standalone(str(database)) as worker_store:
+            worker_store.configure_input_admission(allow_unsigned=True)
             yield worker_store
 
     worker = LocalWorker(
@@ -509,6 +516,7 @@ def test_local_worker_returns_claim_when_stopped_before_handoff(store, database)
         nonlocal opens
         opens += 1
         with SQLiteStore.standalone(str(database)) as worker_store:
+            worker_store.configure_input_admission(allow_unsigned=True)
             if opens == 2:
                 assert worker is not None
                 worker.stop()
@@ -732,6 +740,7 @@ def test_postgres_workers_claim_one_session_once(store, database: str) -> None:
 
     def claim(owner: str) -> str | None:
         with PostgresStore.standalone(database) as worker:
+            worker.configure_input_admission(allow_unsigned=True)
             worker._runtime_binding = RuntimeBinding("worker")
             worker.configure_worker(level=1, handler_versions=("1",), capabilities=())
             barrier.wait(timeout=10)
@@ -751,6 +760,7 @@ def test_postgres_claim_commits_before_returning(store, database: str) -> None:
     _start(store, "unlocked")
 
     with PostgresStore.standalone(database) as claimant:
+        claimant.configure_input_admission(allow_unsigned=True)
         claimant._runtime_binding = RuntimeBinding("worker")
         claimant.configure_worker(level=1, handler_versions=("1",), capabilities=())
         claimed = claimant.claim_runnable(owner="claimant", ttl_ms=10_000, limit=1)
@@ -792,7 +802,7 @@ def test_wrapped_store_first_renewal_recovers_short_lock_before_dispatch(store, 
     session_id = "wrapped-anchor"
     wrapped = wrap_fixture_store(store)
     _start(wrapped, session_id)
-    claimed = wrapped.claim_runnable(owner="wrapped", ttl_ms=1_000, limit=1)
+    claimed = wrapped.claim_runnable(owner="wrapped", ttl_ms=5_000, limit=1)
     assert len(claimed) == 1 and claimed[0].lease is not None
 
     rt = runtime(database, [], ttl_ms=400, heartbeat_seconds=0.02)

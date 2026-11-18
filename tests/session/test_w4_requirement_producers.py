@@ -638,6 +638,7 @@ def test_l2_session_input_drives_complete_turn_with_exact_requirements(tmp_path)
     bound = runtime.requirements_bound()
     with SQLiteStore.standalone(str(tmp_path / "published.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         store.configure_worker(
@@ -698,6 +699,7 @@ def test_l2_bootstrap_with_l1_user_input_drives_complete_turn(tmp_path) -> None:
     bound = runtime.requirements_bound()
     with SQLiteStore.standalone(str(tmp_path / "transition.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         store.configure_worker(
@@ -777,6 +779,7 @@ def test_l2_model_selection_is_used_by_real_drive_with_exact_tags(tmp_path) -> N
 
     with SQLiteStore.standalone(str(tmp_path / "selection.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         store.configure_worker(
@@ -853,6 +856,7 @@ def test_actual_over_bound_fails_without_dispatch_or_mutation(tmp_path) -> None:
     bound = SessionRequirements(level=2, handler_version="handler/h2", capabilities=())
     with SQLiteStore.standalone(str(tmp_path / "overflow.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         store.configure_worker(level=2, handler_versions=("handler/h2",), capabilities=())
@@ -1054,6 +1058,7 @@ def test_real_handoff_and_grandchild_publish_l2_requirements(tmp_path) -> None:
     runtime = runtimes[0]
     with SQLiteStore.standalone(str(tmp_path / "handoff.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         bound = _create_l2_session(raw_store, store, "root", runtime, tmp_path)
         supports = tuple(sorted(set().union(*(set(item.requirements_bound().capabilities) for item in runtimes))))
@@ -1109,6 +1114,7 @@ def test_manual_child_without_trusted_bootstrap_is_rejected_before_creation(tmp_
     )
     with SQLiteStore.standalone(str(tmp_path / "manual-child.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         bound = _create_l2_session(raw_store, store, "parent", runtime, tmp_path)
         parent_created = store.read_state("parent")[1][0].record
@@ -1271,6 +1277,7 @@ def test_approval_answer_cold_recovers_without_repeating_provider_or_model(tmp_p
 
     with SQLiteStore.standalone(str(tmp_path / "approval-recovery.sqlite")) as raw_store:
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw_store)
         bound = _create_l2_session(raw_store, store, "approval", runtime, tmp_path)
         push_fixture_input(
