@@ -22,6 +22,7 @@ LOCAL_ENVIRONMENT_METADATA_KEY = "local_environment"
 LOCAL_ENVIRONMENT_CAPABILITIES_METADATA_KEY = "local_environment_capabilities"
 
 _LOCAL_ENVIRONMENT_ID = "local"
+_LOCAL_ENVIRONMENT_PROVIDER_ID = "provider/local-test"
 _LOCAL_ENVIRONMENT_GENERATION = 0
 _LOCAL_ENVIRONMENT_CAPABILITIES = ("command", "find_files", "search_files")
 
@@ -78,6 +79,7 @@ class ExecutionEnvironmentPort(Protocol):
     """Narrow W3 environment surface used by built-in local tools."""
 
     capabilities: EnvironmentCapabilities
+    provider_id: str
 
     def start_process(
         self,
@@ -121,9 +123,11 @@ class LocalEnvironment:
         self,
         *,
         environment_id: str = _LOCAL_ENVIRONMENT_ID,
+        provider_id: str = _LOCAL_ENVIRONMENT_PROVIDER_ID,
         generation: int = _LOCAL_ENVIRONMENT_GENERATION,
         process_starter: StartProcess = start_captured_process,
     ) -> None:
+        self.provider_id = provider_id
         self.capabilities = EnvironmentCapabilities.create(
             environment_id=environment_id,
             generation=generation,

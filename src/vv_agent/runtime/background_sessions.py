@@ -118,8 +118,7 @@ class BackgroundSessionManager:
         capabilities = self._environment.capabilities
         if binding.environment_id != capabilities.environment_id or binding.generation != capabilities.generation:
             raise InvalidLookupBinding("lookup binding does not match the manager environment")
-        provider_id = getattr(self._environment, "provider_id", None)
-        if provider_id is not None and binding.provider_id != provider_id:
+        if binding.provider_id != self._environment.provider_id:
             raise InvalidLookupBinding("lookup binding does not match the manager provider")
 
     def _existing_session_id_locked(self, binding: LookupBinding) -> str | None:
@@ -135,6 +134,25 @@ class BackgroundSessionManager:
         if session.binding is None or self._stable_binding_fields(session.binding) != self._stable_binding_fields(binding):
             raise BackgroundExecutionConflict("idempotency key is already bound to a different command or environment identity")
         return session_id
+
+    @staticmethod
+    def _cleanup_rejected_process(process: subprocess.Popen[str], output_path: Path) -> str | None:
+        try:
+            stopped = kill_process_tree(process)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        if not stopped:
+            return "kill_process_tree did not confirm process-tree termination"
+        remove_captured_output(output_path)
+        return None
+
+    def _rollback_session_locked(self, session_id: str, session: _SessionState) -> None:
+        if self._sessions.get(session_id) is session:
+            del self._sessions[session_id]
+        if session.binding is not None:
+            identity_key = (session.binding.tenant_id, session.binding.idempotency_key)
+            if self._identity_sessions.get(identity_key) == session_id:
+                del self._identity_sessions[identity_key]
 
     def _register_session(
         self,
@@ -180,14 +198,52 @@ class BackgroundSessionManager:
         )
         with self._lock:
             if binding is not None:
-                existing_session_id = self._existing_session_id_locked(binding)
+                identity_key = (binding.tenant_id, binding.idempotency_key)
+                existing_session_id = self._identity_sessions.get(identity_key)
                 if existing_session_id is not None:
-                    return existing_session_id
-                self._validate_binding(binding)
+                    existing = self._sessions.get(existing_session_id)
+                    if existing is None:
+                        conflict = BackgroundExecutionConflict(
+                            "execution identity conflicts with lost process-local session state; "
+                            "refusing to adopt another process"
+                        )
+                    elif existing.binding is None or self._stable_binding_fields(existing.binding) != self._stable_binding_fields(
+                        binding
+                    ):
+                        conflict = BackgroundExecutionConflict(
+                            "idempotency key is already bound to a different command or environment identity"
+                        )
+                        if existing.process is process:
+                            raise conflict
+                    elif existing.process is process:
+                        return existing_session_id
+                    else:
+                        conflict = BackgroundExecutionConflict("execution identity is already owned by a different process")
+
+                    cleanup_error = self._cleanup_rejected_process(process, output_path)
+                    if cleanup_error is not None:
+                        raise BackgroundExecutionConflict(
+                            f"{conflict}; rejected process cleanup failed: {cleanup_error}"
+                        ) from conflict
+                    raise conflict
+                try:
+                    self._validate_binding(binding)
+                except Exception as exc:
+                    cleanup_error = self._cleanup_rejected_process(process, output_path)
+                    if cleanup_error is not None:
+                        raise RuntimeError(f"binding validation failed and process cleanup failed: {cleanup_error}") from exc
+                    raise
             self._sessions[session_id] = session
             if binding is not None:
                 self._identity_sessions[(binding.tenant_id, binding.idempotency_key)] = session_id
-        self._start_watch_thread(session_id)
+            try:
+                self._start_watch_thread(session_id)
+            except Exception as exc:
+                self._rollback_session_locked(session_id, session)
+                cleanup_error = self._cleanup_rejected_process(process, output_path)
+                if cleanup_error is not None:
+                    raise RuntimeError(f"background watcher failed to start and process cleanup failed: {cleanup_error}") from exc
+                raise
         return session_id
 
     def start(
@@ -227,11 +283,15 @@ class BackgroundSessionManager:
                 if existing_session_id is not None:
                     return existing_session_id
                 self._validate_binding(binding)
+                expected_capabilities = self._environment.capabilities
                 started = self._environment.start_process(
                     shell_command,
                     cwd=cwd,
                     stdin_text=prepared_stdin,
                     env=env,
+                    expected_capabilities=expected_capabilities,
+                    expected_environment_id=binding.environment_id,
+                    expected_generation=binding.generation,
                 )
                 return self._register_session(
                     command=command,
