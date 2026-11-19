@@ -233,18 +233,6 @@ def _approval_answer_payload(driver: CoreDriver, record: Record) -> dict[str, An
     return hydrate_input(driver, InboxItem(**record._payload["input"])).payload
 
 
-def _stop_level_three_retry(record: Record) -> Record:
-    """Keep recovery evidence while level-3 lookup/resubmit wiring is deferred."""
-
-    payload = copy_json(record._payload)
-    observation = dict(payload["observation"])
-    observation["retryable"] = False
-    payload["observation"] = observation
-    payload["retry"] = "stop"
-    payload["retry_at_ms"] = None
-    return replace(record, payload=payload)
-
-
 def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
@@ -621,7 +609,11 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                         outcomes.check_provider_result(driver, stored_plan, outcome)
                     except ProviderResultInvalid:
                         unknown = yield from outcomes.unknown_steps(driver, stored_plan, "provider_result_invalid")
-                        yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
+                        if w3_command:
+                            from ._driver_recovery import stop_unknown
+
+                            unknown = stop_unknown(unknown)
+                        yield CommitDispatch([unknown])
                         return
             outcome = replace(outcome, shared_state=(yield DispatchRead.DURABLE_CONTEXT))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, outcome)))
@@ -629,6 +621,10 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             yield CommitDispatch([(yield from outcomes.accepted_steps(driver, stored_plan, outcome))])
         else:
             unknown = yield from outcomes.unknown_steps(driver, stored_plan, outcome.reason)
-            yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
+            if w3_command:
+                from ._driver_recovery import stop_unknown
+
+                unknown = stop_unknown(unknown)
+            yield CommitDispatch([unknown])
     except StopIteration as error:
         raise _StopIterationTransport(error) from error

@@ -69,6 +69,8 @@ class HostCommandProbe:
     def __init__(self) -> None:
         self.submitted_plans: list[Any] = []
         self.submitted_calls: list[ToolCall] = []
+        self.lookup_calls: list[tuple[str, Any]] = []
+        self.lookup_handler = None
         self.ledger_at_submit: list[str] = []
         self.ledger_reader = None
 
@@ -110,6 +112,9 @@ class HostCommandProvider:
     def lookup(self, execution_id, binding):
         from vv_agent.session.providers import Unknown
 
+        self.probe.lookup_calls.append((execution_id, binding))
+        if self.probe.lookup_handler is not None:
+            return self.probe.lookup_handler(execution_id, binding)
         return ProviderLookupResult(
             binding,
             LookupStatus.UNKNOWN,
