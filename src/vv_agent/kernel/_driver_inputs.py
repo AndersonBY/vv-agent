@@ -11,7 +11,7 @@ from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
 from ._canonical_json import canonical_json_bytes
 from ._child_store import PENDING_CHILD_COMPLETION, ChildCompletion, child_handles, result_from_completions, verify_completion
-from ._content_publication import declared_content_ref
+from ._content_publication import declared_content_ref, make_retained_record_before_publication
 from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import ConfiguredChildResultProjector, CoreDriver
 from ._execution_values import AgentStatus, AgentTask, SubTaskOutcome
@@ -20,7 +20,9 @@ from ._provider_outcomes import (
     Accepted,
     Definitive,
     ProviderResultInvalid,
+    Unknown,
     validate_acceptance,
+    validate_lookup_provider_handle,
     validate_provider_result,
     validate_reference_provider_handle,
 )
@@ -38,6 +40,19 @@ from ._token_count import _StopIterationTransport
 from ._tool_planner import ToolCatalog
 from ._tool_result_checks import provider_result_identity
 from ._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
+
+_PROVIDER_RECOVERY_LOOKUP_PREFIX = "provider-recovery/lookup/"
+_PARKED_PROVIDER_HANDLE_FIELDS = (
+    "kind",
+    "provider",
+    "job_id",
+    "operation_id",
+    "attempt",
+    "request_digest",
+    "evidence",
+    "query_ref",
+    "cancel_ref",
+)
 
 
 class InputSetting(Enum):
@@ -219,40 +234,194 @@ def _validate_provider_evidence_reference(
     retained_item: InboxItem,
     plan: Record,
     turn,
-) -> None:
+) -> Any | None:
     if logical_item.kind != "provider_evidence":
-        return
+        return None
     if logical_item.feature_level == 3:
         if driver.content_reader is None:
             raise ProviderResultInvalid()
-        try:
-            lookup = logical_item.payload["provider_lookup"]
-            binding = lookup["binding"]
-            identity = plan._payload["execution_identity"]
-            environment = turn.start._payload["environment"]
-            expected = {
-                "tenant_id": identity["tenant_id"],
-                "session_id": plan.session_id,
-                "operation_id": plan.operation_id,
-                "attempt": plan.attempt,
-                "request_digest": plan._payload["request_digest"],
-                "execution_id": identity["execution_id"],
-                "command_digest": plan._payload["command_digest"],
-                "environment_id": identity["environment_id"],
-                "generation": environment["generation"],
-                "provider_id": plan._payload["provider_binding"],
-            }
-            if (
-                type(lookup) is not dict
-                or type(binding) is not dict
-                or any(binding.get(key) != value for key, value in expected.items())
-            ):
-                raise ValueError("provider lookup binding mismatch")
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProviderResultInvalid() from exc
-        return
+        logical_plan = driver.hydrate_plan(plan) if getattr(driver, "records", None) else plan
+        return _decoded_provider_lookup(logical_item, logical_plan, turn)
     if driver.content_reader is not None:
         validate_reference_provider_handle(plan, retained_item.payload["handle"])
+    return None
+
+
+def provider_recovery_lookup_input_id(
+    operation_id: str,
+    attempt: int,
+    request_digest: str,
+    provider_lookup: dict[str, Any],
+) -> str:
+    return _PROVIDER_RECOVERY_LOOKUP_PREFIX + digest(
+        {
+            "operation_id": operation_id,
+            "attempt": attempt,
+            "request_digest": request_digest,
+            "provider_lookup": provider_lookup,
+        }
+    )
+
+
+def _committed_lookup_binding(plan: Record, turn):
+    from vv_agent.session.environments import LookupBinding
+
+    identity = plan._payload["execution_identity"]
+    environment = turn.start._payload["environment"]
+    return LookupBinding(
+        tenant_id=identity["tenant_id"],
+        session_id=plan.session_id,
+        operation_id=plan.operation_id,
+        attempt=plan.attempt,
+        request_digest=plan._payload["request_digest"],
+        idempotency_key=plan._payload["idempotency_key"],
+        execution_id=identity["execution_id"],
+        command_digest=plan._payload["command_digest"],
+        environment_id=identity["environment_id"],
+        generation=environment["generation"],
+        provider_id=plan._payload["provider_binding"],
+    )
+
+
+def _decoded_provider_lookup(item: InboxItem, plan: Record, turn):
+    from vv_agent.session.environments import LookupBinding, LookupStatus, ProviderLookupResult
+
+    try:
+        lookup = item.payload["provider_lookup"]
+        if type(lookup) is not dict or set(lookup) != {
+            "schema_version",
+            "status",
+            "binding",
+            "outcome",
+            "evidence",
+        }:
+            raise ValueError("provider lookup shape mismatch")
+        if lookup["schema_version"] != "vv-agent.provider-lookup.v1":
+            raise ValueError("provider lookup version mismatch")
+        status = LookupStatus(lookup["status"])
+        binding = LookupBinding.from_dict(lookup["binding"])
+        committed_binding = _committed_lookup_binding(plan, turn)
+        binding.assert_matches(committed_binding)
+        outcome_value = lookup["outcome"]
+        if status is LookupStatus.NOT_STARTED:
+            if outcome_value is not None:
+                raise ValueError("not_started lookup carries an outcome")
+            outcome = None
+        elif status is LookupStatus.RUNNING:
+            if type(outcome_value) is not dict or set(outcome_value) != {"kind", "handle", "yield_on_steer"}:
+                raise ValueError("running lookup outcome mismatch")
+            if outcome_value["kind"] != "Accepted":
+                raise ValueError("running lookup kind mismatch")
+            validate_lookup_provider_handle(binding, outcome_value["handle"], feature_level=3)
+            outcome = Accepted(outcome_value["handle"], yield_on_steer=outcome_value["yield_on_steer"])
+        elif status is LookupStatus.EXITED:
+            if type(outcome_value) is not dict or set(outcome_value) != {
+                "kind",
+                "result",
+                "usage",
+                "shared_state",
+                "evidence",
+            }:
+                raise ValueError("exited lookup outcome mismatch")
+            if outcome_value["kind"] != "Definitive":
+                raise ValueError("exited lookup kind mismatch")
+            outcome = Definitive(
+                outcome_value["result"],
+                tuple(outcome_value["evidence"]),
+                usage=outcome_value["usage"],
+                shared_state=outcome_value["shared_state"],
+            )
+            validate_provider_result(plan, outcome)
+        elif status is LookupStatus.UNKNOWN:
+            if type(outcome_value) is not dict or set(outcome_value) != {"kind", "reason"}:
+                raise ValueError("unknown lookup outcome mismatch")
+            if outcome_value["kind"] != "Unknown":
+                raise ValueError("unknown lookup kind mismatch")
+            outcome = Unknown(outcome_value["reason"])
+        else:
+            raise ValueError("provider lookup status is not recognized")
+        result = ProviderLookupResult(
+            binding,
+            status,
+            outcome,
+            tuple(lookup["evidence"]),
+            feature_level=3,
+        )
+        if (
+            item.payload.get("operation_id") != plan.operation_id
+            or item.payload.get("attempt") != plan.attempt
+            or item.payload.get("request_digest") != plan._payload["request_digest"]
+        ):
+            raise ValueError("provider lookup outer identity mismatch")
+        if item.input_id != provider_recovery_lookup_input_id(
+            plan.operation_id or "",
+            plan.attempt or 0,
+            plan._payload["request_digest"],
+            lookup,
+        ):
+            raise ValueError("provider lookup input identity mismatch")
+        return result
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProviderResultInvalid() from exc
+
+
+def _trusted_provider_lookup(item: InboxItem, result: Any | None):
+    if item.feature_level != 3:
+        return None
+    actor = item.actor or {}
+    attributes = actor.get("attributes")
+    if (
+        actor.get("subject_kind") != "service"
+        or actor.get("subject_id") != "provider-recovery"
+        or type(attributes) is not dict
+        or attributes.get("role") != "provider-recovery"
+    ):
+        return None
+    return result
+
+
+def _not_started_retry_records(
+    driver: CoreDriver,
+    attempt: Attempt,
+    item: InboxItem,
+    plan: Record,
+    lookup: Any,
+) -> list[Record] | None:
+    operation = driver.state.operations[plan.operation_id or ""]
+    if attempt.state != "started" or attempt.dispatch is None or attempt.plan.attempt != 1 or max(operation.attempts) != 1:
+        return None
+    payload = driver.hydrate_plan(attempt.execution_plan)._payload
+    next_plan = make_retained_record_before_publication(
+        "op_planned",
+        session_id=driver.sid,
+        turn_id=attempt.plan.turn_id,
+        operation_id=attempt.plan.operation_id,
+        attempt=2,
+        payload=payload | {"not_before_ms": 0},
+        feature_level=attempt.plan.feature_level,
+    )
+    unknown = driver.record(
+        "op_unknown",
+        {
+            "reason": "authenticated provider lookup proved not_started",
+            "dispatch_evidence": [attempt.dispatch.record_id],
+            "observation": {
+                "code": "lookup_not_started",
+                "lookup_status": "not_started",
+                "lookup_evidence": list(lookup.evidence),
+                "evidence_input_id": item.input_id,
+                "evidence_owner": f"input:{item.input_id}",
+                "evidence_slot": "provider_lookup",
+                "retryable": True,
+            },
+            "retry": "retry",
+            "retry_at_ms": 0,
+            "duplicate_cost_risk": False,
+            "measurement_missing": True,
+        },
+        attempt.execution_plan,
+    )
+    return [unknown, next_plan]
 
 
 def _hydratable_definition(value: Any) -> Any:
@@ -596,8 +765,9 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
             ):
                 disposition, reason = "rejected", "untrusted or mismatched provider evidence"
             else:
+                lookup_result = None
                 try:
-                    _validate_provider_evidence_reference(
+                    lookup_result = _validate_provider_evidence_reference(
                         self,
                         logical_item,
                         item,
@@ -608,7 +778,68 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                     disposition, reason = "rejected", "provider_result_invalid"
                 else:
                     if logical_item.feature_level == 3:
-                        disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                        from vv_agent.session.environments import LookupStatus
+
+                        lookup_result = _trusted_provider_lookup(logical_item, lookup_result)
+                        if lookup_result is None:
+                            disposition, reason = "rejected", "untrusted or mismatched provider evidence"
+                        elif lookup_result.status is LookupStatus.NOT_STARTED:
+                            retry_records = _not_started_retry_records(
+                                self, attempt, logical_item, attempt.execution_plan, lookup_result
+                            )
+                            if retry_records is None:
+                                disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            else:
+                                extra = retry_records
+                        elif lookup_result.status is LookupStatus.RUNNING:
+                            operation = self.state.operations[lookup_result.binding.operation_id]
+                            if (
+                                attempt.state != "started"
+                                or attempt.wait is not None
+                                or max(operation.attempts) != lookup_result.binding.attempt
+                            ):
+                                disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            else:
+                                from . import _driver_outcomes as outcomes
+
+                                accepted = lookup_result.outcome
+                                handle = {key: accepted.handle[key] for key in _PARKED_PROVIDER_HANDLE_FIELDS}
+                                parked = yield from outcomes.parked_steps(self, attempt.execution_plan, handle, after=True)
+                                if accepted.yield_on_steer:
+                                    parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
+                                extra = [parked]
+                        elif lookup_result.status is LookupStatus.EXITED:
+                            operation = self.state.operations[lookup_result.binding.operation_id]
+                            if max(operation.attempts) != lookup_result.binding.attempt:
+                                disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            elif attempt.result is not None:
+                                retained_result = hydrate_record(self, attempt.result)
+                                equal = True
+                                assert lookup_result.outcome is not None
+                                for key, incoming_value in (
+                                    ("result", lookup_result.outcome.result),
+                                    ("usage", lookup_result.outcome.usage),
+                                ):
+                                    retained_value = retained_result._payload[key]
+                                    if key == "result":
+                                        retained_value = provider_result_identity(retained_value)
+                                        incoming_value = yield ProjectProviderResult(
+                                            attempt.execution_plan,
+                                            incoming_value,
+                                            retained_result._payload["result"].get("artifact"),
+                                        )
+                                        incoming_value = provider_result_identity(incoming_value)
+                                    if canonical_json_bytes(retained_value) != canonical_json_bytes(incoming_value):
+                                        equal = False
+                                        break
+                                disposition = "noop" if equal else "rejected"
+                                reason = "retained provider lookup result" if equal else "result conflict"
+                            elif attempt.state not in {"started", "parked"}:
+                                disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            else:
+                                extra = yield CompleteResult(attempt.execution_plan, lookup_result.outcome)
+                        else:
+                            disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
                     elif not (yield AuthenticateProvider(logical_item, item, attempt.execution_plan)):
                         disposition, reason = "rejected", "untrusted or mismatched provider evidence"
                     elif logical_item.kind == "provider_result":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from vv_agent.approval import ApprovalDecision, ApprovalRequest
@@ -149,7 +150,17 @@ class _Host:
         if isinstance(request, core.ProviderCall):
             provider, handle = self.provider, request.handle
             assert provider is not None
-            callback = (lambda: provider.query(handle)) if request.method == "query" else (lambda: provider.cancel(handle))
+            if request.method == "lookup":
+                from .environments import InvalidProviderLookupResult, LookupBinding
+                from .providers import lookup_provider
+
+                if not isinstance(handle, LookupBinding):
+                    raise InvalidProviderLookupResult("lookup requires the committed binding")
+                callback = partial(lookup_provider, provider, handle.execution_id, handle, feature_level=3)
+            elif request.method == "query":
+                callback = partial(provider.query, handle)
+            else:
+                callback = partial(provider.cancel, handle)
             return _invoke(driver.scope, callback, request.timeout)
         if isinstance(request, core.CommitStopping):
             return driver.commit(
@@ -466,6 +477,14 @@ class _Host:
                     writer,
                     replace(request.item, actor=actor),
                 )
+                receipt = tx.push(driver.sid, publication.item)
+                link_declared_input_content(writer, publication.item)
+                return receipt
+        if isinstance(request, core.PushProviderEvidence):
+            with driver.store.atomic() as tx:
+                writer = driver.content_writer(tx)
+                actor, _ = writer.service_principal("provider-recovery")
+                publication = declare_input_content(writer, replace(request.item, actor=actor))
                 receipt = tx.push(driver.sid, publication.item)
                 link_declared_input_content(writer, publication.item)
                 return receipt

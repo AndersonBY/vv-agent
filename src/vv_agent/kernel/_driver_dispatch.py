@@ -621,7 +621,11 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
                         outcomes.check_provider_result(driver, stored_plan, outcome)
                     except ProviderResultInvalid:
                         unknown = yield from outcomes.unknown_steps(driver, stored_plan, "provider_result_invalid")
-                        yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
+                        if w3_command:
+                            from ._driver_recovery import stop_unknown
+
+                            unknown = stop_unknown(unknown)
+                        yield CommitDispatch([unknown])
                         return
             outcome = replace(outcome, shared_state=(yield DispatchRead.DURABLE_CONTEXT))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, outcome)))
@@ -629,6 +633,10 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             yield CommitDispatch([(yield from outcomes.accepted_steps(driver, stored_plan, outcome))])
         else:
             unknown = yield from outcomes.unknown_steps(driver, stored_plan, outcome.reason)
-            yield CommitDispatch([_stop_level_three_retry(unknown) if w3_command else unknown])
+            if w3_command:
+                from ._driver_recovery import stop_unknown
+
+                unknown = stop_unknown(unknown)
+            yield CommitDispatch([unknown])
     except StopIteration as error:
         raise _StopIterationTransport(error) from error

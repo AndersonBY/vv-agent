@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from . import _after_cycle as cycle
 from . import _compaction_phase as compaction
@@ -22,7 +22,18 @@ from ._driver_requests import CommitRecords, CreateBoundary, PlanModel
 from ._execution_values import AgentTask
 from ._hydration import KeyUnavailable
 from ._message_values import Message
-from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, validate_acceptance
+from ._provider_outcomes import (
+    Accepted,
+    Definitive,
+    ProviderResultInvalid,
+    validate_acceptance,
+    validate_lookup_provider_handle,
+    validate_provider_result,
+    validate_reference_provider_handle,
+)
+from ._provider_outcomes import (
+    Unknown as ProviderUnknown,
+)
 from ._record_codec import RecordError
 from ._records import InboxItem, Record, copy_json, digest
 from ._retained_budget import retained_budget_inputs, retained_evaluator
@@ -31,6 +42,9 @@ from ._summary_requests import pending_compaction_requests, summary_pending
 from ._token_count import _StopIterationTransport
 from ._tool_behavior import build_skipped_result
 from ._tool_values import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
+
+if TYPE_CHECKING:
+    from vv_agent.session.environments import LookupBinding, ProviderLookupResult
 
 
 class Read(Enum):
@@ -78,7 +92,7 @@ class SelectProvider:
 @dataclass(frozen=True, slots=True)
 class ProviderCall:
     method: str
-    handle: dict[str, Any]
+    handle: dict[str, Any] | LookupBinding
     timeout: float
 
 
@@ -87,6 +101,11 @@ class CommitStopping:
     records: list[Record]
     turn_id: str
     stopping: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PushProviderEvidence:
+    item: InboxItem
 
 
 class _RecoveryStopIteration(Exception):
@@ -136,6 +155,187 @@ def _task(driver: CoreDriver, *, copy: bool = False):
     return task if not copy else deepcopy(task)
 
 
+def stop_unknown(record: Record, *, observation: dict[str, Any] | None = None) -> Record:
+    """Keep an unknown execution pinned to stop while retaining recovery evidence."""
+
+    payload = copy_json(record._payload)
+    retained = dict(payload["observation"])
+    if observation:
+        retained.update(observation)
+    retained["retryable"] = False
+    payload["observation"] = retained
+    payload["retry"] = "stop"
+    payload["retry_at_ms"] = None
+    return replace(record, payload=payload)
+
+
+def _committed_lookup_binding(driver: CoreDriver, plan: Record) -> LookupBinding | None:
+    """Build the single authenticated lookup binding from committed execution data."""
+
+    from vv_agent.session.environments import InvalidLookupBinding, LookupBinding
+
+    if plan.feature_level != 3 or plan._payload.get("op_kind") != "tool" or not planning.is_w3_command_plan(driver, plan):
+        return None
+    try:
+        identity = plan._payload["execution_identity"]
+        tenant_id = getattr(driver.store, "tenant_id", None)
+        if (
+            type(identity) is not dict
+            or not isinstance(tenant_id, str)
+            or not tenant_id
+            or identity.get("session_id") != plan.session_id
+            or identity.get("operation_id") != plan.operation_id
+            or identity.get("tenant_id") != tenant_id
+            or plan.turn_id is None
+        ):
+            return None
+        environment = driver.state.turns[plan.turn_id].start._payload["environment"]
+        if type(environment) is not dict or identity.get("environment_id") != environment.get("environment_id"):
+            return None
+        return LookupBinding(
+            tenant_id=tenant_id,
+            session_id=plan.session_id,
+            operation_id=plan.operation_id,
+            attempt=plan.attempt,
+            request_digest=plan._payload["request_digest"],
+            idempotency_key=plan._payload["idempotency_key"],
+            execution_id=identity["execution_id"],
+            command_digest=plan._payload["command_digest"],
+            environment_id=environment["environment_id"],
+            generation=environment["generation"],
+            provider_id=plan._payload["provider_binding"],
+        )
+    except (InvalidLookupBinding, KeyError, TypeError, AssertionError):
+        return None
+
+
+def _lookup_evidence(driver: CoreDriver, plan: Record, lookup: ProviderLookupResult) -> InboxItem:
+    if lookup.feature_level != 3 or plan.operation_id is None or plan.attempt is None or plan.turn_id is None:
+        raise ValueError("provider lookup evidence is not persistable")
+    binding = lookup.binding
+    outcome = lookup.outcome
+    if isinstance(outcome, Accepted):
+        encoded_outcome = {
+            "kind": "Accepted",
+            "handle": outcome.handle,
+            "yield_on_steer": outcome.yield_on_steer,
+        }
+    elif isinstance(outcome, Definitive):
+        encoded_outcome = {
+            "kind": "Definitive",
+            "result": outcome.result,
+            "usage": outcome.usage,
+            "shared_state": outcome.shared_state,
+            "evidence": list(outcome.evidence),
+        }
+    elif isinstance(outcome, ProviderUnknown):
+        encoded_outcome = {"kind": "Unknown", "reason": outcome.reason}
+    elif outcome is None:
+        encoded_outcome = None
+    else:
+        raise ValueError("provider lookup outcome is not persistable")
+    provider_lookup = {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": lookup.status.value,
+        "binding": binding.to_dict(),
+        "outcome": encoded_outcome,
+        "evidence": list(lookup.evidence),
+    }
+    input_id = inputs.provider_recovery_lookup_input_id(
+        plan.operation_id,
+        plan.attempt,
+        plan._payload["request_digest"],
+        provider_lookup,
+    )
+    return InboxItem(
+        input_id,
+        "provider_evidence",
+        {
+            "operation_id": plan.operation_id,
+            "attempt": plan.attempt,
+            "request_digest": plan._payload["request_digest"],
+            "provider_lookup": provider_lookup,
+        },
+        target_turn_id=plan.turn_id,
+        generation=driver.state.turns[plan.turn_id].start._payload["generation"],
+        feature_level=3,
+    )
+
+
+def _lookup_recovery_unknown(
+    driver: CoreDriver,
+    attempt: Attempt,
+    plan: Record,
+    binding: LookupBinding,
+):
+    from vv_agent.session.environments import InvalidProviderLookupResult, LookupStatus, ProviderLookupResult
+
+    def push_evidence(lookup: ProviderLookupResult):
+        receipt = yield PushProviderEvidence(_lookup_evidence(driver, plan, lookup))
+        if not receipt.replayed:
+            return None
+        unknown = yield from outcomes.unknown_steps(
+            driver, attempt.execution_plan, "provider lookup evidence was already consumed"
+        )
+        return stop_unknown(
+            unknown,
+            observation={
+                "code": "provider_lookup_replayed",
+                "lookup_status": lookup.status.value,
+                "lookup_evidence": list(lookup.evidence),
+                "evidence_input_id": receipt.input_id,
+                "evidence_replayed": True,
+            },
+        )
+
+    try:
+        yield SelectProvider(plan)
+        lookup = yield ProviderCall("lookup", binding, 1)
+    except TimeoutError:
+        status, evidence = "unknown", ("provider-lookup-timeout",)
+    except InvalidProviderLookupResult:
+        status, evidence = "invalid", ("provider-lookup-result-invalid",)
+    except Exception:
+        status, evidence = "unknown", ("provider-lookup-error",)
+    else:
+        if isinstance(lookup, ProviderLookupResult):
+            if lookup.status is LookupStatus.NOT_STARTED:
+                if attempt.plan.attempt == 1:
+                    replayed = yield from push_evidence(lookup)
+                    if replayed is not None:
+                        return replayed
+                    return None
+            elif lookup.status is LookupStatus.EXITED:
+                try:
+                    validate_provider_result(plan, lookup.outcome)
+                except ProviderResultInvalid:
+                    status, evidence = "invalid", ("provider-lookup-result-invalid",)
+                else:
+                    replayed = yield from push_evidence(lookup)
+                    if replayed is not None:
+                        return replayed
+                    return None
+            elif lookup.status is LookupStatus.RUNNING:
+                replayed = yield from push_evidence(lookup)
+                if replayed is not None:
+                    return replayed
+                return None
+            status, evidence = lookup.status.value, lookup.evidence
+        elif isinstance(lookup, ProviderUnknown):
+            status, evidence = "unknown", ("provider-lookup-dispatch-unknown",)
+        else:
+            status, evidence = "invalid", ("provider-lookup-result-invalid",)
+    unknown = yield from outcomes.unknown_steps(driver, attempt.execution_plan, "worker lost before durable result")
+    return stop_unknown(
+        unknown,
+        observation={
+            "code": "provider_lookup_recovery_unavailable",
+            "lookup_status": status,
+            "lookup_evidence": list(evidence),
+        },
+    )
+
+
 def _completed_values(driver: CoreDriver, record: Record) -> tuple[dict[str, Any], tuple[str, ...], dict[str, Any] | None]:
     result = driver.hydrate_record_field(record, "result", record._payload["result"])
     evidence = driver.hydrate_record_field(record, "evidence", record._payload["evidence"])
@@ -157,6 +357,41 @@ def _result(driver: CoreDriver, record: Record) -> dict[str, Any]:
 def _hydrated_wait(driver: CoreDriver, attempt: Attempt) -> dict[str, Any]:
     assert attempt.plan.operation_id is not None and attempt.plan.attempt is not None and attempt.wait is not None
     return driver.hydrate_parked_wait(attempt.plan.operation_id, attempt.plan.attempt, attempt.wait)
+
+
+def _provider_operation_handle(
+    driver: CoreDriver,
+    plan: Record,
+    handle: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore the W3 identity needed to address an already parked execution."""
+
+    retained_handle = next(
+        (
+            stored.record._payload["handle"]
+            for stored in reversed(driver.records)
+            if stored.record.kind == "op_parked"
+            and stored.record.operation_id == plan.operation_id
+            and stored.record.attempt == plan.attempt
+            and stored.record._payload["handle"]["kind"] == "provider"
+        ),
+        None,
+    )
+    if retained_handle is None:
+        raise ProviderResultInvalid()
+    validate_reference_provider_handle(plan, retained_handle)
+    if plan.feature_level != 3:
+        return handle
+    binding = _committed_lookup_binding(driver, plan)
+    if binding is None:
+        raise ProviderResultInvalid()
+    rehydrated = handle | {
+        "execution_id": binding.execution_id,
+        "command_digest": binding.command_digest,
+        "environment_id": binding.environment_id,
+        "generation": binding.generation,
+    }
+    return rehydrated
 
 
 def _retained_budget(driver: CoreDriver, tid: str):
@@ -473,18 +708,19 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                 yield from close(self, "failed", "model_request_rejected", rejected["content"])
                 return True
             if a.state == "started":
-                yield CommitRecords(
-                    [
-                        (
-                            yield from _compose(
-                                self, outcomes.unknown_steps(self, a.execution_plan, "worker lost before durable result")
-                            )
-                        )
-                    ]
-                )
+                plan = self.hydrate_plan(a.execution_plan)
+                binding = _committed_lookup_binding(self, plan)
+                if binding is not None:
+                    unknown = yield from _compose(self, _lookup_recovery_unknown(self, a, plan, binding))
+                else:
+                    unknown = yield from _compose(
+                        self, outcomes.unknown_steps(self, a.execution_plan, "worker lost before durable result")
+                    )
+                if unknown is not None:
+                    yield CommitRecords([stop_unknown(unknown)])
                 return True
             if a.state == "unknown" and a.unknown:
-                if a.unknown._payload["retry"] == "retry":
+                if a.plan.feature_level != 3 and a.unknown._payload["retry"] == "retry":
                     now = (yield outcomes.OutcomeRead.POLL_LEASE).db_now_ms
                     due = a.unknown._payload["retry_at_ms"] or 0
                     if due > now:
@@ -530,13 +766,22 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     plan = self.hydrate_plan(a.execution_plan)
                     yield SelectProvider(plan)
                     try:
-                        outcome = yield ProviderCall("query", handle, 1)
+                        query_handle = _provider_operation_handle(self, plan, handle)
+                        outcome = yield ProviderCall("query", query_handle, 1)
                         if isinstance(outcome, Definitive):
                             outcomes.check_provider_result(self, a.execution_plan, outcome)
                         elif isinstance(outcome, Accepted):
-                            validate_acceptance(plan, outcome)
-                            if outcome.handle != handle or outcome.yield_on_steer != wait.get("yield_on_steer", False):
+                            if plan.feature_level == 3:
+                                binding = _committed_lookup_binding(self, plan)
+                                if binding is None:
+                                    raise ProviderResultInvalid()
+                                validate_lookup_provider_handle(binding, outcome.handle, feature_level=3)
+                            else:
+                                validate_acceptance(plan, outcome)
+                            if outcome.handle != query_handle or outcome.yield_on_steer != wait.get("yield_on_steer", False):
                                 raise ProviderResultInvalid()
+                        elif plan.feature_level == 3 and not isinstance(outcome, ProviderUnknown):
+                            raise ProviderResultInvalid()
                     except ProviderResultInvalid as exc:
                         exc._query_operation_key = key
                         raise
@@ -716,7 +961,19 @@ def close(
                         handle = wait["handle"]
                         plan = self.hydrate_plan(a.execution_plan)
                         yield SelectProvider(plan)
-                        outcome = yield ProviderCall("cancel", handle, 1)
+                        try:
+                            cancel_handle = _provider_operation_handle(self, plan, handle)
+                            outcome = yield ProviderCall("cancel", cancel_handle, 1)
+                        except ProviderResultInvalid:
+                            if can_be_unknown:
+                                records.append(
+                                    (
+                                        yield from _compose(
+                                            self, outcomes.unknown_steps(self, a.execution_plan, "provider_result_invalid")
+                                        )
+                                    )
+                                )
+                            continue
                         if isinstance(outcome, Definitive):
                             try:
                                 outcomes.check_provider_result(self, a.execution_plan, outcome)

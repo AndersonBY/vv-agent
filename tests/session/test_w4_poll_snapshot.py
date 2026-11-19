@@ -154,7 +154,7 @@ def test_factory_handoff_controls_bind_new_token_without_driver_renewal(store, d
         bind_turn(self)
         binding = self.scope.control_binding
         assert binding is not None
-        active_state = self.fold.state if self._logical_dirty else self.state
+        state = self.fold.state if self._logical_dirty else self.state
         binds.append(
             _Bind(
                 binding.turn_id,
@@ -163,7 +163,7 @@ def test_factory_handoff_controls_bind_new_token_without_driver_renewal(store, d
                 binding.token.cancelled,
                 binding.token.reason,
                 tuple(binding.applied_inputs),
-                binding.applied_inputs is active_state.applied_inputs,
+                binding.applied_inputs is state.applied_inputs,
             )
         )
 
