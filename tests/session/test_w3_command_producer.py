@@ -71,6 +71,8 @@ class HostCommandProbe:
         self.submitted_calls: list[ToolCall] = []
         self.lookup_calls: list[tuple[str, Any]] = []
         self.lookup_handler = None
+        self.query_calls: list[dict[str, Any]] = []
+        self.query_handler = None
         self.ledger_at_submit: list[str] = []
         self.ledger_reader = None
 
@@ -99,6 +101,9 @@ class HostCommandProvider:
     def query(self, handle):
         from vv_agent.session.providers import Unknown
 
+        self.probe.query_calls.append(handle)
+        if self.probe.query_handler is not None:
+            return self.probe.query_handler(handle)
         return Unknown("test host has no query receipt")
 
     def cancel(self, handle):
