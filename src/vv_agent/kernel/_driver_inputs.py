@@ -28,6 +28,7 @@ from ._provider_outcomes import (
     validate_reference_provider_handle,
 )
 from ._records import InboxItem, Record, _RetainedTools, copy_json, digest
+from ._reducer import normalize_approval_decision
 from ._requirements import (
     definition_requirements,
     model_capability_tags,
@@ -941,6 +942,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                         disposition, reason = "rejected", "acceptance is not attachable"
         elif item.kind == "approval_answer":
             target = logical_item.payload["operation_id"]
+            decision = normalize_approval_decision(logical_item.payload["decision"])
             op = self.state.operations.get(target)
             attempt = op.attempts.get(logical_item.payload["attempt"]) if op else None
             hydrated_wait = _hydrated_provider_wait(self, attempt) if attempt and attempt.wait else None
@@ -973,7 +975,7 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                 attempt
                 and attempt.wait
                 and attempt.wait["deadline_ms"] is not None
-                and logical_item.payload["decision"] != "timeout"
+                and decision != "timeout"
                 and (yield InputSetting.POLL_NOW) >= attempt.wait["deadline_ms"]
             ):
                 disposition, reason = "rejected", "approval deadline expired"

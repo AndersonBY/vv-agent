@@ -112,6 +112,11 @@ class LocalWorker:
             return self._coordinate_pass
 
     @property
+    def drive_available(self) -> bool:
+        with self._state:
+            return self.support.drive is not None and self._inflight is None and not self._stop.is_set()
+
+    @property
     def active_wake_sessions(self) -> frozenset[str]:
         with self._state:
             return frozenset(self._pending_wake_sessions | self._scanning_wake_sessions)

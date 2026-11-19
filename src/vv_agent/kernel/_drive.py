@@ -120,7 +120,7 @@ def drive_core(
         binding = make_binding()
     except BaseException:
         if lease is not None:
-            with suppress(Exception):
+            with suppress(LeaseLost):
                 store.release(lease)
         raise
     ttl_ms = binding.ttl_ms
@@ -290,7 +290,7 @@ def drive_core(
         raise
     finally:
         if scope is None or scope_close_succeeded:
-            with suppress(Exception):
+            with suppress(LeaseLost):
                 store.release(scope.lease if scope is not None else lease)
         with suppress(Exception):
             binding.after_drive(runtime)

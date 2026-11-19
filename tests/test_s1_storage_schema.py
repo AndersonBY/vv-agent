@@ -92,6 +92,9 @@ EXPECTED_COLUMNS = {
         "available_ms",
         "received_ms",
         "consumed_seq",
+        "routing_level",
+        "routing_handler_version",
+        "routing_required_capabilities",
     },
     "sk_consumer": {"tenant_id", "session_id", "consumer", "last_seq", "project_retry_at_ms"},
     "sk_commit": {

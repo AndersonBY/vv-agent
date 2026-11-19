@@ -17,7 +17,7 @@ from vv_agent.session.reducer import Fold
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.timing import SystemClock, ThreadLeaseKeeper, _SharedLeaseKeeper
 
-from .helpers import create_fixture_session, wrap_fixture_store
+from .helpers import acquire_fixture_lease, create_fixture_session, wrap_fixture_store
 from .test_recovery_matrix import runtime
 
 
@@ -33,7 +33,7 @@ def _lease_for(path, session_id: str, *, ttl_ms: int = 4_000):
         store.install_schema()
         store.configure_input_admission(allow_unsigned=True)
         create_fixture_session(wrap_fixture_store(store), session_id, consumers=())
-        lease = store.acquire(session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
+        lease = acquire_fixture_lease(store, session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
     assert lease is not None
     return lease
 
@@ -56,7 +56,7 @@ def test_core_drive_store_factory_tenant_facade_is_supported(tmp_path):
         core.install_schema()
         core.configure_input_admission(allow_unsigned=True)
         create_fixture_session(wrap_fixture_store(core), "s", consumers=())
-        lease = core.acquire("s", owner="core-owner", ttl_ms=4_000)
+        lease = acquire_fixture_lease(core, "s", owner="core-owner", ttl_ms=4_000)
         assert lease is not None
 
         with core.drive_store_factory()() as drive:
@@ -349,7 +349,7 @@ def test_blocked_heartbeat_resource_close_keeps_lease_unreleased(tmp_path, monke
 def test_persistent_keeper_reuses_one_heartbeat_connection(store, monkeypatch):
     wrapped = wrap_fixture_store(store)
     create_fixture_session(wrapped, "persistent", consumers=())
-    lease = wrapped.acquire("persistent", owner="persistent-owner", ttl_ms=4_000)
+    lease = acquire_fixture_lease(wrapped, "persistent", owner="persistent-owner", ttl_ms=4_000)
     assert lease is not None
     heartbeat_store = store.heartbeat_store_factory()
     foreground_thread = threading.get_ident()

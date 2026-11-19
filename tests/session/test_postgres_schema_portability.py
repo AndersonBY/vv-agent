@@ -13,10 +13,10 @@ import pytest
 from vv_agent.kernel import _postgres
 
 FIXTURE_DIR = Path(__file__).with_name("fixtures")
-PG16_CATALOG_SHA256 = "387928e904a3e1ead2667a822c78eb7fff964e8d998f35cc0048f97ae4fbc4ce"
-PG16_RAW_FINGERPRINT = "ad09a6a7a7e43a528b8a21ff8a88c0440b634eb277eaa6ccdeae080960980f32"
-PG18_CATALOG_SHA256 = "6d22dc7f14c63f5afad1f612337c8d419835d15237cf3aa08dc5efa2cd56caad"
-PG18_RAW_FINGERPRINT = "f75229408d171de21a92b0ccc24d6806d5651af74084f5ae0b30141085c8c472"
+PG16_CATALOG_SHA256 = "29e391fb004563a15d3c26b91f5d1eef18c3aa587d1504edc09e52ee387b051a"
+PG16_RAW_FINGERPRINT = "b6975c70ad23fabb6dab4f56480ca2eb3c63cd9209561c5e8c209112fa04a7a7"
+PG18_CATALOG_SHA256 = "6c7b47899cfba255e2f107505d36224f8c47ae61d4d53359f52176273491eb23"
+PG18_RAW_FINGERPRINT = "66e62f44aebe17b8c6c93391e795c0e324a2765947e49d5832bc23cb96580a7e"
 
 
 def _fold_factory():
@@ -56,7 +56,7 @@ def test_real_pg16_and_pg18_catalog_evidence_has_one_semantic_difference():
     pg18_constraints = set(map(tuple, pg18["constraints"]))
     added = pg18_constraints - pg16_constraints
     assert not pg16_constraints - pg18_constraints
-    assert len(added) == 90
+    assert len(added) == 92
     assert all(row[2] == "n" and row[6] for row in added)
     attnotnull_columns = {(row[0], row[2]) for row in pg18["columns"] if row[4]}
     assert {(row[0], row[3].removeprefix("NOT NULL ")) for row in added} == attnotnull_columns

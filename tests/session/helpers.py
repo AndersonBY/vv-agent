@@ -1,7 +1,7 @@
 from typing import Any
 
+from support.s1_fixture_values import append_fixture_records as _append_fixture_records
 from support.s1_fixture_values import (
-    append_fixture_records,
     content_ref,
     create_fixture_session,
     fixture_child_spec,
@@ -16,6 +16,7 @@ from support.s1_fixture_values import (
 from vv_agent.session.records import InboxItem, Record, digest, make_record
 
 __all__ = [
+    "acquire_fixture_lease",
     "append_fixture_records",
     "base",
     "content_ref",
@@ -31,6 +32,41 @@ __all__ = [
     "runtime_turn_record",
     "wrap_fixture_store",
 ]
+
+
+def acquire_fixture_lease(store: Any, session_id: str, *, owner: str, ttl_ms: int):
+    """Acquire a lease for tests that seed records into a known fixture session."""
+
+    _mark_fixture_session_due(store, session_id)
+    return store.acquire(session_id, owner=owner, ttl_ms=ttl_ms)
+
+
+def append_fixture_records(
+    store: Any,
+    session_id: str,
+    records: Any,
+    *,
+    commit_id: str = "fixture",
+    consume_input_ids: tuple[str, ...] = (),
+):
+    """Append fixture records after making the fixture-only drive runnable."""
+
+    _mark_fixture_session_due(store, session_id)
+    return _append_fixture_records(
+        store,
+        session_id,
+        records,
+        commit_id=commit_id,
+        consume_input_ids=consume_input_ids,
+    )
+
+
+def _mark_fixture_session_due(store: Any, session_id: str) -> None:
+    with store.atomic():
+        store._rows(
+            "UPDATE sk_session SET next_drive_ms=%s WHERE tenant_id=%s AND session_id=%s",
+            (store._now(), store.tenant_id, session_id),
+        )
 
 
 def item(input_id: str = "i", kind: str = "user", **kw: Any) -> InboxItem:

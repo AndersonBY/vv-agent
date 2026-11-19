@@ -24,6 +24,10 @@ def create(store, session_id: str = "s", *, consumers=(), parent=None):
 
 
 def acquire(store, session_id: str = "s"):
+    store._rows(
+        "UPDATE sk_session SET next_drive_ms=%s WHERE tenant_id=%s AND session_id=%s",
+        (store._now(), store.tenant_id, session_id),
+    )
     lease = store.acquire(session_id, owner=f"worker/{session_id}", ttl_ms=10_000)
     assert lease is not None
     return lease
@@ -94,9 +98,11 @@ def test_write_level_is_atomic_and_session_level_is_monotonic(store):
     store.release(low)
 
 
-def test_held_lease_is_fenced_when_session_level_rises(store):
+def test_held_lease_renews_through_level_rise_until_unsafe_write(store):
     set_write_level(store, 2)
     create(store, consumers=("host",))
+    with store.atomic() as tx:
+        tx.push("s", item("before-rise", actor=principal("test")))
     store.configure_worker(level=1)
     lease = acquire(store)
     store._rows(
@@ -106,8 +112,15 @@ def test_held_lease_is_fenced_when_session_level_rises(store):
     counts = tuple(store._rows(f"SELECT count(*) FROM {table}")[0][0] for table in ("sk_record", "sk_commit", "sk_inbox"))
     mismatch = "session feature level 2 exceeds worker feature level 1"
 
-    with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
-        store.renew(lease, ttl_ms=10_000)
+    poll = store.renew(lease, ttl_ms=10_000)
+    assert poll.lease == lease.__class__(
+        lease.session_id,
+        lease.owner,
+        lease.epoch,
+        poll.lease.expires_at_ms,
+        lease.tenant_id,
+    )
+    assert poll.db_now_ms < poll.lease.expires_at_ms
     with pytest.raises(UnsupportedFeatureLevel, match=mismatch):
         append(store, lease, [record("turn_ended")], "stale-writer")
     with pytest.raises(UnsupportedFeatureLevel, match=mismatch):

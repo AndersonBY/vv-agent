@@ -77,3 +77,14 @@ def test_fixture_output_does_not_dirty_source_provenance(source_repo: Path) -> N
     output.write_bytes(b"{}\n")
     assert RECORD_CODEC["_source_tree_digest"](source_repo) == digest
     assert not RECORD_CODEC["_source_worktree_dirty"](source_repo)
+
+
+def test_app_server_capture_uses_explicit_unsigned_local_policy() -> None:
+    first = RECORD_CODEC["app_server_error"]()
+    second = RECORD_CODEC["app_server_error"]()
+
+    assert first == second
+    assert first == {
+        "code": -32602,
+        "message": "stored record chain digest mismatch at seq 1",
+    }

@@ -27,7 +27,13 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import create_fixture_session, fixture_content_reader, push_fixture_input, wrap_fixture_store
+from .helpers import (
+    acquire_fixture_lease,
+    create_fixture_session,
+    fixture_content_reader,
+    push_fixture_input,
+    wrap_fixture_store,
+)
 from .test_recovery_matrix import runtime as base_runtime
 
 
@@ -58,7 +64,7 @@ def test_tenant_scoped_factory_renews_the_requested_session(tmp_path):
             },
         )
         with sessions._open_drive_store() as drive:
-            lease = drive.acquire("s", owner="tenant-owner", ttl_ms=4_000)
+            lease = acquire_fixture_lease(drive, "s", owner="tenant-owner", ttl_ms=4_000)
             assert lease is not None and lease.tenant_id == tenant_id
             heartbeat = _LeaseHeartbeat(
                 lease,
@@ -84,7 +90,7 @@ def test_postgres_tenant_scoped_factory_renews_the_requested_session(store):
     tenant_id = "tenant-scoped-postgres-heartbeat"
     tenant = wrap_fixture_store(store.for_tenant(tenant_id))
     create_fixture_session(tenant, "s", consumers=())
-    lease = tenant.acquire("s", owner="tenant-owner", ttl_ms=4_000)
+    lease = acquire_fixture_lease(tenant, "s", owner="tenant-owner", ttl_ms=4_000)
     assert lease is not None and lease.tenant_id == tenant_id
     heartbeat = _LeaseHeartbeat(
         lease,
@@ -123,7 +129,7 @@ def heartbeat_for(
     closed_threads=None,
 ):
     with open_store(path) as store:
-        lease = store.acquire(session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
+        lease = acquire_fixture_lease(store, session_id, owner=f"owner-{session_id}", ttl_ms=ttl_ms)
     assert lease is not None
 
     @contextmanager
@@ -279,7 +285,7 @@ def test_runtime_monotonic_schedule_stays_separate_from_sqlite_elapsed_epoch(tmp
         store.install_schema()
         store.configure_input_admission(allow_unsigned=True)
         create_sessions(store, "s")
-        lease = store.acquire("s", owner="owner", ttl_ms=3_000)
+        lease = acquire_fixture_lease(store, "s", owner="owner", ttl_ms=3_000)
         assert lease is not None
 
     @contextmanager
@@ -473,7 +479,7 @@ def test_postgres_heartbeat_unwraps_backend_before_classifying_timeouts(store, m
     from psycopg import errors
 
     create_sessions(store, "s")
-    lease = store.acquire("s", owner="wrapped-timeout", ttl_ms=5_000)
+    lease = acquire_fixture_lease(store, "s", owner="wrapped-timeout", ttl_ms=5_000)
     assert lease is not None
     failure = getattr(errors, error_name)("injected database timeout")
 
@@ -957,7 +963,7 @@ def test_scheduled_keeper_first_renew_establishes_anchor_without_wall_clock(tmp_
         world.create()
         selected = world.runtime("s", "owner")
         store = world.connection("owner")
-        lease = store.acquire("s", owner="owner", ttl_ms=selected.ttl_ms)
+        lease = acquire_fixture_lease(store, "s", owner="owner", ttl_ms=selected.ttl_ms)
         assert lease is not None
         scope = SimScope(lease, selected, now_ms=None)
         assert scope.latest_poll is None

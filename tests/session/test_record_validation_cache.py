@@ -9,7 +9,6 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema.validators import extend
 from support.s1_fixture_values import (
-    append_fixture_records,
     clear_fixture_state_cache,
     content_ref,
     create_fixture_session,
@@ -32,7 +31,7 @@ from vv_agent.session.records import RecordError, digest
 from vv_agent.session.store import Conflict, SequenceConflict
 
 from .conftest import open_store
-from .helpers import record
+from .helpers import acquire_fixture_lease, append_fixture_records, record
 from .test_recovery_matrix import runtime as recovery_runtime
 
 
@@ -217,8 +216,8 @@ def test_append_validates_current_locked_context_once(store, monkeypatch):
     create_fixture_session(store, "stable")
     create_fixture_session(store, "changed")
     raw = store._root
-    stable_lease = store.acquire("stable", owner="stable-worker", ttl_ms=15000)
-    changed_lease = store.acquire("changed", owner="changed-worker", ttl_ms=15000)
+    stable_lease = acquire_fixture_lease(store, "stable", owner="stable-worker", ttl_ms=15000)
+    changed_lease = acquire_fixture_lease(store, "changed", owner="changed-worker", ttl_ms=15000)
     assert stable_lease is not None and changed_lease is not None
 
     prefix_calls: Counter[str] = Counter()
@@ -406,7 +405,7 @@ def test_driver_tail_rejects_sequence_gap(store, database, gap):
     from vv_agent.session.store import ReadPage, StoredRecord
 
     create_fixture_session(store, "s")
-    lease = store.acquire("s", owner="driver", ttl_ms=15000)
+    lease = acquire_fixture_lease(store, "s", owner="driver", ttl_ms=15000)
     assert lease is not None
     rt = recovery_runtime(database, [], content_reader=fixture_content_reader(store, "s"))
     driver = _Driver(store, "s", rt, _Scope(lease, rt))

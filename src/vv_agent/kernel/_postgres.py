@@ -25,7 +25,7 @@ CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
 SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v2"
 # Update this digest with intentional DDL or fingerprint-shape changes and contract review.
-SCHEMA_FINGERPRINT = "f407bb0222d374caacd1ceeb24e69580055447fd34856b0928a851fb88c728ac"
+SCHEMA_FINGERPRINT = "5518c19df3a7476dc81f476188fee796036198b7ab3316347a2a661ba41c3b20"
 RLS_ISOLATION = "explicit-tenant-credentials"
 RLS_INSTALL_REASON = "The base DDL is unisolated. Runtime tenant access requires install_tenant_rls() and tenant_standalone()."
 RLS_SHARED_GATEWAY_REASON = (
@@ -151,6 +151,8 @@ CREATE TABLE sk_inbox (
     admission_signed_ms bigint CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
     available_ms bigint NOT NULL CHECK (available_ms >= 0), received_ms bigint NOT NULL CHECK (received_ms >= 0),
     consumed_seq bigint CHECK (consumed_seq IS NULL OR consumed_seq > 0),
+    routing_level integer NOT NULL DEFAULT 1 CHECK (routing_level >= 1), routing_handler_version text,
+    routing_required_capabilities bytea NOT NULL DEFAULT decode('5b5d','hex'),
     PRIMARY KEY (tenant_id,session_id,input_id), UNIQUE (tenant_id,session_id,input_seq),
     CHECK ((admission_key_id IS NULL) = (admission_signature IS NULL)
         AND (admission_key_id IS NULL) = (admission_signed_ms IS NULL)),

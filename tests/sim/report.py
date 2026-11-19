@@ -311,26 +311,24 @@ def replay_provenance(recorded, current):
 @contextmanager
 def _seed_record_parse_cache():
     """Parse immutable record bodies once within one seed without sharing across workers' jobs."""
-    from vv_agent.kernel._records import Record
+    from vv_agent.kernel._records import Record, _MessageCache
 
     descriptor = Record.__dict__["_parse"]
     uncached = Record._parse
 
     @lru_cache(maxsize=4096)
-    def parse(cls, body, messages):
+    def parse(cls: type[Record], body: bytes, messages: _MessageCache | None) -> Record:
         return uncached(body, messages)
 
-    def cached_parse(cls, body, messages=None):
-        if type(body) is not bytes:
-            return uncached(body, messages)
+    def cached_parse(cls: type[Record], body: bytes, messages: _MessageCache | None = None) -> Record:
         # Retaining the message-cache object prevents id reuse from producing an incorrect hit.
         return parse(cls, body, messages)
 
-    Record._parse = classmethod(cached_parse)
+    type.__setattr__(Record, "_parse", classmethod(cached_parse))
     try:
         yield parse
     finally:
-        Record._parse = descriptor
+        type.__setattr__(Record, "_parse", descriptor)
         parse.cache_clear()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
 from .helpers import push_fixture_input, wrap_fixture_store
-from .test_delegation_parity import parent_llm, routed, runtime
+from .test_delegation_parity import open_fixture_store, parent_llm, routed, runtime
 from .test_tools_control_parity import admit
 
 
@@ -46,6 +47,14 @@ def database_clock(store, monkeypatch):
         monkeypatch.setattr(type(raw_store), "clock_sql", str(now))
 
     return advance
+
+
+@contextmanager
+def _worker_heartbeat_store(database, capabilities):
+    with open_fixture_store(database) as opened:
+        worker_store = getattr(opened, "_root", opened)
+        worker_store.configure_worker(level=2, handler_versions=("1",), capabilities=capabilities)
+        yield opened
 
 
 def _parent_with_child(
@@ -103,6 +112,9 @@ def _parent_with_child(
     )
     admit(store, config, sid="parent")
     parent_rt = runtime(store, database, agent, config, parent_llm(config), sid="parent")
+    worker_store = getattr(store, "_root", store)
+    capabilities = worker_store.worker_supports.capabilities
+    parent_rt.heartbeat_store = lambda: _worker_heartbeat_store(database, capabilities)
     drive(store, "parent", runtime=parent_rt)
 
     children = [sid for sid in store.list_sessions() if sid != "parent"]

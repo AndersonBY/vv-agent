@@ -709,7 +709,7 @@ def test_control_records_use_captured_inbox_watermark_during_level_raising_push(
 
 @pytest.mark.persistent_store
 def test_idle_deferral_compares_matching_head_snapshot(store) -> None:
-    _start(store, "idle", push=False)
+    _start(store, "idle")
     lease = store.acquire("idle", owner="idle", ttl_ms=10_000)
     assert lease is not None
     requirements = {"level": 1, "handler_version": "1", "capabilities": []}
@@ -1396,6 +1396,52 @@ def test_runtime_scope_must_be_ready_before_driver_step(store) -> None:
         drive_core(store, "scope-not-ready", lease=lease, make_binding=lambda: binding)
 
     assert step_called == []
+
+
+@pytest.mark.persistent_store
+def test_existing_lease_admission_mismatch_releases_pending_work_for_compatible_worker(store) -> None:
+    session_id = "admission-mismatch-release"
+    _start(store, session_id)
+    store.configure_worker(level=1, handler_versions=("1",), capabilities=())
+    lease = store.acquire(session_id, owner="old-worker", ttl_ms=10_000)
+    assert lease is not None
+
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    with store.atomic() as tx:
+        tx.push(
+            session_id,
+            item(
+                "high-level",
+                actor=principal("test"),
+                feature_level=2,
+                requirements={"level": 2, "handler_version": "1", "capabilities": []},
+            ),
+        )
+
+    def incompatible_binding():
+        store._require_worker_accepts_row(store._head(session_id))
+        pytest.fail("admission should reject the old worker")
+
+    with pytest.raises(UnsupportedFeatureLevel, match="feature level 2"):
+        drive_core(store, session_id, lease=lease, make_binding=incompatible_binding)
+
+    assert _lease_row(store, session_id)[:3] == (lease.epoch, None, None)
+    assert [(work.kind, work.session_id) for work in store.list_runnable(work_kinds=("drive",))] == [("drive", session_id)]
+    assert not store.is_runnable(session_id)
+    assert store.claim_runnable(owner="still-old", ttl_ms=10_000, limit=1) == ()
+    assert (
+        store._one(
+            "SELECT consumed_seq FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id='high-level'",
+            (store.tenant_id, session_id),
+        )[0]
+        is None
+    )
+
+    store.configure_worker(level=2, handler_versions=("1",), capabilities=())
+    claimed = store.claim_runnable(owner="compatible", ttl_ms=10_000, limit=1)
+    assert len(claimed) == 1 and claimed[0].lease is not None
+    assert claimed[0].lease.epoch == lease.epoch + 1
+    assert store.release(claimed[0].lease)
 
 
 @pytest.mark.postgres

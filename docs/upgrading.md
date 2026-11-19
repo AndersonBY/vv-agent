@@ -28,11 +28,15 @@ new store major and the full boundary procedure below.
 For a rolling upgrade, install the same S1 schema, start workers configured for
 their maximum supported level, and keep the database `write_level` at its old
 value until every worker that can claim work has been upgraded. Then raise
-`write_level` transactionally. A worker below a session's level skips the
-session when claiming work and is fenced from renewing its lease, appending,
-deferring work or advancing a consumer projection. It may release an existing
-lease so an upgraded worker can take over. The worker level is a capability
-gate; it does not replace the database write ceiling or the exact schema checks.
+`write_level` transactionally. Acquire and claim filter work by the worker's
+supported level, handler versions and capabilities before decoding inbox
+bodies, and turn admission derives and verifies the same routing requirements.
+Lease renewal performs only lease fencing: it checks the owner, epoch, expiry
+and current row, without re-running routing compatibility. An existing holder
+may therefore keep its lease alive while requirements rise, but renewal grants
+no execution authority and an incompatible worker cannot acquire or claim new
+work. The worker support set is a capability gate; it does not replace the
+database write ceiling or the exact schema checks.
 
 A host moving a worker to `SessionDriver` must replace any cached runtime with
 its per-claim `runtime_factory` and rebuild callbacks against that claim's drive

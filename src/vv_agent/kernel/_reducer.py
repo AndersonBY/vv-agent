@@ -36,6 +36,8 @@ _LOGICAL_OPERATION_REQUESTS: ContextVar[dict[tuple[str, int], str] | None] = Con
 )
 _LOGICAL_BOUNDARY_SOURCES: ContextVar[dict[str, list[Message]] | None] = ContextVar("logical_boundary_sources", default=None)
 _LOGICAL_BOUNDARY_PAYLOADS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("logical_boundary_payloads", default=None)
+_APPROVAL_DECISION_ALIASES = {"approve_once": "approve", "approve_for_session": "allow_session"}
+_APPROVAL_DECISIONS = frozenset({"approve", "allow_session", "deny", "timeout"}) | frozenset(_APPROVAL_DECISION_ALIASES)
 
 
 @contextmanager
@@ -98,6 +100,14 @@ class CountMessages(Protocol):
 
 class TransitionError(ValueError):
     pass
+
+
+def normalize_approval_decision(decision: str) -> str:
+    """Map S1 decision names onto the established driver authorization values."""
+
+    if decision not in _APPROVAL_DECISIONS:
+        raise ValueError(f"Unknown approval decision: {decision}")
+    return _APPROVAL_DECISION_ALIASES.get(decision, decision)
 
 
 def require(condition: bool, reason: str) -> None:
@@ -285,7 +295,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             "approval application target mismatch",
         )
         require(attempt.approval is None, "approval already answered")
-        attempt.approval = answer["decision"]
+        attempt.approval = normalize_approval_decision(answer["decision"])
         attempt.approval_answer = record
 
 

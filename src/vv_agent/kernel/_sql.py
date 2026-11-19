@@ -638,21 +638,50 @@ class SQLStore:
         capabilities = canonical_json_bytes(list(self.worker_supports.capabilities), "worker capabilities")
         return handlers.decode("utf-8"), capabilities.decode("utf-8")
 
-    def _worker_candidate_predicate(self, *, session_alias: str = "s", clock_alias: str = "t") -> tuple[str, tuple[Any, ...]]:
-        """Filter obvious rows in SQL, but leave due-input rows for the locked proof."""
+    def _worker_inbox_candidate_predicate(
+        self,
+        *,
+        session_alias: str = "s",
+        inbox_alias: str = "candidate",
+        clock_alias: str = "t",
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Match a due route-defining inbox row from its body-free projection."""
+
+        handlers, capabilities = self._worker_filter_params()
+        handler_sql = self._worker_handler_filter_sql.replace("s.", f"{inbox_alias}.routing_")
+        capability_sql = self._worker_capability_filter_sql.replace("s.", f"{inbox_alias}.routing_")
+        sql = (
+            f"EXISTS (SELECT 1 FROM sk_inbox {inbox_alias} "
+            f"WHERE {inbox_alias}.tenant_id={session_alias}.tenant_id "
+            f"AND {inbox_alias}.session_id={session_alias}.session_id "
+            f"AND {inbox_alias}.consumed_seq IS NULL "
+            f"AND {inbox_alias}.available_ms<={clock_alias}.ms "
+            f"AND {inbox_alias}.kind IN ('user','follow_up','model_selection') "
+            f"AND {inbox_alias}.routing_level<=%s AND {handler_sql} AND {capability_sql})"
+        )
+        return sql, (self.worker_level, handlers, capabilities)
+
+    def _worker_candidate_predicate(self, *, session_alias: str = "s") -> tuple[str, tuple[Any, ...]]:
+        """Match the session cache or a compatible due inbox without decoding either body."""
 
         handlers, capabilities = self._worker_filter_params()
         handler_sql = self._worker_handler_filter_sql.replace("s.", f"{session_alias}.")
         capability_sql = self._worker_capability_filter_sql.replace("s.", f"{session_alias}.")
-        sql = (
-            f"(({session_alias}.level<=%s AND {handler_sql} AND {capability_sql}) OR EXISTS ("
-            "SELECT 1 FROM sk_inbox candidate "
-            f"WHERE candidate.tenant_id={session_alias}.tenant_id "
-            f"AND candidate.session_id={session_alias}.session_id "
-            "AND candidate.consumed_seq IS NULL "
-            f"AND candidate.available_ms<={clock_alias}.ms))"
+        inbox_sql, inbox_params = self._worker_inbox_candidate_predicate(session_alias=session_alias)
+        sql = f"{session_alias}.level<=%s AND (({handler_sql} AND {capability_sql}) OR {inbox_sql})"
+        return sql, (self.worker_level, handlers, capabilities, *inbox_params)
+
+    def _worker_accepts_ready_inbox(self, session_id: str) -> bool:
+        predicate, params = self._worker_inbox_candidate_predicate()
+        return bool(
+            self._rows(
+                f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
+                "SELECT 1 FROM sk_session s CROSS JOIN clock t "
+                "WHERE s.tenant_id=%s AND s.session_id=%s AND s.deletion_state='live' "
+                f"AND s.level<=%s AND {predicate}",
+                (self.tenant_id, session_id, self.worker_level, *params),
+            )
         )
-        return sql, (self.worker_level, handlers, capabilities)
 
     def _input_level(self, item: InboxItem, *, parent_session_id: str | None = None) -> int:
         required = _level(item.feature_level, "input feature_level")
@@ -1907,6 +1936,19 @@ class SQLStore:
         )
         return tuple(self._stored_input(session_id, row) for row in rows)
 
+    def _drive_runnable_at(self, session_id: str) -> int | None:
+        rows = self._rows(
+            f"""
+            WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms)
+            SELECT t.ms
+            FROM sk_session s CROSS JOIN clock t
+            WHERE s.tenant_id=%s AND s.session_id=%s
+              AND {_DRIVE_RUNNABLE_SQL}
+            """,
+            (self.tenant_id, session_id),
+        )
+        return int(rows[0][0]) if len(rows) == 1 else None
+
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None:
         self._require_configured_ledger("lease acquisition")
         _identity(owner)
@@ -1914,17 +1956,17 @@ class SQLStore:
         with self._transaction():
             row = self._lock(session_id)
             self._require_live_row(row)
+            if not self._worker_accepts_row(row) and not self._worker_accepts_ready_inbox(session_id):
+                return None
             routing = self._require_routing_cache(session_id, row)
-            now = self._now()  # Must be read after the row lock, not at transaction start.
-            if (
-                not self.worker_supports.accepts(
-                    level=routing.requirements.level,
-                    handler_version=routing.requirements.handler_version,
-                    capabilities=routing.requirements.capabilities,
-                )
-                or (row[4] is not None and row[4] > now)
-                or row[5] > now
+            if not self.worker_supports.accepts(
+                level=routing.requirements.level,
+                handler_version=routing.requirements.handler_version,
+                capabilities=routing.requirements.capabilities,
             ):
+                return None
+            now = self._drive_runnable_at(session_id)  # Must be read after the row lock.
+            if now is None:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(
@@ -1940,18 +1982,23 @@ class SQLStore:
             row = self._lock(lease.session_id)
             now = self._now()
             self._check_lease(lease.session_id, lease, row, now)
-            self._require_worker_accepts_row(row)
-            routing = self._require_routing_cache(lease.session_id, row)
-            self._require_worker_supports(
-                level=routing.requirements.level,
-                handler_version=routing.requirements.handler_version,
-                capabilities=routing.requirements.capabilities,
-            )
             renewed = Lease(lease.session_id, lease.owner, lease.epoch, now + ttl_ms, lease.tenant_id)
-            self._rows(
-                "UPDATE sk_session SET lease_until_ms=%s WHERE tenant_id=%s AND session_id=%s",
-                (renewed.expires_at_ms, self.tenant_id, lease.session_id),
+            updated = self._rows(
+                "UPDATE sk_session SET lease_until_ms=%s WHERE tenant_id=%s AND session_id=%s "
+                "AND lease_epoch=%s AND lease_owner=%s AND lease_until_ms=%s AND lease_until_ms>%s "
+                "RETURNING session_id",
+                (
+                    renewed.expires_at_ms,
+                    self.tenant_id,
+                    lease.session_id,
+                    lease.epoch,
+                    lease.owner,
+                    lease.expires_at_ms,
+                    now,
+                ),
             )
+            if len(updated) != 1:
+                raise LeaseLost("lease expired or fenced")
             controls = tuple(
                 self._stored_input(lease.session_id, r).item
                 for r in self._rows(
@@ -3013,10 +3060,12 @@ class SQLSessionTx:
                         f"ledger signer key binding does not verify input admission at input_seq {seq}"
                     )
                 signed_ms = now
+            projected = s._inbox_requirements(item, inherited=routing_before.requirements)
             s._rows(
                 "INSERT INTO sk_inbox(tenant_id,session_id,input_id,input_seq,kind,body,digest,"
-                "admission_key_id,admission_signature,admission_signed_ms,available_ms,received_ms) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "admission_key_id,admission_signature,admission_signed_ms,available_ms,received_ms,"
+                "routing_level,routing_handler_version,routing_required_capabilities) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     s.tenant_id,
                     session_id,
@@ -3030,6 +3079,9 @@ class SQLSessionTx:
                     signed_ms,
                     item.available_ms,
                     now,
+                    projected.level,
+                    projected.handler_version,
+                    canonical_json_bytes(list(projected.capabilities), "input routing required_capabilities"),
                 ),
             )
             s._rows(

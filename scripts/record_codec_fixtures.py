@@ -69,6 +69,7 @@ def app_server_error() -> dict[str, Any]:
         SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
     ):
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         transport = ChannelTransport(connection_id="codec-owner", outbound_capacity=100)
         host = DefaultAppServerHost(
             agent=Agent("codec", "Answer."),

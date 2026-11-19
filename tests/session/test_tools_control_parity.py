@@ -476,6 +476,147 @@ def test_approval_broker_restart_session_and_conflicting_answer(store, database,
 
 
 @pytest.mark.capability("approval-modes")
+def test_approve_once_dispatches_current_operation_once_across_late_answers(store, database, tmp_path):
+    effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def guarded(text: str) -> str:
+        effects.append(text)
+        return text
+
+    config = RunConfig(workspace=tmp_path, approval_timeout_seconds=60)
+    agent = Agent("test", "test", tools=[guarded])
+    admit(store, config)
+    drive(
+        store,
+        "control",
+        runtime=runtime(
+            store,
+            database,
+            agent,
+            config,
+            ScriptedLLM(
+                [
+                    LLMResponse("", [ToolCall("once", "guarded", {"text": "one"})]),
+                    LLMResponse("done"),
+                ]
+            ),
+        ),
+    )
+    park = records(store, kind="op_parked")[0]
+    approval_answer(store, park, decision="approve_once", input_id="once-answer")
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
+
+    assert effects == ["one"]
+    assert len([r for r in records(store, kind="op_started") if r.operation_id == park.operation_id]) == 1
+
+    approval_answer(store, park, decision="approve_once", input_id="once-replay")
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
+    approval_answer(store, park, decision="deny", input_id="once-late-conflict")
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
+
+    dispositions = [r.payload["disposition"] for r in raw_records(store, kind="input_applied")[-2:]]
+    assert dispositions == ["noop", "rejected"]
+    assert effects == ["one"]
+    assert len([r for r in records(store, kind="op_started") if r.operation_id == park.operation_id]) == 1
+
+
+@pytest.mark.capability("approval-modes")
+def test_approve_for_session_allows_matching_scope_and_rejects_other_bindings(store, database, tmp_path):
+    effects: list[tuple[str, str]] = []
+
+    @function_tool(needs_approval=True)
+    def allowed(text: str) -> str:
+        effects.append(("allowed", text))
+        return text
+
+    @function_tool(needs_approval=True)
+    def separate(text: str) -> str:
+        effects.append(("separate", text))
+        return text
+
+    config = RunConfig(workspace=tmp_path, approval_timeout_seconds=60)
+    agent = Agent("test", "test", tools=[allowed, separate])
+    admit(store, config)
+    llm = ScriptedLLM(
+        [
+            LLMResponse("", [ToolCall("allowed-1", "allowed", {"text": "one"})]),
+            LLMResponse("", [ToolCall("allowed-2", "allowed", {"text": "two"})]),
+            LLMResponse("first turn done"),
+        ]
+    )
+    drive(store, "control", runtime=runtime(store, database, agent, config, llm))
+    first_park = records(store, kind="op_parked")[0]
+    approval_answer(store, first_park, decision="approve_for_session", input_id="session-answer")
+    drive(store, "control", runtime=runtime(store, database, agent, config, llm))
+
+    assert effects == [("allowed", "one"), ("allowed", "two")]
+    assert len(records(store, kind="op_parked")) == 1
+
+    push_fixture_input(store, "control", InboxItem("next", "user", {"content": "go"}))
+    drive(
+        store,
+        "control",
+        runtime=runtime(
+            store,
+            database,
+            agent,
+            config,
+            ScriptedLLM(
+                [
+                    LLMResponse("", [ToolCall("separate-1", "separate", {"text": "blocked"})]),
+                    LLMResponse("second turn done"),
+                ]
+            ),
+        ),
+    )
+    second_park = records(store, kind="op_parked")[-1]
+    assert second_park.operation_id != first_park.operation_id
+    handle = second_park.payload["handle"]
+    target = {
+        "operation_id": second_park.operation_id,
+        "attempt": second_park.attempt,
+        "request_id": handle["request_id"],
+        "request_digest": handle["request_digest"],
+        "scope": handle["scope"],
+    }
+    push_fixture_input(
+        store,
+        "control",
+        InboxItem(
+            "wrong-scope",
+            "approval_answer",
+            target | {"decision": "approve_for_session", "scope": first_park.payload["handle"]["scope"]},
+            second_park.turn_id,
+            0,
+        ),
+    )
+    push_fixture_input(
+        store,
+        "control",
+        InboxItem(
+            "wrong-operation",
+            "approval_answer",
+            target | {"decision": "approve_once", "operation_id": first_park.operation_id},
+            second_park.turn_id,
+            0,
+        ),
+    )
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
+    rejected = [r for r in raw_records(store, kind="input_applied")[-2:] if r.payload["disposition"] == "rejected"]
+    assert len(rejected) == 2
+    assert effects == [("allowed", "one"), ("allowed", "two")]
+
+    approval_answer(store, second_park, decision="deny", input_id="separate-denied")
+    drive(store, "control", runtime=runtime(store, database, agent, config, ScriptedLLM([])))
+    assert effects == [("allowed", "one"), ("allowed", "two")]
+    ended = records(store, kind="turn_ended")[-1]
+    assert ended.payload["status"] == "failed"
+    denied = next(r for r in records(store, kind="op_completed") if r.operation_id == second_park.operation_id)
+    assert denied.payload["result"]["error_code"] == "tool_approval_denied"
+
+
+@pytest.mark.capability("approval-modes")
 def test_approval_timeout_restart_parity(store, database, tmp_path, database_clock):
     @function_tool(needs_approval=True)
     def approved() -> str:

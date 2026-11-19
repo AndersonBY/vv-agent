@@ -19,11 +19,11 @@ from vv_agent.kernel._sql import InputAdmissionProofError, LedgerIntegrityError,
 from vv_agent.session import postgres as session_postgres
 from vv_agent.session import sqlite as session_sqlite
 from vv_agent.session.records import InboxItem, SessionSpec, digest, make_record
-from vv_agent.session.store import Conflict, Lease
+from vv_agent.session.store import Conflict, Lease, LeaseLost
 from vv_agent.session.worker import LocalWorker, WorkerSupport
 
 from .conftest import open_store
-from .helpers import content_ref, wrap_fixture_store
+from .helpers import acquire_fixture_lease, content_ref, wrap_fixture_store
 
 
 def _requirements(*capabilities: str, handler: str = "handler/h2", level: int = 2) -> SessionRequirements:
@@ -132,7 +132,7 @@ def _usage_record(session_id: str, meter_id: str, observation: int) -> Any:
 
 
 def _acquire(store: Any, session_id: str, owner: str) -> Lease:
-    lease = store.acquire(session_id, owner=owner, ttl_ms=30_000)
+    lease = acquire_fixture_lease(store, session_id, owner=owner, ttl_ms=30_000)
     assert lease is not None
     return lease
 
@@ -194,11 +194,22 @@ class _HashSigner:
 
 
 @pytest.mark.persistent_store
-def test_heterogeneous_workers_filter_candidates_without_advancing_epoch(store) -> None:
+def test_heterogeneous_workers_filter_ready_candidates_before_body_decode(store, monkeypatch) -> None:
     requirements = _requirements("family:agent", "model:old", "model:new", "tool:a")
     bound = _create_session(store, "heterogeneous", bootstrap=requirements)
     _push(bound, "heterogeneous", _input("work", "user", requirements))
 
+    raw = getattr(bound, "_bound", bound)
+    routing_cache = raw._require_routing_cache
+    stored = raw._stored
+    stored_input = raw._stored_input
+
+    def decode_must_not_run(*_args, **_kwargs):
+        raise AssertionError("incompatible ready worker decoded routing or session bodies")
+
+    monkeypatch.setattr(raw, "_require_routing_cache", decode_must_not_run)
+    monkeypatch.setattr(raw, "_stored", decode_must_not_run)
+    monkeypatch.setattr(raw, "_stored_input", decode_must_not_run)
     incompatible = (
         (1, ("handler/h2",), ("family:agent", "model:old", "model:new")),
         (2, ("handler/h2",), ("family:agent", "model:new", "tool:a")),
@@ -207,15 +218,63 @@ def test_heterogeneous_workers_filter_candidates_without_advancing_epoch(store) 
     for index, (level, handlers, capabilities) in enumerate(incompatible):
         bound.configure_worker(level=level, handler_versions=handlers, capabilities=capabilities)
         assert "heterogeneous" in {work.session_id for work in bound.list_runnable()}
+        assert bound.acquire("heterogeneous", owner=f"incompatible-acquire-{index}", ttl_ms=10_000) is None
         assert bound.claim_runnable(owner=f"incompatible-{index}", ttl_ms=10_000, limit=1) == ()
         assert _lease_row(bound, "heterogeneous")[:2] == (0, None)
+        assert (
+            bound._one(
+                "SELECT consumed_seq FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id='work'",
+                (bound.tenant_id, "heterogeneous"),
+            )[0]
+            is None
+        )
 
+    monkeypatch.setattr(raw, "_require_routing_cache", routing_cache)
+    monkeypatch.setattr(raw, "_stored", stored)
+    monkeypatch.setattr(raw, "_stored_input", stored_input)
     bound.configure_worker(level=2, handler_versions=("handler/h2",), capabilities=requirements.capabilities)
     claimed = bound.claim_runnable(owner="compatible", ttl_ms=10_000, limit=1)
     assert len(claimed) == 1 and claimed[0].lease is not None
     assert claimed[0].lease.epoch == 1
     assert _lease_row(bound, "heterogeneous")[:2] == (1, "compatible")
     assert bound.release(claimed[0].lease)
+
+
+@pytest.mark.persistent_store
+def test_renew_survives_raised_requirements_without_body_decode_and_fences_stale_epoch(store, monkeypatch) -> None:
+    initial = _requirements("family:agent", "tool:required")
+    bound = _create_session(store, "renew-after-routing-rise", bootstrap=initial)
+    bound.configure_worker(level=2, handler_versions=("handler/h2",), capabilities=initial.capabilities)
+    lease = _acquire(bound, "renew-after-routing-rise", "renew-owner")
+    raw = getattr(bound, "_bound", bound)
+
+    raised = _requirements("tool:future", level=3)
+    bound._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
+    _push(bound, "renew-after-routing-rise", _input("raised", "user", raised))
+
+    def decode_must_not_run(*_args, **_kwargs):
+        raise AssertionError("lease renewal decoded routing, records or high-level inbox bodies")
+
+    monkeypatch.setattr(raw, "_require_worker_accepts_row", decode_must_not_run)
+    monkeypatch.setattr(raw, "_require_routing_cache", decode_must_not_run)
+    monkeypatch.setattr(raw, "_require_worker_supports", decode_must_not_run)
+    monkeypatch.setattr(raw, "_stored", decode_must_not_run)
+    monkeypatch.setattr(raw, "_stored_input", decode_must_not_run)
+
+    poll = bound.renew(lease, ttl_ms=30_000)
+    assert (poll.lease.session_id, poll.lease.tenant_id, poll.lease.owner, poll.lease.epoch) == (
+        lease.session_id,
+        lease.tenant_id,
+        lease.owner,
+        lease.epoch,
+    )
+    assert poll.lease.expires_at_ms > lease.expires_at_ms
+    assert poll.controls == ()
+    assert _lease_row(bound, lease.session_id)[:3] == (lease.epoch, lease.owner, poll.lease.expires_at_ms)
+
+    with pytest.raises(LeaseLost, match="expired or fenced"):
+        bound.renew(replace(poll.lease, epoch=poll.lease.epoch + 1), ttl_ms=30_000)
+    assert bound.release(poll.lease)
 
 
 @pytest.mark.persistent_store

@@ -522,6 +522,36 @@
         ""
       ],
       [
+        "sk_inbox",
+        14,
+        "routing_level",
+        "integer",
+        true,
+        "1",
+        "",
+        ""
+      ],
+      [
+        "sk_inbox",
+        15,
+        "routing_handler_version",
+        "text",
+        false,
+        null,
+        "",
+        ""
+      ],
+      [
+        "sk_inbox",
+        16,
+        "routing_required_capabilities",
+        "bytea",
+        true,
+        "decode('5b5d'::text, 'hex'::text)",
+        "",
+        ""
+      ],
+      [
         "sk_record",
         1,
         "tenant_id",
@@ -1422,6 +1452,15 @@
         "sk_inbox_received_ms_check",
         "c",
         "CHECK (received_ms >= 0)",
+        false,
+        false,
+        true
+      ],
+      [
+        "sk_inbox",
+        "sk_inbox_routing_level_check",
+        "c",
+        "CHECK (routing_level >= 1)",
         false,
         false,
         true

@@ -24,7 +24,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 5000
 DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 250
 SCHEMA_FINGERPRINT_VERSION = "S1-sqlite-schema-v2"
 # Update this digest with intentional DDL changes and contract review.
-SCHEMA_FINGERPRINT = "0bd580cfc9c3e59787f7700963be03094b8289522592c7d734bd00fa7539ecd2"
+SCHEMA_FINGERPRINT = "45ef6bca2841dcd317ea61984760b5d838638bb3fc08fbd997a1c4c71d17ad27"
 SCHEMA_TABLES = frozenset(
     {
         "sk_settings",
@@ -101,6 +101,8 @@ CREATE TABLE sk_inbox (
     admission_signed_ms INTEGER CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
     available_ms INTEGER NOT NULL CHECK (available_ms >= 0), received_ms INTEGER NOT NULL CHECK (received_ms >= 0),
     consumed_seq INTEGER CHECK (consumed_seq IS NULL OR consumed_seq > 0),
+    routing_level INTEGER NOT NULL DEFAULT 1 CHECK (routing_level >= 1), routing_handler_version TEXT,
+    routing_required_capabilities BLOB NOT NULL DEFAULT X'5B5D',
     PRIMARY KEY (tenant_id,session_id,input_id), UNIQUE (tenant_id,session_id,input_seq),
     CHECK ((admission_key_id IS NULL) = (admission_signature IS NULL)
         AND (admission_key_id IS NULL) = (admission_signed_ms IS NULL)),

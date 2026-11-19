@@ -51,6 +51,8 @@ from vv_agent.kernel._requirements import (
 from vv_agent.kernel._sql import (
     _DRIVE_RUNNABLE_SQL,
     LedgerIntegrityError,
+    SessionNotLive,
+    SQLStore,
     UnsupportedFeatureLevel,
     UnsupportedWorkerCapabilities,
     _RoutingCache,
@@ -1109,23 +1111,49 @@ class SessionDriver:
         candidates.update(handle.session_id for handle in self.handles)
         candidates.update(self._observer_cursors)
         for root in roots:
-            for child_sid in self._discover_child_runtimes(store, root):
-                candidates.add(child_sid)
-                self._observer_cursors.setdefault(child_sid, store.read(child_sid, limit=1).head_seq)
-        for sid in sorted(candidates):
-            registration = self._registration_for_cursor(sid, store=store)
-            if registration is None:
+            try:
+                child_ids = self._discover_child_runtimes(store, root)
+            except Conflict as exc:
+                if not self._is_deleted_session_conflict(exc):
+                    raise
+                self._drop_deleted_session_observation(root)
+                candidates.discard(root)
                 continue
-            runtime = _ProjectionRuntime(
-                owner=self,
-                agent=registration.agent,
-                config=registration.config,
-                _resolved=registration.resolved,
-                handler_version=registration.handler_version,
-                wake=self._wake_session,
-            )
-            self._deliver_projected_events(store, sid, runtime)
+            candidates.update(child_ids)
+        for sid in sorted(candidates):
+            try:
+                registration = self._registration_for_cursor(sid, store=store)
+                if registration is None:
+                    continue
+                runtime = _ProjectionRuntime(
+                    owner=self,
+                    agent=registration.agent,
+                    config=registration.config,
+                    _resolved=registration.resolved,
+                    handler_version=registration.handler_version,
+                    wake=self._wake_session,
+                )
+                self._deliver_projected_events(store, sid, runtime)
+            except Conflict as exc:
+                if not self._is_deleted_session_conflict(exc):
+                    raise
+                self._drop_deleted_session_observation(sid)
+                continue
             self._notify_session(sid)
+
+    @staticmethod
+    def _is_deleted_session_conflict(exc: Conflict) -> bool:
+        return isinstance(exc, SessionNotLive) or str(exc) in {
+            "session or cursor not found",
+            "session not found in tenant",
+        }
+
+    def _drop_deleted_session_observation(self, sid: str) -> None:
+        self._runtimes.pop(sid, None)
+        self._observer_cursors.pop(sid, None)
+        key = (self.tenant_id, sid)
+        if _DRIVERS.get(key) is self:
+            _DRIVERS.pop(key, None)
 
     def _wake_session(self, sid: str) -> None:
         self._worker.wake(sid)
@@ -1244,6 +1272,8 @@ class SessionDriver:
             deliver_spans(store, sid, processors)
 
     def _discover_child_runtimes(self, store: SessionStore, sid: str) -> tuple[str, ...]:
+        concrete = _tenant_bound_sql_store(store)
+        transaction_in_progress = isinstance(concrete, SQLStore) and concrete._transaction_in_progress()
         parent, _ = self._runtime_lineage(store, sid)
         state, _, _ = store.read_state(sid)
         child_ids: list[str] = []
@@ -1253,12 +1283,27 @@ class SessionDriver:
                     continue
                 for child in child_handles(attempt.child_handle):
                     child_sid = child["session_id"]
-                    child_ids.append(child_sid)
-                    root, _ = self._runtime_lineage(store, child_sid)
+                    try:
+                        page = store.read(child_sid, limit=1)
+                        root, _ = self._runtime_lineage(store, child_sid)
+                    except Conflict as exc:
+                        if not self._is_deleted_session_conflict(exc):
+                            raise
+                        self._drop_deleted_session_observation(child_sid)
+                        continue
                     if root is not parent:
                         raise Conflict("child session is not registered under this driver root")
+                    child_ids.append(child_sid)
+                    cursor = self._observer_cursors.get(child_sid)
+                    is_new = cursor is None
+                    if is_new:
+                        self._observer_cursors[child_sid] = page.head_seq
                     _DRIVERS[(self.tenant_id, child_sid)] = self
-                    self._worker.wake(child_sid)
+                    wake = is_new or cursor < page.head_seq
+                    if not wake and self._worker.drive_available and not transaction_in_progress:
+                        wake = store.is_runnable(child_sid)
+                    if wake:
+                        self._worker.wake(child_sid)
         return tuple(dict.fromkeys(child_ids))
 
     def _deliver_child_session(self, store: SessionStore, sid: str) -> int:
@@ -1434,10 +1479,13 @@ class SessionDriver:
                 fields[2],
                 fields[3],
             )
-            with suppress(Exception):
+            try:
                 store.defer_drive(lease, retry_after_ms=self._worker.support.failure_backoff_ms)
-            with suppress(Exception):
-                store.release(lease)
+            except LeaseLost:
+                pass
+            finally:
+                with suppress(LeaseLost):
+                    store.release(lease)
             self._notify_session(session_id)
             return
         except BaseException as exc:
@@ -1479,10 +1527,13 @@ class SessionDriver:
                         store.release(lease)
                 self._notify_session(session_id)
                 return
-            with suppress(LeaseLost):
+            try:
                 store.defer_drive(lease, retry_after_ms=self._worker.support.failure_backoff_ms)
-            with suppress(LeaseLost):
-                store.release(lease)
+            except LeaseLost:
+                pass
+            finally:
+                with suppress(LeaseLost):
+                    store.release(lease)
             raise
         if failure is not None and not failure.terminal and before_head > failure.progress_head:
             # A keeper failure after a committed record is retryable, but it is
@@ -1747,7 +1798,7 @@ class SessionDriver:
             # from second-guessing DriveCore's keeper-close ownership decision.
         finally:
             if not ownership_transferred:
-                with suppress(Exception):
+                with suppress(LeaseLost):
                     store.release(lease)
             self._notify_session(session_id)
 

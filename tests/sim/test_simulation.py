@@ -198,7 +198,7 @@ def test_spawned_seeds_match_serial_real_driver_traces():
     assert serial == spawned
 
 
-def test_seed_record_parse_cache_preserves_identity_and_scope(sim_database):
+def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
     from vv_agent.kernel._records import Record, _MessageCache
 
     from . import report
@@ -208,30 +208,33 @@ def test_seed_record_parse_cache_preserves_identity_and_scope(sim_database):
         _, rows, _ = world.read_state("s")
     body = rows[-1].record.encode()
     baseline = Record.parse(body)
+    descriptor = Record.__dict__["_parse"]
 
     with report._seed_record_parse_cache() as parse:
         parsed = Record.parse(body)
-        repeated = Record.parse(body)
+        Record.parse(body)
         messages = _MessageCache()
         message_parsed = Record._parse(body, messages)
-        message_repeated = Record._parse(body, messages)
+        Record._parse(body, messages)
+        Record._parse(body, _MessageCache())
         assert parse.cache_parameters()["maxsize"] == 4096
+        assert parse.cache_info().misses == 3
         assert parse.cache_info().hits == 2
 
-    assert parsed is repeated
-    assert message_parsed is message_repeated
-    assert message_parsed._message_cache_id == id(messages)
+    assert Record.__dict__["_parse"] is descriptor
+    assert parse.cache_info().currsize == 0
     for candidate in (parsed, message_parsed):
         assert candidate == baseline
         assert candidate.to_dict() == baseline.to_dict()
         assert candidate.record_id == baseline.record_id
         assert candidate.digest == baseline.digest
         assert candidate.encode() == body
-    assert Record.parse(body) is not parsed
 
-    with report._seed_record_parse_cache():
+    with report._seed_record_parse_cache() as next_parse:
         next_scope = Record.parse(body)
-    assert next_scope is not parsed
+        assert next_parse.cache_info().misses == 1
+    assert next_scope == baseline
+    assert next_parse.cache_info().currsize == 0
 
 
 @pytest.mark.parametrize(

@@ -60,7 +60,9 @@ def _open_seed_store(database: RLSDatabase) -> Any:
 
 
 def _seed_store(connection: Any) -> PostgresStore:
-    return PostgresStore(connection, runtime_binding=RuntimeBinding("worker"))
+    store = PostgresStore(connection, runtime_binding=RuntimeBinding("worker"))
+    store.configure_input_admission(allow_unsigned=True)
+    return store
 
 
 def _create_session(
@@ -157,6 +159,7 @@ def test_observer_independent_connection_reads_bound_tenant_and_content(rls_data
         observed_content: list[bytes] = []
 
         with root as root_store:
+            root_store.configure_input_admission(allow_unsigned=True)
             root_connection = root_store.connection
             opener = root_store.drive_store_factory()
 
@@ -292,6 +295,7 @@ def test_bare_gateway_and_tenant_credential_forgery_remain_fail_closed(rls_datab
         with PostgresStore.shared_gateway_standalone(
             _dsn(rls_database, rls_database.gateway_role, rls_database.gateway_password)
         ) as gateway:
+            gateway.configure_input_admission(allow_unsigned=True)
             with pytest.raises(Conflict):
                 gateway.read("gateway-a")
             backend = cast(
@@ -305,6 +309,7 @@ def test_bare_gateway_and_tenant_credential_forgery_remain_fail_closed(rls_datab
         tenant_dsn = _dsn(rls_database, rls_database.tenant_a_role, rls_database.tenant_a_password)
         with psycopg.connect(tenant_dsn, autocommit=True) as tenant_a:
             store = PostgresStore(tenant_a, tenant_id=TENANT_A)
+            store.configure_input_admission(allow_unsigned=True)
             with pytest.raises(ValueError, match="another tenant"):
                 store.for_tenant(TENANT_B)
             page = store.read("gateway-a")
@@ -312,20 +317,19 @@ def test_bare_gateway_and_tenant_credential_forgery_remain_fail_closed(rls_datab
             bind_content_key_provider(store, provider)
             content_store = wrap_session_content_store(store, provider)
             reader = durable_content_reader(content_store, tenant_id=TENANT_A, session_id="gateway-a")
-            with tenant_a.transaction():
+            with reader._read_frame(record_seqs=(1,)) as frame, tenant_a.transaction():
                 tenant_a.execute("SELECT set_config('vv.tenant_id',%s,true)", (TENANT_B,))
                 with pytest.raises(Conflict):
                     store.read("tenant-b")
-                with reader._read_frame(record_seqs=(1,)) as frame:
-                    with pytest.raises(MissingContentLink):
-                        frame.read(
-                            TENANT_A,
-                            "gateway-a",
-                            "record:1",
-                            SESSION_WORKSPACE,
-                            workspace_ref,
-                        )
-                    assert tenant_a.execute("SELECT current_setting('vv.tenant_id',true)").fetchone() == (TENANT_B,)
+                with pytest.raises(MissingContentLink):
+                    frame.read(
+                        TENANT_A,
+                        "gateway-a",
+                        "record:1",
+                        SESSION_WORKSPACE,
+                        workspace_ref,
+                    )
+                assert tenant_a.execute("SELECT current_setting('vv.tenant_id',true)").fetchone() == (TENANT_B,)
             assert tenant_a.info.transaction_status == TransactionStatus.IDLE
     finally:
         provider.close()

@@ -29,6 +29,7 @@ from ._execution_values import AgentTask
 from ._interactions import InteractionError, user_interaction
 from ._provider_outcomes import Accepted, Definitive, ProviderResultInvalid, Unknown, validate_acceptance
 from ._records import InboxItem, Record, copy_json, inherited_seed_policies
+from ._reducer import normalize_approval_decision
 from ._state import Attempt
 from ._store import SequenceConflict, SessionTx
 from ._token_count import _StopIterationTransport
@@ -367,10 +368,11 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         stored_plan = attempt.execution_plan
         plan = driver.hydrate_plan(stored_plan)
         kind = plan._payload["op_kind"]
+        approval = normalize_approval_decision(attempt.approval) if attempt.approval is not None else None
         w3_command = kind != "model" and is_w3_command_plan(driver, plan)
         assert driver.state.active_turn_id is not None
         task = _task(driver) if kind == "model" and not (yield DispatchRead.HAS_HOOKS) else _task(driver, copy=True)
-        yield PrepareContext(task, plan, attempt.approval in {"approve", "allow_session"})
+        yield PrepareContext(task, plan, approval in {"approve", "allow_session"})
         metadata = yield FinishContext(CompiledCallFacts(task, plan))
         metadata["fence_epoch"] = driver.scope.lease.epoch
         if kind != "model":
@@ -435,10 +437,10 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             final = yield from finalize_tool(driver, plan, Definitive(hook_result))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)), guarded=True)
             return
-        if attempt.approval in {"deny", "timeout"}:
+        if approval in {"deny", "timeout"}:
             assert attempt.approval_answer is not None
             answer = _approval_answer_payload(driver, attempt.approval_answer)
-            result = yield ApprovalDenied(plan, answer, attempt.approval)
+            result = yield ApprovalDenied(plan, answer, approval)
             final = yield from finalize_tool(driver, plan, Definitive(result.to_dict(), ()))
             yield CommitDispatch((yield from outcomes.completed_steps(driver, stored_plan, final)))
             return
@@ -447,7 +449,7 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
             if any(
                 r._payload["disposition"] == "applied"
                 and r._payload["input"]["kind"] == "approval_answer"
-                and (answer := _approval_answer_payload(driver, r))["decision"] == "allow_session"
+                and normalize_approval_decision((answer := _approval_answer_payload(driver, r))["decision"]) == "allow_session"
                 and name in answer["scope"]
                 for r in driver.state.applied_inputs.values()
             ):

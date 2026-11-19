@@ -43,6 +43,7 @@ from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 from .conftest import open_store as configured_open_store
 from .helpers import (
+    acquire_fixture_lease,
     content_ref,
     create_fixture_session,
     fixture_key_provider,
@@ -770,7 +771,7 @@ def test_after_commit_watermark_uses_batch_head(tmp_path: Path) -> None:
             driver.handles.append(watermark_cursor)
             runtime = driver._build_runtime_for_claim(driver.store, "watermark")
 
-            lease = store.acquire("watermark", owner="fixture/watermark", ttl_ms=10_000)
+            lease = acquire_fixture_lease(store, "watermark", owner="fixture/watermark", ttl_ms=10_000)
             assert lease is not None
             batch = (
                 record("turn_started", sid="watermark"),
