@@ -407,9 +407,10 @@ def _verify_live_completion(
     item: InboxItem,
 ) -> ChildCompletion | None:
     p = item.payload
-    handle = _matched_completion_handle(parent_id, handle, item)
-    if handle is None:
+    matched_handle = _matched_completion_handle(parent_id, handle, item)
+    if matched_handle is None:
         return None
+    handle = matched_handle
     created_stored = store.read(p["session_id"], limit=1).records[0]
     created = created_stored.record
     created_attributes_ref = created.payload["attributes"]
@@ -479,9 +480,10 @@ def _verify_parent_completion(
     item: InboxItem,
 ) -> ChildCompletion | None:
     p = item.payload
-    handle = _matched_completion_handle(parent_id, handle, item)
-    if handle is None:
+    matched_handle = _matched_completion_handle(parent_id, handle, item)
+    if matched_handle is None:
         return None
+    handle = matched_handle
     delivered_result = _verified_parent_copy(store, parent_id, item)
     if delivered_result is _UNVERIFIED:
         return None
@@ -572,10 +574,12 @@ def child_outcome(
 ) -> ToolExecutionResult:
     p = terminal.record.payload
     result = p["result"] if hydrated_result is _UNHYDRATED_RESULT else hydrated_result
+    turn_id = terminal.record.turn_id
+    assert turn_id is not None
     return _child_outcome(
         plan,
         session_id=terminal.record.session_id,
-        turn_id=terminal.record.turn_id,
+        turn_id=turn_id,
         status=p["status"],
         result=result,
     )

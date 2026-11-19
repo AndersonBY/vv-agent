@@ -31,7 +31,7 @@ from ._driver_scope import _invoke
 from .children import ChildTool, SummaryChildTool
 from .compaction import manager_for, tokens
 from .delegation import admitted_result
-from .environments import CommandSpec, InvalidCommandSpec
+from .environments import CommandSpec, InvalidCommandSpec, StdinMode
 from .providers import Definitive, FunctionProvider, Provider
 from .records import Record
 from .reducer import Attempt
@@ -45,7 +45,12 @@ def _select_w3_command_provider(driver: _Driver, binding: object, request: objec
     runtime = getattr(driver, "runtime", None)
     if runtime is None:
         raise planning.InvalidW3CommandProvider("level-3 bash requires an SDK runtime with a trusted command provider")
-    if binding != planning.W3_COMMAND_TOOL or type(request) is not dict or request.get("name") != planning.W3_COMMAND_TOOL:
+    if binding != planning.W3_COMMAND_TOOL:
+        raise planning.InvalidW3CommandProvider("level-3 bash cannot switch provider or tool name")
+    if type(request) is not dict:
+        raise planning.InvalidW3CommandProvider("level-3 bash cannot switch provider or tool name")
+    request_payload = cast(dict[str, Any], request)
+    if request_payload.get("name") != planning.W3_COMMAND_TOOL:
         raise planning.InvalidW3CommandProvider("level-3 bash cannot switch provider or tool name")
     provider = runtime.providers.get(planning.W3_COMMAND_TOOL)
     if provider is None or isinstance(provider, FunctionProvider):
@@ -102,7 +107,7 @@ def _normalize_w3_command_spec(driver: _Driver, request: dict[str, Any]) -> dict
             argv=(),
             cwd=cwd,
             stdin_base64=stdin_base64,
-            stdin_mode="provided" if stdin_base64 is not None else "none",
+            stdin_mode=StdinMode.PROVIDED if stdin_base64 is not None else StdinMode.NONE,
             secret_ref_names=(),
             wall_time_ms=wall_time_ms,
             output_bytes=planning.W3_DEFAULT_OUTPUT_BYTES,

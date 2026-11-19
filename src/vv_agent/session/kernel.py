@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
 from dataclasses import replace
@@ -77,8 +77,8 @@ def _is_content_ref(value: Any) -> bool:
 
 def _project_configured_child_results(
     plan: Record,
-    outcomes: list[SubTaskOutcome] | tuple[SubTaskOutcome, ...],
-    delegation: dict[str, Any],
+    outcomes: Sequence[SubTaskOutcome],
+    delegation: Mapping[str, Any],
 ) -> ToolExecutionResult:
     del delegation
     values = iter(outcomes)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from vv_agent.runtime.processes import CapturedProcess, start_captured_process
 from vv_agent.session.environments import (
@@ -174,7 +174,7 @@ class LocalEnvironment:
         if expected_capabilities is None:
             return
         if isinstance(expected_capabilities, Mapping):
-            expected_capabilities = EnvironmentCapabilities.from_dict(expected_capabilities)
+            expected_capabilities = EnvironmentCapabilities.from_dict(cast(Mapping[str, Any], expected_capabilities))
         if not isinstance(expected_capabilities, EnvironmentCapabilities):
             raise LocalEnvironmentBindingError("expected_capabilities must be EnvironmentCapabilities")
         if expected_capabilities.to_dict() != self.capabilities.to_dict():

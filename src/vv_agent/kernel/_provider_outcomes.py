@@ -146,6 +146,7 @@ def validate_provider_handle(plan: Record, handle: dict[str, Any]) -> None:
             raise TypeError("provider handle must be an object")
         if set(handle) != _PROVIDER_HANDLE_FIELDS:
             raise ValueError("provider handle members mismatch")
+        assert plan.operation_id is not None and plan.attempt is not None
         _validate_provider_handle_identity(
             handle,
             provider=plan._payload["provider_binding"],

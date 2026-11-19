@@ -607,9 +607,12 @@ class SessionDriver:
         if store is None and path is _DEFAULT_SQLITE_PATH:
             self._temporary_store_directory = TemporaryDirectory(prefix="vv-agent-session-")
             path = Path(self._temporary_store_directory.name) / "sessions.sqlite3"
-        self._root_store = store if store is not None else SQLiteStore(str(path))
-        if self._temporary_store_directory is not None:
-            self._root_store.configure_input_admission(allow_unsigned=True)
+        if store is not None:
+            self._root_store = store
+        else:
+            self._root_store = SQLiteStore(str(path))
+            if self._temporary_store_directory is not None:
+                self._root_store.configure_input_admission(allow_unsigned=True)
         concrete_store = self._root_store
         seen: set[int] = set()
         while id(concrete_store) not in seen:
