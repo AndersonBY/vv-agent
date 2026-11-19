@@ -80,13 +80,20 @@ def _runtime(sessions: SessionDriver, *, workspace: Path, provider: _Provider):
     )
 
 
+def _sessions(path: Path) -> SessionDriver:
+    sessions = SessionDriver(path, content_key_provider=_key_provider())
+    if sessions.store._ledger_integrity_mode() == "unconfigured":
+        sessions.store.configure_input_admission(allow_unsigned=True)
+    return sessions
+
+
 def _park(
     path: Path,
     *,
     workspace: Path,
     provider: _Provider,
 ) -> tuple[Record, dict]:
-    sessions = SessionDriver(path, content_key_provider=_key_provider())
+    sessions = _sessions(path)
     try:
         sessions.create(SESSION_ID, str(workspace), {})
         sessions.push(SESSION_ID, InboxItem("initial", "user", {"content": "start"}))
@@ -141,7 +148,7 @@ def test_s1_parked_provider_callbacks_rehydrate_after_restart(tmp_path: Path, ki
         "query_ref": "query/options",
     }
 
-    sessions = SessionDriver(path, content_key_provider=_key_provider())
+    sessions = _sessions(path)
     provider = _Provider(result=first.result)
     provider.handle = logical_handle
     try:

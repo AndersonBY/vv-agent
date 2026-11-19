@@ -9,7 +9,7 @@ import pytest
 from vv_agent.events import ModelCallCompletedEvent
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydration_for_session_store, project_records
 from vv_agent.session.providers import Accepted, Definitive, Unknown
 from vv_agent.session.records import InboxItem, RecordError
 from vv_agent.session.result import project_result
@@ -17,11 +17,20 @@ from vv_agent.session.runtime import model_usage
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 
+from .helpers import content_ref, principal, push_fixture_input, read_fixture_state
 from .test_recovery_matrix import MODEL_USAGE, runtime, start
 
 
 def records_of(store, kind, sid="s"):
     return [r.record for r in store.read_state(sid)[1] if r.record.kind == kind]
+
+
+def hydrated_record(store, sid, record):
+    return next(
+        row.record
+        for row in read_fixture_state(store, sid)[1]
+        if row.record.kind == record.kind and row.record.record_id == record.record_id
+    )
 
 
 class WorkerDeath(BaseException):
@@ -58,6 +67,7 @@ class ReceiptProvider:
             },
             target_turn_id=plan.turn_id,
             generation=0,
+            actor=principal("receipt", "service"),
         )
 
     def submit(self, plan, *, context):
@@ -75,12 +85,21 @@ class ReceiptProvider:
 
     def authenticate(self, item, plan):
         return (
-            item.encode() == self.item.encode()
+            item.retained_item.encode() == self.item.encode()
             and item.target_turn_id == plan.turn_id
             and item.payload["operation_id"] == plan.operation_id
             and item.payload["attempt"] == plan.attempt
             and item.payload["request_digest"] == plan.payload["request_digest"]
         )
+
+
+def push_receipt(store, session_id, provider, *, item=None, keep_provider_item=False):
+    selected = provider.item if item is None else item
+    push_fixture_input(store, session_id, selected)
+    stored = store.read_input(session_id, selected.input_id)
+    assert stored is not None
+    if not keep_provider_item:
+        provider.item = stored.item
 
 
 def test_model_usage_bytes_match_sync_receipt_and_query_and_replay(store, database):
@@ -110,24 +129,26 @@ def test_model_usage_bytes_match_sync_receipt_and_query_and_replay(store, databa
                     payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")}
                     | {"handle": provider.handle},
                 )
-            with store.atomic() as tx:
-                tx.push(path, provider.item)
+            push_receipt(store, path, provider)
             resumed = runtime(database, [], providers={"model": provider}, poll_ms=1)
             drive(store, path, runtime=resumed)
             if path == "query":
                 Event().wait(0.01)
                 drive(store, path, runtime=resumed)
         completion = records_of(store, "op_completed", path)[0]
-        usage_bytes.append(canonical_json_bytes(completion.payload["usage"]))
+        hydrated_completion = hydrated_record(store, path, completion)
+        usage_bytes.append(canonical_json_bytes(hydrated_completion.payload["usage"]))
         result = project_result(store, path, completion.turn_id)
         assert result.final_output == "first"
         assert len(result.token_usage.model_calls) == 1
         call = result.token_usage.model_calls[0]
         assert call.usage == model_usage(MODEL_USAGE)
         assert provider.queries == (1 if path == "query" else 0)
-        provider.result = completion.payload["result"]
+        provider.result = hydrated_completion.payload["result"]
+        provider.usage = hydrated_completion.payload["usage"]
         provider.bind(records_of(store, "op_planned", path)[0])
         provider.item = replace(provider.item, input_id="replay")
+        push_receipt(store, path, provider)
         with store.atomic() as tx:
             receipt = tx.push(path, provider.item)
             assert tx.push(path, provider.item) == replace(receipt, replayed=True)
@@ -135,7 +156,11 @@ def test_model_usage_bytes_match_sync_receipt_and_query_and_replay(store, databa
         state, rows, _ = store.read_state(path)
         assert state.applied_inputs["replay"].payload["disposition"] == "noop"
         assert project_result(store, path, completion.turn_id).token_usage == result.token_usage
-        events = [e for e in project_records(rows) if isinstance(e, ModelCallCompletedEvent)]
+        events = [
+            e
+            for e in project_records(rows, hydration=hydration_for_session_store(store, path))
+            if isinstance(e, ModelCallCompletedEvent)
+        ]
         assert len(events) == 1 and events[0].call_id == call.call_id and events[0].usage == call.usage
         assert len(records_of(store, "op_completed", path)) == 1
     assert usage_bytes == [canonical_json_bytes(MODEL_USAGE)] * 3
@@ -162,10 +187,9 @@ def test_authenticated_completed_attempt_conflicts_on_changed_result_or_usage(st
     provider.bind(records_of(store, "op_planned")[0])
     # The authority authenticates the changed receipt; the kernel must still conflict.
     provider.item = replace(provider.item, payload=provider.item.payload | {field: value})
-    with store.atomic() as tx:
-        tx.push("s", provider.item)
+    push_receipt(store, "s", provider)
     drive(store, "s", runtime=runtime(database, [], providers={"model": provider}))
-    state, _, _ = store.read_state("s")
+    state, _, _ = read_fixture_state(store, "s")
     applied = state.applied_inputs[provider.item.input_id].payload
     assert applied["disposition"] == "rejected" and applied["reason"] == "result conflict"
     assert len(records_of(store, "op_completed")) == 1
@@ -189,7 +213,7 @@ def test_tool_provider_query_preserves_definitive_usage(store, database):
     Event().wait(0.01)
     drive(store, "s", runtime=rt)
     completed = next(r for r in records_of(store, "op_completed") if "/tool/" in r.operation_id)
-    assert canonical_json_bytes(completed.payload["usage"]) == canonical_json_bytes(MODEL_USAGE)
+    assert canonical_json_bytes(hydrated_record(store, "s", completed).payload["usage"]) == canonical_json_bytes(MODEL_USAGE)
     assert provider.submits == provider.queries == 1
 
 
@@ -199,6 +223,15 @@ def test_provider_result_usage_codec(usage):
     from .helpers import record
 
     provider.bind(record("op_planned"))
+    provider.item = replace(
+        provider.item,
+        payload=provider.item.payload
+        | {
+            "result": content_ref("provider/result"),
+            "usage": content_ref("provider/usage"),
+            "evidence": content_ref("provider/evidence"),
+        },
+    )
     assert InboxItem.parse(provider.item.encode()) == provider.item
     payload = provider.item.payload
     for invalid in [
@@ -241,21 +274,23 @@ def test_read_schema_drift_closes_turn_and_cancels_provider(store, database):
     rt.registry.register_schema("read_file", old)
     with pytest.raises(WorkerDeath):
         drive(store, "s", runtime=rt)
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            replace(
-                provider.item,
-                kind="provider_evidence",
-                payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")}
-                | {"handle": provider.handle},
-            ),
-        )
+    push_receipt(
+        store,
+        "s",
+        provider,
+        item=replace(
+            provider.item,
+            kind="provider_evidence",
+            payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")} | {"handle": provider.handle},
+        ),
+        keep_provider_item=True,
+    )
     drive(store, "s", runtime=rt)
     assert records_of(store, "op_parked")
     rt.registry.register_schema("read_file", current)
     drive(store, "s", runtime=rt)
-    assert records_of(store, "turn_ended")[0].payload["reason"] == "handler_schema_or_capability_mismatch"
+    ended = records_of(store, "turn_ended")[0]
+    assert hydrated_record(store, "s", ended).payload["reason"] == "handler_schema_or_capability_mismatch"
     assert cancelled == [provider.handle]
     assert len(records_of(store, "op_started")) == 1
 
@@ -314,16 +349,17 @@ def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(stor
     rt.hook = lost
     with pytest.raises(WorkerDeath):
         drive(store, "s", runtime=rt)
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            replace(
-                provider.item,
-                kind="provider_evidence",
-                payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")}
-                | {"handle": provider.handle},
-            ),
-        )
+    push_receipt(
+        store,
+        "s",
+        provider,
+        item=replace(
+            provider.item,
+            kind="provider_evidence",
+            payload={k: provider.handle[k] for k in ("operation_id", "attempt", "request_digest")} | {"handle": provider.handle},
+        ),
+        keep_provider_item=True,
+    )
     drive(store, "s", runtime=rt)
     wait = records_of(store, "op_parked")[-1].payload
     if closing == "schema":
@@ -331,8 +367,17 @@ def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(stor
     elif closing == "version":
         rt.handler_version = "changed"
     else:
-        with store.atomic() as tx:
-            tx.push("s", InboxItem("stop", "control", {"action": closing}, target_turn_id=provider.item.target_turn_id))
+        push_fixture_input(
+            store,
+            "s",
+            InboxItem(
+                "stop",
+                "control",
+                {"action": closing},
+                target_turn_id=provider.item.target_turn_id,
+                actor=principal("control", "user"),
+            ),
+        )
     try:
         drive(store, "s", runtime=rt)
     finally:
@@ -343,7 +388,7 @@ def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(stor
     assert len(ended) == 1
     assert ended[0].payload["status"] == ({"cancel": "cancelled", "abort": "aborted"}.get(closing, "failed"))
     if closing == "schema":
-        assert ended[0].payload["reason"] == "handler_schema_or_capability_mismatch"
+        assert hydrated_record(store, "s", ended[0]).payload["reason"] == "handler_schema_or_capability_mismatch"
     assert ended[0].payload["unconfirmed_operations"] == [provider.handle["operation_id"]]
     state = store.read_state("s")[0]
     attempt = state.operations[provider.handle["operation_id"]].attempts[1]
@@ -353,9 +398,12 @@ def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(stor
         assert state.turns[provider.item.target_turn_id].cancelled
         assert attempt.state == "unknown" and len(unknown) == 1
         assert attempt.unknown == unknown[0]
-        assert unknown[0].payload["reason"] == ("provider_result_invalid" if cancel_reply == "invalid" else "cancel_requested")
-        assert unknown[0].payload["dispatch_evidence"] == [records_of(store, "op_started")[0].record_id]
-        assert unknown[0].payload["retry"] == "stop"
+        hydrated_unknown = hydrated_record(store, "s", unknown[0])
+        assert hydrated_unknown.payload["reason"] == (
+            "provider_result_invalid" if cancel_reply == "invalid" else "cancel_requested"
+        )
+        assert hydrated_unknown.payload["dispatch_evidence"] == [records_of(store, "op_started")[0].record_id]
+        assert hydrated_unknown.payload["retry"] == "stop"
     else:
         assert not state.turns[provider.item.target_turn_id].cancelled
         assert attempt.state == "parked" and attempt.unknown is None
@@ -363,8 +411,7 @@ def test_close_provider_wait_respects_cancelled_turn_and_audits_late_result(stor
     assert not records_of(store, "op_completed")
 
     provider.item = replace(provider.item, input_id="late")
-    with store.atomic() as tx:
-        tx.push("s", provider.item)
+    push_receipt(store, "s", provider)
     drive(store, "s", runtime=rt)
     drive(store, "s", runtime=rt)
     completed = records_of(store, "op_completed")

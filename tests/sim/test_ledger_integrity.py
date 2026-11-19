@@ -9,7 +9,41 @@ from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._sql import _extend_chain_digest
 
 from .scenarios import run_scenario
-from .world import InvariantViolation, SimWorld
+from .world import InvariantViolation, SimLedgerSigner, SimWorld
+
+
+def test_ledger_signer_caches_exact_proofs_and_rejections(monkeypatch):
+    signer = SimLedgerSigner(seed=31)
+    public_key = signer._public_key
+
+    class CountingPublicKey:
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, signature, message):
+            self.calls += 1
+            return public_key.verify(signature, message)
+
+    counting_public_key = CountingPublicKey()
+    monkeypatch.setattr(signer, "_public_key", counting_public_key)
+
+    message = b"tenant/default/session/s/checkpoint/7"
+    signature = signer.bind_key().sign(message)
+    assert signer.verify(signer.key_id, message, signature) is True
+    assert signer.verify(signer.key_id, message, signature) is True
+    assert counting_public_key.calls == 1
+
+    assert signer.verify(signer.key_id, message + b"/different", signature) is False
+    assert counting_public_key.calls == 2
+
+    invalid_signature = bytes([signature[0] ^ 1]) + signature[1:]
+    assert signer.verify(signer.key_id, message, invalid_signature) is False
+    assert signer.verify(signer.key_id, message, invalid_signature) is False
+    assert counting_public_key.calls == 3
+
+    other_seed = SimLedgerSigner(seed=32)
+    assert signer.verify(other_seed.key_id, message, signature) is False
+    assert counting_public_key.calls == 3
 
 
 def test_i9_recomputes_real_sqlite_chain_and_checkpoints(tmp_path):

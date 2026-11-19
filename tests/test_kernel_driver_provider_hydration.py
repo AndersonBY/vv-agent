@@ -117,13 +117,13 @@ def _provider_evidence() -> tuple[InboxItem, dict]:
     handle = {
         "kind": "provider",
         "provider": "echo",
-        "job_id": {"job": "job-secret"},
+        "job_id": "job-secret",
         "operation_id": OPERATION_ID,
         "attempt": 1,
         "request_digest": REQUEST_DIGEST,
         "evidence": ["handle-evidence-secret"],
-        "query_ref": {"query": "query-secret"},
-        "cancel_ref": {"cancel": "cancel-secret"},
+        "query_ref": "query-secret",
+        "cancel_ref": "cancel-secret",
     }
     return (
         InboxItem(
@@ -175,11 +175,15 @@ def _driver(session: _Session, *, handle: dict, attempt_state: str, input_seq: i
         plan,
         state=attempt_state,
         dispatch=plan,
-        wait={
-            "handle": handle,
-            "poll_at_ms": 0,
-            "deadline_ms": None,
-        },
+        wait=(
+            {
+                "handle": handle,
+                "poll_at_ms": 0,
+                "deadline_ms": None,
+            }
+            if attempt_state == "parked"
+            else None
+        ),
     )
     start = Record(
         f"turn/{TURN_ID}/start",
@@ -262,7 +266,7 @@ def test_provider_result_round_trip_authenticates_logical_and_retains_reference_
         logical_evidence = hydrate_input(driver, raw_evidence.item)
         assert logical.payload["result"] == expected_result
         assert logical.payload["usage"] == expected_usage
-        assert logical_evidence.payload["handle"]["job_id"] == {"job": "job-secret"}
+        assert logical_evidence.payload["handle"]["job_id"] == "job-secret"
         assert logical_evidence.payload["handle"]["evidence"] == ["handle-evidence-secret"]
 
         pending = apply_input(driver, one_turn=True)
@@ -378,9 +382,18 @@ def test_provider_evidence_authenticates_raw_and_accepts_logical_handle(tmp_path
         committed = pending.send(250)
         assert isinstance(committed, CommitInput)
         applied, parked = committed.records
+        proof = stored_input_proof(raw)
+        assert proof is not None
+        assert applied.kind == "input_applied"
         assert applied._payload["input"] == raw.item.to_dict()
+        assert InboxItem(**applied._payload["input"]).encode() == raw.item.encode()
+        assert applied._payload["input_digest"] == raw.item.digest
+        assert applied._payload["input_proof"] == proof
+        assert parked.kind == "op_parked"
+        assert parked._payload["phase"] == "after_dispatch"
         assert parked._payload["handle"] == expected_handle
         assert parked._payload["poll_at_ms"] == 1_250
+        assert parked._payload["deadline_ms"] is None
         try:
             next(pending)
         except StopIteration as done:

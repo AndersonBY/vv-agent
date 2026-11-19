@@ -11,10 +11,10 @@ import os
 import platform
 import subprocess
 import time
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import cache
-from itertools import batched
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Self
@@ -375,8 +375,18 @@ def _seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1
             yield _run_seed(job)
         return
     with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
-        for batch in batched(jobs, workers * 2):
-            yield from pool.map(_run_seed, batch)
+        in_flight = deque()
+        for _ in range(workers * 2):
+            try:
+                job = next(jobs)
+            except StopIteration:
+                break
+            in_flight.append(pool.submit(_run_seed, job))
+        while in_flight:
+            result = in_flight.popleft().result()
+            with suppress(StopIteration):
+                in_flight.append(pool.submit(_run_seed, next(jobs)))
+            yield result
 
 
 def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):

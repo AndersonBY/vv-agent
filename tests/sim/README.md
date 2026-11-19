@@ -31,7 +31,7 @@ From the repository root:
 uv run python scripts/session_simulation.py --seeds 5 --workers 2
 uv run python scripts/session_simulation.py --seed 17 --seeds 1 --scenario accepted_lost
 uv run pytest tests/sim/test_simulation.py tests/sim/test_mutations.py -k sqlite
-TMPDIR=/dev/shm VV_AGENT_SIM_SEEDS=5 uv run pytest tests/sim -k simulation_smoke -s
+TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=10 uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
 uv run pytest tests/sim/test_import_boundary.py -q -s
 ```
 
@@ -39,12 +39,12 @@ The unqualified CLI and smoke gate run 1,000 seeds. The smoke gate asserts at
 least 1,000 seeds per minute. The fixed prototype snapshot passed this smoke
 requirement on the hardware documented below. Use
 explicit small counts for local development. `VV_AGENT_SIM_WORKERS` selects smoke workers;
-CLI uses `--workers`. The default is at most five, capped by CPU affinity (CPU count where affinity is
-unavailable); the hard limit is eight. `--workers 1` runs serially.
+CLI uses `--workers`. The formal performance gate pins it to 10 spawn workers. `--workers 1` runs serially.
 
-The selected performance configuration is the original bounded batcher with
-`TMPDIR=/dev/shm`. The Linux CI performance step sets that environment variable
-only for the smoke command; the rolling-queue experiment is not retained.
+The smoke gate uses `TMPDIR=/dev/shm` so its real SQLite files and WAL live in
+tmpfs. The coordinator keeps at most `2 * workers` futures in flight, consumes
+them in seed order and submits one replacement after each result. Set `TMPDIR`
+only for the smoke command.
 The database is still a real file, with native WAL/FULL settings, separate
 participant connections and every oracle enabled. RAM-backed files survive
 worker-process exits but are not evidence of host-power-loss durability. Keep
@@ -53,13 +53,13 @@ separate; do not export `TMPDIR` for the full suite. Full remote checks split in
 
 ```bash
 uv run pytest -k "not simulation_smoke"
-TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
+TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=10 timeout 60s uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
 ```
 
 Independent seeds use standard-library processes with the `spawn` start method;
 each world stays single-threaded and owns its disposable real database file.
 No live SQL connections are inherited. At most twice the worker count of jobs
-and result traces are submitted per batch; aggregate memory does not grow with
+and result traces are retained in the rolling window; aggregate memory does not grow with
 the seed count. The measured campaign includes identity calculation, process
 startup, child imports, initial tokenizer warmup, connection setup, SQL checks,
 FULL-durability commits and process shutdown. Reports include Python, platform, CPU count, affinity,
@@ -246,13 +246,6 @@ available and load averages 2.17/1.87/1.68. Evidence:
 Approval was exercised by directed tests but was not selected in this random
 sample. No steady-state or 1,000-seed throughput claim follows from this sample.
 
-
-The accepted 17-scenario configuration is original `ec53fda` bounded batching
-with `TMPDIR=/dev/shm`, WAL/FULL and all checks retained. Large acceptance runs
-use a separate internal harness and are not part of this public test guide.
-internally / 21.23025s for the full command. The rolling variant remains
-experimental evidence only; the simpler original batcher meets the gate and
-is the selected implementation.
 
 These fixed 17-scenario measurements do not validate other source snapshots,
 final core changes or host-power-loss durability. PostgreSQL and performance

@@ -35,6 +35,12 @@ class _Calls:
         self.effects: list[str] = []
 
 
+def _sessions(store: SQLiteStore) -> SessionDriver:
+    if store._ledger_integrity_mode() == "unconfigured":
+        store.configure_input_admission(allow_unsigned=True)
+    return SessionDriver(store=store, content_key_provider=_KEY)
+
+
 class _HydrationDriver(Protocol):
     runtime: Runtime
     scope: _Scope
@@ -158,7 +164,7 @@ def _park_ask_user(path: Path, calls: _Calls):
     stack = ExitStack()
     store = stack.enter_context(SQLiteStore.standalone(str(path)))
     store.install_schema()
-    sessions = SessionDriver(store=store, content_key_provider=_KEY)
+    sessions = _sessions(store)
     sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
     sessions.push("s", InboxItem("initial", "user", {"content": "ask me"}))
     runtime = _runtime(
@@ -175,7 +181,7 @@ def _park_turn_wait(path: Path, calls: _Calls):
     stack = ExitStack()
     store = stack.enter_context(SQLiteStore.standalone(str(path)))
     store.install_schema()
-    sessions = SessionDriver(store=store, content_key_provider=_KEY)
+    sessions = _sessions(store)
     sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
     sessions.push("s", InboxItem("initial", "user", {"content": "ask me"}))
     runtime = _runtime(sessions, calls, [LLMResponse("Which environment?")], no_tool_policy="wait_user")
@@ -289,7 +295,7 @@ def _park_approval(path: Path, calls: _Calls):
     stack = ExitStack()
     store = stack.enter_context(SQLiteStore.standalone(str(path)))
     store.install_schema()
-    sessions = SessionDriver(store=store, content_key_provider=_KEY)
+    sessions = _sessions(store)
     sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
     sessions.push("s", InboxItem("initial", "user", {"content": "run guarded"}))
     runtime = sessions.runtime(

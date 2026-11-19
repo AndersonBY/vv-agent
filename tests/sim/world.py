@@ -149,6 +149,8 @@ class SimLedgerSigner:
     def __init__(self, seed: int) -> None:
         self.key_id = f"sim-ledger-{seed}"
         self.key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(f"sim-ledger:{seed}".encode()).digest())
+        self._public_key = self.key.public_key()
+        self._proof_results: dict[tuple[str, bytes, bytes], bool] = {}
 
     def bind_key(self):
         signer = self
@@ -163,13 +165,21 @@ class SimLedgerSigner:
         return Bound()
 
     def verify(self, key_id: str, message: bytes, signature: bytes) -> bool:
+        proof = (key_id, message, signature)
+        cached = self._proof_results.get(proof)
+        if cached is not None:
+            return cached
         if key_id != self.key_id:
-            return False
-        try:
-            self.key.public_key().verify(signature, message)
-        except InvalidSignature:
-            return False
-        return True
+            verified = False
+        else:
+            try:
+                self._public_key.verify(signature, message)
+            except InvalidSignature:
+                verified = False
+            else:
+                verified = True
+        self._proof_results[proof] = verified
+        return verified
 
 
 class InvariantViolation(AssertionError):

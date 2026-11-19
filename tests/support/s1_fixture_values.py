@@ -69,6 +69,8 @@ def create_fixture_session(
     consumers: tuple[str, ...] = ("events",),
     subject_id: str = "fixture/host",
 ):
+    if store._ledger_integrity_mode() == "unconfigured":
+        store.configure_input_admission(allow_unsigned=True)
     attributes = attributes if attributes is not None else {"seed": {"messages": [], "shared_state": {}}}
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)

@@ -293,10 +293,10 @@ def controlled_seed_pool(monkeypatch):
 def test_seed_submission_is_bounded_and_preserves_input_order(controlled_seed_pool):
     submitted, completed, closed, _failures = controlled_seed_pool
     results = seed_results(seeds=9, workers=2)
-    for expected in range(9):
+    for yielded, expected in enumerate(range(9), start=1):
         assert next(results)["seed"] == expected
-        assert [seed for seed, _future in submitted] == list(range(min(9, 4 * (expected // 4 + 1))))
-        assert len(submitted) - expected <= 4
+        assert [seed for seed, _future in submitted] == list(range(min(9, 4 + yielded)))
+        assert len(submitted) - yielded <= 4
     assert completed[:4] == [3, 2, 1, 0]
     with pytest.raises(StopIteration):
         next(results)
@@ -310,7 +310,8 @@ def test_campaign_stops_at_first_ordered_failure(controlled_seed_pool):
     assert completed.index(2) < completed.index(1)
     assert result["seed"] == 1 and result["error"] == "seed 1 failed"
     assert result["environment"]["sqlite_temporary_storage"] == {"verified": False, "observations": []}
-    assert [seed for seed, _future in submitted] == [0, 1, 2, 3]
+    assert [seed for seed, _future in submitted] == list(range(6))
+    assert len(submitted) - 2 <= 4
     assert closed == [True]
 
 

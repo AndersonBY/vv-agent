@@ -88,6 +88,8 @@ def test_definition_evidence_detects_bypassed_runtime_digest_check(sim_database,
         with pytest.raises(InvariantViolation, match="definition:"):
             run_scenario(world, "definition_mismatch")
         assert sum(call[3] == "model" for call in world.calls) == 2
+        assert any("ready_active_head" in event for event in world.events)
+        assert "I4" in world.covered
 
 
 def test_precommit_model_result_recovers_as_meter_missing_then_one_retry(sim_database):

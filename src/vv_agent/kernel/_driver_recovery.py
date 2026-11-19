@@ -6,7 +6,7 @@ from collections.abc import Generator
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum, auto
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from . import _after_cycle as cycle
 from . import _compaction_phase as compaction
@@ -110,6 +110,12 @@ class CommitStopping:
 @dataclass(frozen=True, slots=True)
 class PushProviderEvidence:
     item: InboxItem
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvidencePushResult:
+    input_id: str
+    status: Literal["admitted", "replayed", "conflict"]
 
 
 class _RecoveryStopIteration(Exception):
@@ -268,6 +274,68 @@ def _lookup_evidence(driver: CoreDriver, plan: Record, lookup: ProviderLookupRes
     )
 
 
+def _recovery_evidence_rejected_for_unavailable_recovery(driver: CoreDriver, input_id: str) -> bool:
+    applied = driver.state.applied_inputs.get(input_id)
+    if applied is None or applied.kind != "input_applied" or applied._payload.get("disposition") != "rejected":
+        return False
+    reason = driver.hydrate_record_field(applied, "input_reason", applied._payload.get("reason"))
+    return reason == "provider_lookup_recovery_unavailable"
+
+
+def _reconcile_rejected_recovery_evidence(
+    driver: CoreDriver,
+    attempt: Attempt,
+    plan: Record,
+    lookup: ProviderLookupResult,
+):
+    """Apply a fresh lookup when its deterministic evidence identity was rejected."""
+
+    evidence = _lookup_evidence(driver, plan, lookup)
+    try:
+        if plan.turn_id is None:
+            return False
+        lookup = inputs._decoded_provider_lookup(evidence, plan, driver.state.turns[plan.turn_id])
+    except ProviderResultInvalid:
+        return False
+
+    if lookup.status is LookupStatus.NOT_STARTED:
+        records = inputs._not_started_retry_records(
+            driver,
+            attempt,
+            evidence,
+            plan,
+            lookup,
+        )
+        if records is None:
+            return False
+    elif lookup.status is LookupStatus.RUNNING:
+        outcome = lookup.outcome
+        if not isinstance(outcome, Accepted):
+            return False
+        try:
+            validate_lookup_provider_handle(lookup.binding, outcome.handle, feature_level=3)
+        except ProviderResultInvalid:
+            return False
+        handle = {key: outcome.handle[key] for key in inputs._PARKED_PROVIDER_HANDLE_FIELDS}
+        parked = yield from outcomes.parked_steps(driver, attempt.execution_plan, handle, after=True)
+        if outcome.yield_on_steer:
+            parked = replace(parked, payload=parked._payload | {"yield_on_steer": True})
+        records = [parked]
+    elif lookup.status is LookupStatus.EXITED:
+        outcome = lookup.outcome
+        if not isinstance(outcome, Definitive):
+            return False
+        try:
+            validate_provider_result(plan, outcome)
+        except ProviderResultInvalid:
+            return False
+        records = yield inputs.CompleteResult(attempt.execution_plan, outcome)
+    else:
+        return False
+    yield CommitRecords(records)
+    return True
+
+
 def _lookup_recovery_unknown(
     driver: CoreDriver,
     attempt: Attempt,
@@ -276,7 +344,25 @@ def _lookup_recovery_unknown(
 ):
     def push_evidence(lookup: ProviderLookupResult):
         receipt = yield PushProviderEvidence(_lookup_evidence(driver, plan, lookup))
-        if not receipt.replayed:
+        if receipt.status == "conflict":
+            unknown = yield from outcomes.unknown_steps(
+                driver, attempt.execution_plan, "provider lookup evidence identity conflict"
+            )
+            return stop_unknown(
+                unknown,
+                observation={
+                    "code": "provider_lookup_recovery_unavailable",
+                    "lookup_status": lookup.status.value,
+                    "lookup_evidence": list(lookup.evidence),
+                    "evidence_input_id": receipt.input_id,
+                    "evidence_conflict": True,
+                },
+            )
+        if receipt.status == "admitted":
+            return None
+        if _recovery_evidence_rejected_for_unavailable_recovery(driver, receipt.input_id) and (
+            yield from _reconcile_rejected_recovery_evidence(driver, attempt, plan, lookup)
+        ):
             return None
         unknown = yield from outcomes.unknown_steps(
             driver, attempt.execution_plan, "provider lookup evidence was already consumed"

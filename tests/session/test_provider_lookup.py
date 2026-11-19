@@ -20,6 +20,7 @@ from vv_agent.session.providers import (
     Accepted,
     Definitive,
     FunctionProvider,
+    ProviderResultInvalid,
     Unknown,
     lookup_provider,
 )
@@ -176,3 +177,15 @@ def test_lookup_provider_does_not_swallow_provider_exceptions() -> None:
     with pytest.raises(RuntimeError) as caught:
         lookup_provider(FailingProvider(), binding.execution_id, binding)
     assert caught.value is failure
+
+
+def test_lookup_provider_preserves_provider_result_invalid() -> None:
+    binding = _binding()
+
+    class InvalidProvider:
+        def lookup(self, execution_id: str, authenticated: LookupBinding) -> ProviderLookupResult:
+            del execution_id, authenticated
+            raise ProviderResultInvalid()
+
+    with pytest.raises(ProviderResultInvalid):
+        lookup_provider(InvalidProvider(), binding.execution_id, binding)

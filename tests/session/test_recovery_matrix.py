@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import signal
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import pytest
 from vv_agent.agent import Agent
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.events import ModelCallCompletedEvent
+from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
+from vv_agent.kernel._interactions import reply_content, user_interaction
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.run_config import RunConfig
 from vv_agent.session.kernel import Runtime, drive, read_state
@@ -27,7 +30,15 @@ from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
 from .controlled import ControlledProvider
-from .helpers import content_ref, create_fixture_session, principal, push_fixture_input, wrap_fixture_store
+from .helpers import (
+    append_fixture_records,
+    content_ref,
+    create_fixture_session,
+    principal,
+    push_fixture_input,
+    read_fixture_state,
+    wrap_fixture_store,
+)
 from .helpers import item as helper_item
 
 MODEL_USAGE = {"prompt_tokens": 12000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}
@@ -75,7 +86,7 @@ def test_completed_results_are_reused(store, database):
     assert effects == [1]
     assert not rt.llm.steps
     drive(store, "s", runtime=runtime(database, []))
-    state, records, _ = read_state(store, "s")
+    state, records, _ = read_fixture_state(store, "s")
     assert state.active_turn_id is None
     assert [r.record.payload["status"] for r in records if r.record.kind == "turn_ended"] == ["completed"]
 
@@ -89,7 +100,7 @@ def test_model_unknown_has_only_one_retry(store, database):
 
     start(store)
     drive(store, "s", runtime=runtime(database, [lost, lost]))
-    state, records, _ = read_state(store, "s")
+    state, records, _ = read_fixture_state(store, "s")
     assert len(calls) == 2
     assert len(state.operations) == 1
     unknowns = [r.record for r in records if r.record.kind == "op_unknown"]
@@ -157,7 +168,8 @@ def worker(
 
     def model_response(_request):
         response = LLMResponse("first", raw={"usage": MODEL_USAGE})
-        with open_store(database) as reader:
+        with open_store(database) as raw_reader:
+            reader = wrap_fixture_store(raw_reader)
             plan = records_of(reader, "op_planned")[-1]
         provider.retain_model_result(plan, {"content": response.content, "tool_calls": [], "raw": response.raw})
         return response
@@ -170,11 +182,14 @@ def worker(
         providers={} if long_tool else {"effect": provider},
     )
     try:
-        with open_store(database) as store:
-            drive(store, "s", runtime=rt)
+        with open_store(database) as raw_store:
+            drive(wrap_fixture_store(raw_store), "s", runtime=rt)
         pipe.send(("done", None))
     except LeaseLost:
         pipe.send(("fenced", None))
+    except BaseException:
+        pipe.send(("error", traceback.format_exc()))
+        raise
     finally:
         pipe.close()
 
@@ -191,6 +206,8 @@ def spawn_worker(database, **kwargs):
 def receive(pipe, expected, timeout=12):
     assert pipe.poll(timeout), f"worker never reached {expected}"
     kind, value = pipe.recv()
+    if kind == "error":
+        pytest.fail(value)
     assert kind == expected, (kind, value)
     return value
 
@@ -215,7 +232,14 @@ def effect_tool(*, idempotent=False, approval=False):
 
 
 def records_of(store, kind):
-    return [r.record for r in read_state(store, "s")[1] if r.record.kind == kind]
+    return [r.record for r in read_fixture_state(store, "s")[1] if r.record.kind == kind]
+
+
+def push_item(store, item):
+    push_fixture_input(store, "s", item)
+    stored = store.read_input("s", item.input_id)
+    assert stored is not None
+    return stored.item
 
 
 @pytest.mark.parametrize("cut", ["op_planned", "op_completed"])
@@ -273,7 +297,8 @@ def test_parked_job_survives_kill_with_same_handle(store, database):
         kill(proc, pipe, database)
         drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
         assert not records_of(store, "op_unknown")
-        assert records_of(store, "op_parked")[0].payload == parked["payload"]
+        retained = next(r.record for r in read_state(store, "s")[1] if r.record.kind == "op_parked")
+        assert retained.payload == parked["payload"]
         with open_store(database) as provider_store, provider_store.atomic():
             provider_store._rows("UPDATE provider_jobs SET ready=true")
         drive(store, "s", runtime=runtime(database, [LLMResponse("done")], [effect_tool()], providers={"effect": provider}))
@@ -291,11 +316,10 @@ def test_heartbeat_cancels_blocked_tool_under_two_seconds(store, database, coope
     try:
         receive(pipe, "tool_running")
         before = time.monotonic()
-        with store.atomic() as tx:
-            tx.push(
-                "s",
-                helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
-            )
+        push_item(
+            store,
+            helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+        )
         observed = receive(pipe, "token", 2)
         assert observed - before <= 2
         receive(pipe, "done")
@@ -321,8 +345,7 @@ def test_acceptance_before_park_commit_recovers_from_durable_evidence(store, dat
     try:
         receive(pipe, "barrier")
         kill(proc, pipe, database)
-        with store.atomic() as tx:
-            tx.push("s", provider.callback(kind="provider_evidence"))
+        push_item(store, provider.callback(kind="provider_evidence"))
         drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
         assert provider.counts() == (1, 1)
         assert not records_of(store, "op_unknown")
@@ -385,8 +408,7 @@ def test_authenticated_late_results_have_one_tool_message_and_correction_only_wh
         def push():
             nonlocal pushed
             if not pushed:
-                with store.atomic() as tx:
-                    tx.push("s", provider.callback())
+                push_item(store, provider.callback())
                 pushed = True
 
         def hook(point, record):
@@ -442,9 +464,8 @@ def test_steer_during_batch_follow_up_and_final_watermark(store, database):
     try:
         receive(pipe, "barrier")
         kill(proc, pipe, database)
-        with store.atomic() as tx:
-            tx.push("s", helper_item("steer", "steer", actor=principal("test"), target_turn_id="s/turn/initial"))
-            tx.push("s", helper_item("follow", "follow_up", actor=principal("test")))
+        push_item(store, InboxItem("steer", "steer", {"content": "steer now"}, target_turn_id="s/turn/initial"))
+        push_item(store, InboxItem("follow", "follow_up", {"content": "next task"}))
         requests = []
         inserted = False
 
@@ -452,11 +473,10 @@ def test_steer_during_batch_follow_up_and_final_watermark(store, database):
             nonlocal inserted
             if point == "before_turn_end" and not inserted:
                 inserted = True
-                with store.atomic() as tx:
-                    tx.push(
-                        "s",
-                        helper_item("last", "steer", actor=principal("test"), target_turn_id=record.turn_id),
-                    )
+                push_item(
+                    store,
+                    InboxItem("last", "steer", {"content": "at final boundary"}, target_turn_id=record.turn_id),
+                )
 
         def answer(request):
             requests.append(request)
@@ -506,10 +526,10 @@ def test_approval_park_restart_deny_and_exact_reply(store, database):
         },
         target_turn_id=park.turn_id,
     )
+    push_item(store, replace(answer, input_id="wrong", payload=answer.payload | {"scope": ["other"]}))
+    stored_answer = push_item(store, answer)
     with store.atomic() as tx:
-        tx.push("s", replace(answer, input_id="wrong", payload=answer.payload | {"scope": content_ref("other")}))
-        tx.push("s", answer)
-        tx.push("s", answer)
+        assert tx.push("s", stored_answer).replayed
     drive(store, "s", runtime=runtime(database, [LLMResponse("done")], [tool], providers={"effect": provider}))
     assert provider.counts() == (1, 1)
     assert records_of(store, "input_applied")[1].payload["disposition"] == "rejected"
@@ -522,16 +542,23 @@ def test_ask_user_is_same_turn_parked_interaction(store, database):
     park = records_of(store, "op_parked")[0]
     assert park.payload["phase"] == "before_dispatch"
     assert not records_of(store, "turn_ended")
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            replace(
-                helper_item("reply", actor=principal("test")),
-                payload={"content": content_ref("blue-answer")},
-                target_turn_id=park.turn_id,
-                generation=0,
-            ),
-        )
+    generation = records_of(store, "turn_started")[0].payload["generation"]
+    form = user_interaction("s", park.turn_id, generation, park.payload, operation_id=park.operation_id, attempt=park.attempt)
+    target = InteractionReplyTarget.from_dict(
+        {
+            name: form[name]
+            for name in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")
+        }
+    )
+    push_item(
+        store,
+        replace(
+            helper_item("reply", actor=principal("test")),
+            payload={"content": reply_content(target, InteractionAnswer("text", text="blue"))},
+            target_turn_id=park.turn_id,
+            generation=generation,
+        ),
+    )
     seen = []
 
     def answer(request):
@@ -584,16 +611,14 @@ def test_cancel_parked_provider_keeps_unknown_and_audit_late_result(store, datab
             database, [LLMResponse("", [ToolCall("a", "effect", {})])], [effect_tool()], providers={"effect": provider}
         ),
     )
-    with store.atomic() as tx:
-        tx.push(
-            "s",
-            helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
-        )
+    push_item(
+        store,
+        helper_item("cancel", "control", actor=principal("test"), action="cancel", target_turn_id="s/turn/initial"),
+    )
     drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
     assert len(records_of(store, "op_unknown")) == 1
     assert records_of(store, "turn_ended")[0].payload["status"] == "cancelled"
-    with store.atomic() as tx:
-        tx.push("s", provider.callback())
+    push_item(store, provider.callback())
     drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
     assert records_of(store, "op_completed")[-1].payload["context"] == "audit"
 
@@ -644,22 +669,21 @@ def test_tool_admission_reuses_approval_policy_validation_and_version(store, dat
     if mode != "invalid_args":
         parked = records_of(store, "op_parked")[0]
         handle = parked.payload["handle"]
-        with store.atomic() as tx:
-            tx.push(
-                "s",
-                replace(
-                    helper_item("answer", "approval_answer", actor=principal("test")),
-                    payload={
-                        "operation_id": parked.operation_id,
-                        "attempt": parked.attempt,
-                        "request_id": handle["request_id"],
-                        "request_digest": handle["request_digest"],
-                        "scope": handle["scope"],
-                        "decision": "deny" if mode == "deny" else "approve",
-                    },
-                    target_turn_id=parked.turn_id,
-                ),
-            )
+        push_item(
+            store,
+            replace(
+                helper_item("answer", "approval_answer", actor=principal("test")),
+                payload={
+                    "operation_id": parked.operation_id,
+                    "attempt": parked.attempt,
+                    "request_id": handle["request_id"],
+                    "request_digest": handle["request_digest"],
+                    "scope": handle["scope"],
+                    "decision": "deny" if mode == "deny" else "approve",
+                },
+                target_turn_id=parked.turn_id,
+            ),
+        )
         rt = runtime(database, [LLMResponse("done")], [tool], providers={"effect": provider})
         if mode == "revoke":
             rt.config.tool_policy = ToolPolicy(can_use_tool=lambda _name, _args: False)
@@ -697,7 +721,7 @@ def test_run_events_are_stable_typed_projections_and_do_not_execute(store, datab
 
     start(store)
     drive(store, "s", runtime=runtime(database, [LLMResponse("done")]))
-    _, rows, _ = read_state(store, "s")
+    _, rows, _ = read_fixture_state(store, "s")
     first = [event.to_dict() for event in project_records(rows)]
     second = [event.to_dict() for event in project_records(rows)]
     assert first == second
@@ -758,7 +782,7 @@ def test_lost_commit_ack_reuses_real_retained_model_result(store, database, monk
 
 def test_twenty_concurrent_callback_replays_and_different_bytes_conflict(store, database):
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
+    from threading import Barrier, Event
 
     from vv_agent.session.store import Conflict
 
@@ -774,19 +798,30 @@ def test_twenty_concurrent_callback_replays_and_different_bytes_conflict(store, 
     )
     item = provider.callback()
     barrier = Barrier(20)
+    published = Event()
+    canonical = []
 
-    def deliver(_index):
-        with open_store(database) as other:
+    def deliver(index):
+        with open_store(database) as raw_other:
+            other = wrap_fixture_store(raw_other)
             barrier.wait(timeout=10)
+            if index == 0:
+                receipt = push_fixture_input(other, "s", item)
+                stored = other.read_input("s", item.input_id)
+                assert stored is not None
+                canonical.append(stored.item)
+                published.set()
+                return receipt
+            assert published.wait(10)
             with other.atomic() as tx:
-                return tx.push("s", item)
+                return tx.push("s", canonical[0])
 
     with ThreadPoolExecutor(max_workers=20) as pool:
         receipts = list(pool.map(deliver, range(20)))
     assert sum(not r.replayed for r in receipts) == 1
     assert len({r.input_seq for r in receipts}) == 1
     with pytest.raises(Conflict), store.atomic() as tx:
-        tx.push("s", replace(item, payload=item.payload | {"result": {"different": True}}))
+        tx.push("s", replace(canonical[0], payload=canonical[0].payload | {"result": content_ref("different")}))
     drive(store, "s", runtime=runtime(database, [LLMResponse("done")], [effect_tool()], providers={"effect": provider}))
     assert provider.counts() == (1, 1)
     assert len([r for r in records_of(store, "input_applied") if r.payload["input"]["input_id"] == item.input_id]) == 1
@@ -801,21 +836,16 @@ def test_future_retry_not_runnable_until_database_due_time(store, database):
     try:
         receive(pipe, "barrier")
         kill(proc, pipe, database)
-        state, rows, watermark = read_state(store, "s")
+        state, _, _ = read_fixture_state(store, "s")
         plan = next(iter(state.operations.values())).attempts[1].plan
         assert plan.turn_id is not None and plan.operation_id is not None
-        lease = store.acquire("s", owner="test-repair", ttl_ms=15000)
-        due = store.renew(lease, ttl_ms=15000).db_now_ms + 1000
-        with store.atomic() as tx:
-            tx.append(
-                "s",
-                lease=lease,
-                expected_seq=rows[-1].seq,
-                commit_id="future-repair",
-                expected_inbox_seq=watermark,
-                records=(record("op_unknown", tid=plan.turn_id, oid=plan.operation_id, retry_at_ms=due),),
-            )
-        store.release(lease)
+        due = store._now() + 1000
+        unknown = record("op_unknown", tid=plan.turn_id, oid=plan.operation_id, retry_at_ms=due)
+        unknown = replace(
+            unknown,
+            payload=unknown.payload | {"reason": "lost", "dispatch_evidence": ["dispatch"], "observation": {"code": "timeout"}},
+        )
+        append_fixture_records(store, "s", (unknown,), commit_id="future-repair")
         assert not [w for w in store.list_runnable() if w.kind == "drive"]
         rt = runtime(database, [LLMResponse("done")], [effect_tool()])
         drive(store, "s", runtime=rt)
@@ -860,7 +890,7 @@ def test_budget_counts_and_elapsed_survive_recovery(store, database):
     rt.config.budget_limits = RunBudgetLimits(max_tool_calls=1)
     with pytest.raises(Restart):
         drive(store, "s", runtime=rt)
-    observed_before = sum(r.payload["usage"]["elapsed_ms"] for r in read_state(store, "s")[0].usage_values.values())
+    observed_before = sum(r.payload["usage"]["elapsed_ms"] for r in read_fixture_state(store, "s")[0].usage_values.values())
     drive(
         store,
         "s",
@@ -896,8 +926,7 @@ def test_late_first_model_result_respects_retry_dispatch_boundary(store, databas
             desired = "before_external_call" if retry_started else "after_commit"
             if not pushed and point == desired and record.attempt == 2:
                 pushed = True
-                with store.atomic() as tx:
-                    tx.push("s", provider.callback())
+                push_item(store, provider.callback())
 
         rt = runtime(database, [LLMResponse("second")], [effect_tool()], providers={"model": provider}, hook=hook)
         drive(store, "s", runtime=rt)
@@ -907,7 +936,7 @@ def test_late_first_model_result_respects_retry_dispatch_boundary(store, databas
         assert result.payload["usage"] == MODEL_USAGE
         assert records_of(store, "turn_ended")[0].payload["result"] == ("second" if retry_started else "first")
         assert len(records_of(store, "op_started")) == (2 if retry_started else 1)
-        state, rows, _ = read_state(store, "s")
+        state, rows, _ = read_fixture_state(store, "s")
         projected = project_result(store, "s", result.turn_id)
         call = next(c for c in projected.token_usage.model_calls if c.attempt == 1)
         assert call.usage == model_usage(MODEL_USAGE)
@@ -918,12 +947,13 @@ def test_late_first_model_result_respects_retry_dispatch_boundary(store, databas
         assert len({c.call_id for c in projected.token_usage.model_calls}) == (2 if retry_started else 1)
 
         # Redelivery under either input identity must not create a second billable call.
+        stored_callback = push_item(store, provider.callback())
         with store.atomic() as tx:
-            first_receipt = tx.push("s", provider.callback())
-            assert tx.push("s", provider.callback()) == first_receipt
-            tx.push("s", provider.callback(input_id="redelivery"))
+            first_receipt = tx.push("s", stored_callback)
+            assert tx.push("s", stored_callback) == first_receipt
+        push_item(store, provider.callback(input_id="redelivery"))
         drive(store, "s", runtime=rt)
-        state, replay_rows, _ = read_state(store, "s")
+        state, replay_rows, _ = read_fixture_state(store, "s")
         assert state.applied_inputs["redelivery"].payload["disposition"] == "noop"
         assert project_result(store, "s", result.turn_id).token_usage == projected.token_usage
         assert len([e for e in project_records(replay_rows) if isinstance(e, ModelCallCompletedEvent) and e.attempt == 1]) == 1
@@ -934,9 +964,8 @@ def test_late_first_model_result_respects_retry_dispatch_boundary(store, databas
 
 @pytest.mark.persistent_store
 def test_repair_missing_plans_uses_retained_response_without_model_replay(store, database):
+    from vv_agent.kernel._content_publication import make_record_before_publication
     from vv_agent.session.records import digest
-
-    from .helpers import record
 
     provider = ControlledProvider(database)
     provider.install()
@@ -945,30 +974,33 @@ def test_repair_missing_plans_uses_retained_response_without_model_replay(store,
     try:
         receive(pipe, "barrier")
         kill(proc, pipe, database)
-        state, rows, _ = read_state(store, "s")
+        state, _, _ = read_fixture_state(store, "s")
         plan = next(iter(state.operations.values())).attempts[1].plan
         assert plan.turn_id is not None and plan.operation_id is not None
-        lease = store.acquire("s", owner="retained-result", ttl_ms=15000)
-        with store.atomic() as tx:
-            result_ref = content_ref("retained-model-result")
-            tx.append(
-                "s",
-                lease=lease,
-                expected_seq=rows[-1].seq,
-                commit_id="model-result-only",
-                records=(
-                    record(
-                        "op_completed",
-                        tid=plan.turn_id,
-                        oid=plan.operation_id,
-                        result=result_ref,
-                        result_digest=digest(result_ref),
-                        request_digest=plan.payload["request_digest"],
-                        provider_binding="model",
-                    ),
-                ),
-            )
-        store.release(lease)
+        model_result = {
+            "content": "retained",
+            "tool_calls": [ToolCall("a", "effect", {}).to_dict()],
+            "raw": {},
+        }
+        completed = make_record_before_publication(
+            "op_completed",
+            session_id="s",
+            turn_id=plan.turn_id,
+            operation_id=plan.operation_id,
+            attempt=plan.attempt,
+            payload={
+                "result": model_result,
+                "result_digest": digest(model_result),
+                "usage": MODEL_USAGE,
+                "shared_state": None,
+                "evidence": ["retained"],
+                "execution_started": True,
+                "context": "normal",
+                "request_digest": plan.payload["request_digest"],
+                "provider_binding": "model",
+            },
+        )
+        append_fixture_records(store, "s", (completed,), commit_id="model-result-only")
         drive(store, "s", runtime=runtime(database, [LLMResponse("done")], [effect_tool()], providers={"effect": provider}))
         assert provider.counts() == (1, 1)
         assert len([r for r in records_of(store, "op_planned") if r.payload["op_kind"] == "model"]) == 2
@@ -985,38 +1017,31 @@ def test_abort_before_heartbeat_retains_durable_action(store, database):
         nonlocal fired
         if not fired and point == "after_commit" and record.kind == "turn_started":
             fired = True
-            with store.atomic() as tx:
-                tx.push(
-                    "s",
-                    helper_item("abort", "control", actor=principal("test"), action="abort", target_turn_id=record.turn_id),
-                )
+            push_item(
+                store,
+                helper_item("abort", "control", actor=principal("test"), action="abort", target_turn_id=record.turn_id),
+            )
 
     drive(store, "s", runtime=runtime(database, [], hook=hook))
     assert records_of(store, "turn_ended")[0].payload["status"] == "aborted"
 
 
 def test_projection_identity_is_scoped_to_session(store, database):
-    from vv_agent.session.projection import project_records
-    from vv_agent.session.records import digest, make_record
-    from vv_agent.session.store import StoredRecord
+    from vv_agent.session.projection import hydration_for_session_store, project_records
 
     # record_id is only session-scoped; callers may use the same turn id in another session.
-    record = make_record(
-        "turn_started",
-        session_id="s",
-        turn_id="same-turn",
-        payload={
-            "input_ids": [],
-            "definition": content_ref("definition"),
-            "definition_digest": digest(content_ref("definition")),
-            "handler_version": "1",
-            "budget": content_ref("budget"),
-            "binding": None,
-            "generation": 0,
-        },
-    )
-    a = project_records([StoredRecord(record, 1, "c", 1, 1)])[0]
-    b = project_records([StoredRecord(replace(record, session_id="other"), 1, "c", 1, 1)])[0]
+    start(store)
+    drive(store, "s", runtime=runtime(database, [LLMResponse("done")]))
+    start(store, "other")
+    drive(store, "other", runtime=runtime(database, [LLMResponse("done")]))
+    first = next(r for r in read_state(store, "s")[1] if r.record.kind == "turn_started")
+    second = next(r for r in read_state(store, "other")[1] if r.record.kind == "turn_started")
+
+    def same_identity(row):
+        return replace(row, record=replace(row.record, record_id="turn/same/started", turn_id="same-turn"))
+
+    a = project_records([same_identity(first)], hydration=hydration_for_session_store(store, "s"))[0]
+    b = project_records([same_identity(second)], hydration=hydration_for_session_store(store, "other"))[0]
     assert a.event_id != b.event_id
 
 
@@ -1063,11 +1088,10 @@ def test_steer_during_model_retry_waits_for_next_unfrozen_request(store, databas
         nonlocal inserted
         if point == "after_commit" and r.kind == "op_unknown" and not inserted:
             inserted = True
-            with store.atomic() as tx:
-                tx.push(
-                    "s",
-                    helper_item("during-retry", "steer", actor=principal("test"), target_turn_id=r.turn_id),
-                )
+            push_item(
+                store,
+                InboxItem("during-retry", "steer", {"content": "new instruction"}, target_turn_id=r.turn_id),
+            )
 
     drive(store, "s", runtime=runtime(database, [lost, answer, answer], hook=hook))
     assert len(requests) == 3
@@ -1129,7 +1153,7 @@ def test_real_context_and_event_projection_keep_logical_cycle_numbers(store, dat
     start(store)
     steps = [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("", [ToolCall("b", "effect", {})]), LLMResponse("done")]
     drive(store, "s", runtime=runtime(database, steps, [effect]))
-    events = project_records(read_state(store, "s")[1])
+    events = project_records(read_fixture_state(store, "s")[1])
     from vv_agent.events import event_from_dict
 
     assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in events)
@@ -1141,7 +1165,7 @@ def assert_event_projection(store):
     from vv_agent.events import event_from_dict
     from vv_agent.session.projection import project_records
 
-    events = project_records(read_state(store, "s")[1])
+    events = project_records(read_fixture_state(store, "s")[1])
     assert all(event_from_dict(e.to_dict()).to_dict() == e.to_dict() for e in events)
 
 
@@ -1157,6 +1181,6 @@ def test_undispatched_model_closure_projects_failure(store, database):
 
     rt.hook = hook
     drive(store, "s", runtime=rt)
-    events = project_records(read_state(store, "s")[1])
+    events = project_records(read_fixture_state(store, "s")[1])
     assert not [e for e in events if e.type in {"model_call_started", "model_call_completed"}]
     assert len([e for e in events if e.type == "model_call_failed"]) == 1

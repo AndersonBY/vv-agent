@@ -1,10 +1,13 @@
 """Owner-bound logical-state reads for exploration evidence."""
 
+from vv_agent.kernel._boundary_hydration import hydrate_session_records
+
 
 def read_logical_state(world, session_id="s"):
     """Read witness state through the store's tenant/session content boundary."""
 
-    return world.read_state(session_id)
+    state, rows, inbox_seq = world.read_state(session_id)
+    return state, hydrate_session_records(rows, world.hydration(session_id)), inbox_seq
 
 
 def retained_definition(world, session_id="s"):

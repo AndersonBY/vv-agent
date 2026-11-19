@@ -340,9 +340,7 @@ def _plan(state: ExecutionState, record: Record, *, tenant_id: str) -> None:
         prepared_retry = record.feature_level == 3 and previous.prepared is not None
         retry_source = previous.execution_plan if prepared_retry else previous.plan
         previous_payload = (
-            retry_source._payload
-            if prepared_retry
-            else logical_payloads.get(retry_source.record_id, retry_source._payload)
+            retry_source._payload if prepared_retry else logical_payloads.get(retry_source.record_id, retry_source._payload)
         )
         require(record.feature_level == previous.plan.feature_level, "retry changed level-3 plan format")
         current_retained = _is_retained(p["request"], "retry request contains a malformed ContentRef")

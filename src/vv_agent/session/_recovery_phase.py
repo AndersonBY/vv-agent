@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from dataclasses import replace
+from collections.abc import Callable, Generator
+from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from vv_agent.approval import ApprovalDecision, ApprovalRequest
 from vv_agent.kernel import _after_cycle as cycle
@@ -36,10 +36,20 @@ from . import output as output_host
 from ._driver_scope import _invoke
 from .delegation import result_for_children
 from .runtime import InvalidTrustedEnvironmentBinding, _is_vv_endpoint_client
+from .store import Conflict
 from .tool_results import prepare_tool_resources, project_tool_content
 
 if TYPE_CHECKING:
     from .kernel import _Driver
+
+_CallResult = TypeVar("_CallResult")
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderCallFailure:
+    """A provider-scoped failure that invokers pass through unchanged."""
+
+    error: Exception
 
 
 def _bootstrap_level(driver: _Driver) -> int:
@@ -148,6 +158,8 @@ class _Host:
             self.provider = driver.provider(request.plan)
             return None
         if isinstance(request, core.ProviderCall):
+            from .providers import Outcome, ProviderResultInvalid, Unknown
+
             provider, handle = self.provider, request.handle
             assert provider is not None
             if request.method == "lookup":
@@ -161,7 +173,17 @@ class _Host:
                 callback = partial(provider.query, handle)
             else:
                 callback = partial(provider.cancel, handle)
-            return _invoke(driver.scope, callback, request.timeout)
+            provider_callback = cast(Callable[[], Outcome], self._provider_callback(callback))
+            result = cast(Outcome | _ProviderCallFailure, _invoke(driver.scope, provider_callback, request.timeout))
+            if isinstance(result, _ProviderCallFailure):
+                if request.method == "lookup":
+                    if isinstance(result.error, TimeoutError):
+                        raise TimeoutError(str(result.error)) from result.error
+                    raise InvalidProviderLookupResult("provider lookup result is invalid") from result.error
+                if isinstance(result.error, TimeoutError):
+                    return Unknown(f"{type(result.error).__name__}: external outcome unavailable")
+                raise ProviderResultInvalid() from result.error
+            return result
         if isinstance(request, core.CommitStopping):
             return driver.commit(
                 request.records,
@@ -481,13 +503,21 @@ class _Host:
                 link_declared_input_content(writer, publication.item)
                 return receipt
         if isinstance(request, core.PushProviderEvidence):
-            with driver.store.atomic() as tx:
-                writer = driver.content_writer(tx)
-                actor, _ = writer.service_principal("provider-recovery")
-                publication = declare_input_content(writer, replace(request.item, actor=actor))
-                receipt = tx.push(driver.sid, publication.item)
-                link_declared_input_content(writer, publication.item)
-                return receipt
+            try:
+                with driver.store.atomic() as tx:
+                    writer = driver.content_writer(tx)
+                    actor, _ = writer.service_principal("provider-recovery")
+                    publication = declare_input_content(writer, replace(request.item, actor=actor))
+                    receipt = tx.push(driver.sid, publication.item)
+                    link_declared_input_content(writer, publication.item)
+            except Conflict as exc:
+                if type(exc) is not Conflict or exc.args != ("input identity has different bytes",):
+                    raise
+                return core.ProviderEvidencePushResult(request.item.input_id, status="conflict")
+            return core.ProviderEvidencePushResult(
+                receipt.input_id,
+                status="replayed" if receipt.replayed else "admitted",
+            )
         if isinstance(request, output_core.OutputSetting):
             agent = self.output_agent
             assert agent is not None
@@ -537,6 +567,29 @@ class _Host:
         if isinstance(request, output_core.SerializeOutput):
             return output_host.serializable_output(request.value)
         return self.dispatch()._handle(request)
+
+    @staticmethod
+    def _provider_callback(
+        callback: Callable[[], _CallResult],
+    ) -> Callable[[], _CallResult | _ProviderCallFailure]:
+        from vv_agent.runtime.remote_environment import RemoteBindingError, RemoteProtocolError
+
+        from .environments import InvalidProviderLookupResult
+        from .providers import ProviderResultInvalid
+
+        def invoke() -> _CallResult | _ProviderCallFailure:
+            try:
+                return callback()
+            except (
+                InvalidProviderLookupResult,
+                ProviderResultInvalid,
+                RemoteBindingError,
+                RemoteProtocolError,
+                TimeoutError,
+            ) as exc:
+                return _ProviderCallFailure(exc)
+
+        return invoke
 
 
 def run[T](

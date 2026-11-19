@@ -1,8 +1,11 @@
 """Exercise injection through the real kernel, SQLite SQL clock and projections."""
 
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Thread, current_thread
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -10,11 +13,18 @@ from vv_agent import Agent, RunConfig
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.llm.errors import ModelRequestRejected
 from vv_agent.runtime.cancellation import CancellationToken
-from vv_agent.session import kernel
+from vv_agent.runtime.remote_environment import RemoteBindingError, RemoteProtocolError
+from vv_agent.session import _recovery_phase, kernel
 from vv_agent.session.app_server import ThreadStatus, _KernelThreadStore, thread_status
 from vv_agent.session.content_runtime import durable_content_reader
 from vv_agent.session.delegation import ChildTasks
-from vv_agent.session.providers import Definitive, Unknown
+from vv_agent.session.environments import (
+    InvalidProviderLookupResult,
+    LookupBinding,
+    execution_id_for,
+    stable_operation_key,
+)
+from vv_agent.session.providers import Definitive, Outcome, ProviderResultInvalid, Unknown
 from vv_agent.session.records import InboxItem
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost
@@ -81,6 +91,23 @@ class InlineInvoker:
         return callback()
 
 
+class CatchAllSynchronousInvoker:
+    def invoke(self, callback, *, timeout, token, cancellation_grace, clock):
+        del timeout, token, cancellation_grace, clock
+        try:
+            return callback()
+        except Exception as exc:
+            return Unknown(f"{type(exc).__name__}: synchronous outcome unavailable")
+
+
+@contextmanager
+def hash_only_store(path, *, clock):
+    with SQLiteStore.standalone(str(path), clock=clock) as store:
+        if store._ledger_integrity_mode() == "unconfigured":
+            store.configure_input_admission(allow_unsigned=True)
+        yield store
+
+
 def clocked_runtime(path, steps, tools=(), *, clock, content_store, session_id="s", **kwargs):
     runtime_value = runtime(
         path,
@@ -90,7 +117,7 @@ def clocked_runtime(path, steps, tools=(), *, clock, content_store, session_id="
         content_reader=durable_content_reader(content_store, tenant_id=content_store.tenant_id, session_id=session_id),
         **kwargs,
     )
-    runtime_value.heartbeat_store = lambda: SQLiteStore.standalone(str(path), clock=clock)
+    runtime_value.heartbeat_store = lambda: hash_only_store(path, clock=clock)
     return runtime_value
 
 
@@ -215,7 +242,7 @@ def test_budget_clock_stays_bound_after_runtime_clock_replacement(tmp_path):
             invoker=InlineInvoker(),
         )
         rt.config.budget_limits = RunBudgetLimits(max_wall_time_ms=10)
-        lease = content_store.acquire("s", owner="budget-clock", ttl_ms=1000)
+        lease = content_store.acquire("s", owner="budget-clock", ttl_ms=rt.ttl_ms)
         assert lease is not None
         scope = kernel._Scope(lease, rt, now_ms=content_store._now())
         scope.start()
@@ -270,7 +297,7 @@ def test_heartbeat_deadline_uses_injected_monotonic_time(tmp_path):
         assert lease is not None
         heartbeat = kernel._LeaseHeartbeat(
             lease,
-            lambda: SQLiteStore.standalone(str(tmp_path / "world.sqlite"), clock=clock),
+            lambda: hash_only_store(tmp_path / "world.sqlite", clock=clock),
             100,
             0.01,
             clock=clock,
@@ -321,6 +348,8 @@ def test_app_server_status_uses_thread_store_clock(tmp_path):
     path = tmp_path / "world.sqlite"
     with SQLiteStore.standalone(str(path), clock=clock) as store:
         store.install_schema()
+        if store._ledger_integrity_mode() == "unconfigured":
+            store.configure_input_admission(allow_unsigned=True)
         driver = SessionDriver(store=store, content_key_provider=fixture_key_provider())
         threads = _KernelThreadStore(driver, clock=clock)
         threads.create_thread_receipt(input_id="s", agent_key="default")
@@ -379,6 +408,131 @@ def test_thread_invoker_preserves_worker_and_exception_receipts():
     assert invoker.invoke(failing, timeout=1, token=CancellationToken(), cancellation_grace=0.25, clock=clock) == Unknown(
         "ValueError: external outcome unavailable"
     )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("lookup timed out"),
+        InvalidProviderLookupResult("invalid lookup"),
+        ProviderResultInvalid(),
+        RemoteBindingError("binding generation does not match"),
+        RemoteProtocolError("invalid remote receipt"),
+    ],
+)
+def test_provider_call_failures_pass_through_thread_and_catch_all_synchronous_invokers(error: Exception):
+    def failing():
+        raise error
+
+    callback = _recovery_phase._Host._provider_callback(failing)
+    assert callable(callback)
+    expected = _recovery_phase._ProviderCallFailure(error)
+
+    options = {
+        "timeout": 1,
+        "token": CancellationToken(),
+        "cancellation_grace": 0.25,
+        "clock": SystemClock(),
+    }
+
+    assert callback() == expected
+    assert ThreadInvoker().invoke(cast(Callable[[], Outcome], callback), **options) == expected
+    assert CatchAllSynchronousInvoker().invoke(callback, **options) == expected
+
+
+def test_provider_callback_leaves_ordinary_errors_unchanged():
+    failure = RuntimeError("ordinary callback failure")
+
+    def failing():
+        raise failure
+
+    callback = _recovery_phase._Host._provider_callback(failing)
+    with pytest.raises(RuntimeError) as caught:
+        callback()
+
+    assert caught.value is failure
+    options = {
+        "timeout": 1,
+        "token": CancellationToken(),
+        "cancellation_grace": 0.25,
+        "clock": SystemClock(),
+    }
+    assert ThreadInvoker().invoke(cast(Callable[[], Outcome], callback), **options) == Unknown(
+        "RuntimeError: external outcome unavailable"
+    )
+    assert CatchAllSynchronousInvoker().invoke(callback, **options) == Unknown("RuntimeError: synchronous outcome unavailable")
+
+
+def _provider_host(provider, invoker):
+    runtime = SimpleNamespace(invoker=invoker, cancellation_grace=0.25, clock=SystemClock())
+    scope = SimpleNamespace(token=CancellationToken(), runtime=runtime)
+    host = _recovery_phase._Host(SimpleNamespace(scope=scope))
+    host.provider = provider
+    return host
+
+
+def _provider_binding():
+    tenant_id, session_id, operation_id = "tenant-a", "session-a", "operation-a"
+    environment_id = "environment-a"
+    operation_key = stable_operation_key(session_id, operation_id)
+    return LookupBinding(
+        tenant_id=tenant_id,
+        session_id=session_id,
+        operation_id=operation_id,
+        attempt=1,
+        request_digest="1" * 64,
+        idempotency_key=operation_key,
+        execution_id=execution_id_for(tenant_id, environment_id, operation_key),
+        command_digest="2" * 64,
+        environment_id=environment_id,
+        generation=0,
+        provider_id="provider-a",
+    )
+
+
+@pytest.mark.parametrize("invoker_type", [ThreadInvoker, CatchAllSynchronousInvoker])
+def test_remote_binding_failures_have_invoker_independent_fail_closed_mapping(invoker_type):
+    failure = RemoteBindingError("binding generation does not match")
+
+    class FailingProvider:
+        def lookup(self, execution_id, binding):
+            del execution_id, binding
+            raise failure
+
+        def query(self, handle):
+            del handle
+            raise failure
+
+        def cancel(self, handle):
+            del handle
+            raise failure
+
+    host = _provider_host(FailingProvider(), invoker_type())
+
+    with pytest.raises(InvalidProviderLookupResult) as lookup:
+        host.handle(_recovery_phase.core.ProviderCall("lookup", _provider_binding(), 1))
+    assert lookup.value.__cause__ is failure
+
+    for method in ("query", "cancel"):
+        with pytest.raises(ProviderResultInvalid) as invalid:
+            host.handle(_recovery_phase.core.ProviderCall(method, {}, 1))
+        assert invalid.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("invoker_type", [ThreadInvoker, CatchAllSynchronousInvoker])
+@pytest.mark.parametrize("method", ["query", "cancel"])
+def test_provider_timeout_query_and_cancel_have_one_unknown_mapping(invoker_type, method):
+    class FailingProvider:
+        def query(self, handle):
+            del handle
+            raise TimeoutError("provider timeout")
+
+        def cancel(self, handle):
+            del handle
+            raise TimeoutError("provider timeout")
+
+    host = _provider_host(FailingProvider(), invoker_type())
+    assert host.handle(_recovery_phase.core.ProviderCall(method, {}, 1)) == Unknown("TimeoutError: external outcome unavailable")
 
 
 @pytest.mark.parametrize("cancelled", [False, True])

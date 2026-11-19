@@ -48,6 +48,8 @@ class _CoreScope(LeaseOwnership):
 
 def _sessions(store: SQLiteStore, provider: LocalKeyProvider) -> SessionDriver:
     store.install_schema()
+    if store._ledger_integrity_mode() == "unconfigured":
+        store.configure_input_admission(allow_unsigned=True)
     sessions = SessionDriver(store=store, content_key_provider=provider)
     sessions.create(SESSION_ID, WORKSPACE, {"seed": {"messages": [], "shared_state": {}}})
     sessions.push(SESSION_ID, InboxItem("initial", "user", {"content": "start"}))
