@@ -56,6 +56,15 @@ separate models. If only `kimi-k3` is configured, a request for `kimi-k2.5`
 raises `ConfigError` instead of quietly using `kimi-k3`.
 `tests/test_config.py` covers this.
 
+### Gemini migration controls
+
+Gemini 2.5 model keys remain exact and are not rewritten by `vv-agent`. A
+migration can be gray-routed by setting an endpoint option's `model_id` to the
+replacement model. When the resolved wire model is Gemini 3+, the bridge omits
+`temperature`, `top_p`, `top_k`, `turn`, `candidate_count`, and legacy thinking
+budgets, and converts `thinkingLevel` to `thinking_level`. Completion metadata
+records both the requested and resolved model IDs when they differ.
+
 `VvLlmModelProvider.resolve()` first uses an exact settings key within the
 explicit or default backend. If that key is absent, it accepts an exact
 resolved `model_id`, including the first endpoint's override, only when one

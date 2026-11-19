@@ -1724,7 +1724,7 @@ requires-dist = [
     { name = "ripgrep", marker = "sys_platform != 'win32'", specifier = ">=14.1.0" },
     { name = "ripgrep", marker = "sys_platform == 'win32'", specifier = ">=14.1.0,<15" },
     { name = "tiktoken", specifier = ">=0.14.0" },
-    { name = "vv-llm", specifier = ">=0.10.1" },
+    { name = "vv-llm", specifier = ">=0.10.8" },
 ]
 provides-extras = ["postgres", "s3"]
 
@@ -1741,7 +1741,7 @@ dev = [
 
 [[package]]
 name = "vv-llm"
-version = "0.10.1"
+version = "0.10.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1753,7 +1753,7 @@ dependencies = [
     { name = "qwen-tokenizer" },
     { name = "tiktoken" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/1c/4846ebdec1989cd24f9d4d5a1905928a6e5647276303045e7ee34907dd78/vv_llm-0.10.1.tar.gz", hash = "sha256:1888ff2107aa9660570007be9429e24bc8da399bcd5cb9ec76ddf0138545e86e", size = 134796, upload-time = "2026-11-07T02:40:00.341Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/87/5841045ec02e3286894b0c280507a3b07f1465219b281fa37638381c1b8f/vv_llm-0.10.8.tar.gz", hash = "sha256:822d01bfdb990859b93b5c85a53f23cf002941ccef0aefed0a8a676c1621b5e5", size = 135251, upload-time = "2026-11-19T14:02:48.727Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/ee/fdff84f1de10c48d93a010450952e9e11979fa9499d4a99c3140e1ac5538/vv_llm-0.10.1-py3-none-any.whl", hash = "sha256:5a98e1f9966da9f5c1865a7e9691d7f17389baea00632b2a07203d9387ccd635", size = 161513, upload-time = "2026-11-07T02:39:58.651Z" },
+    { url = "https://files.pythonhosted.org/packages/45/85/1c35a70bffcf0c49c52927ba336e5b5b0daa1d126a23b5162caf77663ce4/vv_llm-0.10.8-py3-none-any.whl", hash = "sha256:00457f104a4e0c1853537ecc7ecd896cce4187a3846763889c453136116d2224", size = 161943, upload-time = "2026-11-19T14:02:46.987Z" },
 ]

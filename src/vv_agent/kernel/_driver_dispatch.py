@@ -233,6 +233,18 @@ def _approval_answer_payload(driver: CoreDriver, record: Record) -> dict[str, An
     return hydrate_input(driver, InboxItem(**record._payload["input"])).payload
 
 
+def _stop_level_three_retry(record: Record) -> Record:
+    """Keep recovery evidence while level-3 lookup/resubmit wiring is deferred."""
+
+    payload = copy_json(record._payload)
+    observation = dict(payload["observation"])
+    observation["retryable"] = False
+    payload["observation"] = observation
+    payload["retry"] = "stop"
+    payload["retry_at_ms"] = None
+    return replace(record, payload=payload)
+
+
 def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     assert driver.state.active_turn_id is not None
     start = driver.state.turns[driver.state.active_turn_id].start
