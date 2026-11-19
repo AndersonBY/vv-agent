@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from vv_agent import Agent
-from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_records
+from vv_agent.kernel._boundary_hydration import MissingContentLink, SessionHydration, hydrate_session_records
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._store import Lease
 from vv_agent.session import _recovery_phase, kernel
@@ -53,15 +53,16 @@ class WorkerLost(BaseException):
 
 
 class LoseSubmittedReceipt:
-    def __init__(self, provider: HostCommandProvider) -> None:
+    def __init__(self, provider: HostCommandProvider, *, losses: int = 1) -> None:
         self.provider = provider
-        self.lost = False
+        self.remaining = losses
 
     def invoke(self, callback, *, timeout, token, cancellation_grace, clock):
         del timeout, token, cancellation_grace, clock
+        submitted = len(self.provider.probe.submitted_plans)
         outcome = callback()
-        if self.provider.probe.submitted_plans and not self.lost:
-            self.lost = True
+        if len(self.provider.probe.submitted_plans) > submitted and self.remaining:
+            self.remaining -= 1
             raise WorkerLost("worker lost after provider submission")
         return outcome
 
@@ -175,7 +176,13 @@ def _assert_w3_lookup_fail_closed(
     assert len(provider.probe.submitted_calls) == 1
 
 
-def _level_three_lookup_item(plan, turn, *, input_id: str = "provider-lookup-running") -> InboxItem:
+def _level_three_lookup_item(
+    plan,
+    turn,
+    *,
+    input_id: str = "provider-lookup-running",
+    status: LookupStatus = LookupStatus.RUNNING,
+) -> InboxItem:
     identity = plan.payload["execution_identity"]
     provider_id = plan.payload["provider_binding"]
     binding = {
@@ -194,7 +201,7 @@ def _level_three_lookup_item(plan, turn, *, input_id: str = "provider-lookup-run
     handle = {
         "kind": "provider",
         "provider": provider_id,
-        "job_id": "job-running-1",
+        "job_id": f"job-{status.value}",
         "operation_id": binding["operation_id"],
         "attempt": binding["attempt"],
         "request_digest": binding["request_digest"],
@@ -202,7 +209,7 @@ def _level_three_lookup_item(plan, turn, *, input_id: str = "provider-lookup-run
         "command_digest": binding["command_digest"],
         "environment_id": binding["environment_id"],
         "generation": binding["generation"],
-        "evidence": ["provider-registry:running"],
+        "evidence": [f"provider-registry:{status.value}"],
         "query_ref": None,
         "cancel_ref": None,
     }
@@ -215,10 +222,12 @@ def _level_three_lookup_item(plan, turn, *, input_id: str = "provider-lookup-run
             "request_digest": binding["request_digest"],
             "provider_lookup": {
                 "schema_version": "vv-agent.provider-lookup.v1",
-                "status": "running",
+                "status": status.value,
                 "binding": binding,
-                "outcome": {"kind": "Accepted", "handle": handle, "yield_on_steer": False},
-                "evidence": ["provider-registry:running"],
+                "outcome": {"kind": "Accepted", "handle": handle, "yield_on_steer": False}
+                if status is LookupStatus.RUNNING
+                else None,
+                "evidence": [f"provider-registry:{status.value}"],
             },
         },
         target_turn_id=plan.turn_id,
@@ -227,12 +236,18 @@ def _level_three_lookup_item(plan, turn, *, input_id: str = "provider-lookup-run
     )
 
 
-def _push_lookup(sessions: SessionDriver, store, item: InboxItem) -> None:
+def _push_lookup(
+    sessions: SessionDriver,
+    store,
+    item: InboxItem,
+    *,
+    actor_subject_id: str = "bash",
+) -> None:
     actor = {
         "tenant_id": TENANT_ID,
-        "subject_id": "bash",
+        "subject_id": actor_subject_id,
         "subject_kind": "service",
-        "attributes": {},
+        "attributes": {"role": actor_subject_id},
     }
     with store.atomic() as tx:
         sessions._push_in_transaction(tx, SESSION_ID, item, actor=actor, actor_subject_id="provider")
@@ -275,6 +290,7 @@ def _lost_w3_submission(
     tmp_path: Path,
     *,
     provider: HostCommandProvider | None = None,
+    losses: int = 1,
 ):
     path = tmp_path / "w3-lookup.sqlite3"
     key_provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "w3-lookup-keys.sqlite3")
@@ -282,7 +298,7 @@ def _lost_w3_submission(
     agent = _idempotent_agent()
     config = _config(provider)
     _create_level_three_session(path, key_provider, agent, config)
-    invoker = LoseSubmittedReceipt(provider)
+    invoker = LoseSubmittedReceipt(provider, losses=losses)
     holder: dict[str, SessionDriver] = {}
 
     with open_store(path) as store:
@@ -356,7 +372,7 @@ def test_w3_worker_loss_lookup_unknown_never_retries_or_resubmits(tmp_path: Path
         )
 
 
-@pytest.mark.parametrize("status", [LookupStatus.NOT_STARTED, LookupStatus.RUNNING, LookupStatus.EXITED])
+@pytest.mark.parametrize("status", [LookupStatus.RUNNING, LookupStatus.EXITED])
 def test_level_three_worker_loss_records_known_lookup_status_fail_closed(
     tmp_path: Path,
     status: LookupStatus,
@@ -394,6 +410,8 @@ def test_level_three_worker_loss_records_known_lookup_status_fail_closed(
         ("timeout", "unknown", ["provider-lookup-timeout"]),
         ("malformed", "invalid", ["provider-lookup-result-invalid"]),
         ("mismatch", "invalid", ["provider-lookup-result-invalid"]),
+        ("not_started_malformed", "invalid", ["provider-lookup-result-invalid"]),
+        ("not_started_mismatch", "invalid", ["provider-lookup-result-invalid"]),
     ],
 )
 def test_level_three_worker_loss_rejects_lookup_failures_without_resubmission(
@@ -411,6 +429,10 @@ def test_level_three_worker_loss_rejects_lookup_failures_without_resubmission(
             raise TimeoutError("lookup timed out")
         if failure == "malformed":
             return {"status": "unknown"}
+        if failure == "not_started_malformed":
+            return {"status": "not_started"}
+        if failure == "not_started_mismatch":
+            return _lookup_result(_other_lookup_binding(binding), LookupStatus.NOT_STARTED)
         return _lookup_result(_other_lookup_binding(binding), LookupStatus.UNKNOWN)
 
     provider.probe.lookup_handler = lookup
@@ -480,11 +502,12 @@ def test_level_three_provider_lookup_is_preserved_and_fails_closed_without_resub
         assert b"job-running-1" not in path.read_bytes()
 
 
-def test_w3_recovery_retry_plan_preserves_feature_level_and_execution_identity(
-    tmp_path: Path,
-) -> None:
+def test_w3_not_started_lookup_publishes_evidence_then_retries_once(tmp_path: Path) -> None:
+    provider = HostCommandProvider()
+    provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.NOT_STARTED)
+
     with (
-        _lost_w3_submission(tmp_path) as (_, store, sessions, _provider),
+        _lost_w3_submission(tmp_path, provider=provider) as (_, _store, sessions, provider),
         sessions._open_drive_store() as drive_store,
     ):
         _, hydrated = _records(drive_store)
@@ -492,33 +515,200 @@ def test_w3_recovery_retry_plan_preserves_feature_level_and_execution_identity(
             row.record for row in hydrated if row.record.kind == "op_planned" and "/tool/" in str(row.record.operation_id)
         )
         runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
-        driver, lease = _direct_driver(drive_store, sessions, runtime)
-        try:
-            attempt = driver.state.operations[plan.operation_id].attempts[1]
-            unknown = driver.record(
-                "op_unknown",
-                {
-                    "reason": "authenticated provider lookup proved not_started",
-                    "dispatch_evidence": [attempt.dispatch.record_id],
-                    "observation": {"code": "lookup_not_started", "retryable": True},
-                    "retry": "retry",
-                    "retry_at_ms": 0,
-                    "duplicate_cost_risk": False,
-                    "measurement_missing": True,
-                },
-                attempt.execution_plan,
-            )
-            driver.commit([unknown])
+        drive(drive_store, SESSION_ID, runtime=runtime)
 
-            assert _run_core_step(driver)
+        rows, hydrated = _records(drive_store)
+        tool_records = [row for row in rows if row.record.operation_id == plan.operation_id]
+        applied_row = next(
+            row
+            for row in hydrated
+            if row.record.kind == "input_applied" and row.record.payload["input"]["kind"] == "provider_evidence"
+        )
+        applied = applied_row.record
+        evidence_item = applied.payload["input"]
+        evidence_id = evidence_item["input_id"]
+        unknown_row = next(row for row in tool_records if row.record.kind == "op_unknown" and row.record.attempt == 1)
+        unknown = next(row.record for row in hydrated if row.record.record_id == unknown_row.record.record_id)
+        retry_plan = next(row for row in tool_records if row.record.kind == "op_planned" and row.record.attempt == 2)
+        retry_started = next(row for row in tool_records if row.record.kind == "op_started" and row.record.attempt == 2)
 
-            retry = driver.state.operations[plan.operation_id].attempts[2]
-            assert retry.plan.feature_level == 3
-            assert retry.execution_plan.feature_level == 3
-            assert retry.execution_plan.payload["execution_identity"] == plan.payload["execution_identity"]
-            assert retry.execution_plan.payload["idempotency_key"] == plan.payload["idempotency_key"]
-        finally:
-            store.release(lease)
+        assert evidence_id.startswith("provider-recovery/lookup/")
+        assert applied.payload["disposition"] == "applied"
+        assert unknown.payload["retry"] == "retry"
+        assert unknown.payload["observation"]["evidence_input_id"] == evidence_id
+        assert unknown.payload["observation"]["evidence_owner"] == f"input:{evidence_id}"
+        assert unknown.payload["observation"]["evidence_slot"] == "provider_lookup"
+        assert applied_row.seq < unknown_row.seq < retry_plan.seq < retry_started.seq
+        assert [row.record.attempt for row in tool_records if row.record.kind == "op_planned"] == [1, 2]
+        assert [row.record.attempt for row in tool_records if row.record.kind == "op_prepared"] == [1]
+        assert not any(row.record.attempt == 3 for row in tool_records)
+        assert len(provider.probe.submitted_plans) == 2
+        first, second = provider.probe.submitted_plans
+        assert first.attempt == 1 and second.attempt == 2
+        for field in ("execution_identity", "idempotency_key", "command_digest", "provider_binding"):
+            assert second.payload[field] == first.payload[field]
+        assert second.feature_level == first.feature_level == 3
+        assert second.payload["execution_identity"]["operation_key"] == first.payload["execution_identity"]["operation_key"]
+        assert sum(row.record.kind == "op_started" for row in tool_records) == 2
+
+        link = drive_store._rows(
+            "SELECT owner,slot,content_id FROM ("
+            "SELECT 'input:' || input_id AS owner,slot,content_id FROM sk_content_link "
+            "WHERE tenant_id=%s AND session_id=%s AND input_id=%s AND slot='provider_lookup'"
+            ")",
+            (TENANT_ID, SESSION_ID, evidence_id),
+        )
+        assert len(link) == 1
+        assert link[0][0:2] == (f"input:{evidence_id}", "provider_lookup")
+        assert link[0][2]
+        inbox = drive_store._rows(
+            "SELECT input_seq,consumed_seq FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+            (TENANT_ID, SESSION_ID, evidence_id),
+        )
+        assert len(inbox) == 1 and inbox[0][1] is not None
+
+
+def test_w3_not_started_evidence_commit_failure_creates_no_retry_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HostCommandProvider()
+    provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.NOT_STARTED)
+    declare_input_content = _recovery_phase.declare_input_content
+
+    def fail_lookup_publication(writer, item):
+        if item.kind == "provider_evidence":
+            raise RuntimeError("evidence publication failed")
+        return declare_input_content(writer, item)
+
+    monkeypatch.setattr(_recovery_phase, "declare_input_content", fail_lookup_publication)
+    with (
+        _lost_w3_submission(tmp_path, provider=provider) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        with pytest.raises(RuntimeError, match="evidence publication failed"):
+            drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, _ = _records(drive_store)
+        assert len(provider.probe.submitted_plans) == 1
+        assert not any(row.record.kind == "op_planned" and row.record.attempt == 2 for row in rows)
+
+
+def test_w3_not_started_second_submission_unknown_does_not_create_attempt_three(tmp_path: Path) -> None:
+    provider = HostCommandProvider(Unknown("second submission has no receipt"))
+    provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.NOT_STARTED)
+
+    with (
+        _lost_w3_submission(tmp_path, provider=provider) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, _ = _records(drive_store)
+        tool_records = [row.record for row in rows if "/tool/" in str(row.record.operation_id)]
+        assert len(provider.probe.submitted_plans) == 2
+        assert [record.attempt for record in tool_records if record.kind == "op_planned"] == [1, 2]
+        assert [record.attempt for record in tool_records if record.kind == "op_started"] == [1, 2]
+        assert not any(record.attempt == 3 for record in tool_records)
+        assert not any(
+            record.kind == "op_unknown" and record.attempt == 2 and record.payload["retry"] == "retry" for record in tool_records
+        )
+
+
+def test_w3_not_started_second_recovery_lookup_does_not_create_attempt_three(tmp_path: Path) -> None:
+    provider = HostCommandProvider()
+    provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.NOT_STARTED)
+
+    with (
+        _lost_w3_submission(tmp_path, provider=provider, losses=2) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        with pytest.raises(WorkerLost):
+            drive(drive_store, SESSION_ID, runtime=runtime)
+
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, hydrated = _records(drive_store)
+        tool_records = [row.record for row in rows if "/tool/" in str(row.record.operation_id)]
+        assert len(provider.probe.submitted_plans) == 2
+        assert [record.attempt for record in tool_records if record.kind == "op_planned"] == [1, 2]
+        assert not any(record.attempt == 3 for record in tool_records)
+        attempt_two_unknown = next(row.record for row in hydrated if row.record.kind == "op_unknown" and row.record.attempt == 2)
+        assert attempt_two_unknown.payload["retry"] == "stop"
+        assert attempt_two_unknown.payload["observation"]["lookup_status"] == "not_started"
+        assert attempt_two_unknown.payload["observation"]["code"] == "provider_lookup_recovery_unavailable"
+
+
+def test_w3_not_started_evidence_from_an_untrusted_actor_does_not_retry(tmp_path: Path) -> None:
+    with (
+        _lost_w3_submission(tmp_path) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        _, hydrated = _records(drive_store)
+        plan = next(
+            row.record for row in hydrated if row.record.kind == "op_planned" and "/tool/" in str(row.record.operation_id)
+        )
+        turn = next(row.record for row in hydrated if row.record.kind == "turn_started")
+        _push_lookup(
+            sessions,
+            drive_store,
+            _level_three_lookup_item(
+                plan,
+                turn,
+                input_id="provider-recovery/lookup/untrusted",
+                status=LookupStatus.NOT_STARTED,
+            ),
+        )
+
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, hydrated = _records(drive_store)
+        applied = next(
+            row.record
+            for row in hydrated
+            if row.record.kind == "input_applied"
+            and row.record.payload["input"]["input_id"] == "provider-recovery/lookup/untrusted"
+        )
+        assert applied.payload["disposition"] == "rejected"
+        assert applied.payload["reason"] == "provider_lookup_recovery_unavailable"
+        assert len(provider.probe.submitted_plans) == 1
+        assert not any(row.record.kind == "op_planned" and row.record.attempt == 2 for row in rows)
+
+
+def test_w3_not_started_evidence_with_missing_content_does_not_retry(tmp_path: Path) -> None:
+    with (
+        _lost_w3_submission(tmp_path) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        _, hydrated = _records(drive_store)
+        plan = next(
+            row.record for row in hydrated if row.record.kind == "op_planned" and "/tool/" in str(row.record.operation_id)
+        )
+        turn = next(row.record for row in hydrated if row.record.kind == "turn_started")
+        item = _level_three_lookup_item(
+            plan,
+            turn,
+            input_id="provider-recovery/lookup/missing",
+            status=LookupStatus.NOT_STARTED,
+        )
+        _push_lookup(sessions, drive_store, item, actor_subject_id="provider-recovery")
+        drive_store._rows(
+            "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND input_id=%s AND slot='provider_lookup'",
+            (TENANT_ID, SESSION_ID, item.input_id),
+        )
+
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        with pytest.raises(MissingContentLink):
+            drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, _ = _records(drive_store)
+        assert len(provider.probe.submitted_plans) == 1
+        assert not any(row.record.kind == "op_planned" and row.record.attempt == 2 for row in rows)
 
 
 def test_ordinary_idempotent_unknown_still_retries(tmp_path: Path) -> None:

@@ -33,7 +33,7 @@ from ._tool_behavior import build_skipped_result
 from ._tool_values import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 if TYPE_CHECKING:
-    from vv_agent.session.environments import LookupBinding
+    from vv_agent.session.environments import LookupBinding, ProviderLookupResult
 
 
 class Read(Enum):
@@ -90,6 +90,11 @@ class CommitStopping:
     records: list[Record]
     turn_id: str
     stopping: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PushProviderEvidence:
+    item: InboxItem
 
 
 class _RecoveryStopIteration(Exception):
@@ -193,13 +198,65 @@ def _committed_lookup_binding(driver: CoreDriver, plan: Record) -> LookupBinding
         return None
 
 
+def _not_started_evidence(driver: CoreDriver, plan: Record, lookup: ProviderLookupResult) -> InboxItem:
+    from vv_agent.session.environments import LookupStatus
+
+    if (
+        lookup.status is not LookupStatus.NOT_STARTED
+        or lookup.feature_level != 3
+        or plan.operation_id is None
+        or plan.attempt != 1
+        or plan.turn_id is None
+    ):
+        raise ValueError("provider lookup evidence is not retryable")
+    binding = lookup.binding
+    provider_lookup = {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": lookup.status.value,
+        "binding": {
+            "tenant_id": binding.tenant_id,
+            "session_id": binding.session_id,
+            "operation_id": binding.operation_id,
+            "attempt": binding.attempt,
+            "request_digest": binding.request_digest,
+            "idempotency_key": binding.idempotency_key,
+            "execution_id": binding.execution_id,
+            "command_digest": binding.command_digest,
+            "environment_id": binding.environment_id,
+            "generation": binding.generation,
+            "provider_id": binding.provider_id,
+        },
+        "outcome": None,
+        "evidence": list(lookup.evidence),
+    }
+    input_id = inputs.provider_recovery_lookup_input_id(
+        plan.operation_id,
+        plan.attempt,
+        plan._payload["request_digest"],
+        provider_lookup,
+    )
+    return InboxItem(
+        input_id,
+        "provider_evidence",
+        {
+            "operation_id": plan.operation_id,
+            "attempt": plan.attempt,
+            "request_digest": plan._payload["request_digest"],
+            "provider_lookup": provider_lookup,
+        },
+        target_turn_id=plan.turn_id,
+        generation=driver.state.turns[plan.turn_id].start._payload["generation"],
+        feature_level=3,
+    )
+
+
 def _lookup_recovery_unknown(
     driver: CoreDriver,
     attempt: Attempt,
     plan: Record,
     binding: LookupBinding,
 ):
-    from vv_agent.session.environments import InvalidProviderLookupResult, ProviderLookupResult
+    from vv_agent.session.environments import InvalidProviderLookupResult, LookupStatus, ProviderLookupResult
     from vv_agent.session.providers import Unknown
 
     try:
@@ -213,6 +270,9 @@ def _lookup_recovery_unknown(
         status, evidence = "unknown", ("provider-lookup-error",)
     else:
         if isinstance(lookup, ProviderLookupResult):
+            if lookup.status is LookupStatus.NOT_STARTED and attempt.plan.attempt == 1:
+                yield PushProviderEvidence(_not_started_evidence(driver, plan, lookup))
+                return None
             status, evidence = lookup.status.value, lookup.evidence
         elif isinstance(lookup, Unknown):
             status, evidence = "unknown", ("provider-lookup-dispatch-unknown",)
@@ -574,10 +634,11 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                     unknown = yield from _compose(
                         self, outcomes.unknown_steps(self, a.execution_plan, "worker lost before durable result")
                     )
-                yield CommitRecords([stop_unknown(unknown)])
+                if unknown is not None:
+                    yield CommitRecords([stop_unknown(unknown)])
                 return True
             if a.state == "unknown" and a.unknown:
-                if a.unknown._payload["retry"] == "retry":
+                if a.plan.feature_level != 3 and a.unknown._payload["retry"] == "retry":
                     now = (yield outcomes.OutcomeRead.POLL_LEASE).db_now_ms
                     due = a.unknown._payload["retry_at_ms"] or 0
                     if due > now:

@@ -480,6 +480,14 @@ class _Host:
                 receipt = tx.push(driver.sid, publication.item)
                 link_declared_input_content(writer, publication.item)
                 return receipt
+        if isinstance(request, core.PushProviderEvidence):
+            with driver.store.atomic() as tx:
+                writer = driver.content_writer(tx)
+                actor, _ = writer.service_principal("provider-recovery")
+                publication = declare_input_content(writer, replace(request.item, actor=actor))
+                receipt = tx.push(driver.sid, publication.item)
+                link_declared_input_content(writer, publication.item)
+                return receipt
         if isinstance(request, output_core.OutputSetting):
             agent = self.output_agent
             assert agent is not None

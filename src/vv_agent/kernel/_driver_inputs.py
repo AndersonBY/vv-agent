@@ -11,7 +11,7 @@ from ._boundary_hydration import hydrate_input, hydrate_record
 from ._budget_values import RunBudgetLimits
 from ._canonical_json import canonical_json_bytes
 from ._child_store import PENDING_CHILD_COMPLETION, ChildCompletion, child_handles, result_from_completions, verify_completion
-from ._content_publication import declared_content_ref
+from ._content_publication import declared_content_ref, make_retained_record_before_publication
 from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import ConfiguredChildResultProjector, CoreDriver
 from ._execution_values import AgentStatus, AgentTask, SubTaskOutcome
@@ -38,6 +38,8 @@ from ._token_count import _StopIterationTransport
 from ._tool_planner import ToolCatalog
 from ._tool_result_checks import provider_result_identity
 from ._tool_values import ToolDirective, ToolExecutionResult, ToolResultStatus
+
+_PROVIDER_RECOVERY_LOOKUP_PREFIX = "provider-recovery/lookup/"
 
 
 class InputSetting(Enum):
@@ -253,6 +255,105 @@ def _validate_provider_evidence_reference(
         return
     if driver.content_reader is not None:
         validate_reference_provider_handle(plan, retained_item.payload["handle"])
+
+
+def provider_recovery_lookup_input_id(
+    operation_id: str,
+    attempt: int,
+    request_digest: str,
+    provider_lookup: dict[str, Any],
+) -> str:
+    return _PROVIDER_RECOVERY_LOOKUP_PREFIX + digest(
+        {
+            "operation_id": operation_id,
+            "attempt": attempt,
+            "request_digest": request_digest,
+            "provider_lookup": provider_lookup,
+        }
+    )
+
+
+def _trusted_not_started_evidence(item: InboxItem, plan: Record) -> dict[str, Any] | None:
+    if item.feature_level != 3:
+        return None
+    actor = item.actor or {}
+    attributes = actor.get("attributes")
+    if (
+        actor.get("subject_kind") != "service"
+        or actor.get("subject_id") != "provider-recovery"
+        or type(attributes) is not dict
+        or attributes.get("role") != "provider-recovery"
+    ):
+        return None
+    try:
+        lookup = item.payload["provider_lookup"]
+        binding = lookup["binding"]
+    except (KeyError, TypeError):
+        return None
+    if (
+        type(lookup) is not dict
+        or type(binding) is not dict
+        or lookup.get("status") != "not_started"
+        or lookup.get("outcome") is not None
+        or binding.get("operation_id") != plan.operation_id
+        or binding.get("attempt") != 1
+        or binding.get("request_digest") != plan._payload["request_digest"]
+        or item.input_id
+        != provider_recovery_lookup_input_id(
+            plan.operation_id or "",
+            plan.attempt or 0,
+            plan._payload["request_digest"],
+            lookup,
+        )
+    ):
+        return None
+    return lookup
+
+
+def _not_started_retry_records(
+    driver: CoreDriver,
+    attempt: Attempt,
+    item: InboxItem,
+    plan: Record,
+) -> list[Record] | None:
+    lookup = _trusted_not_started_evidence(item, plan)
+    if lookup is None:
+        return None
+    operation = driver.state.operations[plan.operation_id or ""]
+    if attempt.state != "started" or attempt.dispatch is None or attempt.plan.attempt != 1 or max(operation.attempts) != 1:
+        return None
+    payload = driver.hydrate_plan(attempt.execution_plan)._payload
+    next_plan = make_retained_record_before_publication(
+        "op_planned",
+        session_id=driver.sid,
+        turn_id=attempt.plan.turn_id,
+        operation_id=attempt.plan.operation_id,
+        attempt=2,
+        payload=payload | {"not_before_ms": 0},
+        feature_level=attempt.plan.feature_level,
+    )
+    unknown = driver.record(
+        "op_unknown",
+        {
+            "reason": "authenticated provider lookup proved not_started",
+            "dispatch_evidence": [attempt.dispatch.record_id],
+            "observation": {
+                "code": "lookup_not_started",
+                "lookup_status": "not_started",
+                "lookup_evidence": lookup["evidence"],
+                "evidence_input_id": item.input_id,
+                "evidence_owner": f"input:{item.input_id}",
+                "evidence_slot": "provider_lookup",
+                "retryable": True,
+            },
+            "retry": "retry",
+            "retry_at_ms": 0,
+            "duplicate_cost_risk": False,
+            "measurement_missing": True,
+        },
+        attempt.execution_plan,
+    )
+    return [unknown, next_plan]
 
 
 def _hydratable_definition(value: Any) -> Any:
@@ -608,7 +709,14 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                     disposition, reason = "rejected", "provider_result_invalid"
                 else:
                     if logical_item.feature_level == 3:
-                        disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                        if logical_item.payload["provider_lookup"]["status"] == "not_started":
+                            retry_records = _not_started_retry_records(self, attempt, logical_item, attempt.execution_plan)
+                            if retry_records is None:
+                                disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            else:
+                                extra = retry_records
+                        else:
+                            disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
                     elif not (yield AuthenticateProvider(logical_item, item, attempt.execution_plan)):
                         disposition, reason = "rejected", "untrusted or mismatched provider evidence"
                     elif logical_item.kind == "provider_result":
