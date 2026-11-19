@@ -75,6 +75,7 @@ def create_session(store):
         writer.create_session(spec,consumers=())
 with SQLiteStore.standalone(sys.argv[2],clock=clock,fold_factory=factory) as raw_store:
     raw_store.install_schema()
+    raw_store.configure_input_admission(allow_unsigned=True)
     binding=bind_content_runtime(raw_store,key_provider=KeyProvider(),cipher=Cipher())
     store=wrap_session_content_store(raw_store,binding)
     create_session(store)

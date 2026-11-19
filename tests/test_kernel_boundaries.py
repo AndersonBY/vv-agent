@@ -21,6 +21,47 @@ def source(root: Path, text: str, name: str = "probe.py") -> Path:
     return file
 
 
+def test_environment_values_import_without_session():
+    script = r"""
+import importlib.abc
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "src"))
+
+class CoreOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "vv_agent" or fullname.startswith("vv_agent."):
+            if fullname not in {"vv_agent", "vv_agent.kernel"} and not fullname.startswith("vv_agent.kernel."):
+                raise AssertionError(f"forbidden SDK import: {fullname}")
+
+sys.meta_path.insert(0, CoreOnly())
+
+from vv_agent.kernel import _environment_values as values
+
+assert values.LookupBinding.__module__ == "vv_agent.kernel._environment_values"
+assert not any(name == "vv_agent.session" or name.startswith("vv_agent.session.") for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", script, str(ROOT)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_session_environment_exports_are_kernel_value_objects():
+    from vv_agent.kernel import _environment_values as values
+    from vv_agent.session import environments
+
+    assert environments.__all__ == values.__all__
+    for name in values.__all__:
+        assert getattr(environments, name) is getattr(values, name), name
+
+
 def test_extracted_kernel_passes_static_boundaries():
     assert check_kernel_boundaries(ROOT) == []
 

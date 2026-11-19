@@ -20,7 +20,7 @@ from vv_agent.kernel._requirements import (
     definition_requirements,
 )
 from vv_agent.kernel._sql import LedgerIntegrityError
-from vv_agent.kernel._store import LeaseLost
+from vv_agent.kernel._store import Conflict, LeaseLost
 from vv_agent.kernel._tool_values import ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -197,7 +197,14 @@ def lease_takeover(w, provider):
 
         def hook(point, record, participant=participant, original_hook=original_hook):
             is_model = record is not None and record.payload.get("op_kind") == "model"
-            if point == "after_commit" and record.kind == "op_planned" and is_model and owner == [participant] and not prepared:
+            if (
+                point == "after_commit"
+                and record is not None
+                and record.kind == "op_planned"
+                and is_model
+                and owner == [participant]
+                and not prepared
+            ):
                 prepared.append(True)
                 heartbeat = heartbeats[participant]
                 before = heartbeat.lease
@@ -1057,6 +1064,15 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
             ("child-forged", template.payload | {"session_id": "s"}),
         ):
             item = replace(template, input_id=input_id, payload=payload, admission_proof=None)
+            if input_id == "child-forged":
+                try:
+                    with delivery.atomic() as tx:
+                        tx.push("s", item)
+                except Conflict as error:
+                    require("does not belong" in str(error), "I6", "forged child rejected for the wrong reason")
+                else:
+                    require(False, "I6", "forged child accepted at inbox boundary")
+                continue
             with delivery.atomic() as tx:
                 writer = SessionContentWriter.bind(tx, tenant_id=delivery.tenant_id, session_id="s")
                 tx.push("s", item)
@@ -1067,7 +1083,7 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
             w.queue.append("s")
         w.drive(provider=provider, children=children)
         parent = w.read_state("s")[0]
-        require(parent.applied_inputs["child-forged"].payload["disposition"] == "rejected", "I6", "forged child accepted")
+        require("child-forged" not in parent.applied_inputs, "I6", "forged child entered the parent inbox")
         require(parent.applied_inputs["child-redelivery"].payload["disposition"] == "noop", "I6", "child result applied twice")
         if w.scenario == "cancel":
             require(
@@ -1146,6 +1162,8 @@ def run_scenario(world: SimWorld, scenario=None, *, memory_settings=None):
             "I1",
             "two-cycle compaction history was not dispatched exactly once per operation",
         )
+    elif w.scenario == "lease_takeover":
+        require(calls == effects, "I1", "unsafe takeover redispatched external work")
     elif w.scenario not in {"children", "cancel"}:
         require(calls == effects == 1, "I1", "completed or unsafe operation was redispatched")
     # Delayed duplicate broker deliveries really reach drive(), after completion.

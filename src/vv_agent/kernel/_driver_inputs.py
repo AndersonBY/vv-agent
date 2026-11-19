@@ -14,6 +14,7 @@ from ._child_store import PENDING_CHILD_COMPLETION, ChildCompletion, child_handl
 from ._content_publication import declared_content_ref, make_retained_record_before_publication
 from ._definition import DefinitionBindings, DefinitionCache
 from ._driver import ConfiguredChildResultProjector, CoreDriver
+from ._environment_values import LookupBinding, LookupStatus, ProviderLookupResult
 from ._execution_values import AgentStatus, AgentTask, SubTaskOutcome
 from ._message_values import Message
 from ._provider_outcomes import (
@@ -263,11 +264,11 @@ def provider_recovery_lookup_input_id(
     )
 
 
-def _committed_lookup_binding(plan: Record, turn):
-    from vv_agent.session.environments import LookupBinding
-
+def _committed_lookup_binding(plan: Record, turn) -> LookupBinding:
     identity = plan._payload["execution_identity"]
     environment = turn.start._payload["environment"]
+    if plan.operation_id is None or plan.attempt is None:
+        raise ValueError("provider lookup plan is missing operation identity")
     return LookupBinding(
         tenant_id=identity["tenant_id"],
         session_id=plan.session_id,
@@ -284,8 +285,6 @@ def _committed_lookup_binding(plan: Record, turn):
 
 
 def _decoded_provider_lookup(item: InboxItem, plan: Record, turn):
-    from vv_agent.session.environments import LookupBinding, LookupStatus, ProviderLookupResult
-
     try:
         lookup = item.payload["provider_lookup"]
         if type(lookup) is not dict or set(lookup) != {
@@ -422,6 +421,20 @@ def _not_started_retry_records(
         attempt.execution_plan,
     )
     return [unknown, next_plan]
+
+
+def _provider_lookup_recovery_available(driver: CoreDriver, operation: Any, attempt: Attempt) -> bool:
+    turn = driver.state.turns.get(operation.turn_id)
+    return (
+        operation.turn_id == driver.state.active_turn_id
+        and turn is not None
+        and not turn.cancelled
+        and not turn.suspended
+        and not driver.state.closed
+        and turn.wait is None
+        and attempt.state == "started"
+        and attempt.wait is None
+    )
 
 
 def _hydratable_definition(value: Any) -> Any:
@@ -778,24 +791,25 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                     disposition, reason = "rejected", "provider_result_invalid"
                 else:
                     if logical_item.feature_level == 3:
-                        from vv_agent.session.environments import LookupStatus
-
                         lookup_result = _trusted_provider_lookup(logical_item, lookup_result)
                         if lookup_result is None:
                             disposition, reason = "rejected", "untrusted or mismatched provider evidence"
                         elif lookup_result.status is LookupStatus.NOT_STARTED:
-                            retry_records = _not_started_retry_records(
-                                self, attempt, logical_item, attempt.execution_plan, lookup_result
-                            )
-                            if retry_records is None:
+                            operation = self.state.operations[lookup_result.binding.operation_id]
+                            if not _provider_lookup_recovery_available(self, operation, attempt):
                                 disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
                             else:
-                                extra = retry_records
+                                retry_records = _not_started_retry_records(
+                                    self, attempt, logical_item, attempt.execution_plan, lookup_result
+                                )
+                                if retry_records is None:
+                                    disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                                else:
+                                    extra = retry_records
                         elif lookup_result.status is LookupStatus.RUNNING:
                             operation = self.state.operations[lookup_result.binding.operation_id]
                             if (
-                                attempt.state != "started"
-                                or attempt.wait is not None
+                                not _provider_lookup_recovery_available(self, operation, attempt)
                                 or max(operation.attempts) != lookup_result.binding.attempt
                             ):
                                 disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
@@ -836,6 +850,13 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
                                 reason = "retained provider lookup result" if equal else "result conflict"
                             elif attempt.state not in {"started", "parked"}:
                                 disposition, reason = "rejected", "provider_lookup_recovery_unavailable"
+                            elif attempt.state == "parked":
+                                try:
+                                    _check_provider_result(self, attempt.execution_plan, lookup_result.outcome)
+                                except ProviderResultInvalid:
+                                    disposition, reason = "rejected", "provider_result_invalid"
+                                else:
+                                    extra = yield CompleteResult(attempt.execution_plan, lookup_result.outcome)
                             else:
                                 extra = yield CompleteResult(attempt.execution_plan, lookup_result.outcome)
                         else:

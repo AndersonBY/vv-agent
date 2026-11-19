@@ -337,14 +337,22 @@ def _plan(state: ExecutionState, record: Record, *, tenant_id: str) -> None:
             "retry not authorized",
         )
         require(rejection_retry or op.selected_attempt is None, "retry after adopted result")
-        previous_payload = logical_payloads.get(previous.plan.record_id, previous.plan._payload)
+        prepared_retry = record.feature_level == 3 and previous.prepared is not None
+        retry_source = previous.execution_plan if prepared_retry else previous.plan
+        previous_payload = (
+            retry_source._payload
+            if prepared_retry
+            else logical_payloads.get(retry_source.record_id, retry_source._payload)
+        )
         require(record.feature_level == previous.plan.feature_level, "retry changed level-3 plan format")
         current_retained = _is_retained(p["request"], "retry request contains a malformed ContentRef")
         previous_retained = _is_retained(previous_payload["request"], "previous retry request contains a malformed ContentRef")
         require(current_retained == previous_retained, "retry mixes retained and hydrated request")
-        previous_operation_id, previous_attempt = previous.plan.operation_id, previous.plan.attempt
+        previous_operation_id, previous_attempt = retry_source.operation_id, retry_source.attempt
         assert previous_operation_id is not None and previous_attempt is not None
-        previous_identity = (_LOGICAL_OPERATION_REQUESTS.get() or {}).get((previous_operation_id, previous_attempt))
+        previous_identity = None
+        if not prepared_retry:
+            previous_identity = (_LOGICAL_OPERATION_REQUESTS.get() or {}).get((previous_operation_id, previous_attempt))
         if current_retained:
             # Raw folds compare immutable structural identities. The provisional
             # semantic fold below compares the hydrated request after publication.

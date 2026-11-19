@@ -126,6 +126,19 @@ class CoreDriver:
     def clock(self) -> Clock:
         return self._clock
 
+    @property
+    def tenant_id(self) -> str | None:
+        """Return the tenant committed by the session creation record."""
+
+        if not self.records:
+            return None
+        created = self.records[0].record
+        if created.kind != "session_created":
+            return None
+        principal = created._payload.get("principal")
+        tenant_id = principal.get("tenant_id") if type(principal) is dict else None
+        return tenant_id if isinstance(tenant_id, str) and tenant_id else None
+
     def load_state(self) -> None:
         self.state, self.records, self.watermark = self.store.read_state(self.sid, expected_head=self._expected_head)
         self._stored_by_id = {stored.record.record_id: stored for stored in self.records}

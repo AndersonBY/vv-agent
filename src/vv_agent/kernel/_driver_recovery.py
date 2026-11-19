@@ -6,7 +6,7 @@ from collections.abc import Generator
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from . import _after_cycle as cycle
 from . import _compaction_phase as compaction
@@ -19,6 +19,13 @@ from ._content_publication import make_retained_record_before_publication
 from ._context import protected_start
 from ._driver import CoreDriver
 from ._driver_requests import CommitRecords, CreateBoundary, PlanModel
+from ._environment_values import (
+    InvalidLookupBinding,
+    InvalidProviderLookupResult,
+    LookupBinding,
+    LookupStatus,
+    ProviderLookupResult,
+)
 from ._execution_values import AgentTask
 from ._hydration import KeyUnavailable
 from ._message_values import Message
@@ -42,9 +49,6 @@ from ._summary_requests import pending_compaction_requests, summary_pending
 from ._token_count import _StopIterationTransport
 from ._tool_behavior import build_skipped_result
 from ._tool_values import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
-
-if TYPE_CHECKING:
-    from vv_agent.session.environments import LookupBinding, ProviderLookupResult
 
 
 class Read(Enum):
@@ -172,19 +176,21 @@ def stop_unknown(record: Record, *, observation: dict[str, Any] | None = None) -
 def _committed_lookup_binding(driver: CoreDriver, plan: Record) -> LookupBinding | None:
     """Build the single authenticated lookup binding from committed execution data."""
 
-    from vv_agent.session.environments import InvalidLookupBinding, LookupBinding
-
     if plan.feature_level != 3 or plan._payload.get("op_kind") != "tool" or not planning.is_w3_command_plan(driver, plan):
         return None
     try:
         identity = plan._payload["execution_identity"]
-        tenant_id = getattr(driver.store, "tenant_id", None)
+        tenant_id = driver.tenant_id
+        operation_id = plan.operation_id
+        attempt = plan.attempt
         if (
             type(identity) is not dict
             or not isinstance(tenant_id, str)
             or not tenant_id
+            or operation_id is None
+            or attempt is None
             or identity.get("session_id") != plan.session_id
-            or identity.get("operation_id") != plan.operation_id
+            or identity.get("operation_id") != operation_id
             or identity.get("tenant_id") != tenant_id
             or plan.turn_id is None
         ):
@@ -195,8 +201,8 @@ def _committed_lookup_binding(driver: CoreDriver, plan: Record) -> LookupBinding
         return LookupBinding(
             tenant_id=tenant_id,
             session_id=plan.session_id,
-            operation_id=plan.operation_id,
-            attempt=plan.attempt,
+            operation_id=operation_id,
+            attempt=attempt,
             request_digest=plan._payload["request_digest"],
             idempotency_key=plan._payload["idempotency_key"],
             execution_id=identity["execution_id"],
@@ -268,8 +274,6 @@ def _lookup_recovery_unknown(
     plan: Record,
     binding: LookupBinding,
 ):
-    from vv_agent.session.environments import InvalidProviderLookupResult, LookupStatus, ProviderLookupResult
-
     def push_evidence(lookup: ProviderLookupResult):
         receipt = yield PushProviderEvidence(_lookup_evidence(driver, plan, lookup))
         if not receipt.replayed:
@@ -717,7 +721,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
                         self, outcomes.unknown_steps(self, a.execution_plan, "worker lost before durable result")
                     )
                 if unknown is not None:
-                    yield CommitRecords([stop_unknown(unknown)])
+                    yield CommitRecords([unknown])
                 return True
             if a.state == "unknown" and a.unknown:
                 if a.plan.feature_level != 3 and a.unknown._payload["retry"] == "retry":

@@ -51,9 +51,12 @@ class PlanningView(Protocol):
     def fold(self) -> Fold: ...
     @property
     def sid(self) -> str: ...
+    @property
+    def tenant_id(self) -> str | None: ...
     def hydrated_definition(self, record: Record) -> DefinitionContent: ...
     def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any: ...
     def hydrate_plan(self, record: Record) -> Record: ...
+    def stored_record(self, record: Record) -> StoredRecord: ...
     def session_attributes(self) -> dict[str, Any]: ...
 
 
@@ -261,8 +264,11 @@ def committed_command_plan(view: PlanningView, started: Record) -> Record:
     stored = view.stored_record(started)
     if stored.record.kind != "op_started":
         raise InvalidW3Command("level-3 command submission requires op_started")
+    attempt_number = started.attempt
+    if attempt_number is None:
+        raise InvalidW3Command("level-3 command submission requires an attempt")
     operation = view.state.operations.get(started.operation_id or "")
-    attempt = operation.attempts.get(started.attempt) if operation is not None else None
+    attempt = operation.attempts.get(attempt_number) if operation is not None else None
     if attempt is None or attempt.prepared is None or attempt.dispatch is None or attempt.dispatch.record_id != started.record_id:
         raise InvalidW3Command("level-3 command submission requires its committed prepared request")
     plan = view.hydrate_plan(attempt.execution_plan)
@@ -450,7 +456,7 @@ def _request_envelope(record: Record) -> dict[str, Any]:
 
 
 def _tenant_id(view: PlanningView) -> str:
-    tenant_id = getattr(getattr(view, "store", None), "tenant_id", None)
+    tenant_id = view.tenant_id
     if not isinstance(tenant_id, str) or not tenant_id:
         raise InvalidW3Command("level-3 command requires an authenticated tenant")
     return tenant_id
