@@ -410,7 +410,6 @@ def _verify_live_completion(
     matched_handle = _matched_completion_handle(parent_id, handle, item)
     if matched_handle is None:
         return None
-    handle = matched_handle
     created_stored = store.read(p["session_id"], limit=1).records[0]
     created = created_stored.record
     created_attributes_ref = created.payload["attributes"]
@@ -424,7 +423,7 @@ def _verify_live_completion(
     if (
         created.payload["parent_session_id"] != parent_id
         or created.payload["parent_operation_id"] != p["operation_id"]
-        or created_attributes.get("child_handle") != handle
+        or created_attributes.get("child_handle") != matched_handle
     ):
         return None
     page = store.read(p["session_id"], after_seq=p["terminal_seq"] - 1, through_seq=p["terminal_seq"])
@@ -435,7 +434,7 @@ def _verify_live_completion(
     if r.kind != "turn_ended" or r.turn_id != p["turn_id"] or r.digest != p["terminal_digest"]:
         return None
     # Canonical input bytes distinguish JSON values such as true and 1.
-    expected = completion_input(handle, terminal, actor=item.actor, result_ref=item.payload["result"])
+    expected = completion_input(matched_handle, terminal, actor=item.actor, result_ref=item.payload["result"])
     if (
         replace(
             expected,
@@ -480,10 +479,8 @@ def _verify_parent_completion(
     item: InboxItem,
 ) -> ChildCompletion | None:
     p = item.payload
-    matched_handle = _matched_completion_handle(parent_id, handle, item)
-    if matched_handle is None:
+    if _matched_completion_handle(parent_id, handle, item) is None:
         return None
-    handle = matched_handle
     delivered_result = _verified_parent_copy(store, parent_id, item)
     if delivered_result is _UNVERIFIED:
         return None
