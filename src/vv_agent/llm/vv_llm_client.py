@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 from vv_llm.chat_clients import create_chat_client, format_messages, get_token_counts
+from vv_llm.chat_clients.reasoning import normalize_gemini_body
 from vv_llm.settings import Settings
 from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
@@ -72,6 +73,69 @@ _KIMI_K3_OMITTED_EXTRA_BODY_FIELDS = (
     "thinking",
     "top_p",
 )
+
+_GEMINI_UNSUPPORTED_GENERATION_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "topP",
+        "topK",
+        "thinking_budget",
+        "thinkingBudget",
+        "turn",
+        "candidate_count",
+        "candidateCount",
+    }
+)
+
+
+def _normalize_gemini_request_body(body: dict[str, Any] | None) -> dict[str, Any] | None:
+    if body is None:
+        return None
+
+    def map_budget(value: Any) -> Any:
+        if isinstance(value, dict):
+            mapped = {key: map_budget(item) for key, item in value.items()}
+            budget = mapped.get("thinking_budget", mapped.get("thinkingBudget"))
+            if (
+                isinstance(budget, int)
+                and not isinstance(budget, bool)
+                and "thinking_level" not in mapped
+                and "thinkingLevel" not in mapped
+            ):
+                mapped["thinking_level"] = (
+                    "high"
+                    if budget < 0 or budget > 8192
+                    else "medium"
+                    if budget > 4096
+                    else "low"
+                    if budget > 1024
+                    else "minimal"
+                )
+            return mapped
+        if isinstance(value, list):
+            return [map_budget(item) for item in value]
+        return value
+
+    normalized = normalize_gemini_body(map_budget(body))
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in value.items():
+                if key in _GEMINI_UNSUPPORTED_GENERATION_FIELDS:
+                    continue
+                cleaned_item = clean(item)
+                if key in {"google", "thinking_config"} and cleaned_item == {}:
+                    continue
+                cleaned[key] = cleaned_item
+            return cleaned
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+
+    return clean(normalized)
 
 
 @dataclass(slots=True)
@@ -278,6 +342,13 @@ class VvLlmClient(LLMClient):
 
                     response.raw["used_endpoint_id"] = target.endpoint_id
                     response.raw["used_model_id"] = request_options.model
+                    response.raw["requested_model_id"] = model
+                    if request_options.model != model:
+                        response.raw["model_migration"] = {
+                            "from": model,
+                            "to": request_options.model,
+                            "reason": "endpoint-model-id-override",
+                        }
                     response.raw["stream_mode"] = should_stream
                     self._preferred_endpoint_id = target.endpoint_id
                     return response
@@ -572,7 +643,7 @@ class VvLlmClient(LLMClient):
         model_settings: ModelSettings | None = None,
     ) -> _RequestOptions:
         resolved_model = model
-        normalized_model = resolved_model.lower()
+        normalized_model = resolved_model.rsplit("/", 1)[-1].lower()
         temperature: float | None = None
         top_p: float | None = None
         max_tokens: int | None = None
@@ -639,7 +710,7 @@ class VvLlmClient(LLMClient):
                 temperature = 1.0
             if normalized_model in {"gemini-3-pro", "gemini-3-flash"}:
                 resolved_model = f"{resolved_model}-preview"
-                normalized_model = resolved_model.lower()
+                normalized_model = resolved_model.rsplit("/", 1)[-1].lower()
             reasoning_effort = None
             extra_body = {
                 "extra_body": {
@@ -681,6 +752,11 @@ class VvLlmClient(LLMClient):
             if model_settings.retry is not None:
                 max_attempts = max(1, int(model_settings.retry.max_attempts))
                 backoff_seconds = max(0.0, float(model_settings.retry.backoff_seconds))
+
+        if is_gemini_3_model:
+            temperature = None
+            top_p = None
+            extra_body = _normalize_gemini_request_body(extra_body)
 
         if normalized_model == "kimi-k3":
             # K3 always reasons at max effort and fixes its sampling profile.

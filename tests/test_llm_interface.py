@@ -753,17 +753,54 @@ def test_resolve_request_options_aligns_gemini3_profile() -> None:
     llm = VvLlmClient(endpoint_targets=[])
     options = llm._resolve_request_options("gemini-3-pro", stream=True, endpoint_type="openai")
     assert options.model == "gemini-3-pro-preview"
-    assert options.temperature == 1.0
+    assert options.temperature is None
+    assert options.top_p is None
     assert options.is_gemini_3_model is True
     assert options.extra_body == {
         "extra_body": {
             "google": {
                 "thinking_config": {
-                    "thinkingLevel": "high",
+                    "thinking_level": "high",
                     "include_thoughts": True,
                 }
             }
         }
+    }
+
+
+def test_resolve_request_options_sanitizes_an_explicit_gemini_replacement() -> None:
+    llm = VvLlmClient(endpoint_targets=[])
+    options = llm._resolve_request_options(
+        "gemini-3-flash-preview",
+        stream=True,
+        endpoint_type="openai",
+        model_settings=ModelSettings(
+            temperature=0.7,
+            top_p=0.95,
+            extra_body={
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 20,
+                "turn": 2,
+                "candidate_count": 2,
+                "google": {"thinking_config": {"thinkingBudget": 1024}},
+            },
+        ),
+    )
+
+    assert options.model == "gemini-3-flash-preview"
+    assert options.temperature is None
+    assert options.top_p is None
+    assert options.extra_body == {
+        "extra_body": {
+            "google": {
+                "thinking_config": {
+                    "thinking_level": "high",
+                    "include_thoughts": True,
+                }
+            }
+        },
+        "google": {"thinking_config": {"thinking_level": "minimal"}},
     }
 
 
