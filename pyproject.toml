@@ -21,7 +21,7 @@ dependencies = [
     "ripgrep>=14.1.0,<15; platform_system == 'Windows'",
     "ripgrep>=14.1.0; platform_system != 'Windows'",
     "tiktoken>=0.14.0",
-    "vv-llm>=0.10.1",
+    "vv-llm>=0.10.8",
 ]
 
 [project.optional-dependencies]
