@@ -14,7 +14,7 @@ import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, suppress
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Self
@@ -308,6 +308,32 @@ def replay_provenance(recorded, current):
     }
 
 
+@contextmanager
+def _seed_record_parse_cache():
+    """Parse immutable record bodies once within one seed without sharing across workers' jobs."""
+    from vv_agent.kernel._records import Record
+
+    descriptor = Record.__dict__["_parse"]
+    uncached = Record._parse
+
+    @lru_cache(maxsize=4096)
+    def parse(cls, body, messages):
+        return uncached(body, messages)
+
+    def cached_parse(cls, body, messages=None):
+        if type(body) is not bytes:
+            return uncached(body, messages)
+        # Retaining the message-cache object prevents id reuse from producing an incorrect hit.
+        return parse(cls, body, messages)
+
+    Record._parse = classmethod(cached_parse)
+    try:
+        yield parse
+    finally:
+        Record._parse = descriptor
+        parse.cache_clear()
+
+
 def _run_seed(job):
     # Imported in the child, after spawn; no SQL connection crosses processes.
     from .scenarios import run_scenario
@@ -320,7 +346,7 @@ def _run_seed(job):
     invariant = None
     storage = {}
     try:
-        with database(backend) as db, SimWorld(db, seed=seed, replay=replay) as world:
+        with _seed_record_parse_cache(), database(backend) as db, SimWorld(db, seed=seed, replay=replay) as world:
             storage = (
                 {"sqlite_temporary_storage": temporary_storage(db.parent.parent)} if isinstance(db, Path) and db.is_file() else {}
             )

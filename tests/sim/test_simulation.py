@@ -198,6 +198,42 @@ def test_spawned_seeds_match_serial_real_driver_traces():
     assert serial == spawned
 
 
+def test_seed_record_parse_cache_preserves_identity_and_scope(sim_database):
+    from vv_agent.kernel._records import Record, _MessageCache
+
+    from . import report
+
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "tools")
+        _, rows, _ = world.read_state("s")
+    body = rows[-1].record.encode()
+    baseline = Record.parse(body)
+
+    with report._seed_record_parse_cache() as parse:
+        parsed = Record.parse(body)
+        repeated = Record.parse(body)
+        messages = _MessageCache()
+        message_parsed = Record._parse(body, messages)
+        message_repeated = Record._parse(body, messages)
+        assert parse.cache_parameters()["maxsize"] == 4096
+        assert parse.cache_info().hits == 2
+
+    assert parsed is repeated
+    assert message_parsed is message_repeated
+    assert message_parsed._message_cache_id == id(messages)
+    for candidate in (parsed, message_parsed):
+        assert candidate == baseline
+        assert candidate.to_dict() == baseline.to_dict()
+        assert candidate.record_id == baseline.record_id
+        assert candidate.digest == baseline.digest
+        assert candidate.encode() == body
+    assert Record.parse(body) is not parsed
+
+    with report._seed_record_parse_cache():
+        next_scope = Record.parse(body)
+    assert next_scope is not parsed
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
