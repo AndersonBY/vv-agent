@@ -655,6 +655,7 @@ class SubTaskStatusProvider:
         attempt = plan.attempt
         assert operation_id is not None and attempt is not None
         evidence = f"sub-task-status/{operation_id}/{attempt}"
+        query_ref = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return {
             "kind": "provider",
             "provider": plan._payload["provider_binding"],
@@ -663,8 +664,8 @@ class SubTaskStatusProvider:
             "attempt": attempt,
             "request_digest": plan._payload["request_digest"],
             "evidence": evidence,
-            "query_ref": state,
-            "cancel_ref": state,
+            "query_ref": query_ref,
+            "cancel_ref": query_ref,
         }
 
     @staticmethod
@@ -765,7 +766,13 @@ class SubTaskStatusProvider:
             return Accepted(self._handle(plan, state))
 
     def query(self, handle: dict[str, Any]) -> Outcome:
-        state = handle.get("query_ref")
+        query_ref = handle.get("query_ref")
+        if not isinstance(query_ref, str) or not query_ref.strip():
+            return Unknown("sub_task_status handle has no query state")
+        try:
+            state = json.loads(query_ref)
+        except (TypeError, ValueError):
+            return Unknown("sub_task_status handle query state is invalid")
         if type(state) is not dict:
             return Unknown("sub_task_status handle has no query state")
         try:
