@@ -14,7 +14,9 @@ import pytest
 from support.contract import fixture_root
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._reducer import logical_operation_payloads
 from vv_agent.session.kernel import drive
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.providers import Definitive
 from vv_agent.session.records import InboxItem, digest
 from vv_agent.session.reducer import TransitionError, fold
@@ -26,6 +28,7 @@ from vv_agent.workspace.artifacts import PREVIEW_MARKER, persist_text_artifact
 
 from .conftest import open_store
 from .controlled import ControlledProvider
+from .helpers import push_fixture_input, wrap_fixture_store
 from .test_recovery_matrix import effect_tool, kill, receive, records_of, runtime, start
 
 PRODUCER = runpy.run_path(str(Path(__file__).parents[2] / "scripts/tool_result_artifact_fixtures.py"))
@@ -297,6 +300,7 @@ def test_named_provider_repeated_original_callback_is_noop(store, database, tmp_
     provider = LongProvider(database)
     provider.install()
     start(store)
+    store = wrap_fixture_store(store)
     rt = runtime(
         database,
         [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")],
@@ -306,8 +310,7 @@ def test_named_provider_repeated_original_callback_is_noop(store, database, tmp_
     rt.config = replace(rt.config, workspace_backend=LocalWorkspaceBackend(tmp_path / "workspace"))
     drive(store, "s", runtime=rt)
     completed = [r.encode() for r in records_of(store, "op_completed")]
-    with store.atomic() as tx:
-        tx.push("s", provider.callback(input_id="repeat-original"))
+    push_fixture_input(store, "s", provider.callback(input_id="repeat-original"))
     drive(store, "s", runtime=rt)
     applied = records_of(store, "input_applied")[-1]
     assert applied._payload["disposition"] == "noop", applied.payload
@@ -320,6 +323,7 @@ def test_receipt_source_must_bind_the_admitted_operation(store, database, tmp_pa
     provider = LongProvider(database)
     provider.install()
     start(store)
+    store = wrap_fixture_store(store)
     rt = runtime(
         database,
         [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")],
@@ -328,16 +332,29 @@ def test_receipt_source_must_bind_the_admitted_operation(store, database, tmp_pa
     )
     rt.config = replace(rt.config, workspace_backend=LocalWorkspaceBackend(tmp_path / "workspace"))
     drive(store, "s", runtime=rt)
-    records = [entry.record for entry in store.read("s", limit=100).records]
-    for index, record in enumerate(records):
-        if record.kind == "op_completed" and "metadata" in record._payload["result"]:
-            payload = record.payload
+    stored_records = tuple(store.read("s", limit=100).records)
+    hydration = hydration_for_session_store(store, "s")
+    logical = {
+        entry.record.record_id: hydrate_record_payload(entry, hydration)
+        for entry in stored_records
+        if entry.record.kind in {"op_planned", "op_completed"}
+    }
+    for entry in stored_records:
+        if entry.record.kind == "op_completed":
+            payload = logical[entry.record.record_id]
+        else:
+            continue
+        if "metadata" in payload["result"]:
             payload["result"]["metadata"]["vv_artifact"]["source"][field] = value
             payload["result_digest"] = digest(payload["result"])
-            records[index] = replace(record, payload=payload)
             break
-    with pytest.raises(TransitionError, match="artifact source"):
-        fold(records, consumed_inputs=[InboxItem(**r._payload["input"]) for r in records if r.kind == "input_applied"])
+    with pytest.raises(TransitionError, match="artifact source"), logical_operation_payloads(logical):
+        fold(
+            (entry.record for entry in stored_records),
+            consumed_inputs=(
+                InboxItem(**entry.record._payload["input"]) for entry in stored_records if entry.record.kind == "input_applied"
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -415,7 +432,8 @@ def artifact_worker(database, root, pipe, cut):
             pipe.send(("barrier", None))
             pipe.recv()
 
-    with open_store(database) as store:
+    with open_store(database) as raw_store:
+        store = wrap_fixture_store(raw_store)
         rt = runtime(
             database,
             [LLMResponse("", [ToolCall("a", "effect", {})]), LLMResponse("done")],
@@ -433,6 +451,7 @@ def test_process_death_around_artifact_and_receipt_never_replays_effect(store, d
     provider = LongProvider(database)
     provider.install()
     start(store)
+    store = wrap_fixture_store(store)
     ctx = multiprocessing.get_context("spawn")
     pipe, child = ctx.Pipe()
     proc = ctx.Process(target=artifact_worker, args=(database, str(tmp_path / "workspace"), child, cut))
@@ -447,8 +466,7 @@ def test_process_death_around_artifact_and_receipt_never_replays_effect(store, d
         rt.config = replace(rt.config, workspace_backend=backend)
         if cut != "after_receipt":
             # Authenticate the saved provider receipt; never submit the external tool again.
-            with store.atomic() as tx:
-                tx.push("s", provider.callback(input_id="recover"))
+            push_fixture_input(store, "s", provider.callback(input_id="recover"))
         drive(store, "s", runtime=rt)
         receipts = [r for r in records_of(store, "op_completed") if r._payload["result"].get("tool_call_id")]
         assert len(receipts) == 1

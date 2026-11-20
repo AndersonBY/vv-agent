@@ -719,6 +719,13 @@ class SubTaskStatusProvider:
             if request.message:
                 target = request.task_ids[0]
                 target_status = next(entry["status"] for entry in snapshot.metadata["tasks"] if entry["task_id"] == target)
+                if target_status == "missing":
+                    error = status_error(
+                        f"Sub-task {target} not found.",
+                        error_code="sub_task_not_found",
+                        details={"task_id": target},
+                    )
+                    return self._result(plan, error, f"sub-task-status/{plan.operation_id}/{plan.attempt}")
                 if target_status == AgentStatus.MAX_CYCLES.value:
                     error = status_error(
                         f"Sub-task {target} reached max cycles and cannot continue.",

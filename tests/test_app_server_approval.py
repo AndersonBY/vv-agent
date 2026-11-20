@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from support import FixedModelProvider
 
-from vv_agent import Agent, RunConfig, function_tool
+from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, MessageProcessor, OutgoingRouter, RequestId
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.approval import ApprovalDecision
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.events import ApprovalRequestedEvent
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import resolve_model_selection
+from vv_agent.session.app_server import _JoinDriveState, _KernelRunAdapter
+from vv_agent.session.reducer import ExecutionState
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
@@ -121,6 +127,261 @@ def test_app_server_approval_deny_skips_tool_and_completes_turn() -> None:
     assert _completed_status(outbound) == "completed"
 
 
+@pytest.mark.parametrize(("store_now_ms", "expected_notification"), [(999, True), (1000, False)])
+def test_pending_approval_uses_database_store_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    store_now_ms: int,
+    expected_notification: bool,
+) -> None:
+    class Store:
+        def read_state(self, session_id: str):
+            assert session_id == "thread_1"
+            return ExecutionState(), (), 0
+
+        def _now(self) -> int:
+            return store_now_ms
+
+        def lease_status(self, session_id: str):
+            assert session_id == "thread_1"
+            return 1, 0, 0
+
+    class Router:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, str, dict[str, object], RequestId]] = []
+
+        def is_registered(self, connection_id: str) -> bool:
+            return connection_id == "conn_1"
+
+        def get_pending_server_request(self, request_id: RequestId):
+            del request_id
+            return None
+
+        def send_server_request(self, connection_id, method, params, *, request_id):
+            self.sent.append((connection_id, method, params, request_id))
+
+    class Worker:
+        def wake(self, session_id: str) -> None:
+            assert session_id == "thread_1"
+
+    class Kernel:
+        def __init__(self) -> None:
+            self._runtimes: dict[str, object] = {}
+            self._worker = Worker()
+
+        def waits(self, session_id: str, *, snapshot, store):
+            del snapshot
+            assert store._now() == store_now_ms
+            return [
+                (
+                    session_id,
+                    None,
+                    {
+                        "kind": "approval",
+                        "turn_id": "turn_1",
+                        "request_id": "approval_1",
+                        "operation_id": "operation_1",
+                        "attempt": 1,
+                        "deadline_ms": 1000,
+                    },
+                )
+            ]
+
+    event = ApprovalRequestedEvent(
+        run_id="turn_1",
+        trace_id="trace_1",
+        tool_name="dangerous_tool",
+        tool_call_id="call_1",
+        message="Review this tool call.",
+        request_id="approval_1",
+        metadata={"session_seq": 1},
+    )
+    monkeypatch.setattr("vv_agent.session.app_server.project_records", lambda *_args, **_kwargs: [event])
+
+    store = Store()
+    router = Router()
+    adapter = object.__new__(_KernelRunAdapter)
+    adapter.kernel = Kernel()
+    adapter._router = router
+    adapter._turn_connections = {("thread_1", "turn_1"): "conn_1"}
+    adapter._hydration = lambda *_args, **_kwargs: None
+    adapter._approval_answered = lambda *_args: False
+
+    adapter._send_pending_approvals("thread_1", store, after_seq=0, through_seq=1)
+
+    assert bool(router.sent) is expected_notification
+
+
+@pytest.mark.parametrize(("record_kind", "expected_due"), [("approval", 10.05), ("turn", 10.05)])
+def test_committed_record_progress_immediately_resets_observation_backoff(record_kind: str, expected_due: float) -> None:
+    class Clock:
+        def monotonic(self) -> float:
+            return 10.0
+
+    class Store:
+        committed = False
+
+        def read(self, session_id: str, *, after_seq: int, limit: int):
+            assert session_id == "thread_1"
+            assert after_seq == 0 and limit == 1
+            return SimpleNamespace(records=[object()] if self.committed else [])
+
+    delivered: list[str] = []
+    position = SimpleNamespace(seq=0, due=20.0, delay=0.8, warning_at=0.0, replay_approvals=False)
+    store = Store()
+    adapter = object.__new__(_KernelRunAdapter)
+    adapter.clock = Clock()
+    adapter._notification_positions = {"thread_1": position}
+    adapter._state_manager = SimpleNamespace(subscribers=lambda _sid: {"conn_1"})
+    adapter._publish_operational_error = lambda _sid, _store: False
+    adapter._next_approval_seq = lambda _sid, _store, *, after_seq: 1 if record_kind == "approval" and store.committed else None
+
+    def send_pending_approvals(*_args, **_kwargs):
+        delivered.append("approval")
+        return None
+
+    def publish_turns(*_args, **kwargs):
+        if not store.committed or kwargs.get("through_seq") == 0:
+            return False
+        if record_kind == "turn":
+            delivered.append("turn")
+        position.seq = 1
+        return True
+
+    adapter._send_pending_approvals = send_pending_approvals
+    adapter._publish_turns = publish_turns
+    adapter._reconcile_local_turn = lambda _sid, _store: None
+
+    adapter._observe(store)
+    assert delivered == []
+    assert position.due == 20.0
+
+    store.committed = True
+    adapter._observe(store)
+
+    assert delivered == [record_kind]
+    assert position.due == pytest.approx(expected_due)
+
+
+@pytest.mark.parametrize(
+    ("runnable", "delay_ms", "lease_ms", "wake_session", "inflight_session", "expected"),
+    [
+        (False, None, 0, None, None, _JoinDriveState.NONE),
+        (False, 250, 0, None, None, _JoinDriveState.FUTURE),
+        (False, 0, 0, None, None, _JoinDriveState.DUE),
+        (True, None, 0, None, None, _JoinDriveState.DUE),
+        (False, 0, 250, "thread_1", None, _JoinDriveState.LOCAL_LEASE),
+        (False, 0, 250, None, None, _JoinDriveState.REMOTE_LEASE),
+        (False, 0, 250, None, "thread_1", _JoinDriveState.LOCAL_LEASE),
+    ],
+)
+def test_join_drive_plan_distinguishes_schedule_and_lease_states(
+    runnable: bool,
+    delay_ms: int | None,
+    lease_ms: int,
+    wake_session: str | None,
+    inflight_session: str | None,
+    expected: _JoinDriveState,
+) -> None:
+    class Store:
+        def lease_status(self, session_id: str) -> tuple[int, int, int]:
+            assert session_id == "thread_1"
+            return 1, 1 if lease_ms else 0, lease_ms
+
+        def is_runnable(self, session_id: str) -> bool:
+            assert session_id == "thread_1"
+            return runnable
+
+        def next_drive_delay_ms(self, session_id: str) -> int | None:
+            assert session_id == "thread_1"
+            return delay_ms
+
+    worker = SimpleNamespace(
+        _inflight_lease=SimpleNamespace(session_id=inflight_session) if inflight_session is not None else None,
+        active_wake_sessions=frozenset({wake_session}) if wake_session is not None else frozenset(),
+    )
+    adapter = object.__new__(_KernelRunAdapter)
+    adapter.kernel = SimpleNamespace(store=Store(), _worker=worker)
+
+    assert adapter._join_drive_plan("thread_1").state is expected
+
+
+@pytest.mark.parametrize(
+    ("kind", "background", "child_pending", "retained"),
+    [
+        ("child", False, True, True),
+        ("child", False, False, False),
+        ("child", True, True, False),
+        ("user", None, True, False),
+        ("approval", None, True, False),
+        ("provider", None, True, False),
+    ],
+)
+def test_reconcile_retains_only_unquiescent_foreground_child_handle(
+    kind: str,
+    background: bool | None,
+    child_pending: bool,
+    retained: bool,
+) -> None:
+    class Manager:
+        def __init__(self, active):
+            self.active = active
+            self.cleared = False
+
+        def active_turn(self, sid: str):
+            assert sid == "thread_1"
+            return self.active
+
+        def clear_active_turn(self, sid: str, turn_id: str, *, handle):
+            assert sid == "thread_1" and turn_id == "thread_1/turn/turn_1"
+            if self.active is None or self.active.handle is not handle:
+                return False
+            self.active = None
+            self.cleared = True
+            return True
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.pending_calls = 0
+            self.abandoned: list[object] = []
+
+        def _pending_child_work(self, store, state):
+            del store, state
+            self.pending_calls += 1
+            return child_pending
+
+        def _abandon_handle(self, handle) -> None:
+            self.abandoned.append(handle)
+
+    handle = object()
+    active = SimpleNamespace(turn_id="thread_1/turn/turn_1", handle=handle)
+    manager = Manager(active)
+    child_handle: dict[str, object] = {"kind": kind}
+    if background is not None:
+        child_handle["background"] = background
+    state = SimpleNamespace(
+        turns={},
+        phase="parked",
+        waits={("operation_1", 1): {"handle": child_handle}},
+    )
+    store = SimpleNamespace(
+        read_state=lambda _sid: (state, (), 0),
+        lease_status=lambda _sid: (0, 0, 0),
+    )
+    kernel = Kernel()
+    adapter = object.__new__(_KernelRunAdapter)
+    adapter.kernel = kernel
+    adapter._state_manager = manager
+    adapter._settle_turn_connections = lambda *_args: None
+    adapter._router = SimpleNamespace(cancel_matching_server_requests=lambda **_kwargs: None)
+
+    adapter._reconcile_local_turn("thread_1", store)
+
+    assert manager.cleared is not retained
+    assert (manager.active is active) is retained
+    assert kernel.abandoned == ([] if retained else [handle])
+    assert kernel.pending_calls == (1 if kind == "child" and background is False else 0)
+
+
 def test_app_server_approval_timeout_denies_without_running_tool(surface) -> None:
     calls: list[str] = []
     server, transport = _server_with_approval_tool(calls, approval_timeout_seconds=1)
@@ -209,7 +470,9 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
     now_ms = [deadline_ms - 1]
     with _controlled_session_clock(server.kernel, lambda: now_ms[0]):
         server.router.unregister_transport(owner.connection_id)
+        join_started = time.monotonic()
         cast(Any, server.run_adapter).join()
+        assert time.monotonic() - join_started < 3
         before_deadline = _drain_available(observer)
         assert not any(message.get("method") == "turn/completed" for message in before_deadline)
         now_ms[0] = deadline_ms
@@ -220,6 +483,157 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
     assert not any(message.get("method") == "approval/request" for message in observer_after_disconnect)
     assert _approval_resolutions(observer_after_disconnect) == ["timeout"]
     assert calls == []
+
+
+def test_new_app_server_reconnect_replays_durable_approval_without_local_runtime(surface) -> None:
+    calls: list[str] = []
+    first, owner = _server_with_approval_tool(calls)
+    approval = _start_and_wait_for_approval(first, owner)
+    approval_id = approval["id"]
+    assert isinstance(approval_id, str)
+    thread_id = "thread_1"
+    assert thread_id in first.kernel._runtimes
+
+    first.router.unregister_transport(owner.connection_id)
+    first.run_adapter.close()
+    first.kernel.close()
+
+    second, observer = _server_with_approval_tool(calls)
+    assert thread_id not in second.kernel._runtimes
+
+    _initialize(second, observer, request_id=10, client_name="observer")
+    _send(
+        observer,
+        second,
+        {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": thread_id}},
+    )
+    replayed = _drain_until(observer, lambda message: message.get("method") == "approval/request")
+    assert replayed["id"] == approval_id
+    assert thread_id in second.kernel._runtimes
+
+    _send(
+        observer,
+        second,
+        {"jsonrpc": "2.0", "id": approval_id, "result": {"decision": "allow", "reason": "reconnected"}},
+    )
+    resolved = _drain_until(observer, lambda message: message.get("method") == "approval/resolved")
+    assert cast(dict[str, object], resolved["params"])["decision"] == "allow"
+    state, _, _ = surface.store.read_state(thread_id)
+    assert f"approval/{approval_id}/answer" in state.applied_inputs
+
+
+def test_second_turn_registers_config_before_worker_can_drive() -> None:
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+    registered_turns: list[object] = []
+    second_config_entered = threading.Event()
+    release_second_config = threading.Event()
+    transport = ChannelTransport(connection_id="owner")
+
+    first_provider = ScriptedModelProvider.from_callback(
+        "first",
+        "m",
+        lambda _request: first_calls.append("first") or LLMResponse("first done"),
+    )
+
+    server: AppServer
+
+    def second_model(_request):
+        second_calls.append("second")
+        registered_turns.append(server.kernel._runtime_registration("thread_1").config.metadata.get("turn_id"))
+        return LLMResponse("second done")
+
+    second_provider = ScriptedModelProvider.from_callback("second", "m", second_model)
+
+    class PerTurnHost(DefaultAppServerHost):
+        def build_run_config(self, request):
+            run = request.metadata.get("run")
+            if run == "second":
+                second_config_entered.set()
+                assert release_second_config.wait(10)
+            provider = second_provider if run == "second" else first_provider
+            return RunConfig(model_provider=provider, metadata={"run": run})
+
+        def resolve_model(self, request):
+            provider = second_provider if second_config_entered.is_set() else first_provider
+            return resolve_model_selection(provider, request)
+
+    server = AppServer(transport=transport, host=PerTurnHost())
+    _initialize(server, transport, request_id=0, client_name="owner")
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "thread/start",
+            "params": {"inputId": "thread_1", "metadata": {"run": "first"}},
+        },
+    )
+    _drain_until(transport, lambda message: message.get("id") == 1)
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "inputId": "turn_1",
+                "expectedTurnId": None,
+                "threadId": "thread_1",
+                "metadata": {"run": "first"},
+                "input": [{"type": "text", "text": "first"}],
+            },
+        },
+    )
+    first_outbound = _drain_until_turn_completed(transport)
+    assert _completed_status(first_outbound) == "completed"
+    assert first_calls == ["first"]
+
+    second_result: dict[str, object] = {}
+
+    def start_second() -> None:
+        _send(
+            transport,
+            server,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "turn/start",
+                "params": {
+                    "inputId": "turn_2",
+                    "expectedTurnId": "thread_1/turn/turn_1",
+                    "threadId": "thread_1",
+                    "metadata": {"run": "second"},
+                    "input": [{"type": "text", "text": "second"}],
+                },
+            },
+        )
+        second_result["response"] = _drain_until(transport, lambda message: message.get("id") == 3)
+
+    thread = threading.Thread(target=start_second, name="second-turn-start")
+    try:
+        thread.start()
+        assert second_config_entered.wait(5)
+        worker = server.kernel._worker
+        previous_pass = worker.coordinate_pass
+        worker.wake("thread_1")
+        assert worker.wait_for_coordinate_pass(previous_pass, 5)
+        worker.wait_idle(5)
+        assert first_calls == ["first"]
+        assert second_calls == []
+        assert not any(entry.item.input_id == "turn_2" for entry in server.kernel.store.peek_inbox("thread_1"))
+    finally:
+        release_second_config.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert "result" in cast(dict[str, object], second_result["response"])
+    second_outbound = _drain_until_turn_completed(transport)
+    assert _completed_status(second_outbound) == "completed"
+    assert first_calls == ["first"]
+    assert second_calls == ["second"]
+    assert registered_turns == ["thread_1/turn/turn_2"]
 
 
 def test_app_server_follow_up_routes_callback_to_driving_subscriber() -> None:

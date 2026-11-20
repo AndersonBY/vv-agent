@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import sys
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, replace
@@ -261,17 +261,22 @@ def static_session_requirements(
     config: RunConfig,
     resolved: ResolvedModelConfig | None = None,
     *,
-    level: int = 2,
+    level: int = 1,
     handler_version: str | None,
     extra_capabilities: Iterable[str] = (),
 ) -> SessionRequirements:
-    """Build an L2 pre-admission bound from trusted static configuration only."""
+    """Build a pre-admission bound from trusted static configuration only."""
 
     extra = tuple(extra_capabilities)
     if handler_version is None and not extra:
         raise ValueError("null handler requirements require an explicit trusted family capability")
+    declares_children = bool(agent.sub_agents or agent.handoffs) or any(
+        isinstance(metadata.get("agent"), Agent)
+        for tool in agent.tools
+        for metadata in (tool.metadata if isinstance(tool.metadata, Mapping) else {},)
+    )
     return static_capability_requirements(
-        level=level,
+        level=max(level, 2 if declares_children else 1),
         handler_version=handler_version,
         extra_capabilities=_static_capability_tags(
             agent,
@@ -307,7 +312,7 @@ def static_model_selection_requirements(
     handler_version: str,
     level: int = 2,
 ) -> SessionRequirements:
-    """Tag one already validated trusted model-resolution result."""
+    """Tag one already validated L2 model-selection resolution."""
 
     _, resolved = resolve_model(copy_json(selection))
     return SessionRequirements(

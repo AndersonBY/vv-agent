@@ -137,7 +137,7 @@ def _create_l2_session(
     runtime: Runtime,
     workspace: Path,
 ) -> SessionRequirements:
-    bound = runtime.requirements_bound()
+    bound = replace(runtime.requirements_bound(), level=2)
     raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     raw_store.configure_worker(
         level=2,
@@ -282,7 +282,7 @@ def test_pre_admission_bound_has_no_compile_effects_and_turn_has_one_each(tmp_pa
     runtime = _commands_runtime(calls, tool_enabled=True)
 
     bound = runtime.requirements_bound()
-    assert bound.level == 2
+    assert bound.level == 1
     assert bound.handler_version == "handler/h2"
     assert calls == Counter()
 
@@ -322,7 +322,7 @@ def test_static_publish_helpers_do_not_construct_runtime_or_memory_manager(monke
         supports = static_worker_supports(agent, config, RESOLVED)
 
     assert enabled_calls == Counter()
-    assert bound.level == 2
+    assert bound.level == 1
     assert bound.handler_version == "handler/h2"
     assert set(bound.capabilities) <= set(supports)
     assert (
@@ -635,7 +635,7 @@ def test_l2_session_input_drives_complete_turn_with_exact_requirements(tmp_path)
         Agent("requirements", "Be concise.", model="m"),
         RunConfig(workspace=tmp_path),
     )
-    bound = runtime.requirements_bound()
+    bound = replace(runtime.requirements_bound(), level=2)
     with SQLiteStore.standalone(str(tmp_path / "published.sqlite")) as raw_store:
         raw_store.install_schema()
         raw_store.configure_input_admission(allow_unsigned=True)
@@ -696,7 +696,7 @@ def test_l2_bootstrap_with_l1_user_input_drives_complete_turn(tmp_path) -> None:
         Agent("requirements", "Be concise.", model="m"),
         RunConfig(workspace=tmp_path),
     )
-    bound = runtime.requirements_bound()
+    bound = replace(runtime.requirements_bound(), level=2)
     with SQLiteStore.standalone(str(tmp_path / "transition.sqlite")) as raw_store:
         raw_store.install_schema()
         raw_store.configure_input_admission(allow_unsigned=True)
@@ -764,7 +764,7 @@ def test_l2_model_selection_is_used_by_real_drive_with_exact_tags(tmp_path) -> N
         handler_version="handler/h2",
         model_resolver=lambda request: resolve_model_selection(provider, request),
     )
-    bound = runtime.requirements_bound()
+    bound = replace(runtime.requirements_bound(), level=2)
     selection = {"model": "B", "route": {}, "metadata": {}}
     selection_requirements = static_model_selection_requirements(
         selection,
@@ -1206,7 +1206,7 @@ def test_live_approval_provider_uses_trusted_service_ingress(tmp_path) -> None:
         item = hydrated.payload["input"]
         assert item["feature_level"] == 1
         assert item.get("requirements") is None
-        assert store.read_state(handle.session_id)[1][0].record.feature_level == 2
+        assert store.read_state(handle.session_id)[1][0].record.feature_level == 1
         assert item["actor"]["subject_kind"] == "service"
         assert item["actor"]["subject_id"] == "approval-provider"
         assert set(item["actor"]["attributes"]) == {"content_id", "mac", "size", "key_id", "labels"}

@@ -115,6 +115,7 @@ _ALL_RECORDS_LIMIT = (1 << 31) - 1
 _EVENT_PAGE_SIZE = 256
 _PROVIDER_RECOVERY_SUBJECT_ID = "provider-recovery"
 _TRANSIENT_STREAM_EVENTS = (AssistantDeltaEvent, ReasoningDeltaEvent, ModelToolCallStartedEvent, ModelToolCallProgressEvent)
+_RUNTIME_CLAIM_BOUND = object()
 PrincipalInput = Principal | Mapping[str, Any]
 RuntimeFactory = Callable[[SessionStore, Agent, RunConfig, AgentTask | None, str], Runtime]
 """Rebuild a host runtime against the exact store connection for one worker drive.
@@ -930,8 +931,20 @@ class SessionDriver:
                 raise TypeError("SessionDriver runtime_factory must return Runtime")
             if runtime.handler_version != handler_version:
                 raise Conflict("runtime handler_version does not match SessionDriver worker support")
+            if getattr(runtime, "_session_driver_claim_bound", None) is _RUNTIME_CLAIM_BOUND:
+                raise Conflict("SessionDriver runtime_factory must return a fresh Runtime for every claim")
+            object.__setattr__(runtime, "_session_driver_claim_bound", _RUNTIME_CLAIM_BOUND)
+            self._bind_claim_content_reader(runtime, store, sid)
             return runtime
         return self.runtime(agent, config, task, session_id=sid, store=store, handler_version=handler_version)
+
+    def _bind_claim_content_reader(self, runtime: Runtime, store: SessionStore, sid: str) -> None:
+        default_reader = getattr(runtime, "_session_driver_default_content_reader", None)
+        if default_reader is None:
+            return
+        object.__setattr__(runtime, "_session_driver_default_content_reader", None)
+        if runtime.content_reader is default_reader:
+            runtime.content_reader = self._durable_content_reader(store, sid)
 
     def _register_runtime(
         self,
@@ -1034,16 +1047,9 @@ class SessionDriver:
             created = self._created_payload(store, child_sid)
             attributes = created.get("attributes", {})
             if "child_admission" in attributes:
+                # The admitted child derives from the host-provided root runtime;
+                # rebuilding it would discard bindings that are not factory inputs.
                 runtime = runtime.child_runtime(store, child_sid)
-                if self.runtime_factory is not None:
-                    runtime = self._runtime_for_session(
-                        store,
-                        runtime.agent,
-                        runtime.config,
-                        runtime.frozen_task,
-                        child_sid,
-                        registration.handler_version,
-                    )
             else:
                 runtime = self._runtime_for_session(
                     store,
@@ -1055,6 +1061,7 @@ class SessionDriver:
                 )
         if runtime.handler_version != registration.handler_version:
             raise Conflict("runtime handler_version does not match SessionDriver worker support")
+        runtime.heartbeat_store = store.heartbeat_store
         original_stream = runtime.config.stream
         watermark = {"seq": store.read(sid, limit=1).head_seq}
         original_hook = runtime.hook
@@ -2348,8 +2355,9 @@ class SessionDriver:
                     Message.from_dict(message)
         bootstrap = self._next_session_requirements
         self._next_session_requirements = None
-        if bootstrap is not None and bootstrap.level < 2:
-            raise ValueError("level-2 session bootstrap requires requirements.level >= 2")
+        if bootstrap is not None and bootstrap.level == 1:
+            # L1 static capabilities bind the worker; only L2/L3 requirements are durable bootstrap.
+            bootstrap = None
         with self.store.atomic() as tx:
             writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
 
@@ -2406,6 +2414,11 @@ class SessionDriver:
             keep_recent_messages=metadata.get("memory_keep_recent_messages", 10),
             microcompaction_policy=task.microcompaction_policy if task else config.microcompaction_policy,
         )
+        content_reader = (
+            durable_content_reader(store or self._root_store, tenant_id=self.tenant_id, session_id=session_id)
+            if session_id is not None
+            else None
+        )
         runtime = Runtime(
             agent,
             config,
@@ -2418,12 +2431,10 @@ class SessionDriver:
             model_resolver=self.model_resolver,
             handler_version=self._handler_version(handler_version),
             wake=self._wake_session if hasattr(self, "_worker") else lambda _sid: None,
-            content_reader=(
-                durable_content_reader(store or self._root_store, tenant_id=self.tenant_id, session_id=session_id)
-                if session_id is not None
-                else None
-            ),
+            content_reader=content_reader,
         )
+        if store is None and content_reader is not None:
+            object.__setattr__(runtime, "_session_driver_default_content_reader", content_reader)
         provider = config.model_provider
         if self.model_resolver is None and provider is not None:
             runtime.model_resolver = lambda request: resolve_model_selection(provider, request)
@@ -2644,8 +2655,10 @@ class SessionDriver:
         if route_level is None:
             raise LedgerIntegrityError("verified routing cache has no route level")
         registration_is_level_two = registration is not None and registration.requirements.level >= 2
-        if route_level < 2 and not (registration_is_level_two and ceiling >= 2):
+        if route_level < 2 and item.kind != "model_selection" and not (registration_is_level_two and ceiling >= 2):
             return item
+        if route_level < 2 and item.kind == "model_selection" and (ceiling < 2 or routing.requirements.handler_version is None):
+            raise UnsupportedFeatureLevel("model selection requires a level-2 session route with a bound handler")
         if (
             item.kind == "model_selection"
             and registration is not None
@@ -2671,6 +2684,10 @@ class SessionDriver:
         )
         if item.kind == "model_selection":
             requirements = self._route_model_selection(sid, item, session_requirements, registration)
+            self._ensure_static_worker_support(
+                level=requirements.level,
+                capabilities=requirements.capabilities,
+            )
         else:
             requirements = session_requirements
         return replace(item, feature_level=2, requirements=requirements)

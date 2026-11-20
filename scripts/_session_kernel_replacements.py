@@ -22,6 +22,7 @@ from vv_agent import Agent, RunConfig, Runner, ToolPolicy
 from vv_agent.budget import HostCost, RunBudgetLimits
 from vv_agent.context_providers import ContextFragment
 from vv_agent.events import event_from_dict
+from vv_agent.kernel._hydration import DefinitionContent
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.prompt import PromptBundle, PromptSection, SystemPromptBuilder, build_system_prompt_bundle
@@ -32,7 +33,7 @@ from vv_agent.runtime.lifecycle import AfterCycleDecision, AfterCycleStop
 from vv_agent.runtime.token_usage import normalize_token_usage, summarize_task_token_usage
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydrate_record_payload, hydrate_records, hydration_for_session_store, project_records
 from vv_agent.session.tracing import deliver_spans, project_spans
 from vv_agent.tools.function import FunctionTool, function_tool
 from vv_agent.tools.metadata import ToolMetadata
@@ -253,6 +254,42 @@ def start_runner(driver, session_id, agent, content, *, run_config=None):
         patch("vv_agent.runner.uuid.uuid4", return_value=SimpleNamespace(hex=session_id)),
     ):
         return Runner.start(agent, content, run_config=run_config)
+
+
+def _result_after_worker(handle):
+    """Project the result after the sole drive claim stops polling snapshot state."""
+
+    handle.kernel._worker.wait_idle()
+    return handle.result()
+
+
+class _MemoryCapacityDriver:
+    """Adapt one live-prefix fixture snapshot to the CoreDriver reads used by manager_for."""
+
+    def __init__(self, *, state, records, sid, runtime, store):
+        self.state = state
+        self.records = records
+        self.sid = sid
+        self.runtime = runtime
+        self._stored_by_id = {stored.record.record_id: stored for stored in records}
+        self._hydration = hydration_for_session_store(store, sid)
+
+    def hydrated_definition(self, record):
+        decoded = {}
+        hydrate_record_payload(self._stored_by_id[record.record_id], self._hydration, _decoded_values=decoded)
+        definition = decoded.get(("definition",))
+        if not isinstance(definition, DefinitionContent):
+            raise TypeError("memory capacity fixture definition hydration did not produce DefinitionContent")
+        return definition
+
+    def session_attributes(self):
+        created = self.records[0]
+        if created.record.kind != "session_created":
+            raise TypeError("memory capacity fixture session must begin with session_created")
+        attributes = hydrate_record_payload(created, self._hydration)["attributes"]
+        if type(attributes) is not dict:
+            raise TypeError("memory capacity fixture session attributes must be an object")
+        return attributes
 
 
 class Author:
@@ -712,6 +749,9 @@ class Author:
 
         before = inventory_names(d)
         d.update(contract="vv-agent-public-api-v15", schema_version=15)
+        drive_surface = next(surface for surface in d["surfaces"] if surface["id"] == "session_drive")
+        drive_member = next(member for member in drive_surface["members"] if member["id"] == "drive")
+        drive_member["python"]["signature"] = signature(resolve("vv_agent.session.kernel").drive)
         d["surfaces"] = [s for s in d["surfaces"] if s["id"] != "session_Provider"]
         d["surfaces"].append(
             {
@@ -1196,7 +1236,7 @@ class Author:
             parsed = [Message.from_dict(m) for m in messages]
             self.f.admit(sid, [], attributes={"seed": {"messages": [m.to_dict() for m in parsed], "shared_state": {}}})
             state, rows, _ = self.f.kernel.store.read_state(sid)
-            actual = [m.to_dict() for m in project_context(rows, state)]
+            actual = [m.to_dict() for m in project_context(rows, state, _initial=parsed)]
             assert actual == messages
             self.outputs[name] = actual
         d["same_turn_wait_producer"] = self.evidence_for("messages", "user_wait")
@@ -1391,9 +1431,14 @@ class Author:
         _, rows, _ = self.f.kernel.store.read_state(parent)
         admitted = [r.record for r in rows if r.record.kind == "op_parked" and r.record.payload["handle"]["kind"] == "child"]
         child_sid = admitted[0].payload["handle"]["session_id"]
-        child_state, _, _ = self.f.kernel.store.read_state(child_sid)
+        child_state, child_rows, _ = self.f.kernel.store.read_state(child_sid)
         child_turn = next(iter(child_state.turns.values())).start
-        task = child_turn.payload["definition"]["task"]
+        child_start = next(row for row in child_rows if row.record.record_id == child_turn.record_id)
+        child_definition = hydrate_record_payload(
+            child_start,
+            hydration_for_session_store(self.f.kernel.store, child_sid),
+        )["definition"]
+        task = child_definition["task"]
         d["identity"] = {
             "session_id": child_sid,
             "turn_id": child_turn.turn_id,
@@ -1407,7 +1452,11 @@ class Author:
         d["capability_projection"] = {"frozen_admission": admitted[0].payload["handle"]}
         d["continuation"] = {"same_turn_reply": True, "terminal_only_parent_adoption": True, "full_history_from_records": True}
         d["lifecycle"] = {
-            "event_sequence": [e.type for e in project_records(rows) if e.type.startswith("sub_run_")],
+            "event_sequence": [
+                e.type
+                for e in project_records(rows, hydration=hydration_for_session_store(self.f.kernel.store, parent))
+                if e.type.startswith("sub_run_")
+            ],
             "parent_owned": True,
         }
         d["manager"] = {
@@ -1486,8 +1535,10 @@ class Author:
                         sub_agents={"researcher": SubAgentConfig(model="m", description="Research.")},
                     ),
                 )
-                receipt = result.raw_result.cycles[0].tool_results[0]
-                actual = json.loads(receipt.content)
+                assert result.raw_result.cycles, (case["name"], "manager tool call projected no primary cycle")
+                tool_results = result.raw_result.cycles[0].tool_results
+                assert len(tool_results) == 1, (case["name"], "manager primary cycle must project one tool result")
+                actual = json.loads(tool_results[0].content)
                 assert actual == case["expected"], (case["name"], actual)
                 case["expected"] = actual
                 case["producer"] = self.evidence_for("manager", result.raw_result.session_id)
@@ -1509,7 +1560,12 @@ class Author:
         handoff = self.outputs["handoff_contract.json"]
         handoff_rows = self.f.kernel.store.read_state("handoff")[1]
         handoff["lifecycle_order"] = [
-            e.type for e in project_records(handoff_rows) if e.type in {"handoff_started", "handoff_completed", "run_completed"}
+            e.type
+            for e in project_records(
+                handoff_rows,
+                hydration=hydration_for_session_store(self.f.kernel.store, "handoff"),
+            )
+            if e.type in {"handoff_started", "handoff_completed", "run_completed"}
         ]
         handoff["admitted_max_handoffs"] = (
             self.f.state("handoff")
@@ -1660,24 +1716,32 @@ class Author:
         all_events, identity_inputs, sources = [], [], []
         memory_ids = {}
         for sid, rows in self.f.collect():
+            hydration = hydration_for_session_store(self.f.kernel.store, sid)
             for index, stored in enumerate(rows):
                 source = stored.record
                 if source.kind != "boundary_recorded" or source.payload["stage"] != "memory_started":
                     continue
+                from vv_agent.session.projection import fold_hydrated_records
                 from vv_agent.session.records import InboxItem
-                from vv_agent.session.reducer import fold
+                from vv_agent.session.reducer import Fold, fold
 
                 prefix = rows[:index]
                 logical = [r.record for r in prefix]
                 state = fold(
                     logical, consumed_inputs=[InboxItem(**r.payload["input"]) for r in logical if r.kind == "input_applied"]
                 )
-                event = source.payload["data"]["event"]
-                messages = [m.to_dict() for m in project_context(prefix, state)]
+                hydrated_payload = hydrate_record_payload(stored, hydration)
+                event = hydrated_payload["data"]["event"]
+                hydrated_prefix = hydrate_records(prefix, hydration)
+                projection_state = fold_hydrated_records(hydrated_prefix, prefix, Fold, hydration)
+                assert state.active_turn_id == projection_state.active_turn_id
+                assert state.turns.keys() == projection_state.turns.keys()
+                assert state.applied_inputs.keys() == projection_state.applied_inputs.keys()
+                messages = [m.to_dict() for m in project_context(hydrated_prefix, projection_state)]
                 key = sha256(self.independent([[source.turn_id, messages, event["trigger"]]])[0]).hexdigest()
                 assert key == source.payload["boundary_id"]
                 memory_ids[(sid, key)] = key
-            for e in project_records(rows):
+            for e in project_records(rows, hydration=hydration):
                 wire = e.to_dict()
                 assert event_from_dict(wire).to_dict() == wire
                 seq = e.metadata["session_seq"]
@@ -1707,8 +1771,10 @@ class Author:
         self.outputs["event_store_replay.jsonl"] = replay
         self.outputs["runner_events.jsonl"] = [e.to_dict() for e in self.f.result("tools").events]
         rows = self.f.kernel.store.read_state("tools")[1]
+        tools_hydration = hydration_for_session_store(self.f.kernel.store, "tools")
         self.outputs["runner_trace.jsonl"] = [
-            {"seq": seq, "method": method, "span": span.to_dict()} for seq, method, span in project_spans(rows)
+            {"seq": seq, "method": method, "span": span.to_dict()}
+            for seq, method, span in project_spans(rows, hydration=tools_hydration)
         ]
         for row in self.outputs["runner_trace.jsonl"]:
             span = row["span"]
@@ -1739,16 +1805,23 @@ class Author:
                 "end_order": [k for m, k in delivered if m == "end"],
                 "parents": {
                     span.name: next(
-                        (parent.name for _, _, parent in project_spans(rows) if parent.span_id == span.parent_id), None
+                        (
+                            parent.name
+                            for _, _, parent in project_spans(rows, hydration=tools_hydration)
+                            if parent.span_id == span.parent_id
+                        ),
+                        None,
                     )
-                    for _, method, span in project_spans(rows)
+                    for _, method, span in project_spans(rows, hydration=tools_hydration)
                     if method == "on_span_start"
                 },
             },
             "delivery": {"ack_first": True, "at_most_once": True, "replay_deliveries": 0, "telemetry_loss_possible": True},
         }
         failure = self.f.result("blocked")
-        failed_spans = project_spans(self.f.kernel.store.read_state("blocked")[1])
+        blocked_rows = self.f.kernel.store.read_state("blocked")[1]
+        blocked_hydration = hydration_for_session_store(self.f.kernel.store, "blocked")
+        failed_spans = project_spans(blocked_rows, hydration=blocked_hydration)
         self.outputs["runner_trace_spans.json"]["failure_cleanup"] = {
             "started": [s.name for _, method, s in failed_spans if method == "on_span_start"],
             "ended": [s.name for _, method, s in failed_spans if method == "on_span_end"],
@@ -1768,7 +1841,9 @@ class Author:
         delivered.clear()
         while deliver_spans(self.f.kernel.store, "repair", [BrokenProcessor(), processor]):
             pass
-        repair_spans = project_spans(self.f.kernel.store.read_state("repair")[1])
+        repair_rows = self.f.kernel.store.read_state("repair")[1]
+        repair_hydration = hydration_for_session_store(self.f.kernel.store, "repair")
+        repair_spans = project_spans(repair_rows, hydration=repair_hydration)
         assert delivered == [("start" if m == "on_span_start" else "end", s.name) for _, m, s in repair_spans]
         self.outputs["runner_trace_spans.json"]["sink_failure"] = {
             "isolated": bool(delivered),
@@ -1869,7 +1944,7 @@ class Author:
             )
             first, second = handle.events(), handle.events()
             prefix_a, prefix_b = next(first), next(second)
-            result = handle.result()
+            result = _result_after_worker(handle)
             a, b = [prefix_a, *first], [prefix_b, *second]
             count = len(a)
             assert count >= 1100 and a == b == list(handle.events()) == result.events
@@ -2132,13 +2207,23 @@ class Author:
                 rt = self.f.admit(sid, [LLMResponse("done")], memory=produced[0])
                 self.f.run(sid)
                 records = self.f.kernel.store.read_state(sid)[1]
-                prefix = [
-                    stored.record for stored in records[: next(i for i, r in enumerate(records) if r.record.kind == "turn_ended")]
-                ]
+                terminals = [(index, stored.record) for index, stored in enumerate(records) if stored.record.kind == "turn_ended"]
+                assert len(terminals) == 1, [stored.record.kind for stored in records]
+                terminal_index, terminal = terminals[0]
+                assert terminal.payload["status"] == "completed"
+                prefix = [stored.record for stored in records[:terminal_index]]
                 state = fold(
                     prefix, consumed_inputs=[InboxItem(**r._payload["input"]) for r in prefix if r.kind == "input_applied"]
                 )
-                admitted = manager_for(SimpleNamespace(state=state, records=records, sid=sid, runtime=rt))
+                assert state.model_selection is None
+                driver = _MemoryCapacityDriver(
+                    state=state,
+                    records=records,
+                    sid=sid,
+                    runtime=rt,
+                    store=self.f.kernel.store,
+                )
+                admitted = manager_for(driver)  # ty: ignore[invalid-argument-type]
                 if context_only:
                     assert admitted.model_context_window == case["expected_model_context_window"]
                     case["expected_model_context_window"] = admitted.model_context_window
@@ -2471,7 +2556,9 @@ class Author:
             sid = "c1c/reasoning/" + c["name"]
             self.f.admit(sid, [], attributes={"seed": {"messages": [message.to_dict()], "shared_state": {}}})
             state, rows, _ = self.f.kernel.store.read_state(sid)
-            projected = project_context(rows, state)
+            attributes = hydrate_record_payload(rows[0], hydration_for_session_store(self.f.kernel.store, sid))["attributes"]
+            parsed = [Message.from_dict(m) for m in attributes["seed"]["messages"]]
+            projected = project_context(rows, state, _initial=filter_empty_assistant_messages(parsed))
             assert bool(projected) == c["expected"]["retain_in_resumable_history"] == retained
             if retained:
                 assert projected[0].content == c["expected"]["visible_content"]

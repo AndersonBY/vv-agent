@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ import pytest
 from vv_agent import Agent, RunConfig, SubAgentConfig
 from vv_agent.session.delegation import ChildTasks, SubTaskStatusProvider
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import SessionHydration, hydrate_records
+from vv_agent.session.projection import SessionHydration, hydrate_records, hydration_for_session_store, project_records
 from vv_agent.session.providers import Accepted, Definitive
 from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
@@ -65,13 +66,14 @@ def _parent_with_child(
     wait_for_completion: bool = True,
     wait_for_response: bool = False,
     message: str | None = None,
+    status_target: str | None = None,
     child_steps: list[Any] | None = None,
 ):
     child_id: dict[str, str] = {}
 
     def status_step(_request):
         arguments: dict[str, Any] = {
-            "task_ids": [child_id["id"]],
+            "task_ids": [status_target if status_target is not None else child_id["id"]],
             "wait_for_completion": wait_for_completion,
             "wait_for_response": wait_for_response,
         }
@@ -174,6 +176,45 @@ def test_nonwait_pending_status_is_definitive_and_does_not_block_parent(store, d
     assert not any(
         record.record.kind == "op_parked"
         and record.record.turn_id == "parent/turn/nonwait-input"
+        and record.record.payload["handle"]["kind"] == "provider"
+        for record in store.read_state("parent")[1]
+    )
+    assert store.read_state("parent")[0].active_turn_id is None
+
+
+@pytest.mark.sqlite_file
+def test_message_unknown_task_is_definitive_not_found(store, database, tmp_path):
+    _agent, _config, parent_rt, _child_id = _parent_with_child(
+        store,
+        database,
+        tmp_path,
+        wait_for_completion=False,
+        message="continue",
+        status_target="unknown",
+    )
+    _follow_up(store, "unknown-message-input")
+    drive(store, "parent", runtime=parent_rt)
+
+    result = _tool_result(store, "parent", "status")
+    expected = {
+        "details": {"task_id": "unknown"},
+        "error": "Sub-task unknown not found.",
+        "error_code": "sub_task_not_found",
+        "ok": False,
+    }
+    assert result["status_code"] == "ERROR"
+    assert result["error_code"] == "sub_task_not_found"
+    assert result["metadata"] == expected
+    assert json.loads(result["content"]) == expected
+    events = project_records(
+        store.read_state("parent")[1],
+        hydration=hydration_for_session_store(store, "parent"),
+    )
+    completed = next(event for event in events if event.type == "tool_call_completed" and event.tool_call_id == "status")
+    assert completed.error_code == "sub_task_not_found"
+    assert not any(
+        record.record.kind == "op_parked"
+        and record.record.turn_id == "parent/turn/unknown-message-input"
         and record.record.payload["handle"]["kind"] == "provider"
         for record in store.read_state("parent")[1]
     )

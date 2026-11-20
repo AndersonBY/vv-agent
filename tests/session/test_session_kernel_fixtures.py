@@ -28,7 +28,6 @@ from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import StoredRecord
 from vv_agent.session.surfaces import SessionDriver
-from vv_agent.session.tracing import project_spans
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
 
@@ -76,9 +75,6 @@ def checked_bytes(vector):
 
 @pytest.fixture(scope="module")
 def generated_fixtures(tmp_path_factory):
-    trusted_storage = json.loads((fixture_root() / "trusted_storage_s1.json").read_text())
-    if trusted_storage.get("status") == "producer-captured":
-        pytest.skip("focused S1 producer capture is covered; the full contract 40 corpus remains pending")
     root = tmp_path_factory.mktemp("kernel-fixtures")
     directories = [root / "first"]
     coverage_runs = []
@@ -109,6 +105,312 @@ def test_generated_fixtures_match_vendored_snapshot(generated_fixtures):
     (produced, vendored), _, _, _ = generated_fixtures
     differences = sorted(name for name in FILES if (produced / name).read_bytes() != (vendored / name).read_bytes())
     assert not differences, differences
+
+
+def test_fixture_store_explicitly_uses_hash_only_ledger_mode():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        assert fixtures._raw_store._ledger_integrity_mode() == "hash-only"
+    finally:
+        fixtures.kernel.close()
+
+
+def test_children_fixture_declares_runtime_support_and_reaches_parent_result():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        assert fixtures._raw_store.worker_supports.max_level == 1
+        fixtures.children()
+        assert fixtures._raw_store.worker_supports.max_level == 2
+        assert fixtures.result("children").final_output == "parent done"
+    finally:
+        fixtures.kernel.close()
+
+
+def test_manager_tool_result_stays_on_projected_primary_cycle():
+    fixtures = AUTHOR["Fixtures"]()
+    author = REPLACEMENTS["Author"](fixtures, AUTHOR["independent_bytes"], AUTHOR["facts"])
+    try:
+        fixtures.children()
+        result = author.execute(
+            "manager_primary_cycle_probe",
+            [
+                LLMResponse("", [ToolCall("manager", "create_sub_task", {"agent_id": "\u001c", "task_description": "Research"})]),
+                LLMResponse("done"),
+            ],
+            agent=Agent(
+                "coordinator",
+                "Coordinate.",
+                sub_agents={"researcher": REPLACEMENTS["SubAgentConfig"](model="m", description="Research.")},
+            ),
+        )
+
+        assert len(result.raw_result.cycles) == 2
+        primary = result.raw_result.cycles[0]
+        assert len(primary.tool_results) == 1
+        completed = next(event for event in result.events if event.type == "tool_call_completed")
+        assert completed.tool_call_id == primary.tool_calls[0].id
+        assert json.loads(primary.tool_results[0].content) == json.loads(
+            completed.to_dict()["metadata"]["tool_result"]["preview"]
+        )
+    finally:
+        fixtures.kernel.close()
+
+
+def test_controls_fixture_reuses_retained_runtime_and_reaches_archive():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        fixtures.admit("seed", [LLMResponse("done")])
+        fixtures.run("seed")
+        fixtures.controls()
+
+        controls = fixtures.runtimes["controls"]
+        assert (
+            fixtures.kernel.runtime_factory(
+                fixtures.kernel.store,
+                controls.agent,
+                controls.config,
+                controls.frozen_task,
+                "controls",
+            )
+            is controls
+        )
+        assert fixtures.state("controls").archived
+        assert fixtures.state("seed").closed
+    finally:
+        fixtures.kernel.close()
+
+
+def test_memory_capacity_corpus_reaches_real_turn_terminals(tmp_path):
+    fixtures = AUTHOR["Fixtures"]()
+    author = REPLACEMENTS["Author"](fixtures, AUTHOR["independent_bytes"], AUTHOR["facts"])
+    lifecycle_suite = runpy.run_path(str(Path(__file__).parents[2] / "tests" / "test_memory_lifecycle_contract.py"))
+    try:
+        author.memory_capacity(lifecycle_suite, tmp_path)
+
+        capacity = author.outputs["memory_lifecycle.json"]["capacity_contract"]
+        cases = [*capacity["cases"], *capacity["context_window_resolution"]["cases"]]
+        for case in cases:
+            sid = "c1c/capacity/" + case["name"]
+            state, rows, _ = fixtures.kernel.store.read_state(sid)
+            started = [row.record for row in rows if row.record.kind == "turn_started"]
+            ended = [row.record for row in rows if row.record.kind == "turn_ended"]
+
+            assert state.active_turn_id is None
+            assert len(started) == len(ended) == 1
+            assert started[0].turn_id == ended[0].turn_id == f"{sid}/turn/initial"
+            assert ended[0].payload["status"] == "completed"
+            assert not any(row.record.kind == "turn_parked" for row in rows)
+    finally:
+        fixtures.kernel.close()
+
+
+@pytest.mark.parametrize(
+    ("producer", "session_id", "input_id"),
+    [
+        ("endpoint_routing", "endpoint-routing", "select"),
+        ("model_selection", "model_selection", "select-B"),
+    ],
+)
+def test_model_selection_fixture_producers_publish_l2_requirements(producer, session_id, input_id):
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        getattr(fixtures, producer)()
+
+        created = fixtures.kernel.store.read(session_id, limit=1).records[0].record
+        stored = fixtures.kernel.store.read_input(session_id, input_id)
+        assert stored is not None
+        requirements = stored.item.to_dict()["requirements"]
+
+        assert created.feature_level == 2
+        assert created.payload["bootstrap"]["level"] == 2
+        assert stored.item.feature_level == 2
+        assert requirements["level"] == 2
+        assert requirements["capabilities"]
+        assert all(capability.startswith("model:") for capability in requirements["capabilities"])
+        assert fixtures.kernel._runtimes[session_id].requirements.level == 2
+        assert fixtures.kernel.store.worker_supports.accepts(
+            level=requirements["level"],
+            handler_version=requirements["handler_version"],
+            capabilities=requirements["capabilities"],
+        )
+    finally:
+        fixtures.kernel.close()
+
+
+def test_app_server_fixture_orders_model_selection_before_close():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        app = fixtures.app_server()
+        created = fixtures.kernel.store.read("thread_1", limit=1).records[0].record
+        selection = fixtures.kernel.store.read_input("thread_1", "select-app")
+        assert created.feature_level == 2
+        assert selection is not None
+        assert selection.item.feature_level == 2
+        assert selection.item.requirements["level"] == 2
+        closed_thread = fixtures.state("thread_1")
+    finally:
+        fixtures.kernel.close()
+
+    transcript = [entry for entry in app["transcripts"] if "request" in entry]
+    model_selections = [entry for entry in transcript if entry["request"]["method"] == "thread/model/select"]
+    assert [entry["request"]["id"] for entry in model_selections] == [16, 17, 18, 19, 46]
+    assert [entry["request"]["params"]["inputId"] for entry in model_selections] == [
+        "select-app",
+        "select-app",
+        "select-app",
+        "select-app",
+        "select-closed",
+    ]
+    assert model_selections[0]["responses"][-1]["result"]["accepted"] is True
+    assert model_selections[1]["responses"][-1]["result"]["accepted"] is True
+    assert [response["code"] for response in (entry["responses"][-1]["error"] for entry in model_selections[2:4])] == [
+        -32024,
+        -32602,
+    ]
+    assert model_selections[4]["responses"][-1]["error"] == {
+        "code": -32024,
+        "message": "submission_conflict",
+    }
+
+    positions = {
+        entry["request"]["id"]: index for index, entry in enumerate(transcript) if entry["request"].get("id") is not None
+    }
+    assert positions[19] < positions[13] < positions[14] < positions[46]
+    assert closed_thread.closed and closed_thread.archived
+
+
+def test_store_semantics_prepares_ready_worker_compatible_session():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        fixtures.admit(
+            "tools",
+            [LLMResponse("", [ToolCall("echo", "echo", {"text": "ok"})]), LLMResponse("done")],
+        )
+        fixtures.run("tools")
+        fixtures.kernel._worker.start()
+        store = fixtures.kernel.store
+        before = tuple(
+            (stored.seq, stored.commit_id, stored.writer_epoch, stored.record.record_id)
+            for stored in store.read("tools", limit=1024).records
+        )
+        epoch_before = store._one(
+            "SELECT lease_epoch FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (store.tenant_id, "tools"),
+        )[0]
+
+        fixtures.prepare_store_semantics()
+        ready = InboxItem("ready", "follow_up", {"content": "store"})
+        fixtures.push("tools", ready)
+
+        row = store._one(
+            "SELECT next_drive_ms,level,handler_version,required_capabilities "
+            "FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (store.tenant_id, "tools"),
+        )
+        capabilities = store._session_capabilities(row[3])
+        assert row[0] == fixtures.clock
+        assert store.worker_supports.accepts(level=row[1], handler_version=row[2], capabilities=capabilities)
+        assert store.is_runnable("tools")
+        pending = store.peek_inbox("tools")
+        assert len(pending) == 1
+        assert pending[0].item.input_id == ready.input_id
+        assert pending[0].item.kind == ready.kind
+        assert pending[0].consumed_seq is None
+        assert not fixtures.kernel._worker.running
+
+        lease = store.acquire("tools", owner="store-semantics", ttl_ms=100)
+        assert lease is not None
+        assert (lease.tenant_id, lease.session_id, lease.epoch) == (store.tenant_id, "tools", epoch_before + 1)
+        assert store.release(lease)
+        after = tuple(
+            (stored.seq, stored.commit_id, stored.writer_epoch, stored.record.record_id)
+            for stored in store.read("tools", limit=1024).records
+        )
+        assert after == before
+    finally:
+        fixtures.kernel.close()
+
+
+def test_admission_negatives_capture_published_input_with_rejection_audit():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        provider = AUTHOR["Provider"]()
+        fixtures.admit(
+            "accepted",
+            [
+                AUTHOR["LLMResponse"]("", [AUTHOR["ToolCall"]("effect", "echo", {"text": "effect"})]),
+                AUTHOR["LLMResponse"]("done"),
+            ],
+            providers={"echo": provider},
+        )
+        fixtures.run("accepted")
+        turn_id = "accepted/turn/initial"
+        fixtures.push_provider_evidence("accepted", provider.callback("provider_evidence", turn_id, "evidence"))
+        fixtures.push("accepted", provider.callback("provider_result", turn_id, "result"))
+        fixtures.run("accepted")
+        fixtures.children()
+
+        fixtures.admission_negatives()
+
+        vector = next(v for v in fixtures.invalid if v["rejection_class"] == "provider_authentication")
+        raw = checked_bytes(vector)
+        item = InboxItem.parse(raw)
+        audit = fixtures.state("accepted").applied_inputs[item.input_id]
+        assert audit.payload["disposition"] == "rejected"
+        assert audit.payload["reason"] == vector["reason"]
+        assert audit.payload["input"]["input_id"] == item.input_id
+        assert audit.payload["input"]["payload"]["evidence"] == ["forged"]
+        assert item.payload["evidence"]["content_id"].startswith("content_")
+        assert {v["rejection_class"] for v in fixtures.invalid} == {
+            "provider_authentication",
+            "provider_binding_drift",
+            "stale_generation",
+            "child_authentication",
+            "authorization",
+        }
+    finally:
+        fixtures.kernel.close()
+
+
+def test_recovery_cuts_preserve_prefixes_and_single_provider_effects():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        fixtures.recovery_cuts()
+        cases = {case["case"]: case for case in fixtures.recovery}
+
+        assert set(cases) == {
+            *(f"lost_wall_{policy.value}" for policy in AUTHOR["UnavailableMetricPolicy"]),
+            "op_planned",
+            "op_prepared",
+            "op_started",
+            "op_completed",
+            "boundary_recorded",
+            "accepted",
+            "parked",
+            "tool_a_done_b_pending",
+            "boundary_before_commit",
+            "boundary_after_commit",
+        }
+        prefix_kinds = {}
+        for name, case in cases.items():
+            stored = fixtures.kernel.store.read_state(case["session_id"])[1]
+            record_ids = [item.record.record_id for item in stored]
+            assert record_ids[: len(case["prefix_ids"])] == case["prefix_ids"]
+            assert fixtures.state(case["session_id"]).active_turn_id is None
+            prefix_kinds[name] = [item.record.kind for item in stored[: len(case["prefix_ids"])]]
+
+        assert cases["accepted"]["effects"] == cases["parked"]["effects"] == 1
+        assert cases["boundary_before_commit"]["callback_calls"] == 3
+        assert cases["boundary_after_commit"]["callback_calls"] == 2
+        for kind in ("op_planned", "op_prepared", "op_started", "op_completed", "boundary_recorded"):
+            assert cases[kind]["remaining_model_steps"] >= 0
+            assert prefix_kinds[kind][-1] == kind
+        assert prefix_kinds["accepted"][-1] == "op_started"
+        assert prefix_kinds["parked"][-1] == "op_parked"
+        assert prefix_kinds["boundary_before_commit"][-1] == "op_completed"
+        assert prefix_kinds["boundary_after_commit"][-1] == "boundary_recorded"
+    finally:
+        fixtures.kernel.close()
 
 
 def validate_outputs(values):
@@ -247,11 +549,17 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         )
         expected_events = {e.event_id: e.to_dict() for e in project_records(rows)}
         assert projection["events"] == [expected_events[e["event_id"]] for e in projection["events"]]
-        expected_spans = {
-            (seq, method, span.span_id): {"seq": seq, "method": method, "span": span.to_dict()}
-            for seq, method, span in project_spans(rows)
-        }
-        assert projection["spans"] == [expected_spans[(s["seq"], s["method"], s["span"]["span_id"])] for s in projection["spans"]]
+        assert projection["spans"]
+        source_by_seq = {row.seq: row.record for row in rows}
+        for entry in projection["spans"]:
+            span = entry["span"]
+            source = source_by_seq[entry["seq"]]
+            identity = (
+                ["tools", source.operation_id, source.attempt]
+                if span["name"] == "tool"
+                else ["tools", source.turn_id, span["name"]]
+            )
+            assert span["span_id"] == "sk/span/" + sha256(AUTHOR["independent_bytes"]([identity])[0]).hexdigest()
         for event in projection["events"]:
             assert event["version"] == "v6"
             assert event_from_dict(event).to_dict() == event
@@ -521,6 +829,49 @@ def test_private_runner_subscribers_and_observer_failure_keep_committed_result()
         kernel.close()
 
 
+def test_handle_burst_result_waits_for_the_worker_claim():
+    kernel = SessionDriver()
+    provider_calls = 0
+
+    def complete(_request):
+        nonlocal provider_calls
+        provider_calls += 1
+        return LLMResponse("draft")
+
+    handle = None
+    try:
+        provider = ScriptedModelProvider.from_callback("test", "m", complete)
+        handle = start_runner(
+            kernel,
+            "worker-result",
+            Agent("fixture", "Continue."),
+            "go",
+            run_config=RunConfig(model_provider=provider, max_cycles=8, no_tool_policy="continue"),
+        )
+        first, second = handle.events(), handle.events()
+        prefix_a, prefix_b = next(first), next(second)
+        observed = []
+        original = SessionDriver._handle_done
+
+        def checked(self, sid, requested_turn_id):
+            observed.append((provider_calls, self._worker._inflight is None))
+            return original(self, sid, requested_turn_id)
+
+        with patch.object(SessionDriver, "_handle_done", checked):
+            result = REPLACEMENTS["_result_after_worker"](handle)
+
+        replayed_a = [prefix_a, *first]
+        replayed_b = [prefix_b, *second]
+        assert len(result.raw_result.cycles) == provider_calls == 8
+        assert observed and all(calls == 8 and idle for calls, idle in observed)
+        assert replayed_a == replayed_b == list(handle.events()) == result.events
+    finally:
+        if handle is not None:
+            handle.close()
+        else:
+            kernel.close()
+
+
 def test_private_shared_state_mutation_does_not_change_the_retained_seed():
     seed = {"nested": {"values": ["seed"]}}
 
@@ -568,6 +919,7 @@ def test_private_approval_provider_failure_is_a_retained_terminal(tmp_path):
 
     with SQLiteStore.standalone(str(tmp_path / "approval.sqlite")) as store:
         broker = ApprovalBroker()
+        store.configure_input_admission(allow_unsigned=True)
         kernel = SessionDriver(store=store, content_key_provider=fixture_key_provider())
         try:
             store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")

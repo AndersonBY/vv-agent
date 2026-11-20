@@ -7,6 +7,7 @@ import base64
 import importlib.util
 import json
 import subprocess
+import time
 from collections import Counter
 from contextlib import ExitStack
 from copy import deepcopy
@@ -16,7 +17,7 @@ from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from vv_agent import Agent, AppServerUserInteraction, InteractionAnswer, RunConfig, handoff, input_guardrail
@@ -26,6 +27,8 @@ from vv_agent.budget import BudgetEvaluator, RunBudgetLimits, UnavailableMetricP
 from vv_agent.events import ModelCallCompletedEvent, event_from_dict
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
+from vv_agent.kernel._content_publication import declare_input_content, link_declared_input_content
+from vv_agent.kernel._content_runtime import SessionContentWriter
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.microcompaction import MicrocompactionPolicy
@@ -36,7 +39,7 @@ from vv_agent.session.children import ChildSession, child_delivery, child_handle
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
+from vv_agent.session.projection import hydrate_record_payload, hydrate_records, hydration_for_session_store, project_records
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import (
     APP_SERVER_ATTRIBUTES,
@@ -57,6 +60,7 @@ from vv_agent.session.records import (
 )
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.result import project_result
+from vv_agent.session.runtime import Runtime, static_session_requirements, static_worker_supports
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict, LeaseLost
 from vv_agent.session.surfaces import SessionDriver
@@ -114,12 +118,14 @@ class _FixtureClock:
 
     def __init__(self, fixtures: Fixtures):
         self.fixtures = fixtures
+        self._monotonic_origin_ns = time.perf_counter_ns()
 
     def now_ms(self) -> int:
         return self.fixtures.clock
 
     def monotonic(self) -> float:
-        return self.fixtures.clock / 1000
+        # Heartbeats wait in real time, so their local clock must advance without changing deterministic DB time.
+        return self.fixtures.clock / 1000 + (time.perf_counter_ns() - self._monotonic_origin_ns) / 1_000_000_000
 
     def monotonic_ns(self) -> int:
         return self.fixtures.clock * 1_000_000
@@ -225,7 +231,11 @@ class Provider:
             return False
         if item.kind == "provider_evidence":
             expected = self.callback("provider_evidence", item.target_turn_id, item.input_id)
-            return item.encode() == expected.encode()
+            return (
+                item.payload == expected.payload
+                and item.target_turn_id == expected.target_turn_id
+                and item.generation == expected.generation
+            )
         return (
             item.payload["result"] == self.result
             and item.payload["usage"] == self.usage
@@ -272,10 +282,28 @@ class Fixtures:
             str(Path(self._state_directory.name) / "sessions.sqlite3"),
             clock=self._clock,
         )
+        self._raw_store.configure_input_admission(allow_unsigned=True)
         self.content_key_provider = fixture_key_provider_for_store(self._raw_store)
         self._deterministic_secrets = deterministic_content_secrets()
         self._deterministic_secrets.__enter__()
-        self.kernel = SessionDriver(store=self._raw_store, content_key_provider=self.content_key_provider)
+        self.runtimes: dict[str, Any] = {}
+
+        def runtime_factory(store, agent, config, task, session_id):
+            retained = self.runtimes.get(session_id)
+            if (
+                isinstance(retained, Runtime)
+                and retained.agent is agent
+                and retained.config is config
+                and retained.frozen_task is task
+            ):
+                return retained
+            return self.kernel.runtime(agent, config, task, session_id=session_id, store=store)
+
+        self.kernel = SessionDriver(
+            store=self._raw_store,
+            content_key_provider=self.content_key_provider,
+            runtime_factory=runtime_factory,
+        )
 
         def close_fixture_store():
             self.content_key_provider.close()
@@ -284,7 +312,6 @@ class Fixtures:
             self._state_directory.cleanup()
 
         self.kernel._on_close(close_fixture_store)
-        self.runtimes: dict[str, Any] = {}
         self.inbox: dict[tuple[str, str], InboxItem] = {}
         self.semantics = []
         self.recovery = []
@@ -316,7 +343,35 @@ class Fixtures:
         self.inbox[(sid, item.input_id)] = stored.item
         return receipt
 
-    def admit(self, sid, steps, *, agent=None, config=None, attributes=None, memory=None, content="go", **kwargs):
+    def push_provider_evidence(self, sid, item):
+        """Publish provider recovery evidence through the trusted fixture ingress."""
+
+        assert item.kind == "provider_evidence"
+        with self.kernel.store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=sid)
+            actor, actor_ref = writer.service_principal("provider-recovery")
+            publication = declare_input_content(writer, replace(item, actor=actor))
+            tx.push(sid, publication.item)
+            link_declared_input_content(writer, publication.item)
+            writer.link_input_actor(publication.item.input_id, actor_ref)
+        stored = self.kernel.store.read_input(sid, item.input_id)
+        if stored is None:
+            raise AssertionError("published provider evidence is missing")
+        self.inbox[(sid, item.input_id)] = stored.item
+
+    def admit(
+        self,
+        sid,
+        steps,
+        *,
+        agent=None,
+        config=None,
+        attributes=None,
+        memory=None,
+        content="go",
+        session_level=1,
+        **kwargs,
+    ):
         """Create one S1 session and bind its real SDK runtime and content reader."""
 
         agent = agent or Agent("fixture", "Be precise.", model="m", tools=[echo])
@@ -325,8 +380,34 @@ class Fixtures:
         if config.initial_messages and attributes is None:
             # Retain the imported-history fixtures' original creation policy.
             attributes = {"seed": {"unseen_input_protection": False}}
+        bootstrap = None
+        if session_level >= 2:
+            self._raw_store._rows(
+                "UPDATE sk_settings SET write_level=? WHERE singleton=1",
+                (session_level,),
+            )
+            bootstrap = static_session_requirements(
+                agent,
+                config,
+                level=session_level,
+                handler_version=self.kernel.default_handler_version,
+                extra_capabilities=self.kernel.capabilities,
+            )
+            self.kernel._configure_static_worker(
+                level=bootstrap.level,
+                capabilities=static_worker_supports(
+                    agent,
+                    config,
+                    extra_capabilities=self.kernel.capabilities,
+                ),
+                requirements=bootstrap,
+            )
         self.kernel.create(sid, "/fixture", attributes)
         rt = self.kernel.runtime(agent, config, session_id=sid)
+        if bootstrap is not None:
+            rt._requirements_bound = bootstrap
+        requirements = rt.requirements_bound()
+        self.kernel._ensure_static_worker_support(level=requirements.level, capabilities=requirements.capabilities)
         rt.__dict__.update(kwargs)
         rt.clock = kwargs.get("clock", self._clock)
         if memory is not None:
@@ -339,6 +420,54 @@ class Fixtures:
         """Drive one real turn without synthesizing terminal or usage records."""
 
         drive(self.kernel.store, sid, runtime=self.runtimes[sid], _one_turn=True)
+
+    def prepare_store_semantics(self, *, stop_worker=True):
+        """Quiesce scheduler wakes and make the direct-store fixture session due."""
+
+        if stop_worker:
+            self.quiesce_worker()
+        else:
+            self.suspend_worker_execution()
+        store = self._raw_store
+        with store.atomic():
+            store._rows(
+                "UPDATE sk_session SET next_drive_ms=%s WHERE tenant_id=%s AND session_id=%s",
+                (self.clock, store.tenant_id, "tools"),
+            )
+
+    def quiesce_worker(self):
+        """Stop the single-use fixture worker before another worker owns the store."""
+
+        worker = self.kernel._worker
+        worker.stop()
+        if worker.started and not worker.join(5):
+            raise AssertionError("store semantics fixture worker did not stop")
+
+    def suspend_worker_execution(self):
+        """Temporarily remove fixture worker callbacks while another worker owns the store."""
+
+        worker = self.kernel._worker
+        if hasattr(self, "_suspended_worker_support"):
+            return
+        if worker.started:
+            worker.wait_idle(5)
+        self._suspended_worker_support = worker.support
+        worker.support = replace(
+            worker.support,
+            drive=None,
+            project=None,
+            observe=None,
+            projection_consumers=(),
+        )
+
+    def resume_worker_execution(self):
+        """Restore the fixture worker callbacks after the competing owner exits."""
+
+        support = getattr(self, "_suspended_worker_support", None)
+        if support is None:
+            return
+        self.kernel._worker.support = support
+        del self._suspended_worker_support
 
     def state(self, sid):
         """Return the hydrated typed state from the SDK snapshot reader."""
@@ -397,7 +526,7 @@ class Fixtures:
             calls.append(request.model)
             return LLMResponse("B done", raw={"usage": USAGE})
 
-        rt = self.admit(sid, [lost, retry])
+        rt = self.admit(sid, [lost, retry], session_level=2)
         other = ScriptedLLM([done])
 
         def resolve(request):
@@ -416,6 +545,13 @@ class Fixtures:
             )
 
         rt.model_resolver = resolve
+        selection_requirements = rt.model_selection_requirements(selection)
+        self.kernel._ensure_static_worker_support(
+            level=selection_requirements.level,
+            capabilities=selection_requirements.capabilities,
+        )
+        previous_model_resolver = self.kernel.model_resolver
+        self.kernel.model_resolver = resolve
 
         class StopAfterUnknown(BaseException):
             pass
@@ -425,6 +561,7 @@ class Fixtures:
                 raise StopAfterUnknown
 
         rt.hook = stop_after_unknown
+        self.kernel._register_runtime(sid, rt)
         try:
             self.run(sid)
         except StopAfterUnknown:
@@ -496,6 +633,7 @@ class Fixtures:
                 "billable_models": [call.model for call in model_calls],
             }
         )
+        self.kernel.model_resolver = previous_model_resolver
 
     def endpoint_routing(self):
         from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
@@ -513,9 +651,16 @@ class Fixtures:
         def client(model):
             return HostOrder([EndpointTarget(e, "unused", "https://example.invalid") for e in routes[model]])
 
-        rt = self.admit(sid, [])
+        rt = self.admit(sid, [], session_level=2)
         rt.llm = client("m")
         rt.model_resolver = lambda request: (client(request["model"]), replace(rt.resolved, model_id=request["model"]))
+        selection_requirements = rt.model_selection_requirements(selection)
+        self.kernel._ensure_static_worker_support(
+            level=selection_requirements.level,
+            capabilities=selection_requirements.capabilities,
+        )
+        previous_model_resolver = self.kernel.model_resolver
+        self.kernel.model_resolver = rt.model_resolver
 
         def remove(point, record):
             if (
@@ -537,6 +682,7 @@ class Fixtures:
                 routes["selected"] = ["B"]
 
         rt.hook = remove
+        self.kernel._register_runtime(sid, rt)
 
         def complete(current, request):
             calls.append(current.endpoint_targets[0].endpoint_id)
@@ -579,6 +725,47 @@ class Fixtures:
                 "missing": missing_record.to_dict(),
             }
         )
+        self.kernel.model_resolver = previous_model_resolver
+
+    def children(self):
+        self._raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        self.admit(
+            "children",
+            [
+                LLMResponse(
+                    "",
+                    [
+                        ToolCall(
+                            "children",
+                            "create_sub_task",
+                            {"agent_id": "worker", "tasks": [{"task_description": "first"}, {"task_description": "second"}]},
+                        )
+                    ],
+                ),
+                LLMResponse("first done"),
+                LLMResponse("second done"),
+                LLMResponse("parent done"),
+            ],
+            agent=Agent("parent", "Be precise.", sub_agents={"worker": SubAgentConfig(model="m", description="Work.")}),
+        )
+        self.drain_children("children", self.runtimes["children"])
+        assert self.result("children").final_output == "parent done"
+
+    def controls(self):
+        self.admit("controls", [LLMResponse("first"), LLMResponse("followed")])
+        rt = self.runtimes["controls"]
+
+        def queue(point, record):
+            if point == "after_commit" and record.kind == "op_planned":
+                rt.hook = lambda *_: None
+                self.push("controls", InboxItem("steer", "steer", {"content": "steer"}, "controls/turn/initial", 0))
+                self.push("controls", InboxItem("follow", "follow_up", {"content": "follow"}))
+
+        rt.hook = queue
+        self.run("controls")
+        self.run("controls")
+        self.kernel.control("controls", "archive", "archive", runtime=rt)
+        self.kernel.control("seed", "close", "close", runtime=self.runtimes["seed"])
 
     def produce(self):
         self.yieldable_wait()
@@ -678,33 +865,13 @@ class Fixtures:
             )
             self.run(sid)
             tid = f"{sid}/turn/initial"
-            self.push(sid, provider.callback("provider_evidence", tid, "evidence"))
+            self.push_provider_evidence(sid, provider.callback("provider_evidence", tid, "evidence"))
             self.push(sid, provider.callback("provider_result", tid, "result"))
             self.run(sid)
             assert provider.effects == 1
             self.semantics.append({"case": sid, "effects": 1, "terminal": self.state(sid).active_turn_id is None})
 
-        self.admit(
-            "children",
-            [
-                LLMResponse(
-                    "",
-                    [
-                        ToolCall(
-                            "children",
-                            "create_sub_task",
-                            {"agent_id": "worker", "tasks": [{"task_description": "first"}, {"task_description": "second"}]},
-                        )
-                    ],
-                ),
-                LLMResponse("first done"),
-                LLMResponse("second done"),
-                LLMResponse("parent done"),
-            ],
-            agent=Agent("parent", "Be precise.", sub_agents={"worker": SubAgentConfig(model="m", description="Work.")}),
-        )
-        self.drain_children("children", self.runtimes["children"])
-        assert self.result("children").final_output == "parent done"
+        self.children()
 
         history = [Message("user", "request"), Message("assistant", "old " * 1200)]
         for sid, summary in (("summary", SUMMARY), ("rejected_summary", "bad")):
@@ -775,20 +942,12 @@ class Fixtures:
         self.run("repair")
         assert self.result("repair").token_usage.model_calls[-1].operation.value == "output_repair"
 
-        self.admit("controls", [LLMResponse("first"), LLMResponse("followed")])
-        rt = self.runtimes["controls"]
+        # Direct-drive recovery cuts must not compete with a worker that was
+        # started by a control operation for the same store.
+        self.recovery_cuts()
 
-        def queue(point, record):
-            if point == "after_commit" and record.kind == "op_planned":
-                rt.hook = lambda *_: None
-                self.push("controls", InboxItem("steer", "steer", {"content": "steer"}, "controls/turn/initial", 0))
-                self.push("controls", InboxItem("follow", "follow_up", {"content": "follow"}))
-
-        rt.hook = queue
-        self.run("controls")
-        self.run("controls")
-        self.kernel.control("controls", "archive", "archive", runtime=rt)
-        self.kernel.control("seed", "close", "close", runtime=self.runtimes["seed"])
+        self.controls()
+        self.suspend_worker_execution()
         from types import SimpleNamespace
 
         from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
@@ -811,8 +970,6 @@ class Fixtures:
             patch.object(VvLlmClient, "_should_use_stream", return_value=False),
         ):
             self.run("endpoint")
-        self.recovery_cuts()
-        self.store_semantics()
         self.admission_negatives()
 
     def compaction_cases(self, history, backend):
@@ -874,7 +1031,6 @@ class Fixtures:
                 r.record.record_id for r in reversed(self.kernel.store.read_state(sid)[1]) if r.record.kind == "op_completed"
             )
             rt.hook = lambda *_: None
-            self.kernel.store._fold_cache = None
             self.clock += 10_000
             self.run(sid)
             plans = [op for op in self.state(sid).operations.values() if op.attempts[1].plan.payload["purpose"] == "compaction"]
@@ -907,6 +1063,7 @@ class Fixtures:
             audit = after.applied_inputs[item.input_id]
             assert audit.payload["disposition"] == "rejected", (label, audit.payload)
             assert {oid: op.selected_attempt for oid, op in after.operations.items()} == selected
+            published = self.inbox[(sid, item.input_id)]
             self.invalid.append(
                 {
                     "rejection_class": label,
@@ -914,7 +1071,7 @@ class Fixtures:
                     "session_id": sid,
                     "audit_record_id": audit.record_id,
                     "reason": audit.payload["reason"],
-                    **facts(item.encode()),
+                    **facts(published.encode()),
                 }
             )
 
@@ -937,7 +1094,7 @@ class Fixtures:
         )
         reject(
             "children",
-            replace(child, input_id="forged-child", payload=child.payload | {"terminal_digest": "0" * 64}),
+            replace(child, input_id="forged-child", payload=child.payload | {"terminal_digest": "0" * 64}, actor=None),
             "child_authentication",
         )
         self.admit(
@@ -965,6 +1122,7 @@ class Fixtures:
         reject("authorization", answer, "authorization")
 
     def recovery_cuts(self):
+        assert not self.kernel._worker.running, "recovery cuts require a quiescent direct-drive worker"
         for policy in UnavailableMetricPolicy:
             sid = "lost_wall_" + policy.value
             rt = self.admit(
@@ -986,7 +1144,6 @@ class Fixtures:
                 raise AssertionError("missing wall interval cut")
             prefix = [r.record.record_id for r in self.kernel.store.read_state(sid)[1]]
             rt.hook = lambda *_: None
-            self.kernel.store._fold_cache = None
             self.clock += 10_000
             self.run(sid)
             result = self.result(sid)
@@ -1029,7 +1186,6 @@ class Fixtures:
                 raise AssertionError(f"missing cut: {kind}")
             prefix = [r.record.record_id for r in self.kernel.store.read_state(sid)[1]]
             rt.hook = lambda *_: None
-            self.kernel.store._fold_cache = None
             self.run(sid)
             assert self.state(sid).active_turn_id is None
             self.recovery.append(
@@ -1064,8 +1220,7 @@ class Fixtures:
                 raise AssertionError("missing provider cut")
             prefix = [r.record.record_id for r in self.kernel.store.read_state(sid)[1]]
             rt.hook = lambda *_: None
-            self.kernel.store._fold_cache = None
-            self.push(sid, provider.callback("provider_evidence", f"{sid}/turn/initial", "evidence"))
+            self.push_provider_evidence(sid, provider.callback("provider_evidence", f"{sid}/turn/initial", "evidence"))
             self.push(sid, provider.callback("provider_result", f"{sid}/turn/initial", "result"))
             self.run(sid)
             assert provider.effects == 1 and self.state(sid).active_turn_id is None
@@ -1101,7 +1256,6 @@ class Fixtures:
         assert effects == ["a"]
         prefix = [r.record.record_id for r in self.kernel.store.read_state(sid)[1]]
         rt.hook = lambda *_: None
-        self.kernel.store._fold_cache = None
         self.run(sid)
         assert effects == ["a", "b"]
         self.recovery.append(
@@ -1143,7 +1297,6 @@ class Fixtures:
                 raise AssertionError("missing callback cut")
             prefix = [r.record.record_id for r in self.kernel.store.read_state(sid)[1]]
             rt.hook = lambda *_: None
-            self.kernel.store._fold_cache = None
             self.run(sid)
             assert callback.calls == (3 if point == "before_commit" else 2), (point, callback.calls)
             self.recovery.append(
@@ -1158,6 +1311,7 @@ class Fixtures:
 
     def store_semantics(self):
         store = self.kernel.store
+        self.prepare_store_semantics(stop_worker=False)
         original = InboxItem("replay", "follow_up", {"content": "same"})
         first = self.push("tools", original)
         head = store.read("tools").head_seq
@@ -1187,7 +1341,9 @@ class Fixtures:
         delivered = []
         try:
             with store.atomic() as tx:
-                batch, events = bridge.batch(tx)
+                result = bridge.batch(tx)
+                assert result is not None
+                batch, events = result
                 delivered.extend(e.event_id for e in events)
                 tx.ack(batch)
                 raise Cut
@@ -1242,17 +1398,48 @@ class Fixtures:
                 "redelivered_ids": redelivered,
             }
         )
+        self.resume_worker_execution()
 
     def app_server(self):
         transport = ChannelTransport(connection_id="owner")
         provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("app done", raw={"usage": USAGE})])
+        agent = Agent("app", "Be precise.", model="m")
+        config = RunConfig(model_provider=provider, workspace="/fixture", tool_registry_factory=ToolRegistry)
         server = AppServer(
             transport=transport,
             store=self.kernel.store,
-            host=DefaultAppServerHost(
-                agent=Agent("app", "Be precise.", model="m"),
-                run_config=RunConfig(model_provider=provider, workspace="/fixture", tool_registry_factory=ToolRegistry),
-            ),
+            content_key_provider=self.content_key_provider,
+            host=DefaultAppServerHost(agent=agent, run_config=config),
+        )
+        self._raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        bootstrap = static_session_requirements(
+            agent,
+            config,
+            level=2,
+            handler_version=server.kernel.default_handler_version,
+            extra_capabilities=server.kernel.capabilities,
+        )
+        supports = static_worker_supports(
+            agent,
+            config,
+            extra_capabilities=server.kernel.capabilities,
+        )
+        server.kernel._configure_static_worker(
+            level=bootstrap.level,
+            capabilities=supports,
+            requirements=bootstrap,
+        )
+        self.kernel._ensure_static_worker_support(level=bootstrap.level, capabilities=supports)
+        server.kernel.create(
+            "thread_1",
+            "/fixture",
+            {"app_server": {"agent_key": "default", "cwd": "/fixture", "metadata": {}}},
+            principal={
+                "tenant_id": server.kernel.tenant_id,
+                "subject_id": "app-server",
+                "subject_kind": "service",
+                "attributes": {"role": "app-server"},
+            },
         )
         transcript = []
         notices = []
@@ -1287,14 +1474,40 @@ class Fixtures:
         assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         request(None, "initialized")
         request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
+        selection_params = {"threadId": "thread_1", "inputId": "select-app", "selection": {"model": "m", "route": {}}}
+        selection = request(16, "thread/model/select", selection_params)
+        assert selection.get("result") == {
+            "threadId": "thread_1",
+            "inputId": "select-app",
+            "accepted": True,
+        }, selection
+        assert request(17, "thread/model/select", selection_params)["result"]["accepted"] is True
+        assert request(18, "thread/model/select", selection_params | {"selection": None})["error"]["code"] == -32024
+        assert request(19, "thread/model/select", selection_params | {"extra": True})["error"]["code"] == -32602
         request(
             2,
             "turn/start",
             {"inputId": "turn_1", "expectedTurnId": None, "threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
         )
+
+        def drive_retry_at():
+            store = cast(Any, server.kernel.store)
+            return store._one(
+                "SELECT drive_retry_at_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+                (store.tenant_id, "thread_1"),
+            )[0]
+
+        retry_before_join = drive_retry_at()
+        server.run_adapter.join()
+        retry_after_join = drive_retry_at()
+        retry_values = tuple(value for value in (retry_before_join, retry_after_join) if value is not None)
+        if retry_values:
+            self.clock = max(self.clock, max(retry_values))
+        server.wake("thread_1")
         server.run_adapter.join()
         drain()
-        assert request(3, "thread/read", {"threadId": "thread_1"})["result"]["thread"]["status"] == "terminal"
+        thread_read = request(3, "thread/read", {"threadId": "thread_1"})
+        assert thread_read.get("result", {}).get("thread", {}).get("status") == "terminal", thread_read
         assert request(4, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "terminal"
         original_transport = transport
         transport = ChannelTransport(connection_id="reconnected")
@@ -1335,16 +1548,9 @@ class Fixtures:
         transport = original_transport
         request(5, "turn/resume", {"threadId": "thread_1", "turnId": "thread_1/turn/turn_1", "checkpointKey": "old"})
         request(6, "thread/unsubscribe", {"threadId": "thread_1"})
-        self.kernel.control("thread_1", "close", "host/close")
-        selection_params = {"threadId": "thread_1", "inputId": "select-app", "selection": {"model": "m", "route": {}}}
-        assert request(16, "thread/model/select", selection_params)["result"] == {
-            "threadId": "thread_1",
-            "inputId": "select-app",
-            "accepted": True,
-        }
-        assert request(17, "thread/model/select", selection_params)["result"]["accepted"] is True
-        assert request(18, "thread/model/select", selection_params | {"selection": None})["error"]["code"] == -32024
-        assert request(19, "thread/model/select", selection_params | {"extra": True})["error"]["code"] == -32602
+        close_runtime = self.kernel.runtime(agent, config, session_id="thread_1")
+        close_runtime._requirements_bound = bootstrap
+        self.kernel.control("thread_1", "close", "host/close", runtime=close_runtime)
         request(13, "thread/archive", {"threadId": "thread_1"})
         assert request(14, "thread/status", {"threadId": "thread_1"})["result"]["status"] == "closed"
         for i, method, params in (
@@ -1359,6 +1565,11 @@ class Fixtures:
         ):
             error = request(i, method, params)["error"]
             assert error == {"code": -32602, "message": "Thread is closed"}
+        closed_selection = selection_params | {"inputId": "select-closed"}
+        assert request(46, "thread/model/select", closed_selection)["error"] == {
+            "code": -32024,
+            "message": "submission_conflict",
+        }
         request(10, "thread/resume", {"threadId": "thread_1", "subscribe": False})
         request(11, "thread/list")
         exported = request(12, "schema/export")["result"]
@@ -1366,6 +1577,9 @@ class Fixtures:
         # Schema text is retained once, rather than duplicated in the transcript.
         transcript[-1]["responses"][-1]["result"] = {"bundle_names": list(exported["jsonSchema"])}
         drain()
+        server.kernel.close()
+        self.suspend_worker_execution()
+        self._raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
 
         transport = ChannelTransport(connection_id="child-owner")
         provider = ScriptedModelProvider.new(
@@ -1381,6 +1595,7 @@ class Fixtures:
         server = AppServer(
             transport=transport,
             store=self.kernel.store,
+            content_key_provider=self.content_key_provider,
             host=DefaultAppServerHost(
                 agent=Agent(
                     "app",
@@ -1405,7 +1620,21 @@ class Fixtures:
             {"inputId": "turn_1", "expectedTurnId": None, "threadId": sid, "input": [{"type": "text", "text": "delegate"}]},
         )
         server.run_adapter.join()
+        server.run_adapter.wake(sid)
+        server.run_adapter.join()
         drain()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = self.state(sid)
+            if any(
+                attempt.child_handle is not None
+                for operation in state.operations.values()
+                for attempt in operation.attempts.values()
+            ):
+                break
+            server.run_adapter.wake(sid)
+            server.run_adapter.join()
+            time.sleep(0.05)
         status = request(23, "thread/status", {"threadId": sid})["result"]
         snapshot = request(24, "thread/read", {"threadId": sid})["result"]
         assert status["status"] == snapshot["thread"]["status"] == "child_running"
@@ -1424,6 +1653,9 @@ class Fixtures:
         }
         request(25, "turn/action", action)
         server.run_adapter.join()
+        if any(item.item.kind == "child_result" for item in server.kernel.store.peek_inbox(sid)):
+            server.run_adapter.recover("child-owner", sid)
+            server.run_adapter.join()
         drain()
         snapshot = request(26, "thread/read", {"threadId": sid})["result"]
         assert snapshot["turns"][-1]["result"]["finalOutput"] == "parent done", snapshot["turns"][-1]
@@ -1457,6 +1689,7 @@ class Fixtures:
             == []
         )
         drain()
+        server.kernel.close()
 
         transport = ChannelTransport(connection_id="approval-owner")
         effects_before = len(APPROVED_EFFECTS)
@@ -1478,7 +1711,12 @@ class Fixtures:
                 tool_registry_factory=ToolRegistry,
             ),
         )
-        server = AppServer(transport=transport, store=self.kernel.store, host=approval_host)
+        server = AppServer(
+            transport=transport,
+            store=self.kernel.store,
+            content_key_provider=self.content_key_provider,
+            host=approval_host,
+        )
         request(30, "initialize", {"clientInfo": {"name": "approval-owner"}})
         request(None, "initialized")
         sid = request(31, "thread/start", {"inputId": "thread_3"})["result"]["threadId"]
@@ -1487,6 +1725,10 @@ class Fixtures:
             "turn/start",
             {"inputId": "turn_1", "expectedTurnId": None, "threadId": sid, "input": [{"type": "text", "text": "approve"}]},
         )
+        server.run_adapter.join()
+        server.run_adapter.wake(sid)
+        server.run_adapter.join()
+        server.run_adapter._observe_with_driver(server.kernel.store)
         while True:
             message = transport.receive_outbound(timeout=5)
             notices.append(message)
@@ -1519,6 +1761,10 @@ class Fixtures:
                 "input": [{"type": "text", "text": "timeout"}],
             },
         )
+        server.run_adapter.join()
+        server.run_adapter.wake(sid)
+        server.run_adapter.join()
+        server.run_adapter._observe_with_driver(server.kernel.store)
         while (message := transport.receive_outbound(timeout=5)).get("method") != "approval/request":
             notices.append(message)
         notices.append(message)
@@ -1527,7 +1773,13 @@ class Fixtures:
         server.run_adapter.join()
         drain()
         # A fresh App Server has no process-local owner state; only the log supplies it.
-        server = AppServer(transport=observer, store=self.kernel.store, host=approval_host)
+        server.kernel.close()
+        server = AppServer(
+            transport=observer,
+            store=self.kernel.store,
+            content_key_provider=self.content_key_provider,
+            host=approval_host,
+        )
         request(35, "initialize", {"clientInfo": {"name": "observer-restart"}})
         request(None, "initialized")
         request(36, "thread/resume", {"threadId": sid, "subscribe": False})
@@ -1567,6 +1819,8 @@ class Fixtures:
         ).to_dict()
         assert HostInteractionRequest.from_dict(request_value).to_dict() == request_value
         assert HostInteractionOutcome.from_dict(outcome_value).to_dict() == outcome_value
+        server.kernel.close()
+        self.resume_worker_execution()
         return {
             "protocol_version": "v5",
             "host_interaction_values": {"request": request_value, "outcome": outcome_value},
@@ -1664,14 +1918,19 @@ class Fixtures:
 
     def yieldable_wait(self):
         sid = "yieldable_wait"
+
+        def child_session(_plan):
+            created = self.kernel.store.read(sid, limit=1).records[0].record
+            return ChildSession(
+                SessionSpec("yieldable_child", created.payload["principal"], created.payload["workspace"]),
+                "work",
+                yield_on_steer=True,
+            )
+
         rt = self.admit(
             sid,
             [LLMResponse("", [ToolCall("observe", "echo", {"text": "work"})]), LLMResponse("new direction")],
-            children={
-                "echo": lambda _plan: ChildSession(
-                    SessionSpec("yieldable_child", "local", "/fixture"), "work", yield_on_steer=True
-                )
-            },
+            children={"echo": child_session},
         )
         drive(self.kernel.store, sid, runtime=rt)
         self.push(sid, InboxItem("new-input", "steer", {"content": "new direction"}, f"{sid}/turn/initial", 0))
@@ -1721,7 +1980,7 @@ class Fixtures:
         else:
             raise AssertionError("acceptance cut was not reached")
         rt.hook = lambda *_: None
-        self.push(sid, provider.callback("provider_evidence", f"{sid}/turn/initial", "acceptance-recovery"))
+        self.push_provider_evidence(sid, provider.callback("provider_evidence", f"{sid}/turn/initial", "acceptance-recovery"))
         drive(self.kernel.store, sid, runtime=rt)
         self.push(sid, InboxItem("new-input", "steer", {"content": "new direction"}, f"{sid}/turn/initial", 0))
         drive(self.kernel.store, sid, runtime=rt)
@@ -1761,11 +2020,14 @@ def wire_schema(envelope, payloads, *, record=False):
             shape["properties"]["target_turn_id"] = {"type": "null"}
             shape["properties"]["generation"] = {"type": "null"}
         if record and kind == "session_created":
-            attributes = {
-                "type": "object",
-                "properties": deepcopy({"seed": SEED, "app_server": APP_SERVER_ATTRIBUTES, "child_admission": CHILD_ADMISSION}),
-            }
-            attributes["properties"]["child_admission"]["properties"]["definition"] = {
+            properties: dict[str, Any] = deepcopy(
+                {"seed": SEED, "app_server": APP_SERVER_ATTRIBUTES, "child_admission": CHILD_ADMISSION}
+            )
+            child_admission = properties["child_admission"]
+            assert isinstance(child_admission, dict)
+            child_properties = child_admission.get("properties")
+            assert isinstance(child_properties, dict)
+            child_properties["definition"] = {
                 "type": "object",
                 "properties": {
                     "task": {
@@ -1776,6 +2038,7 @@ def wire_schema(envelope, payloads, *, record=False):
                     }
                 },
             }
+            attributes = {"type": "object", "properties": properties}
             shape["properties"]["payload"]["properties"]["attributes"] = attributes
         if record and kind == "boundary_recorded":
             shape["properties"]["payload"]["allOf"] = [
@@ -1862,14 +2125,17 @@ def fold_negatives(vectors):
     for sid in ("summary", "micro"):
         log = by_session[sid]
         index = next(i for i, r in enumerate(log) if r["kind"] == "context_compacted")
-        for field, value in {
-            "source_digest": "0" * 64,
-            "prefix_ids": ["forged"],
-            "tail_ids": ["forged"],
-            "replacement": [],
-            "evidence_manifest": {"forged": True},
-        }.items():
-            add(f"{sid}_compaction_{field}", sid, index, changed(log[index], **{field: value}))
+        # S1 raw replay retains ContentRefs and validates the compaction receipt
+        # through the adopted operation, not against hydrated source text.
+        if sid == "summary":
+            add(
+                "summary_compaction_summary_operation_id",
+                sid,
+                index,
+                changed(log[index], summary_operation_id=None),
+            )
+        else:
+            add("micro_compaction_replacement", sid, index, changed(log[index], replacement=[]))
     return invalid
 
 
@@ -2043,10 +2309,10 @@ def invalid_vectors(vectors):
         wire = deepcopy(sample)
         wire["payload"]["request"]["content"] = value
         add(label, wire)
-    add(
-        "duplicate_member",
-        raw=json.dumps(sample).replace('"schema_version": 1', '"schema_version":1,"schema_version":1').encode(),
-    )
+    duplicate = json.dumps(sample, ensure_ascii=True, separators=(",", ":")).encode()
+    member = b'"schema_version":' + json.dumps(sample["schema_version"], ensure_ascii=True).encode()
+    assert duplicate.count(member) == 1
+    add("duplicate_member", raw=duplicate.replace(member, member + b"," + member))
     add("nonobject_envelope", raw=b"[]")
     add("malformed_json", raw=b"{")
     # JSON cannot encode these host values. Retain the exact valid source bytes plus
@@ -2064,24 +2330,21 @@ def invalid_vectors(vectors):
         else:
             raise AssertionError(label)
         invalid.append({"rejection_class": label, "layer": "constructor", "mutation": label, **facts(raw)})
+    # S1 stores request/definition/attributes as closed ContentRefs. Mutating
+    # inline metadata would be invisible to the codec and leave the valid bytes
+    # unchanged, so reject an unknown ContentRef member instead.
     wire = deepcopy(sample)
-    wire["payload"]["request"]["metadata"]["vv_session"]["extra"] = True
-    add("closed_reserved_metadata", wire)
+    wire["payload"]["request"]["unexpected"] = {"vv_session": {"extra": True}}
+    add("request_content_ref_unknown_field", wire)
     turn = deepcopy(next(v["wire"] for v in vectors if v["type"] == "record" and v["wire"]["kind"] == "turn_started"))
-    turn["payload"]["definition"]["task"]["metadata"]["vv_session"] = {"extra": True}
-    turn["payload"]["definition_digest"] = sha256(independent_bytes([turn["payload"]["definition"]])[0]).hexdigest()
-    add("closed_task_metadata", turn)
-    child = deepcopy(
-        next(
-            v["wire"]
-            for v in vectors
-            if v["type"] == "record" and "child_admission" in v["wire"]["payload"].get("attributes", {})
-        )
-    )
-    admission = child["payload"]["attributes"]["child_admission"]
-    admission["definition"]["task"]["metadata"]["vv_session"] = {"extra": True}
-    admission["definition_digest"] = sha256(independent_bytes([admission["definition"]])[0]).hexdigest()
-    add("closed_child_task_metadata", child)
+    turn["payload"]["definition"]["unexpected"] = {"vv_session": {"extra": True}}
+    add("definition_content_ref_unknown_field", turn)
+    child = deepcopy(next(v["wire"] for v in vectors if v["type"] == "record" and v["wire"]["kind"] == "session_created"))
+    child["payload"]["attributes"]["unexpected"] = {"vv_session": {"extra": True}}
+    add("attributes_content_ref_unknown_field", child)
+    compacted = deepcopy(next(v["wire"] for v in vectors if v["type"] == "record" and v["wire"]["kind"] == "context_compacted"))
+    compacted["payload"]["evidence_manifest"] = {"forged": True}
+    add("compaction_evidence_manifest", compacted)
     inbox = next(v["wire"] for v in vectors if v["type"] == "inbox" and v["wire"]["kind"] == "provider_result")
     for label, value in (
         ("retired_inbox_kind", inbox | {"kind": "deferred_result"}),
@@ -2166,6 +2429,9 @@ def generate(output: Path):
             try:
                 fixtures.produce()
                 app = fixtures.app_server()
+                # Direct store assertions quiesce the shared worker. Run them
+                # after app-server capture because LocalWorker is single-use.
+                fixtures.store_semantics()
                 spec = importlib.util.spec_from_file_location(
                     "_session_kernel_replacements", Path(__file__).with_name("_session_kernel_replacements.py")
                 )
@@ -2194,7 +2460,8 @@ def generate(output: Path):
                 write_json(output, "session_recovery.json", {"cases": fixtures.recovery})
                 projections, compactions = [], []
                 for sid, stored in streams:
-                    events = project_records(stored)
+                    hydration = hydration_for_session_store(fixtures.kernel.store, sid)
+                    events = project_records(stored, hydration=hydration)
                     for event in events:
                         assert event_from_dict(event.to_dict()).to_dict() == event.to_dict(), (
                             sid,
@@ -2207,7 +2474,10 @@ def generate(output: Path):
                             "events": [e.to_dict() for e in events],
                             "spans": [
                                 {"seq": seq, "method": method, "span": span.to_dict()}
-                                for seq, method, span in project_spans(stored)
+                                for seq, method, span in project_spans(
+                                    stored,
+                                    hydration=hydration_for_session_store(fixtures.kernel.store, sid),
+                                )
                             ],
                         }
                     )
@@ -2230,7 +2500,8 @@ def generate(output: Path):
                                 next_record.kind in {"context_compacted", "boundary_recorded"}
                                 and next_record.payload["source_digest"] is not None
                             ):
-                                context = [m.to_dict() for m in project_context(tuple(stored[:through]), state)]
+                                hydrated_prefix = hydrate_records(stored[:through], hydration)
+                                context = [m.to_dict() for m in project_context(hydrated_prefix, state)]
                                 assert sha256(independent_bytes([context])[0]).hexdigest() == next_record.payload["source_digest"]
                         projections[-1]["prefix_states"].append(
                             {

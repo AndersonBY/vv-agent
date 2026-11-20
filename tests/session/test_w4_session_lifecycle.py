@@ -20,7 +20,7 @@ from vv_agent.kernel._content import KeyUnavailable as BackendKeyUnavailable
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.kernel._sql import SessionNotLive, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
-from vv_agent.model import ScriptedModelProvider, resolve_model_selection
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.run_handle import RunHandle
 from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.session.children import ChildSession, InvalidChildBatch
@@ -31,7 +31,6 @@ from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.runtime import (
     TrustedEnvironmentBinding,
-    static_model_selection_requirements,
     static_session_requirements,
     static_worker_supports,
 )
@@ -123,7 +122,7 @@ def test_bootstrap_requirements_never_authorize_worker_capabilities(tmp_path: Pa
         handler_version="1",
     )
     bootstrap = SessionRequirements(
-        base.level,
+        2,
         base.handler_version,
         tuple(sorted({*base.capabilities, "deployment:unavailable"})),
     )
@@ -157,11 +156,13 @@ def test_bootstrap_requirements_never_authorize_worker_capabilities(tmp_path: Pa
         consumer = SessionDriver(
             store=consumer_store,
             content_key_provider=key_provider,
+            worker_level=2,
             runtime_factory=unexpected_factory,
         )
         compatible = SessionDriver(
             store=compatible_store,
             content_key_provider=key_provider,
+            worker_level=2,
             capabilities=("deployment:unavailable",),
             runtime_factory=unexpected_factory,
         )
@@ -387,7 +388,7 @@ def test_static_requirements_resolve_model_without_constructing_client() -> None
         handler_version="1",
     )
     supports = static_worker_supports(agent, config, resolved=None)
-    assert requirements.level == 2
+    assert requirements.level == 1
     assert supports
     assert provider.client_calls == 0
 
@@ -605,11 +606,11 @@ def test_level_three_child_reconstruction_uses_host_factory_and_hook(tmp_path: P
             assert handle.result(timeout=8).final_output == "parent done"
 
             child_session_id = next(session_id for session_id in store.list_sessions() if session_id != "parent")
-            child_factory_calls = [task for session_id, task in factory_calls if session_id == child_session_id]
-            assert child_factory_calls
-            assert all(task is not None and task.task_id for task in child_factory_calls)
+            assert factory_calls
+            assert child_session_id not in {session_id for session_id, _task in factory_calls}
+            assert all(session_id == "parent" for session_id, _task in factory_calls)
             assert ("parent", "after_drive") in hook_calls
-            assert (child_session_id, "after_drive") in hook_calls
+            assert all(session_id == "parent" for session_id, _point in hook_calls)
         finally:
             driver.close()
 
@@ -989,7 +990,7 @@ def test_start_publishes_static_registration_without_caller_runtime(monkeypatch)
         driver.close()
 
 
-def test_runner_publishes_bootstrap_and_follow_up_requirements() -> None:
+def test_runner_keeps_l1_turns_and_rejects_model_selection() -> None:
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("first"), LLMResponse("second")])
     agent = Agent("routed", "Answer.", model="m")
     config = RunConfig(model_provider=provider)
@@ -998,58 +999,55 @@ def test_runner_publishes_bootstrap_and_follow_up_requirements() -> None:
     try:
         assert handle.result(timeout=8).final_output == "first"
         created = driver.store.read(handle.session_id, limit=1).records[0].record
-        assert created.feature_level == 2
-        bootstrap = created.payload["bootstrap"]
-        expected_bootstrap = static_session_requirements(
+        assert created.feature_level == 1
+        assert "bootstrap" not in created.payload
+        expected_bound = static_session_requirements(
             agent,
             config,
             resolved=None,
             handler_version="1",
         )
         expected_supports = static_worker_supports(agent, config, resolved=None)
-        assert bootstrap == expected_bootstrap.to_dict()
+        assert expected_bound.level == 1
         assert driver._worker.support.capabilities == expected_supports
+        assert driver._worker.support.level == 1
 
         handle.follow_up("two")
         second = driver.start(handle.session_id, agent, config, None)
         assert second.result(timeout=8).final_output == "second"
-        driver.push(
-            handle.session_id,
-            InboxItem(
-                "select-model",
-                "model_selection",
-                {"selection": {"model": "m", "route": {}}},
-            ),
-        )
-        _wait_for(
-            lambda: any(
-                stored.record.kind == "input_applied" and stored.record.payload["input"]["input_id"] == "select-model"
-                for stored in driver.store.read(handle.session_id, limit=100).records
+        turn_starts = [
+            stored.record
+            for stored in driver.store.read(handle.session_id, limit=100).records
+            if stored.record.kind == "turn_started"
+        ]
+        assert len(turn_starts) == 2
+        assert all(record.feature_level == 1 for record in turn_starts)
+        assert all(record.payload["requirements"]["level"] == 1 for record in turn_starts)
+        with pytest.raises(UnsupportedFeatureLevel, match="level-2 session route"):
+            driver.push(
+                handle.session_id,
+                InboxItem(
+                    "select-model",
+                    "model_selection",
+                    {"selection": {"model": "m", "route": {}}},
+                ),
             )
-        )
         applied = [
             stored.record.payload["input"]
             for stored in driver.store.read(handle.session_id, limit=100).records
             if stored.record.kind == "input_applied"
         ]
-        assert [item["kind"] for item in applied] == ["user", "follow_up", "model_selection"]
-        assert all(item["feature_level"] == 2 for item in applied)
-        assert [item["requirements"] for item in applied[:2]] == [bootstrap, bootstrap]
-        expected_selection = static_model_selection_requirements(
-            {"model": "m", "route": {}},
-            resolve_model=lambda selection: resolve_model_selection(provider, selection),
-            handler_version="1",
-        )
-        assert applied[2]["requirements"] == expected_selection.to_dict()
-        assert all(capability.startswith("model:") for capability in expected_selection.capabilities)
-        assert set(bootstrap["capabilities"]) <= set(driver._worker.support.capabilities)
-        assert driver._worker.support.level == 2
+        assert [item["kind"] for item in applied] == ["user", "follow_up"]
+        assert [item["feature_level"] for item in applied] == [1, 1]
+        assert all("requirements" not in item for item in applied)
+        assert set(expected_bound.capabilities) <= set(driver._worker.support.capabilities)
+        assert driver._worker.support.level == 1
         assert "1" in driver._worker.support.handler_versions
     finally:
         driver.close()
 
 
-def test_custom_factory_extra_capabilities_feed_l2_bootstrap_and_worker(
+def test_custom_factory_capabilities_keep_an_l1_session(
     tmp_path: Path,
 ) -> None:
     key_provider = LocalKeyProvider(b"x" * 32)
@@ -1089,7 +1087,7 @@ def test_custom_factory_extra_capabilities_feed_l2_bootstrap_and_worker(
             )
             agent = Agent("custom", "Answer.", model="m")
             config = RunConfig(model_provider=provider)
-            expected_bootstrap = static_session_requirements(
+            expected_bound = static_session_requirements(
                 agent,
                 config,
                 resolved=None,
@@ -1103,9 +1101,9 @@ def test_custom_factory_extra_capabilities_feed_l2_bootstrap_and_worker(
                 extra_capabilities=("family:custom",),
             )
             driver._configure_static_worker(
-                level=expected_bootstrap.level,
+                level=expected_bound.level,
                 capabilities=expected_supports,
-                requirements=expected_bootstrap,
+                requirements=expected_bound,
             )
             driver.create("custom", str(tmp_path))
             handle = driver.start(
@@ -1123,9 +1121,11 @@ def test_custom_factory_extra_capabilities_feed_l2_bootstrap_and_worker(
                 for stored in driver.store.read("custom", limit=100).records
                 if stored.record.kind == "input_applied"
             )
-            assert created.payload["bootstrap"] == expected_bootstrap.to_dict()
-            assert applied["requirements"] == expected_bootstrap.to_dict()
-            assert "family:custom" in expected_bootstrap.capabilities
+            assert created.feature_level == 1
+            assert "bootstrap" not in created.payload
+            assert applied["feature_level"] == 1
+            assert "requirements" not in applied
+            assert "family:custom" in expected_bound.capabilities
             assert driver._worker.support.capabilities == expected_supports
             assert len(factory_threads) == 1 and factory_threads[0].startswith("session-local-worker-drive")
         finally:

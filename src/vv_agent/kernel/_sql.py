@@ -1945,19 +1945,6 @@ class SQLStore:
         )
         return tuple(self._stored_input(session_id, row) for row in rows)
 
-    def _drive_runnable_at(self, session_id: str) -> int | None:
-        rows = self._rows(
-            f"""
-            WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms)
-            SELECT t.ms
-            FROM sk_session s CROSS JOIN clock t
-            WHERE s.tenant_id=%s AND s.session_id=%s
-              AND {_DRIVE_RUNNABLE_SQL}
-            """,
-            (self.tenant_id, session_id),
-        )
-        return int(rows[0][0]) if len(rows) == 1 else None
-
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None:
         self._require_configured_ledger("lease acquisition")
         _identity(owner)
@@ -1974,8 +1961,9 @@ class SQLStore:
                 capabilities=routing.requirements.capabilities,
             ):
                 return None
-            now = self._drive_runnable_at(session_id)  # Must be read after the row lock.
-            if now is None:
+            # Explicit-session drives may inspect idle state; runnable scans apply due-work readiness.
+            now = self._now()  # Must be read after the row lock.
+            if (row[4] is not None and row[4] > now) or row[5] > now:
                 return None
             lease = Lease(session_id, owner, row[2] + 1, now + ttl_ms, self.tenant_id)
             self._rows(

@@ -14,7 +14,7 @@ from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import publish_session_created_content
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.llm.scripted import ScriptedLLM
-from vv_agent.model import ModelError, ModelRef, ScriptedModelProvider
+from vv_agent.model import ModelError, ModelRef, ScriptedModelProvider, resolve_model_selection
 from vv_agent.session.compaction import manager_for
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import _Driver, _Scope, drive
@@ -1062,7 +1062,14 @@ def test_session_driver_selection_without_runtime_uses_current_h2_cache(store, d
 @pytest.mark.capability("model-selection")
 def test_session_driver_start_preserves_registration_level_two_bound(store, database):
     rt, _ = routed(database, [LLMResponse("done")], store=store, handler_version="handler/h2")
-    bootstrap = rt.requirements_bound()
+    bootstrap = static_session_requirements(
+        rt.agent,
+        rt.config,
+        rt.resolved,
+        level=2,
+        handler_version="handler/h2",
+        extra_capabilities=_worker_capabilities(rt, ()),
+    )
     rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))
     create_level_two(store, bootstrap)
     driver = SessionDriver(
@@ -1167,6 +1174,108 @@ def test_session_driver_follow_up_uses_bootstrap_without_runtime_registration(st
         assert stored.item.feature_level == 2
         assert stored.item.requirements == bootstrap.to_dict()
     finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_level_one_model_selection_requires_a_bound_handler_even_at_level_two_ceiling(store, database):
+    rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h2")
+    capabilities = _worker_capabilities(rt, (SELECTION,))
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    driver = SessionDriver(
+        store=store,
+        model_resolver=rt.model_resolver,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h2",),
+        capabilities=capabilities,
+    )
+    try:
+        driver.create("s", ".")
+        created = store.read("s", limit=1).records[0].record
+        assert created.feature_level == 1
+        assert "bootstrap" not in created.payload
+
+        with pytest.raises(Conflict, match="level-2 session route with a bound handler"):
+            driver.push("s", InboxItem("select", "model_selection", {"selection": SELECTION}))
+
+        assert store.read_input("s", "select") is None
+        assert routing_requirements(store).level == 1
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
+def test_bound_level_one_route_admits_model_selection_as_level_two(store, database):
+    from vv_agent.run_config import RunConfig
+
+    entered, release = Event(), Event()
+
+    def first(request):
+        assert request.model == "scripted"
+        entered.set()
+        assert release.wait(10)
+        return LLMResponse("A")
+
+    default_provider = ScriptedModelProvider.from_callback("scripted", "scripted", first)
+    selected_provider = ScriptedModelProvider.new("anthropic", "B", [])
+
+    def resolve_model(request):
+        if request["model"] == "scripted" and request.get("route", {}) == {}:
+            return resolve_model_selection(default_provider, request)
+        resolved = selected_provider.resolve(ModelRef.named(request["model"]))
+        return selected_provider.client(resolved), resolved
+
+    agent = Agent("kernel", "Answer.", model="scripted")
+    config = RunConfig(model_provider=default_provider)
+    _, resolved = resolve_model_selection(default_provider, {"model": "scripted", "route": {}})
+    base_requirements = static_session_requirements(
+        agent,
+        config,
+        resolved,
+        level=1,
+        handler_version="handler/h2",
+    )
+    selection_requirements = static_model_selection_requirements(
+        SELECTION,
+        resolve_model=resolve_model,
+        handler_version="handler/h2",
+    )
+    capabilities = tuple(sorted(set(base_requirements.capabilities) | set(selection_requirements.capabilities)))
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    driver = SessionDriver(
+        store=store,
+        model_resolver=resolve_model,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=("handler/h2",),
+        capabilities=capabilities,
+    )
+    handle = None
+    try:
+        driver.create("s", ".")
+        handle = driver.start(
+            "s",
+            agent,
+            config,
+            "go",
+            handler_version="handler/h2",
+            autostart=False,
+        )
+        handle.start()
+        assert entered.wait(10)
+
+        driver.push("s", InboxItem("select", "model_selection", {"selection": SELECTION}))
+
+        stored = store.read_input("s", "select")
+        assert stored is not None
+        assert stored.item.feature_level == 2
+        assert stored.item.requirements == selection_requirements.to_dict()
+        assert routing_requirements(store) == selection_requirements
+    finally:
+        release.set()
+        if handle is not None:
+            handle.result(timeout=10)
         driver.close()
 
 

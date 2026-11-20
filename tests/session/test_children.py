@@ -460,7 +460,10 @@ def test_child_input_and_parent_result_rollback_together(store, database):
 
 
 def test_handler_version_stop_with_child_wait_retains_unconfirmed_child(store, database):
-    rt, _, handle = parked(store, database)
+    rt, state, handle = parked(store, database)
+    assert state.phase == "parked"
+    assert store.peek_inbox("s") == ()
+    assert store.next_drive_delay_ms("s") is None
     rt.handler_version = "replaced"
     drive(store, "s", runtime=rt)
     terminal = next(r.record for r in read_fixture_state(store, "s")[1] if r.record.kind == "turn_ended")

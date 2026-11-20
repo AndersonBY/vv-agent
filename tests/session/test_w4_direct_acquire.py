@@ -1,4 +1,4 @@
-"""W4 direct session acquisition uses the same drive readiness predicate as claims."""
+"""W4 explicit session acquisition is fenced separately from runnable scans."""
 
 import pytest
 
@@ -51,7 +51,7 @@ def _create_routed_session(store, session_id: str, requirements: SessionRequirem
 
 
 @pytest.mark.persistent_store
-def test_direct_acquire_honors_future_next_drive(store) -> None:
+def test_background_scan_honors_future_next_drive_while_explicit_acquire_does_not(store) -> None:
     session_id = "future-next-drive"
     _create_session(store, session_id)
     future = store._now() + 60_000
@@ -61,7 +61,9 @@ def test_direct_acquire_honors_future_next_drive(store) -> None:
     )
 
     assert store.claim_runnable(owner="claim", ttl_ms=10_000, limit=1) == ()
-    assert store.acquire(session_id, owner="direct", ttl_ms=10_000) is None
+    lease = store.acquire(session_id, owner="direct", ttl_ms=10_000)
+    assert lease is not None
+    assert store.release(lease)
 
 
 @pytest.mark.persistent_store
@@ -84,14 +86,16 @@ def test_direct_acquire_uses_ready_inbox_even_when_next_drive_is_future(store) -
 
 
 @pytest.mark.persistent_store
-def test_direct_acquire_honors_future_inbox_availability(store) -> None:
+def test_background_scan_honors_future_inbox_availability_while_explicit_acquire_does_not(store) -> None:
     session_id = "future-inbox"
     _create_session(store, session_id)
     future = store._now() + 60_000
     _push(store, session_id, input_id="future", available_ms=future)
 
     assert store.claim_runnable(owner="claim", ttl_ms=10_000, limit=1) == ()
-    assert store.acquire(session_id, owner="direct", ttl_ms=10_000) is None
+    lease = store.acquire(session_id, owner="direct", ttl_ms=10_000)
+    assert lease is not None
+    assert store.release(lease)
 
 
 @pytest.mark.persistent_store

@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from support.contract import fixture_root
 
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 ARTIFACTS = runpy.run_path(str(SCRIPTS / "tool_result_artifact_fixtures.py"))
 SESSION = runpy.run_path(str(SCRIPTS / "session_kernel_fixtures.py"))
@@ -37,6 +39,9 @@ def test_session_bounded_regenerates_projection_and_capture_provenance(tmp_path)
         author = REPLACEMENTS["Author"](fixtures, SESSION["independent_bytes"], SESSION["facts"])
         bounded = author.outputs["bounded_tool_result.json"]
         bounded["unified_projection"] = {"stale": True}
+        # The full producer's children() pass raises the store level before
+        # bounded sessions are created; this isolated gate needs the same setup.
+        fixtures._raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         author.bounded()
         cases = ARTIFACTS["generate"]()["cases"]
         projection = bounded["unified_projection"]
@@ -58,16 +63,20 @@ def test_session_bounded_regenerates_projection_and_capture_provenance(tmp_path)
             result = bounded["canonical_results"][name]
             entry = result["metadata"]["vv_artifact"]
             _, rows, _ = fixtures.kernel.store.read_state("c1c/bounded_" + name)
-            plan = next(
-                row.record
+            plan_row = next(
+                row
                 for row in rows
                 if row.record.kind == "op_planned" and row.record.operation_id == entry["source"]["operation_id"]
             )
-            assert plan.payload["request"]["arguments"] == {}
+            plan = plan_row.record
+            plan_payload = hydrate_record_payload(
+                plan_row, hydration_for_session_store(fixtures.kernel.store, "c1c/bounded_" + name)
+            )
+            assert plan_payload["request"]["arguments"] == {}
             assert entry["source"] == {
                 "operation_id": plan.operation_id,
                 "attempt": plan.attempt,
-                "tool_call_id": plan.payload["request"]["id"],
+                "tool_call_id": plan_payload["request"]["id"],
                 "arguments_sha256": sha256(b"{}").hexdigest(),
             }
             assert entry["source_complete"] is False

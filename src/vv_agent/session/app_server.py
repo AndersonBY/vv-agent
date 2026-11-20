@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from time import sleep
 from typing import Any, cast
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
@@ -22,6 +21,8 @@ from vv_agent.kernel._content import INPUT_ACTOR_ATTRIBUTES, SESSION_PRINCIPAL_A
 from vv_agent.kernel._content_publication import publish_session_created_content
 from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSessionContentWriter
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
+from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
+from vv_agent.kernel._sql import UnsupportedFeatureLevel
 from vv_agent.types import AgentStatus, Message
 
 from .content_runtime import SessionContentWriter
@@ -174,6 +175,30 @@ class TurnMismatch(ValueError):
     pass
 
 
+class _JoinDriveState(StrEnum):
+    LOCAL_LEASE = "local_lease"
+    REMOTE_LEASE = "remote_lease"
+    DUE = "due"
+    FUTURE = "future"
+    NONE = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class _JoinDrivePlan:
+    state: _JoinDriveState
+    head: int
+
+
+def _database_now_ms(store) -> int | None:
+    current = getattr(store, "_now", None)
+    if not callable(current):
+        return None
+    now_ms = current()
+    if isinstance(now_ms, bool) or not isinstance(now_ms, int):
+        raise TypeError("store _now() must return integer milliseconds")
+    return now_ms
+
+
 @dataclass
 class _NotificationPosition:
     seq: int
@@ -272,6 +297,7 @@ class _KernelThreadStore:
         metadata=None,
         context=None,
         principal: PrincipalInput | None = None,
+        bootstrap: SessionRequirements | None = None,
     ):
         attributes = {"app_server": {"agent_key": agent_key, "cwd": cwd, "metadata": metadata or {}}}
         values = attributes | ({"app_server_context": context} if context is not None else {})
@@ -290,6 +316,14 @@ class _KernelThreadStore:
             ):
                 raise SubmissionConflict("submission_conflict")
             return self._thread_receipt(input_id, agent_key=agent_key, cwd=cwd, replayed=True)
+        if bootstrap is not None:
+            bootstrap = normalize_requirements(bootstrap)
+            if bootstrap.level < 2:
+                raise ValueError("App Server static bootstrap requires requirements.level >= 2")
+            self.kernel._ensure_static_worker_support(
+                level=bootstrap.level,
+                capabilities=bootstrap.capabilities,
+            )
         try:
             with self.kernel.store.atomic() as tx:
                 writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
@@ -311,6 +345,8 @@ class _KernelThreadStore:
                         created.principal,
                         created.workspace.to_dict(),
                         attributes=created.attributes.to_dict(),
+                        feature_level=2 if bootstrap is not None else 1,
+                        bootstrap=bootstrap,
                     )
 
                 receipt = writer.create_session(
@@ -556,6 +592,29 @@ class _KernelRunAdapter(RunAdapter):
             approval_provider=run_config.approval_provider,
         )
 
+    def _turn_runtime_config(self, run_config, *, thread_id: str, turn_id: str):
+        host_stream = run_config.stream
+
+        def stream(event):
+            if host_stream:
+                host_stream(event)
+            projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
+            if projection.item is None and projection.notification_method and projection.notification_method.endswith("/delta"):
+                self._notify_subscribers(thread_id, projection.notification_method, projection.notification_params)
+            for method, params in projection.additional_notifications:
+                if method.endswith("/delta"):
+                    self._notify_subscribers(thread_id, method, params)
+            self.kernel._worker.wake(thread_id)
+
+        return replace(run_config, stream=stream)
+
+    def _prepare_turn_runtime(self, *, connection_id: str | None, thread_id: str, input_id: str, content):
+        turn_id = f"{thread_id}/turn/{input_id}"
+        _thread, agent, config = self._binding(thread_id, content)
+        config = self._with_app_server_controls(config, connection_id=connection_id, thread_id=thread_id, turn_id=turn_id)
+        runtime_config = self._turn_runtime_config(config, thread_id=thread_id, turn_id=turn_id)
+        return self.kernel.runtime(agent, runtime_config, session_id=thread_id)
+
     def subscribe(self, thread_id, connection_id):
         state, records, _ = self.kernel.store.read_state(thread_id)
         start = state.turns[state.active_turn_id].start if state.active_turn_id else None
@@ -572,10 +631,13 @@ class _KernelRunAdapter(RunAdapter):
             self._claim_disconnected_turn_owner(connection_id, thread_id, state)
         self._notification_positions.setdefault(thread_id, _NotificationPosition(position, due=0.0))
         self._state_manager.subscribe(thread_id, connection_id)
-        if (
-            self.kernel._worker.support.drive is not None
-            and not self.kernel._worker.started
-            and self._has_pending_start_input(thread_id, self.kernel.store, state)
+        registration = self.kernel._registration_for_cursor(thread_id)
+        pending_start = self._has_pending_start_input(thread_id, self.kernel.store, state)
+        # Observe durable state without a local runtime, but leave worker scans
+        # to the admission/recovery path when there is runnable turn work.
+        if self.kernel._worker.support.drive is not None and (
+            (pending_start and self._state_manager.active_turn(thread_id) is None)
+            or (state.active_turn_id is not None and registration is None)
         ):
             return
         self.kernel._worker.post_observation(self._observe_with_driver)
@@ -657,7 +719,12 @@ class _KernelRunAdapter(RunAdapter):
             try:
                 operational = self._publish_operational_error(sid, store)
                 if now < position.due:
-                    continue
+                    if not store.read(sid, after_seq=position.seq, limit=1).records:
+                        continue
+                    # A committed record is progress even when its producer did
+                    # not call wake(). Reset only this session's throttling.
+                    position.due = 0.0
+                    position.delay = 0.05
                 previous_seq = position.seq
                 approval_seq = self._next_approval_seq(sid, store, after_seq=previous_seq)
                 if position.replay_approvals:
@@ -897,9 +964,15 @@ class _KernelRunAdapter(RunAdapter):
             return
         turn = state.turns.get(active.turn_id)
         ended = turn is not None and turn.ended
+        has_foreground_child_wait = any(
+            wait.get("handle", {}).get("kind") == "child" and wait.get("handle", {}).get("background") is False
+            for wait in state.waits.values()
+        )
         durable_wait = (turn is not None and (turn.wait is not None or turn.suspended)) or bool(state.waits)
         parked = state.phase == "parked" and bool(state.waits)
         if not ended and not durable_wait and not parked:
+            return
+        if not ended and has_foreground_child_wait and self.kernel._pending_child_work(store, state):
             return
         if not self._state_manager.clear_active_turn(sid, active.turn_id, handle=active.handle):
             return
@@ -955,6 +1028,7 @@ class _KernelRunAdapter(RunAdapter):
             )
             if wait_sid == sid and wait.get("kind") == "approval"
         }
+        now_ms = _database_now_ms(store)
         for request_id, event in events.items():
             event_seq = event.metadata["session_seq"]
             if (event_seq <= after_seq and not replay_approvals) or (through_seq is not None and event_seq > through_seq):
@@ -963,6 +1037,13 @@ class _KernelRunAdapter(RunAdapter):
             wait = waits.get((turn_id, request_id))
             if replay_approvals and wait is None:
                 continue
+            if wait is not None:
+                deadline_ms = wait.get("deadline_ms")
+                if deadline_ms is None:
+                    durable_wait = state.waits.get((wait.get("operation_id"), wait.get("attempt")))
+                    deadline_ms = durable_wait.get("deadline_ms") if durable_wait is not None else None
+                if deadline_ms is not None and now_ms is not None and now_ms >= deadline_ms:
+                    continue
             if self._approval_answered(store, sid, request_id):
                 continue
             owner = self._turn_connections.get((sid, turn_id))
@@ -1081,65 +1162,87 @@ class _KernelRunAdapter(RunAdapter):
         input,
         metadata=None,
         actor: PrincipalInput | None = None,
+        _prepared_content=None,
+        _start_runtime=None,
     ):
-        content = _content(self, input, metadata or {}, kind, expected_turn_id)
+        content = (
+            _prepared_content if _prepared_content is not None else _content(self, input, metadata or {}, kind, expected_turn_id)
+        )
+        previous_registration = None
+        start_registration = None
         try:
             while True:
                 state, records, _ = self.kernel.store.read_state(thread_id)
-                with self.kernel.store.atomic() as tx:
-                    tx.lock_session(thread_id)
-                    if self.kernel.store.lease_status(thread_id)[0] != records[-1].seq:
-                        continue
-                    stored = self.kernel.store.read_input(thread_id, input_id)
-                    if stored:
-                        retained = stored.item
-                        expected_kind = "user" if kind == "start" else kind
-                        actor_payload = self._controller_actor_payload(thread_id, actor)
-                        retained_content = hydrate_input(retained, self._hydration(thread_id)).payload.get("content")
-                        if (
-                            retained.kind != expected_kind
-                            or not self._controller_actor_matches(thread_id, retained, actor_payload)
-                            or canonical_json_bytes(retained_content) != canonical_json_bytes(content)
+                try:
+                    with self.kernel.store.atomic() as tx:
+                        tx.lock_session(thread_id)
+                        previous_registration = self.kernel._runtimes.get(thread_id)
+                        if self.kernel.store.lease_status(thread_id)[0] != records[-1].seq:
+                            continue
+                        stored = self.kernel.store.read_input(thread_id, input_id)
+                        if stored:
+                            retained = stored.item
+                            expected_kind = "user" if kind == "start" else kind
+                            actor_payload = self._controller_actor_payload(thread_id, actor)
+                            retained_content = hydrate_input(retained, self._hydration(thread_id)).payload.get("content")
+                            if (
+                                retained.kind != expected_kind
+                                or not self._controller_actor_matches(thread_id, retained, actor_payload)
+                                or canonical_json_bytes(retained_content) != canonical_json_bytes(content)
+                            ):
+                                raise SubmissionConflict("submission_conflict")
+                            receipt = tx.push(thread_id, retained)
+                            break
+                        if state.closed or state.archived:
+                            raise TurnMismatch("Thread is closed or archived")
+                        latest = next(reversed(state.turns), None)
+                        if expected_turn_id != (state.active_turn_id if kind == "steer" else latest):
+                            raise TurnMismatch("turn_mismatch")
+                        if kind == "start" and (
+                            state.active_turn_id
+                            or any(
+                                r._payload["disposition"] == "queued"
+                                and key not in state.admitted_inputs
+                                and r._payload["input"]["kind"] in {"user", "follow_up"}
+                                for key, r in state.applied_inputs.items()
+                            )
+                            or any(
+                                x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None
+                                for x in self.kernel.store.peek_inbox(thread_id)
+                            )
                         ):
-                            raise SubmissionConflict("submission_conflict")
-                        receipt = tx.push(thread_id, retained)
+                            raise TurnMismatch("Thread already has an active turn")
+                        if kind != "start" and expected_turn_id is None:
+                            raise TurnMismatch("turn_mismatch")
+                        item = InboxItem(
+                            input_id,
+                            "user" if kind == "start" else kind,
+                            {"content": content},
+                            expected_turn_id if kind == "steer" else None,
+                            state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
+                        )
+                        if kind == "start" and _start_runtime is not None:
+                            start_registration = self.kernel._register_runtime(
+                                thread_id,
+                                _start_runtime,
+                                armed=True,
+                            )
+                        receipt = self.kernel._push_in_transaction(
+                            tx,
+                            thread_id,
+                            item,
+                            actor=actor,
+                            actor_subject_id="app-server",
+                            registration=start_registration,
+                        )
                         break
-                    if state.closed or state.archived:
-                        raise TurnMismatch("Thread is closed or archived")
-                    latest = next(reversed(state.turns), None)
-                    if expected_turn_id != (state.active_turn_id if kind == "steer" else latest):
-                        raise TurnMismatch("turn_mismatch")
-                    if kind == "start" and (
-                        state.active_turn_id
-                        or any(
-                            r._payload["disposition"] == "queued"
-                            and key not in state.admitted_inputs
-                            and r._payload["input"]["kind"] in {"user", "follow_up"}
-                            for key, r in state.applied_inputs.items()
-                        )
-                        or any(
-                            x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None
-                            for x in self.kernel.store.peek_inbox(thread_id)
-                        )
-                    ):
-                        raise TurnMismatch("Thread already has an active turn")
-                    if kind != "start" and expected_turn_id is None:
-                        raise TurnMismatch("turn_mismatch")
-                    item = InboxItem(
-                        input_id,
-                        "user" if kind == "start" else kind,
-                        {"content": content},
-                        expected_turn_id if kind == "steer" else None,
-                        state.turns[expected_turn_id].start._payload["generation"] if kind == "steer" else None,
-                    )
-                    receipt = self.kernel._push_in_transaction(
-                        tx,
-                        thread_id,
-                        item,
-                        actor=actor,
-                        actor_subject_id="app-server",
-                    )
-                    break
+                except BaseException:
+                    if start_registration is not None and self.kernel._runtimes.get(thread_id) is start_registration:
+                        if previous_registration is None:
+                            self.kernel._runtimes.pop(thread_id, None)
+                        else:
+                            self.kernel._runtimes[thread_id] = previous_registration
+                    raise
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         tid = expected_turn_id if kind == "steer" else f"{thread_id}/turn/{input_id}"
@@ -1171,7 +1274,16 @@ class _KernelRunAdapter(RunAdapter):
         request_id=None,
         actor: PrincipalInput | None = None,
     ):
-        payload, _content = self.submit_input(
+        content = _content(self, input, metadata or {}, "start", expected_turn_id)
+        start_runtime = None
+        if self.kernel._worker.support.drive is not None:
+            start_runtime = self._prepare_turn_runtime(
+                connection_id=connection_id,
+                thread_id=thread_id,
+                input_id=input_id,
+                content=content,
+            )
+        payload, _submitted_content = self.submit_input(
             connection_id=connection_id,
             thread_id=thread_id,
             input_id=input_id,
@@ -1180,6 +1292,8 @@ class _KernelRunAdapter(RunAdapter):
             input=input,
             metadata=metadata,
             actor=actor,
+            _prepared_content=content,
+            _start_runtime=start_runtime,
         )
         self.subscribe(thread_id, connection_id)
         self.recover(connection_id, thread_id)
@@ -1233,7 +1347,6 @@ class _KernelRunAdapter(RunAdapter):
             self.subscribe(thread_id, connection_id)
         else:
             connection_id = self._subscriber(thread_id)
-        _thread, agent, config = self._binding(thread_id, content)
         state, _records, _ = self.kernel.store.read_state(thread_id)
         tid = self._next_turn_id(
             thread_id,
@@ -1252,23 +1365,21 @@ class _KernelRunAdapter(RunAdapter):
                 self._turn_connections[owner_key] = inherited_owner
             elif self.kernel.store.lease_status(thread_id)[2] == 0:
                 self._turn_connections[owner_key] = connection_id
-        config = self._with_app_server_controls(config, connection_id=connection_id, thread_id=thread_id, turn_id=tid)
-        host_stream = config.stream
-
-        def stream(event):
-            if host_stream:
-                host_stream(event)
-            projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
-            if projection.item is None and projection.notification_method and projection.notification_method.endswith("/delta"):
-                self._notify_subscribers(thread_id, projection.notification_method, projection.notification_params)
-            for method, params in projection.additional_notifications:
-                if method.endswith("/delta"):
-                    self._notify_subscribers(thread_id, method, params)
-            self.kernel._worker.wake(thread_id)
-
-        runtime_config = replace(config, stream=stream)
-        runtime = self.kernel.runtime(agent, runtime_config, session_id=thread_id)
-        self.kernel._register_runtime(thread_id, runtime, armed=True)
+        registration = self.kernel._runtimes.get(thread_id)
+        if registration is not None and registration.config.metadata.get("turn_id") == tid:
+            agent = registration.agent
+            runtime_config = registration.config
+        else:
+            _thread, agent, config = self._binding(thread_id, content)
+            config = self._with_app_server_controls(
+                config,
+                connection_id=connection_id,
+                thread_id=thread_id,
+                turn_id=tid,
+            )
+            runtime_config = self._turn_runtime_config(config, thread_id=thread_id, turn_id=tid)
+            runtime = self.kernel.runtime(agent, runtime_config, session_id=thread_id)
+            self.kernel._register_runtime(thread_id, runtime, armed=True)
         handle = self.kernel.start(
             thread_id,
             agent,
@@ -1525,7 +1636,9 @@ class _KernelRunAdapter(RunAdapter):
         return result
 
     def select_model(self, *, thread_id, input_id, selection, actor: PrincipalInput | None = None):
-        self._store.read_thread(thread_id)
+        snapshot = self._store.read_thread(thread_id)
+        if snapshot.thread.status in {ThreadStatus.CLOSED, ThreadStatus.ARCHIVED}:
+            raise SubmissionConflict("submission_conflict")
         try:
             self.kernel.push(
                 thread_id,
@@ -1537,6 +1650,8 @@ class _KernelRunAdapter(RunAdapter):
                 actor=actor,
                 actor_subject_id="app-server",
             )
+        except UnsupportedFeatureLevel:
+            raise
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         return {"threadId": thread_id, "inputId": input_id, "accepted": True}
@@ -1733,6 +1848,54 @@ class _KernelRunAdapter(RunAdapter):
                 return True
         return False
 
+    def _join_drive_plan(self, session_id: str) -> _JoinDrivePlan:
+        worker = self.kernel._worker
+        head, _, lease_ms = self.kernel.store.lease_status(session_id)
+        inflight = worker._inflight_lease
+        if inflight is not None and inflight.session_id == session_id:
+            return _JoinDrivePlan(_JoinDriveState.LOCAL_LEASE, head)
+        if lease_ms > 0:
+            # A wake that has claimed but not yet handed its lease to the
+            # executor is local work. Without that worker marker the lease
+            # belongs to another node and join must only observe it.
+            state = _JoinDriveState.LOCAL_LEASE if session_id in worker.active_wake_sessions else _JoinDriveState.REMOTE_LEASE
+            return _JoinDrivePlan(state, head)
+        if self.kernel.store.is_runnable(session_id):
+            return _JoinDrivePlan(_JoinDriveState.DUE, head)
+        delay_ms = self.kernel.store.next_drive_delay_ms(session_id)
+        if delay_ms is None:
+            return _JoinDrivePlan(_JoinDriveState.NONE, head)
+        if isinstance(delay_ms, bool) or not isinstance(delay_ms, int):
+            raise TypeError("next_drive_delay_ms() must return integer milliseconds or None")
+        state = _JoinDriveState.DUE if delay_ms == 0 else _JoinDriveState.FUTURE
+        return _JoinDrivePlan(state, head)
+
+    def _join_session(self, session_id: str) -> None:
+        worker = self.kernel._worker
+        while True:
+            plan = self._join_drive_plan(session_id)
+            if plan.state is _JoinDriveState.LOCAL_LEASE:
+                inflight = worker._inflight_lease
+                if (inflight is None or inflight.session_id != session_id) and not self._wait_for_local_claim_handoff(session_id):
+                    return
+                worker.wait_idle()
+            elif plan.state is _JoinDriveState.DUE:
+                if not self._wait_for_local_claim_handoff(session_id):
+                    return
+                worker.wait_idle()
+            elif plan.state is _JoinDriveState.REMOTE_LEASE:
+                # Observe the explicit join with one local coordination pass.
+                # The remote owner itself is never awaited.
+                previous = worker.coordinate_pass
+                worker.wake(session_id)
+                if worker.started:
+                    worker.wait_for_coordinate_pass(previous, worker.scan_interval * 4)
+                return
+            else:
+                return
+            if self.kernel.store.lease_status(session_id)[0] == plan.head:
+                return
+
     def join(self):
         """Wait for this node's accepted work without joining a remote lease."""
 
@@ -1745,33 +1908,6 @@ class _KernelRunAdapter(RunAdapter):
         self.kernel._worker.post_observation(self._observe_with_driver)
         self.kernel._worker.wait_idle()
         handles = tuple(handle for handle in self.kernel.handles if handle.consumer == "app_server")
-        for handle in handles:
-            if handle.done():
-                continue
-            # A prior owner can release after its cursor became quiescent. Give
-            # this coordinator one scan to claim that turn; a live remote lease
-            # remains observable and is deliberately not joined.
-            claim_deadline = self.clock.monotonic() + max(5.0, self.kernel._worker.scan_interval * 4)
-            self.kernel._worker.wake(handle.session_id)
-            while not handle.done():
-                inflight = self.kernel._worker._inflight_lease
-                if inflight is not None and inflight.session_id == handle.session_id:
-                    handle.join()
-                    break
-                if self.kernel.store.lease_status(handle.session_id)[2] > 0:
-                    if self._wait_for_local_claim_handoff(handle.session_id):
-                        handle.join()
-                    break
-                if not self.kernel.store.is_runnable(handle.session_id) and self.kernel.store.next_drive_delay_ms(
-                    handle.session_id
-                ):
-                    break
-                if self.clock.monotonic() >= claim_deadline:
-                    break
-                handle.join(timeout=0.01)
-        # Give claimable due work one coordinator scan. A live remote lease is
-        # only observed; this join never waits for another node to release it.
-        claim_deadline = self.clock.monotonic() + max(5.0, self.kernel._worker.scan_interval * 4)
         session_ids = dict.fromkeys(
             (
                 *self._notification_positions,
@@ -1780,18 +1916,7 @@ class _KernelRunAdapter(RunAdapter):
             )
         )
         for sid in session_ids:
-            while self.clock.monotonic() < claim_deadline:
-                inflight = self.kernel._worker._inflight_lease
-                if inflight is not None and inflight.session_id == sid:
-                    self.kernel._worker.wait_idle()
-                    break
-                if self.kernel.store.lease_status(sid)[2] > 0:
-                    if self._wait_for_local_claim_handoff(sid):
-                        self.kernel._worker.wait_idle()
-                    break
-                if not self.kernel.store.is_runnable(sid):
-                    break
-                sleep(0.01)
+            self._join_session(sid)
         # Reconcile the terminal record, operational error, and released cursor.
         self.kernel._worker.post_observation(self._observe_with_driver)
         self.kernel._worker.wait_idle()

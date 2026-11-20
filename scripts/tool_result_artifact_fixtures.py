@@ -15,7 +15,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.s1_fixture_values import create_fixture_session, fixture_content_reader, push_fixture_input, wrap_fixture_store
+from scripts.s1_fixture_values import (
+    create_fixture_session,
+    fixture_content_reader,
+    fixture_key_provider,
+    push_fixture_input,
+    wrap_fixture_store,
+)
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.kernel._canonical_json import canonical_json_bytes
@@ -134,38 +140,47 @@ def produce(text, *, backend=None, truncated=False, named=False, forged=False, t
         SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
     ):
         store.install_schema()
-        store = wrap_fixture_store(store)
-        create_fixture_session(store, "s1", consumers=())
-        push_fixture_input(store, "s1", InboxItem("initial", "user", {"content": "go"}))
-        runtime = Runtime(
-            agent=Agent(name="s1", instructions="Collect output.", tools=[output]),
-            config=RunConfig(workspace_backend=backend, session_memory_enabled=False),
-            resolved=ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", []),
-            llm=ScriptedLLM([LLMResponse("", [ToolCall("call-s1", "output", {})]), LLMResponse("done")]),
-            heartbeat_store=lambda: nullcontext(store),
-            providers={"output": NamedProvider()} if named else {},
-            content_reader=fixture_content_reader(store, "s1"),
-        )
-        drive(store, "s1", runtime=runtime)
-        stored_records = store.read("s1", limit=100).records
-        records = [entry.record for entry in stored_records]
-        hydration = hydration_for_session_store(store, "s1")
-        logical = [
-            SimpleNamespace(
-                kind=entry.record.kind,
-                operation_id=entry.record.operation_id,
-                attempt=entry.record.attempt,
-                _payload=hydrate_record_payload(entry, hydration),
-                _retained_payload=entry.record._payload,
+        key_provider = fixture_key_provider(Path(directory) / "content-keys.sqlite3")
+        try:
+            store = wrap_fixture_store(store, key_provider)
+            create_fixture_session(store, "s1", consumers=())
+            push_fixture_input(store, "s1", InboxItem("initial", "user", {"content": "go"}))
+            runtime = Runtime(
+                agent=Agent(name="s1", instructions="Collect output.", tools=[output]),
+                config=RunConfig(workspace_backend=backend, session_memory_enabled=False),
+                resolved=ResolvedModelConfig("scripted", "scripted", "scripted", "scripted", []),
+                llm=ScriptedLLM([LLMResponse("", [ToolCall("call-s1", "output", {})]), LLMResponse("done")]),
+                heartbeat_store=lambda: nullcontext(store),
+                providers={"output": NamedProvider()} if named else {},
+                content_reader=fixture_content_reader(store, "s1"),
             )
-            for entry in stored_records
-        ]
-        receipt = next(r for r in logical if r.kind == "op_completed" and r._payload["result"].get("tool_call_id"))
-        plan = next(r for r in logical if r.kind == "op_planned" and r.operation_id == receipt.operation_id)
-        before = [r.encode() for r in records]
-        drive(store, "s1", runtime=runtime)
-        assert effects == ["effect"]
-        assert before == [entry.record.encode() for entry in store.read("s1", limit=100).records]
+            drive(store, "s1", runtime=runtime)
+            stored_records = store.read("s1", limit=100).records
+            records = [entry.record for entry in stored_records]
+            hydration = hydration_for_session_store(store, "s1")
+            logical = []
+            for entry in stored_records:
+                payload = hydrate_record_payload(entry, hydration)
+                logical.append(
+                    SimpleNamespace(
+                        kind=entry.record.kind,
+                        session_id=entry.record.session_id,
+                        turn_id=entry.record.turn_id,
+                        operation_id=entry.record.operation_id,
+                        attempt=entry.record.attempt,
+                        payload=payload,
+                        _payload=payload,
+                        _retained_payload=entry.record._payload,
+                    )
+                )
+            receipt = next(r for r in logical if r.kind == "op_completed" and r._payload["result"].get("tool_call_id"))
+            plan = next(r for r in logical if r.kind == "op_planned" and r.operation_id == receipt.operation_id)
+            before = [r.encode() for r in records]
+            drive(store, "s1", runtime=runtime)
+            assert effects == ["effect"]
+            assert before == [entry.record.encode() for entry in store.read("s1", limit=100).records]
+        finally:
+            key_provider.close()
     return plan, receipt, backend
 
 
