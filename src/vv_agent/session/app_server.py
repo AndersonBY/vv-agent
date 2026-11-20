@@ -621,15 +621,19 @@ class _KernelRunAdapter(RunAdapter):
         position = next(r.seq for r in records if r.record == start) - 1 if start else records[-1].seq
         if not self._router.is_registered(connection_id):
             return
+        self._notification_positions.setdefault(thread_id, _NotificationPosition(position, due=0.0))
         local = self._state_manager.active_turn(thread_id)
         if state.active_turn_id is not None and local is not None and local.turn_id == state.active_turn_id:
             owner_key = (thread_id, state.active_turn_id)
             owner = self._turn_connections.get(owner_key)
             if owner_key not in self._turn_connections or owner is None or not self._router.is_registered(owner):
                 self._turn_connections[owner_key] = connection_id
+                self._request_approval_replay(thread_id)
         elif state.active_turn_id is not None:
-            self._claim_disconnected_turn_owner(connection_id, thread_id, state)
-        self._notification_positions.setdefault(thread_id, _NotificationPosition(position, due=0.0))
+            # A fresh observer process has no local owner map. An explicit
+            # subscription may install it, but the lease check still blocks
+            # takeover while another node is driving the turn.
+            self._claim_disconnected_turn_owner(connection_id, thread_id, state, allow_missing=True)
         self._state_manager.subscribe(thread_id, connection_id)
         registration = self.kernel._registration_for_cursor(thread_id)
         pending_start = self._has_pending_start_input(thread_id, self.kernel.store, state)
@@ -909,19 +913,37 @@ class _KernelRunAdapter(RunAdapter):
                 owner = candidate
         return owner
 
-    def _claim_disconnected_turn_owner(self, connection_id, thread_id: str, state) -> bool:
+    def _claim_disconnected_turn_owner(
+        self,
+        connection_id,
+        thread_id: str,
+        state,
+        *,
+        allow_missing: bool = False,
+    ) -> bool:
         if state.active_turn_id is None or connection_id is None or not self._router.is_registered(connection_id):
             return False
         if self.kernel.store.lease_status(thread_id)[2] > 0:
             return False
         owner_key = (thread_id, state.active_turn_id)
-        if owner_key not in self._turn_connections:
+        if owner_key not in self._turn_connections and not allow_missing:
             return False
-        owner = self._turn_connections[owner_key]
+        owner = self._turn_connections.get(owner_key)
         if owner is not None and self._router.is_registered(owner):
             return False
         self._turn_connections[owner_key] = connection_id
+        self._request_approval_replay(thread_id)
         return True
+
+    def _request_approval_replay(self, thread_id: str) -> None:
+        """Trigger a durable-record scan after an owner connection transition."""
+
+        position = self._notification_positions.get(thread_id)
+        if position is None:
+            return
+        position.due = 0.0
+        position.delay = 0.05
+        position.replay_approvals = True
 
     def _ensure_turn_connection(self, thread_id: str, turn_id: str) -> None:
         key = (thread_id, turn_id)

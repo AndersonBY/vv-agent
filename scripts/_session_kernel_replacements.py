@@ -1946,11 +1946,12 @@ class Author:
             prefix_a, prefix_b = next(first), next(second)
             result = _result_after_worker(handle)
             a, b = [prefix_a, *first], [prefix_b, *second]
+            replayed = list(handle.events())
             count = len(a)
-            assert count >= 1100 and a == b == list(handle.events()) == result.events
+            assert count >= 1100 and a == b == replayed == result.events
             subscribers = {
                 "independent": a == b,
-                "start_from_complete_backlog": a == list(handle.events()),
+                "start_from_complete_backlog": a == replayed,
                 "lossless_after_live_capacity": count >= 1100,
                 "burst_event_count": count,
             }
@@ -2185,58 +2186,68 @@ class Author:
 
         capacity = self.outputs["memory_lifecycle.json"]["capacity_contract"]
         builder = suite["build_memory_manager"]
-        for cases, test, context_only in (
-            (capacity["cases"], "test_runtime_resolves_memory_capacity_from_contract_cases", False),
-            (capacity["context_window_resolution"]["cases"], "test_runtime_context_window_resolution_matches_contract", True),
-        ):
-            for case in cases:
-                produced = []
+        was_suspended = hasattr(self.f, "_suspended_worker_support")
+        if not was_suspended:
+            self.f.suspend_worker_execution()
+        try:
+            for cases, test, context_only in (
+                (capacity["cases"], "test_runtime_resolves_memory_capacity_from_contract_cases", False),
+                (capacity["context_window_resolution"]["cases"], "test_runtime_context_window_resolution_matches_contract", True),
+            ):
+                for case in cases:
+                    produced = []
 
-                def capture(produced=produced, **kwargs):
-                    manager = builder(**kwargs)
-                    produced.append(manager)
-                    return manager
+                    def capture(produced=produced, **kwargs):
+                        manager = builder(**kwargs)
+                        produced.append(manager)
+                        return manager
 
-                with (
-                    pytest.MonkeyPatch.context() as monkeypatch,
-                    patch.dict(suite[test].__globals__, {"build_memory_manager": capture}),
-                ):
-                    suite[test](case, tmp, monkeypatch)
-                assert len(produced) == 1
-                sid = "c1c/capacity/" + case["name"]
-                rt = self.f.admit(sid, [LLMResponse("done")], memory=produced[0])
-                self.f.run(sid)
-                records = self.f.kernel.store.read_state(sid)[1]
-                terminals = [(index, stored.record) for index, stored in enumerate(records) if stored.record.kind == "turn_ended"]
-                assert len(terminals) == 1, [stored.record.kind for stored in records]
-                terminal_index, terminal = terminals[0]
-                assert terminal.payload["status"] == "completed"
-                prefix = [stored.record for stored in records[:terminal_index]]
-                state = fold(
-                    prefix, consumed_inputs=[InboxItem(**r._payload["input"]) for r in prefix if r.kind == "input_applied"]
-                )
-                assert state.model_selection is None
-                driver = _MemoryCapacityDriver(
-                    state=state,
-                    records=records,
-                    sid=sid,
-                    runtime=rt,
-                    store=self.f.kernel.store,
-                )
-                admitted = manager_for(driver)  # ty: ignore[invalid-argument-type]
-                if context_only:
-                    assert admitted.model_context_window == case["expected_model_context_window"]
-                    case["expected_model_context_window"] = admitted.model_context_window
-                else:
-                    actual = {
-                        "reserved_output_tokens": admitted.reserved_output_tokens,
-                        "reserved_output_source": admitted.reserved_output_source,
-                        "effective_threshold": admitted.autocompact_threshold,
-                        "microcompact_threshold": admitted.microcompact_trigger_threshold,
-                        "microcompact_target": admitted.microcompact_target_threshold,
-                    }
-                    assert actual == case["expected"]
-                    case["expected"] = actual
+                    with (
+                        pytest.MonkeyPatch.context() as monkeypatch,
+                        patch.dict(suite[test].__globals__, {"build_memory_manager": capture}),
+                    ):
+                        suite[test](case, tmp, monkeypatch)
+                    assert len(produced) == 1
+                    sid = "c1c/capacity/" + case["name"]
+                    rt = self.f.admit(sid, [LLMResponse("done")], memory=produced[0])
+                    self.f.run(sid)
+                    records = self.f.kernel.store.read_state(sid)[1]
+                    terminals = [
+                        (index, stored.record) for index, stored in enumerate(records) if stored.record.kind == "turn_ended"
+                    ]
+                    assert len(terminals) == 1, [stored.record.kind for stored in records]
+                    terminal_index, terminal = terminals[0]
+                    assert terminal.payload["status"] == "completed"
+                    prefix = [stored.record for stored in records[:terminal_index]]
+                    state = fold(
+                        prefix,
+                        consumed_inputs=[InboxItem(**r._payload["input"]) for r in prefix if r.kind == "input_applied"],
+                    )
+                    assert state.model_selection is None
+                    driver = _MemoryCapacityDriver(
+                        state=state,
+                        records=records,
+                        sid=sid,
+                        runtime=rt,
+                        store=self.f.kernel.store,
+                    )
+                    admitted = manager_for(driver)  # ty: ignore[invalid-argument-type]
+                    if context_only:
+                        assert admitted.model_context_window == case["expected_model_context_window"]
+                        case["expected_model_context_window"] = admitted.model_context_window
+                    else:
+                        actual = {
+                            "reserved_output_tokens": admitted.reserved_output_tokens,
+                            "reserved_output_source": admitted.reserved_output_source,
+                            "effective_threshold": admitted.autocompact_threshold,
+                            "microcompact_threshold": admitted.microcompact_trigger_threshold,
+                            "microcompact_target": admitted.microcompact_target_threshold,
+                        }
+                        assert actual == case["expected"]
+                        case["expected"] = actual
+        finally:
+            if not was_suspended:
+                self.f.resume_worker_execution()
 
     def memory_routes(self, suite):
         from vv_agent.config import ResolvedModelConfig

@@ -185,6 +185,25 @@ def test_memory_capacity_corpus_reaches_real_turn_terminals(tmp_path):
     author = REPLACEMENTS["Author"](fixtures, AUTHOR["independent_bytes"], AUTHOR["facts"])
     lifecycle_suite = runpy.run_path(str(Path(__file__).parents[2] / "tests" / "test_memory_lifecycle_contract.py"))
     try:
+        provider = ScriptedModelProvider.new("test", "m", [LLMResponse("prime")])
+        prime = start_runner(
+            fixtures.kernel,
+            "capacity-worker-prime",
+            Agent("prime", "Prime the fixture worker."),
+            "go",
+            run_config=RunConfig(model_provider=provider),
+        )
+        prime.result()
+        admitted = fixtures.admit
+
+        def admit_after_coordinator_pass(*args, **kwargs):
+            runtime = admitted(*args, **kwargs)
+            previous = fixtures.kernel._worker.coordinate_pass
+            assert fixtures.kernel._worker.wait_for_coordinate_pass(previous, timeout=5)
+            fixtures.kernel._worker.wait_idle(5)
+            return runtime
+
+        fixtures.admit = admit_after_coordinator_pass
         author.memory_capacity(lifecycle_suite, tmp_path)
 
         capacity = author.outputs["memory_lifecycle.json"]["capacity_contract"]

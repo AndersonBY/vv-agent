@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -24,6 +25,13 @@ from vv_agent.session.reducer import ExecutionState
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
+
+
+@pytest.fixture(autouse=True)
+def _level_two_app_server_storage(surface) -> None:
+    # App Server static bootstrap creates feature-level-2 sessions, while the
+    # shared disposable fixture starts its SQLite store at write level 1.
+    surface._ensure_static_worker_support(level=2, capabilities=())
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -127,10 +135,14 @@ def test_app_server_approval_deny_skips_tool_and_completes_turn() -> None:
     assert _completed_status(outbound) == "completed"
 
 
-@pytest.mark.parametrize(("store_now_ms", "expected_notification"), [(999, True), (1000, False)])
-def test_pending_approval_uses_database_store_clock(
+@pytest.mark.parametrize(
+    ("store_now_ms", "answered", "expected_notification"),
+    [(999, False, True), (1000, False, False), (999, True, False)],
+)
+def test_pending_approval_replay_respects_database_clock_and_durable_answer(
     monkeypatch: pytest.MonkeyPatch,
     store_now_ms: int,
+    answered: bool,
     expected_notification: bool,
 ) -> None:
     class Store:
@@ -204,7 +216,7 @@ def test_pending_approval_uses_database_store_clock(
     adapter._router = router
     adapter._turn_connections = {("thread_1", "turn_1"): "conn_1"}
     adapter._hydration = lambda *_args, **_kwargs: None
-    adapter._approval_answered = lambda *_args: False
+    adapter._approval_answered = lambda *_args: answered
 
     adapter._send_pending_approvals("thread_1", store, after_seq=0, through_seq=1)
 
@@ -475,6 +487,7 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
         assert time.monotonic() - join_started < 3
         before_deadline = _drain_available(observer)
         assert not any(message.get("method") == "turn/completed" for message in before_deadline)
+        time.sleep(max(0.0, (deadline_ms - time.time() * 1000) / 1000) + 0.02)
         now_ms[0] = deadline_ms
         cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
         observer_after_disconnect = _drain_until_turn_completed(observer, timeout=2)
@@ -485,7 +498,7 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
     assert calls == []
 
 
-def test_new_app_server_reconnect_replays_durable_approval_without_local_runtime(surface) -> None:
+def test_pure_observer_reconnect_replays_durable_approval_without_local_runtime(surface) -> None:
     calls: list[str] = []
     first, owner = _server_with_approval_tool(calls)
     approval = _start_and_wait_for_approval(first, owner)
@@ -499,6 +512,12 @@ def test_new_app_server_reconnect_replays_durable_approval_without_local_runtime
     first.kernel.close()
 
     second, observer = _server_with_approval_tool(calls)
+    second.kernel._worker.support = replace(
+        second.kernel._worker.support,
+        drive=None,
+        project=None,
+        projection_consumers=(),
+    )
     assert thread_id not in second.kernel._runtimes
 
     _initialize(second, observer, request_id=10, client_name="observer")
@@ -509,17 +528,19 @@ def test_new_app_server_reconnect_replays_durable_approval_without_local_runtime
     )
     replayed = _drain_until(observer, lambda message: message.get("method") == "approval/request")
     assert replayed["id"] == approval_id
-    assert thread_id in second.kernel._runtimes
+    assert thread_id not in second.kernel._runtimes
+    assert not second.kernel.handles
+    assert second.kernel._worker.support.drive is None
 
     _send(
         observer,
         second,
         {"jsonrpc": "2.0", "id": approval_id, "result": {"decision": "allow", "reason": "reconnected"}},
     )
-    resolved = _drain_until(observer, lambda message: message.get("method") == "approval/resolved")
-    assert cast(dict[str, object], resolved["params"])["decision"] == "allow"
-    state, _, _ = surface.store.read_state(thread_id)
-    assert f"approval/{approval_id}/answer" in state.applied_inputs
+    answer_id = f"approval/{approval_id}/answer"
+    assert any(entry.item.input_id == answer_id for entry in second.kernel.store.peek_inbox(thread_id))
+    assert thread_id not in second.kernel._runtimes
+    assert not second.kernel.handles
 
 
 def test_second_turn_registers_config_before_worker_can_drive() -> None:

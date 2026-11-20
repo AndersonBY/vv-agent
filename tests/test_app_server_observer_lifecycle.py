@@ -18,7 +18,8 @@ from session.test_app_server_providers import TURN as PROVIDER_TURN
 from session.test_app_server_providers import BusinessDB, JobsProvider
 from session.test_app_server_providers import Server as ProviderServer
 from support import FixedModelProvider
-from test_app_server_distributed import node, request, submission
+from test_app_server_distributed import node as _distributed_node
+from test_app_server_distributed import request, submission
 
 from vv_agent import Accepted, Agent, ScriptedModelProvider, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport
@@ -29,6 +30,21 @@ from vv_agent.llm import ScriptedLLM
 from vv_agent.session.runtime import static_session_requirements
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, ToolCall
+
+
+def node(stack, path, connection, provider, *, agent=None, content_key_provider=None):
+    server = _distributed_node(
+        stack,
+        path,
+        connection,
+        provider,
+        agent=agent,
+        content_key_provider=content_key_provider,
+    )
+    # Static App Server bootstrap persists level-2 sessions. These shared
+    # SQLite fixtures install the default level-1 schema directly.
+    server.kernel._root_store._rows("UPDATE sk_settings SET write_level=? WHERE singleton=1", (2,))
+    return server
 
 
 def _eventually(predicate: Callable[[], bool], timeout: float = 5) -> None:
@@ -476,6 +492,15 @@ def test_reconnect_replays_same_request_and_standard_response_answers_it(tmp_pat
     with ExitStack() as stack:
         server = _approval_node(stack, tmp_path / "store", "A", calls)
         request(server, 1, "thread/start", {"inputId": "thread"})
+        keepalive = ChannelTransport(connection_id="keepalive")
+        server.router.register_transport(keepalive)
+        _send(
+            server,
+            keepalive,
+            {"jsonrpc": "2.0", "id": 20, "method": "initialize", "params": {"clientInfo": {"name": "keepalive"}}},
+        )
+        _until(keepalive, lambda message: message.get("id") == 20)
+        _request_with_messages(server, keepalive, 21, "thread/resume", {"threadId": "thread"})
         tid = request(server, 2, "turn/start", submission())["result"]["turnId"]
         first, _ = _until(server.transport, lambda message: message.get("method") == "approval/request")
         first_params = cast(dict[str, Any], first["params"])
@@ -510,6 +535,15 @@ def test_reconnect_replays_same_request_and_standard_response_answers_it(tmp_pat
         replay_params = cast(dict[str, Any], replay["params"])
         assert replay_params["requestId"] == first_params["requestId"]
         assert replay_params["turnId"] == tid
+
+        _, duplicate_messages = _request_with_messages(
+            server,
+            reconnected,
+            5,
+            "thread/resume",
+            {"threadId": "thread"},
+        )
+        assert not any(message.get("method") == "approval/request" for message in duplicate_messages)
 
         _send(
             server,
@@ -633,6 +667,8 @@ def test_due_provider_query_survives_subscription_and_local_handle_release(tmp_p
     with SQLiteStore.standalone(str(tmp_path / "provider-session.sqlite")) as store:
         store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
+        with store.atomic():
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         provider_server = ProviderServer(store, business)
         try:
             provider_server.start()
@@ -664,6 +700,8 @@ def test_provider_result_invalid_warns_once_and_stays_parked_across_backoff(tmp_
     with SQLiteStore.standalone(str(tmp_path / "invalid-provider-session.sqlite")) as store:
         store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
+        with store.atomic():
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         provider_server = ProviderServer(store, business)
         try:
             provider_server.start()
@@ -751,6 +789,8 @@ def test_first_reconnect_warns_when_future_query_invalidates_without_subscriber(
     with SQLiteStore.standalone(str(tmp_path / "detached-invalid-session.sqlite")) as store:
         store.configure_input_admission(allow_unsigned=True)
         store.install_schema()
+        with store.atomic():
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         provider_server = ProviderServer(store, business)
         try:
             provider_server.start()
@@ -854,6 +894,8 @@ def test_observer_reconciles_invalid_provider_failure_after_remote_completion(tm
         first_store = stack.enter_context(SQLiteStore.standalone(str(session_path)))
         first_store.configure_input_admission(allow_unsigned=True)
         first_store.install_schema()
+        with first_store.atomic():
+            first_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         second_store = stack.enter_context(SQLiteStore.standalone(str(session_path)))
         second_store.configure_input_admission(allow_unsigned=True)
         first = ProviderServer(first_store, business)
