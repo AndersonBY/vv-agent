@@ -31,8 +31,12 @@ from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
+from vv_agent.kernel._requirements import SessionRequirements
+from vv_agent.kernel._sql import UnsupportedFeatureLevel
+from vv_agent.model import ModelError
 from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
 from vv_agent.session.interactions import InteractionError
+from vv_agent.session.runtime import static_model_selection_requirements, static_session_requirements
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import _principal_payload
 
@@ -555,6 +559,37 @@ class MessageProcessor:
         model_request = ModelListRequest(agent_key=agent_key, provider=provider)
         self._router.send_response(connection_id, request.id, self._host.list_models(model_request).to_dict())
 
+    def _static_session_bootstrap(self, agent, config, *, agent_key: str, resolved) -> SessionRequirements:
+        """Build the host-owned L2 floor and exact advertised selection capabilities."""
+
+        handler_version = self._run_adapter.kernel.default_handler_version
+        base = static_session_requirements(
+            agent,
+            config,
+            resolved,
+            level=2,
+            handler_version=handler_version,
+            extra_capabilities=self._run_adapter.kernel.capabilities,
+        )
+        capabilities = set(base.capabilities)
+        for model in self._host.list_models(ModelListRequest(agent_key=agent_key)).models:
+            try:
+                requirements = static_model_selection_requirements(
+                    {"model": model.id, "route": {}},
+                    resolve_model=self._host.resolve_model,
+                    handler_version=handler_version,
+                )
+            except (ModelError, ValueError):
+                # Unresolvable advertised entries remain selectable commands so
+                # the holder can record the stable rejection in the ledger.
+                continue
+            capabilities.update(requirements.capabilities)
+        return SessionRequirements.normalized(
+            level=max(2, base.level),
+            handler_version=handler_version,
+            capabilities=capabilities,
+        )
+
     def _handle_thread_start(
         self,
         connection_id: str,
@@ -583,6 +618,7 @@ class MessageProcessor:
             return
         try:
             context = None
+            bootstrap = None
             try:
                 context = self._run_adapter.kernel.session_attributes(input_id).get("app_server_context")
             except (KeyError, Conflict):
@@ -592,6 +628,12 @@ class MessageProcessor:
                 config = self._host.build_run_config(RunConfigResolutionRequest(input_id, agent_key, cwd, metadata))
                 if config.model_provider is not None:
                     runtime = self._run_adapter.kernel.runtime(agent, config)
+                    bootstrap = self._static_session_bootstrap(
+                        agent,
+                        config,
+                        agent_key=agent_key,
+                        resolved=runtime.resolved,
+                    )
                     task = runtime.compile("", input_id + "/context", control=True)
                     context = runtime._definition(task)
             payload = self._store.create_thread_receipt(
@@ -601,6 +643,7 @@ class MessageProcessor:
                 metadata=metadata,
                 context=context,
                 principal=principal,
+                bootstrap=bootstrap,
             )
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
@@ -657,6 +700,13 @@ class MessageProcessor:
             return
         except SubmissionConflict:
             raise
+        except UnsupportedFeatureLevel as exc:
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params(str(exc), {"reason": "model_selection_unavailable"}),
+            )
+            return
         except ValueError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return
