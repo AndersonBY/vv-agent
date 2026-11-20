@@ -383,69 +383,11 @@ def test_custom_app_server_host_resolver_controls_real_selected_call_and_usage()
         )
         send(3, "turn/start", {"threadId": "thread", "inputId": "prompt", "expectedTurnId": None, "input": []})
         server.wake("thread")
-        try:
-            eventually(
-                lambda: bool(
-                    (turns := server.store.read_thread("thread").turns)
-                    and turns[0].result.get("finalOutput") == "selected client"
-                )
+        eventually(
+            lambda: bool(
+                (turns := server.store.read_thread("thread").turns) and turns[0].result.get("finalOutput") == "selected client"
             )
-        except AssertionError:
-            expected = static_model_selection_requirements(
-                {"model": "b", "route": {"pool": "authorized"}},
-                resolve_model=host.resolve_model,
-                handler_version=server.kernel.default_handler_version,
-            )
-            state, records, _ = server.kernel.store.read_state("thread")
-            support = server.kernel._worker.support
-            snapshot = server.store.read_thread("thread")
-            diagnostic = {
-                "errors": {
-                    sid: {"turn_id": failure.turn_id, "attempts": failure.attempts, "error": repr(failure.error)}
-                    for sid, failure in server.kernel._errors.items()
-                },
-                "lease": server.kernel.store.lease_status("thread"),
-                "worker": {
-                    "started": server.kernel._worker.started,
-                    "running": server.kernel._worker.running,
-                    "last_error": repr(server.kernel._worker.last_error),
-                    "active_wake_sessions": sorted(server.kernel._worker.active_wake_sessions),
-                    "inflight_lease": repr(server.kernel._worker._inflight_lease),
-                    "support": {
-                        "level": support.level,
-                        "handler_versions": support.handler_versions,
-                        "capabilities": len(support.capabilities),
-                        "missing_selection": sorted(set(expected.capabilities) - set(support.capabilities)),
-                    },
-                },
-                "records": [
-                    {
-                        "seq": row.seq,
-                        "kind": row.record.kind,
-                        "turn_id": row.record.turn_id,
-                        "operation_id": row.record.operation_id,
-                        "attempt": row.record.attempt,
-                        "input_id": row.record.payload.get("input", {}).get("input_id"),
-                        "input_kind": row.record.payload.get("input", {}).get("kind"),
-                        "disposition": row.record.payload.get("disposition"),
-                        "reason": row.record.payload.get("reason"),
-                        "error": row.record.payload.get("error"),
-                        "status": row.record.payload.get("status"),
-                    }
-                    for row in records
-                ],
-                "state": {
-                    "active_turn_id": state.active_turn_id,
-                    "turns": list(state.turns),
-                    "model_selection": state.model_selection.encode() if state.model_selection is not None else None,
-                },
-                "turn": snapshot.turns[0].result if snapshot.turns else None,
-                "resolved_requests": [
-                    {"model": request.get("model"), "route": request.get("route"), "keys": sorted(request)}
-                    for request in resolved_requests
-                ],
-            }
-            pytest.fail(repr(diagnostic))
+        )
         server.run_adapter.join()
         result = server.store.read_thread("thread").turns[0].result
         assert result.get("finalOutput") == "selected client", result
