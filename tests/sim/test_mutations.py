@@ -23,7 +23,7 @@ from vv_agent.kernel._store import WorkerSupports
 
 from .content import SimAESGCMCipher
 from .scenarios import run_scenario
-from .world import Choices, InvariantViolation, SimWorld, require
+from .world import Choices, InvariantViolation, SimWorld, require, sqlite_root
 
 INPUT_DEDUPE_MUTATION = "push+dropped-input-identity-constraint"
 
@@ -48,68 +48,50 @@ def mutate(function, before, after):
 def drop_input_identity_constraint(world):
     """Allow duplicate input identities only in this disposable test database."""
     backend = world.summary()["backend"]
-    column_type = "TEXT" if backend == "sqlite" else "text"
-    integer_type = "INTEGER" if backend == "sqlite" else "bigint"
-    blob_type = "BLOB" if backend == "sqlite" else "bytea"
-    record_xor_input = (
-        "((record_seq IS NOT NULL) + (input_id IS NOT NULL) = 1)"
-        if backend == "sqlite"
-        else "((record_seq IS NOT NULL)::int + (input_id IS NOT NULL)::int = 1)"
-    )
-    strict = " STRICT" if backend == "sqlite" else ""
     store = world.connection("mutation/schema")
+    if backend == "postgres":
+        input_link = store._one(
+            "SELECT conname FROM pg_constraint "
+            "WHERE conrelid='sk_content_link'::regclass AND contype='f' AND confrelid='sk_inbox'::regclass "
+            "AND pg_get_constraintdef(oid) LIKE '%(tenant_id, session_id, input_id)%'"
+        )[0]
+        constraints = [
+            row[0]
+            for row in store._rows(
+                "SELECT conname FROM pg_constraint WHERE conrelid='sk_inbox'::regclass AND ("
+                "(contype='p' AND pg_get_constraintdef(oid) LIKE 'PRIMARY KEY (tenant_id, session_id, input_id)%') OR "
+                "(contype='u' AND pg_get_constraintdef(oid) LIKE 'UNIQUE (tenant_id, session_id, input_seq)%'))"
+            )
+        ]
+        assert len(constraints) == 2, "input identity constraints changed"
+        store._rows(f'ALTER TABLE sk_content_link DROP CONSTRAINT "{input_link}"')
+        for constraint in constraints:
+            store._rows(f'ALTER TABLE sk_inbox DROP CONSTRAINT "{constraint}"')
+        return
+
     with store.atomic():
+        inbox_ddl = store._one("SELECT sql FROM sqlite_master WHERE type='table' AND name='sk_inbox'")[0]
+        link_ddl = store._one("SELECT sql FROM sqlite_master WHERE type='table' AND name='sk_content_link'")[0]
+        indexes = store._rows(
+            "SELECT name,sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL "
+            "AND tbl_name IN ('sk_inbox','sk_content_link') ORDER BY name"
+        )
+        constraints = (
+            "PRIMARY KEY (tenant_id,session_id,input_id),",
+            "UNIQUE (tenant_id,session_id,input_seq),",
+        )
+        assert all(inbox_ddl.count(constraint) == 1 for constraint in constraints), "input identity constraint anchor changed"
         store._rows("DROP INDEX IF EXISTS sk_inbox_ready")
-        # Foreign-key targets must stay unique, so rebuild only the link table
-        # without its input_id reference to the intentionally non-unique inbox.
         store._rows("DROP TABLE sk_content_link")
         store._rows("DROP TABLE sk_inbox")
-        store._rows(
-            f"""
-            CREATE TABLE sk_inbox (
-                tenant_id {column_type} NOT NULL, session_id {column_type} NOT NULL, input_id {column_type} NOT NULL,
-                input_seq {integer_type} NOT NULL CHECK (input_seq > 0),
-                kind {column_type} NOT NULL CHECK (kind IN ('user','steer','follow_up','provider_result','approval_answer',
-                    'child_result','control','provider_evidence','model_selection')),
-                body {blob_type} NOT NULL, digest {column_type} NOT NULL CHECK (length(digest)=64),
-                admission_key_id {column_type}, admission_signature {blob_type},
-                admission_signed_ms {integer_type} CHECK (admission_signed_ms IS NULL OR admission_signed_ms >= 0),
-                available_ms {integer_type} NOT NULL CHECK (available_ms >= 0),
-                received_ms {integer_type} NOT NULL CHECK (received_ms >= 0),
-                consumed_seq {integer_type} CHECK (consumed_seq IS NULL OR consumed_seq > 0),
-                UNIQUE(tenant_id,session_id,input_seq),
-                CHECK ((admission_key_id IS NULL) = (admission_signature IS NULL)
-                    AND (admission_key_id IS NULL) = (admission_signed_ms IS NULL)),
-                FOREIGN KEY(tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
-                FOREIGN KEY(tenant_id,session_id,consumed_seq) REFERENCES sk_record(tenant_id,session_id,seq)
-            ){strict}
-            """
-        )
-        store._rows(
-            "CREATE INDEX sk_inbox_ready ON sk_inbox(tenant_id,session_id,available_ms,input_seq) WHERE consumed_seq IS NULL"
-        )
-        store._rows(
-            f"""
-            CREATE TABLE sk_content_link (
-                tenant_id {column_type} NOT NULL, session_id {column_type} NOT NULL,
-                content_id {column_type} NOT NULL, record_seq {integer_type}, input_id {column_type},
-                slot {column_type} NOT NULL,
-                CHECK {record_xor_input},
-                FOREIGN KEY(tenant_id,session_id) REFERENCES sk_session(tenant_id,session_id),
-                FOREIGN KEY(tenant_id,session_id,record_seq) REFERENCES sk_record(tenant_id,session_id,seq),
-                FOREIGN KEY(tenant_id,session_id,content_id) REFERENCES sk_content(tenant_id,session_id,content_id)
-            ){strict}
-            """
-        )
-        store._rows(
-            "CREATE UNIQUE INDEX sk_content_link_record_slot "
-            "ON sk_content_link(tenant_id,session_id,record_seq,slot) WHERE record_seq IS NOT NULL"
-        )
-        store._rows(
-            "CREATE UNIQUE INDEX sk_content_link_input_slot "
-            "ON sk_content_link(tenant_id,session_id,input_id,slot) WHERE input_id IS NOT NULL"
-        )
-        store._rows("CREATE INDEX sk_content_link_content ON sk_content_link(tenant_id,session_id,content_id)")
+        for constraint in constraints:
+            inbox_ddl = inbox_ddl.replace(constraint, "", 1)
+        store._rows(inbox_ddl)
+        input_link = "FOREIGN KEY (tenant_id,session_id,input_id) REFERENCES sk_inbox(tenant_id,session_id,input_id),"
+        assert link_ddl.count(input_link) == 1, "content-link input foreign key anchor changed"
+        store._rows(link_ddl.replace(input_link, "", 1))
+        for _name, ddl in indexes:
+            store._rows(ddl)
 
 
 @pytest.mark.parametrize(
@@ -194,20 +176,24 @@ def test_worker_filter_mutation_is_killed(sim_database, monkeypatch):
         run_scenario(world, "worker_compatibility")
 
 
-def lock_order_probe(world):
-    """Check that production poll leaves commit_lock free at its renewal call.
+def test_i2_oracle_rejects_zero_writer_epoch(sim_database, monkeypatch):
+    original = SQLSessionTx._write
 
-    The substituted renewal callback proves the commit latch is available, then
-    commits one real SQL record, then invokes the actual store renewal. This is
-    a bounded single-threaded lock-order probe; it does not create concurrent
-    database lock waits. A mutant holding the latch across poll fails before the
-    append while a nonblocking assertion prevents the test from hanging.
-    """
+    def zero_writer_epoch(tx, record, **kwargs):
+        kwargs["epoch"] = 0
+        return original(tx, record, **kwargs)
+
+    monkeypatch.setattr(SQLSessionTx, "_write", zero_writer_epoch)
+    with SimWorld(sim_database, seed=17) as world, pytest.raises(InvariantViolation, match="I2"):
+        run_scenario(world, "tools")
+
+
+def lock_order_probe(world):
+    """Check that production poll does not hold a real SQL write lock across renewal."""
     world.create()
     driving = world.connection("driver")
     renewal = world.connection("renewal")
     lease = driving.acquire("s", owner="lock-probe", ttl_ms=15000)
-    commit_lock = threading.Lock()
     heartbeat = LeaseOwnership(
         lease,
         15000,
@@ -216,16 +202,12 @@ def lock_order_probe(world):
         stop=threading.Event(),
         ready=threading.Event(),
     )
-    heartbeat.__dict__["commit_lock"] = commit_lock
+    if world.summary()["backend"] == "sqlite":
+        sqlite_root(driving).connection.execute("PRAGMA busy_timeout=10")
     original = renewal.renew
     committed = []
 
     def append_then_renew(current, *, ttl_ms):
-        require(
-            commit_lock.acquire(blocking=False),
-            "L1",
-            "LeaseOwnership.poll held commit_lock across its renewal boundary",
-        )
         try:
             rec = make_record(
                 "usage_observed",
@@ -241,8 +223,11 @@ def lock_order_probe(world):
             with driving.atomic() as tx:
                 receipt = tx.append("s", lease=current, expected_seq=1, commit_id="lock-probe", records=(rec,))
             committed.append(receipt)
-        finally:
-            commit_lock.release()
+        except Exception as exc:
+            detail = str(exc).lower()
+            if "locked" not in detail and "lock timeout" not in detail:
+                raise
+            require(False, "L1", "LeaseOwnership.poll held a SQL write lock across renewal")
         return original(current, ttl_ms=ttl_ms)
 
     renewal.renew = append_then_renew
@@ -252,16 +237,20 @@ def lock_order_probe(world):
 
 
 @pytest.mark.parametrize("mutated", [False, True])
-def test_l1_commit_lock_free_at_renewal_boundary(sim_database, monkeypatch, record_property, mutated):
+def test_l1_write_lock_free_at_renewal_boundary(sim_database, monkeypatch, record_property, mutated):
     if mutated:
         original = LeaseOwnership.poll
 
-        def hold_commit_lock(self, store):
-            with self.commit_lock:
+        def hold_write_lock(self, store):
+            with store.atomic():
+                store._rows(
+                    "UPDATE sk_session SET lease_until_ms=lease_until_ms WHERE tenant_id=%s AND session_id=%s",
+                    (store.tenant_id, self.lease.session_id),
+                )
                 return original(self, store)
 
-        hold_commit_lock.__dict__["_sim_mutation"] = "hold_commit_lock_during_renewal"
-        monkeypatch.setattr(LeaseOwnership, "poll", hold_commit_lock)
+        hold_write_lock.__dict__["_sim_mutation"] = "hold_write_lock_during_renewal"
+        monkeypatch.setattr(LeaseOwnership, "poll", hold_write_lock)
     from .report import versions
 
     identity = versions()

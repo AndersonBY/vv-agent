@@ -320,8 +320,6 @@ class SQLiteStore(SQLStore):
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.create_function("session_now_ms", 0, self.clock.now_ms)
         self._connection_lock = RLock()
-        self._epoch = 0
-        self._depth = 0
 
     @classmethod
     @contextmanager
@@ -361,14 +359,15 @@ class SQLiteStore(SQLStore):
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         with self._connection_lock:
-            outer = self._depth == 0
-            savepoint = f"session_{self._depth}"
+            state = self._transaction_state
+            outer = state.depth == 0 and not self.connection.in_transaction
+            savepoint = f"session_{state.depth}"
             if outer:
                 self.connection.execute("BEGIN IMMEDIATE")
-                self._epoch += 1
+                state.epoch += 1
             else:
                 self.connection.execute(f"SAVEPOINT {savepoint}")
-            self._depth += 1
+            state.depth += 1
             try:
                 yield
                 self.connection.execute("COMMIT" if outer else f"RELEASE {savepoint}")
@@ -380,13 +379,21 @@ class SQLiteStore(SQLStore):
                     self.connection.execute(f"RELEASE {savepoint}")
                 raise
             finally:
-                self._depth -= 1
+                state.depth -= 1
 
     def _transaction_id(self) -> object:
         with self._connection_lock:
-            if not self._depth or not self.connection.in_transaction:
+            if not self._transaction_state.depth or not self.connection.in_transaction:
                 raise RuntimeError("SessionTx requires an open transaction")
-            return self._epoch
+            return self._transaction_state.epoch
+
+    @property
+    def _depth(self) -> int:
+        return self._transaction_state.depth
+
+    @property
+    def _epoch(self) -> int:
+        return self._transaction_state.epoch
 
     def install_schema(self) -> None:
         with self._connection_lock:

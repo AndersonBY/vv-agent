@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
-from vv_agent.kernel._content_publication import declared_content_ref
+from vv_agent.kernel._content_publication import declare_input_content, declared_content_ref, link_declared_input_content
+from vv_agent.kernel._content_runtime import SessionContentWriter
 from vv_agent.kernel._sql import stored_input_proof
 from vv_agent.session.kernel import drive
 from vv_agent.session.providers import Accepted, Unknown
@@ -82,9 +84,20 @@ def _runtime(sessions: SessionDriver, *, workspace: Path, provider: _Provider):
 
 def _sessions(path: Path) -> SessionDriver:
     sessions = SessionDriver(path, content_key_provider=_key_provider())
-    if sessions.store._ledger_integrity_mode() == "unconfigured":
-        sessions.store.configure_input_admission(allow_unsigned=True)
+    store = cast(Any, sessions.store)
+    if store._ledger_integrity_mode() == "unconfigured":
+        store.configure_input_admission(allow_unsigned=True)
     return sessions
+
+
+def _push_provider_item(sessions: SessionDriver, item: InboxItem) -> None:
+    with sessions.store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id=sessions.tenant_id, session_id=SESSION_ID)
+        actor, actor_ref = writer.service_principal("provider-recovery")
+        publication = declare_input_content(writer, replace(item, actor=actor))
+        tx.push(SESSION_ID, publication.item)
+        link_declared_input_content(writer, publication.item)
+        writer.link_input_actor(publication.item.input_id, actor_ref)
 
 
 def _park(
@@ -174,7 +187,10 @@ def test_s1_parked_provider_callbacks_rehydrate_after_restart(tmp_path: Path, ki
             target_turn_id=plan.turn_id,
             generation=_state_generation(sessions.store, plan.turn_id),
         )
-        sessions.push(SESSION_ID, callback)
+        if kind == "provider_evidence":
+            _push_provider_item(sessions, callback)
+        else:
+            sessions.push(SESSION_ID, callback)
         stored = sessions.store.read_input(SESSION_ID, kind)
         assert stored is not None
         drive(sessions.store, SESSION_ID, runtime=_runtime(sessions, workspace=workspace, provider=provider))
@@ -210,7 +226,10 @@ def test_s1_parked_provider_callbacks_rehydrate_after_restart(tmp_path: Path, ki
             assert state.active_turn_id is None
 
         replay = replace(callback, input_id=f"{kind}-replay")
-        sessions.push(SESSION_ID, replay)
+        if kind == "provider_evidence":
+            _push_provider_item(sessions, replay)
+        else:
+            sessions.push(SESSION_ID, replay)
         drive(sessions.store, SESSION_ID, runtime=_runtime(sessions, workspace=workspace, provider=provider))
         state, records, _ = sessions.store.read_state(SESSION_ID)
         replay_receipt = next(

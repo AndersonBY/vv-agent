@@ -206,29 +206,40 @@ def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
     with SimWorld(sim_database, seed=17) as world:
         run_scenario(world, "tools")
         _, rows, _ = world.read_state("s")
-    body = rows[-1].record.encode()
+    body = next(row.record.encode() for row in rows if row.record.kind == "turn_started")
     baseline = Record.parse(body)
     descriptor = Record.__dict__["_parse"]
 
     with report._seed_record_parse_cache() as parse:
         parsed = Record.parse(body)
-        Record.parse(body)
-        messages = _MessageCache()
-        message_parsed = Record._parse(body, messages)
-        Record._parse(body, messages)
-        Record._parse(body, _MessageCache())
+        repeated = Record.parse(body)
+        first_messages, second_messages = _MessageCache(), _MessageCache()
+        first_fold = Record._parse(body, first_messages)
+        first_fold_repeated = Record._parse(body, first_messages)
+        second_fold = Record._parse(body, second_messages)
         assert parse.cache_parameters()["maxsize"] == 4096
-        assert parse.cache_info().misses == 3
-        assert parse.cache_info().hits == 2
+        assert parse.cache_info().misses == 1
+        assert parse.cache_info().hits == 4
+        assert len({id(candidate) for candidate in (parsed, repeated, first_fold, first_fold_repeated, second_fold)}) == 5
+        assert len({id(candidate._payload) for candidate in (parsed, first_fold, second_fold)}) == 3
+        assert first_fold._message_cache_id == id(first_messages)
+        assert first_fold_repeated._message_cache_id == id(first_messages)
+        assert second_fold._message_cache_id == id(second_messages)
+
+        original_digest = second_fold._payload["definition_digest"]
+        first_fold._payload["definition_digest"] = "polluted"
+        assert second_fold._payload["definition_digest"] == original_digest
+        assert repeated._payload["definition_digest"] == original_digest
 
     assert Record.__dict__["_parse"] is descriptor
     assert parse.cache_info().currsize == 0
-    for candidate in (parsed, message_parsed):
+    for candidate in (parsed, repeated, second_fold):
         assert candidate == baseline
         assert candidate.to_dict() == baseline.to_dict()
         assert candidate.record_id == baseline.record_id
         assert candidate.digest == baseline.digest
         assert candidate.encode() == body
+    assert first_fold.encode() == body
 
     with report._seed_record_parse_cache() as next_parse:
         next_scope = Record.parse(body)

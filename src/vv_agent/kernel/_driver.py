@@ -593,8 +593,9 @@ class CoreDriver:
                         declarations = publication.links
                 with phase("before_commit"):
                     self._hook("before_commit", commit_records[-1] if commit_records else None)
-                # SQL append evaluates the guard only after encoding and immutable
-                # history preparation. Keep the late precheck through atomic exit.
+                # SQL append evaluates the guard after encoding and immutable
+                # history preparation. The outer SQL atomic exit rechecks the
+                # lease after logical validation and content linking.
                 tx.bind_lease_guard(lambda: latch.enter_context(self.scope.committing()))
                 with phase("append"):
                     receipt = tx.append(

@@ -155,13 +155,14 @@ def test_l3_late_control_stays_on_bound_token_and_durable_cancel_reaches_child(t
         world.create()
         children = {"effect": lambda _plan: ChildSession(world.child_spec("s", "child"), "go")}
         world.drive(children=children)
+        world.expire()
+        world.push("s", InboxItem("next", "follow_up", {"content": "continue"}))
         worker = driver(world)
         old_tid = worker.state.active_turn_id
         assert old_tid is not None
         assert worker.store.list_sessions() == ("child", "s")
         old_token = worker.scope.token
         world.push("s", InboxItem("l3-cancel", "control", {"action": "cancel"}, old_tid, 0))
-        world.push("s", InboxItem("next", "follow_up", {"content": "continue"}))
         # Pause after the control matched old_tid, before the captured binding's token is read.
         # Source lookup locates a scheduling cut; all verdicts below use SQL/driver outcomes.
         source, start_line = inspect.getsourcelines(apply_controls)

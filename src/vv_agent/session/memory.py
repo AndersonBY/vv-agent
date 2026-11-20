@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from vv_agent.events import MemoryCompactCompleted, MemoryCompactMode, MemoryCompactStarted, MemoryCompactTrigger
@@ -19,6 +16,9 @@ if TYPE_CHECKING:
 
 
 def session_memory(task, workspace=None) -> SessionMemory:
+    """Build record-backed memory without a plaintext workspace projection."""
+
+    del workspace
     meta = task.metadata
     memory = SessionMemory(
         SessionMemoryConfig(
@@ -31,7 +31,7 @@ def session_memory(task, workspace=None) -> SessionMemory:
             extraction_model=meta.get("session_memory_extraction_model") or meta.get("memory_summary_model") or task.model,
             token_model=task.model,
         ),
-        workspace=workspace,
+        workspace=None,
         storage_scope=meta.get("session_id") or task.task_id,
     )
     memory.state = SessionMemoryState.from_dict(meta.get("vv_session", {}).get("memory_initial_state", {}))
@@ -47,36 +47,9 @@ def restore_memory(driver: _Driver) -> SessionMemory:
 
 
 def save_projection(driver: _Driver) -> None:
-    # Files are a replayable projection of the log; atomic replace never exposes partial JSON.
-    latest = {}
-    for (tid, stage, _), r in driver.state.boundaries.items():
-        if stage != "session_memory_saved":
-            continue
-        task = driver.hydrated_definition(driver.state.turns[tid].start).task
-        memory = session_memory(task, Path(driver.runtime.config.workspace or ".") if task.use_workspace else None)
-        path = memory.storage_path()
-        if path is not None:
-            latest[path] = hydrate_boundary_data(driver, r)["state"]
-    for path, state in latest.items():
-        data = json.dumps(state, ensure_ascii=False, indent=2)
-        if path.exists() and path.read_text(encoding="utf-8") == data:
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        import tempfile
+    """Keep the committed encrypted boundary as the only Session Memory copy."""
 
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
-            staging = Path(f.name)
-            try:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            except BaseException:
-                staging.unlink(missing_ok=True)
-                raise
-        try:
-            os.replace(staging, path)
-        finally:
-            staging.unlink(missing_ok=True)
+    del driver
 
 
 def before_compaction_event(driver, manager, source, *, key, cycle, trigger, prune):

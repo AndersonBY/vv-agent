@@ -72,6 +72,12 @@ class _RoutingCache:
     route_level: int | None = None
 
 
+@dataclass(slots=True)
+class _TransactionState:
+    depth: int = 0
+    epoch: int = 0
+
+
 class InputAdmissionProofError(Conflict):
     """A signed inbox row no longer matches its original trusted admission."""
 
@@ -332,6 +338,7 @@ class SQLStore:
 
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
+        self._transaction_state = _TransactionState()
 
     @property
     def tenant_id(self) -> str:
@@ -789,8 +796,8 @@ class SQLStore:
         *,
         inherited: SessionRequirements | None = None,
     ) -> SessionRequirements:
-        if item.feature_level == 1:
-            return inherited or SessionRequirements(1, None, ())
+        if item.feature_level == 1 or (item.feature_level == 3 and item.requirements is None):
+            return inherited or SessionRequirements(item.feature_level, None, ())
         assert item.requirements is not None
         return normalize_requirements(item.requirements)
 
@@ -1378,7 +1385,9 @@ class SQLStore:
     @contextmanager
     def atomic(self) -> Iterator[SQLSessionTx]:
         with self._transaction():
-            yield SQLSessionTx(self)
+            tx = SQLSessionTx(self)
+            yield tx
+            tx._finalize_lease_fence()
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._one(
@@ -2723,6 +2732,7 @@ class SQLSessionTx:
         self.transaction_id = store._transaction_id()
         self.batches: dict[tuple[str, str], ConsumerBatch] = {}
         self._lease_guard: Callable[[], Lease] | None = None
+        self._pending_lease_fence: tuple[str, Lease] | None = None
 
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._lease_guard = guard
@@ -2730,6 +2740,15 @@ class SQLSessionTx:
     def _active(self) -> None:
         if self.store._transaction_id() != self.transaction_id:
             raise RuntimeError("SessionTx must be used within its original caller transaction")
+
+    def _finalize_lease_fence(self) -> None:
+        pending = self._pending_lease_fence
+        if pending is None:
+            return
+        self._active()
+        session_id, lease = pending
+        row = self.store._lock(session_id)
+        self.store._check_lease(session_id, lease, row, self.store._now())
 
     def _commit(
         self,
@@ -3208,6 +3227,8 @@ class SQLSessionTx:
                     or old[0][2] != max([stored_manifest["head_seq"], *(seq for _, seq in stored_sequences)])
                 ):
                     raise Conflict("commit identity has different bytes")
+                if self._lease_guard is not None:
+                    self._pending_lease_fence = (session_id, lease)
                 return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
             s._require_worker_accepts_row(row)
             prefix = s._prefix(session_id, row, require_worker=False)
@@ -3364,6 +3385,8 @@ class SQLSessionTx:
                 )
             )
             s._check_lease(session_id, lease, row, s._now())
+            if self._lease_guard is not None:
+                self._pending_lease_fence = (session_id, lease)
             return receipt
 
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None:

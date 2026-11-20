@@ -70,6 +70,7 @@ _SLOT_INDEX = re.compile(r"\[(?:0|[1-9][0-9]*)\]")
 _DEFERRED_SESSION_LIVE_SQL = "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}"
 _DEFERRED_ADMISSION_TABLES = frozenset({"sk_session", "sk_session_key", "sk_content", "sk_content_link", "sk_record", "sk_inbox"})
 
+_DEFAULT_LABELS = ContentLabels()
 INTERNAL_LABELS = ContentLabels(source=(SourceKind.INTERNAL,), classification=Classification.INTERNAL)
 HOST_LABELS = ContentLabels(source=(SourceKind.USER,), classification=Classification.INTERNAL)
 
@@ -337,8 +338,11 @@ def durable_content_store(
     if selected is None:
         raise ContentRuntimeUnavailable("a content key provider must be explicitly bound to the session store")
     if isinstance(root, SQLiteStore):
+        source = store._store if isinstance(store, _ContentSessionStoreAdapter) else store
+        if not isinstance(source, (SQLiteStore, _TenantSQLStore)):
+            raise ContentRuntimeUnavailable("SQLite tenant view must retain its concrete runtime binding")
         durable: DurableContentStore = CoreSQLiteContentStore(
-            root,
+            source,
             selected.key_provider,
             selected.cipher,
         )
@@ -616,12 +620,12 @@ class SessionContentWriter:
             operational_policy=operational_policy,
         )
 
-    def put_bytes(self, value: bytes, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
+    def put_bytes(self, value: bytes, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
         ref = self._durable.put(self.tenant_id, self.session_id, value, labels)
         self._published_refs.add(ref)
         return ref
 
-    def put_json(self, value: Any, *, labels: ContentLabels = INTERNAL_LABELS) -> ContentRef:
+    def put_json(self, value: Any, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
         return self.put_bytes(canonical_json_bytes(value), labels=labels)
 
     def get_bytes(self, ref: ContentRef | Mapping[str, Any]) -> bytes:
@@ -646,7 +650,7 @@ class SessionContentWriter:
         if not isinstance(subject_id, str) or not subject_id:
             raise ValueError("subject_id must be a non-empty string")
         value = attributes if attributes is not None else {"role": subject_id}
-        ref = self.put_json(value)
+        ref = self.put_json(value, labels=INTERNAL_LABELS)
         principal = Principal(
             tenant_id=self.tenant_id,
             subject_id=subject_id,

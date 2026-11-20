@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -310,19 +311,25 @@ def replay_provenance(recorded, current):
 
 @contextmanager
 def _seed_record_parse_cache():
-    """Parse immutable record bodies once within one seed without sharing across workers' jobs."""
+    """Validate immutable record bodies once without sharing mutable Record instances."""
     from vv_agent.kernel._records import Record, _MessageCache
 
     descriptor = Record.__dict__["_parse"]
     uncached = Record._parse
 
     @lru_cache(maxsize=4096)
-    def parse(cls: type[Record], body: bytes, messages: _MessageCache | None) -> Record:
-        return uncached(body, messages)
+    def parse(cls: type[Record], body: bytes) -> Record:
+        return uncached(body)
 
     def cached_parse(cls: type[Record], body: bytes, messages: _MessageCache | None = None) -> Record:
-        # Retaining the message-cache object prevents id reuse from producing an incorrect hit.
-        return parse(cls, body, messages)
+        if type(body) is not bytes:
+            return uncached(body, messages)
+        template = parse(cls, body)
+        record = copy.copy(template)
+        record._retain(template.encode(), copy.deepcopy(template._value))
+        if messages is not None:
+            record._share_messages(messages)
+        return record
 
     type.__setattr__(Record, "_parse", classmethod(cached_parse))
     try:

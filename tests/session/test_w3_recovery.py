@@ -12,11 +12,13 @@ import pytest
 from vv_agent import Agent
 from vv_agent.kernel import _driver_inputs
 from vv_agent.kernel._boundary_hydration import MissingContentLink, SessionHydration, hydrate_session_records
+from vv_agent.kernel._content_publication import declare_input_content, link_declared_input_content
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_inputs import provider_recovery_lookup_input_id
 from vv_agent.kernel._store import Lease
 from vv_agent.runtime.remote_environment import RemoteProtocolError
 from vv_agent.session import _recovery_phase, kernel
+from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.environments import (
     InvalidProviderLookupResult,
@@ -28,7 +30,8 @@ from vv_agent.session.environments import (
 )
 from vv_agent.session.kernel import drive, read_state
 from vv_agent.session.providers import Accepted, Definitive, ProviderResultInvalid, Unknown
-from vv_agent.session.records import InboxItem
+from vv_agent.session.records import InboxItem, RecordError
+from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.timing import ThreadInvoker
 from vv_agent.session.tool_results import prepare_tool_resources
@@ -295,14 +298,13 @@ def _push_lookup(
     *,
     actor_subject_id: str = "bash",
 ) -> None:
-    actor = {
-        "tenant_id": TENANT_ID,
-        "subject_id": actor_subject_id,
-        "subject_kind": "service",
-        "attributes": {"role": actor_subject_id},
-    }
     with store.atomic() as tx:
-        sessions._push_in_transaction(tx, SESSION_ID, item, actor=actor, actor_subject_id="provider")
+        writer = SessionContentWriter.bind(tx, tenant_id=TENANT_ID, session_id=SESSION_ID)
+        actor, actor_ref = writer.service_principal(actor_subject_id)
+        publication = declare_input_content(writer, replace(item, actor=actor))
+        tx.push(SESSION_ID, publication.item)
+        link_declared_input_content(writer, publication.item)
+        writer.link_input_actor(item.input_id, actor_ref)
 
 
 def _push_control(sessions: SessionDriver, store, item: InboxItem) -> None:
@@ -337,9 +339,21 @@ def _invalid_durable_lookup_evidence(item: InboxItem, variant: str) -> InboxItem
     if variant == "turn":
         item = replace(item, target_turn_id=f"{item.target_turn_id}/other")
     elif variant == "generation":
+        assert item.generation is not None
         item = replace(item, generation=item.generation + 1)
     elif variant == "actor":
         pass
+    elif variant == "tenant":
+        binding = item.payload["provider_lookup"]["binding"]
+        binding["tenant_id"] = "other-tenant"
+        binding["execution_id"] = execution_id_for(binding["tenant_id"], binding["environment_id"], binding["idempotency_key"])
+    elif variant in {"session", "operation"}:
+        binding = item.payload["provider_lookup"]["binding"]
+        binding[f"{variant}_id"] = f"other-{variant}"
+        binding["idempotency_key"] = stable_operation_key(binding["session_id"], binding["operation_id"])
+        binding["execution_id"] = execution_id_for(binding["tenant_id"], binding["environment_id"], binding["idempotency_key"])
+    elif variant == "request_digest":
+        item.payload["provider_lookup"]["binding"]["request_digest"] = "f" * 64
     elif variant != "input_id":
         raise AssertionError(f"unexpected evidence variant: {variant}")
 
@@ -432,6 +446,7 @@ def _lost_w3_submission(
         holder["sessions"] = sessions
         try:
             handle = sessions.start(SESSION_ID, agent, config, "run", autostart=False)
+            assert handle._pending_submission is not None
             handle._pending_submission()
             handle._pending_submission = None
             handle._runtime_reservation = None
@@ -713,6 +728,7 @@ def test_level_three_worker_loss_running_handle_mismatch_fails_closed_without_su
 
     def lookup(_execution_id, binding):
         result = _lookup_result(binding, LookupStatus.RUNNING)
+        assert isinstance(result.outcome, Accepted)
         result.outcome.handle["execution_id"] = "f" * 64
         return result
 
@@ -1428,6 +1444,37 @@ def test_w3_rejected_provider_evidence_persisted_by_ingress_relooks_up_once(
         )
 
 
+@pytest.mark.parametrize("variant", ["tenant", "session", "operation", "request_digest"])
+def test_w3_tampered_canonical_binding_fails_before_recovery(tmp_path: Path, variant: str) -> None:
+    provider = HostCommandProvider()
+    provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.RUNNING)
+
+    with (
+        _lost_w3_submission(tmp_path, provider=provider) as (_, _store, sessions, provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        _, before = _records(drive_store)
+        plan = next(row.record for row in before if row.record.kind == "op_planned" and "/tool/" in str(row.record.operation_id))
+        turn = next(row.record for row in before if row.record.kind == "turn_started")
+        evidence = _invalid_durable_lookup_evidence(
+            _level_three_lookup_item(plan, turn, status=LookupStatus.RUNNING),
+            variant,
+        )
+        _push_lookup(sessions, drive_store, evidence)
+
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        with pytest.raises(RecordError):
+            drive(drive_store, SESSION_ID, runtime=runtime)
+
+        rows, hydrated = _records(drive_store)
+        assert provider.probe.lookup_calls == []
+        assert not any(
+            row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == evidence.input_id
+            for row in hydrated
+        )
+        assert not any(row.record.kind == "op_planned" and row.record.attempt == 2 for row in rows)
+
+
 def test_w3_ignores_legacy_provider_evidence_skeleton_through_apply_input(tmp_path: Path) -> None:
     provider = HostCommandProvider()
     provider.probe.lookup_handler = lambda _execution_id, binding: _lookup_result(binding, LookupStatus.RUNNING)
@@ -1547,6 +1594,106 @@ def test_w3_provider_evidence_push_status_has_no_overlapping_booleans(tmp_path: 
         assert admitted.status == "admitted"
         assert replayed.status == "replayed"
         assert conflict.status == "conflict"
+
+
+def test_w3_public_push_cannot_squat_provider_recovery_input_identity(tmp_path: Path) -> None:
+    from vv_agent.kernel import _driver_recovery
+
+    with (
+        _lost_w3_submission(tmp_path) as (_, _store, sessions, _provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        _, hydrated = _records(drive_store)
+        plan = next(
+            row.record for row in hydrated if row.record.kind == "op_planned" and "/tool/" in str(row.record.operation_id)
+        )
+        turn = next(row.record for row in hydrated if row.record.kind == "turn_started")
+        item = _with_provider_lookup_input_id(_level_three_lookup_item(plan, turn, status=LookupStatus.RUNNING))
+        forged_actor = {
+            "tenant_id": TENANT_ID,
+            "subject_id": "provider-recovery",
+            "subject_kind": "service",
+            "attributes": {"role": "provider-recovery"},
+        }
+
+        with pytest.raises(Conflict, match="trusted recovery ingress"):
+            sessions.push(SESSION_ID, item, actor=forged_actor)
+        assert drive_store.read_input(SESSION_ID, item.input_id) is None
+
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        driver, lease = _direct_driver(drive_store, sessions, runtime)
+        try:
+            host = _recovery_phase._Host(driver)
+            admitted = host.handle(_driver_recovery.PushProviderEvidence(item))
+            replayed = host.handle(_driver_recovery.PushProviderEvidence(item))
+        finally:
+            drive_store.release(lease)
+
+        stored = drive_store.read_input(SESSION_ID, item.input_id)
+        assert stored is not None
+        assert admitted.status == "admitted"
+        assert replayed.status == "replayed"
+        assert stored.item.target_turn_id == item.target_turn_id
+        assert stored.item.generation == item.generation
+        assert stored.item.payload["operation_id"] == item.payload["operation_id"]
+        assert stored.item.payload["attempt"] == item.payload["attempt"]
+        assert stored.item.payload["request_digest"] == item.payload["request_digest"]
+        assert stored.item.actor["tenant_id"] == TENANT_ID
+        assert stored.item.actor["subject_id"] == "provider-recovery"
+
+
+def test_w3_public_push_rejects_reserved_provider_recovery_actor(tmp_path: Path) -> None:
+    with _lost_w3_submission(tmp_path) as (_, _store, sessions, _provider):
+        forged_actor = {
+            "tenant_id": TENANT_ID,
+            "subject_id": "provider-recovery",
+            "subject_kind": "service",
+            "attributes": {"role": "provider-recovery"},
+        }
+        item = InboxItem("reserved-actor", "user", {"content": "ordinary input"})
+
+        with pytest.raises(Conflict, match="reserved for trusted recovery ingress"):
+            sessions.push(SESSION_ID, item, actor=forged_actor)
+
+        assert sessions.store.read_input(SESSION_ID, item.input_id) is None
+
+
+@pytest.mark.parametrize("kind", ["provider_evidence", "steer"])
+def test_w3_app_server_ingress_rejects_provider_recovery_inputs(tmp_path: Path, kind: str) -> None:
+    from vv_agent.app_server import AppServer
+    from vv_agent.session.app_server import SubmissionConflict
+
+    with (
+        _lost_w3_submission(tmp_path) as (_, _store, sessions, _provider),
+        sessions._open_drive_store() as drive_store,
+    ):
+        state, _, _ = drive_store.read_state(SESSION_ID)
+        actor = (
+            None
+            if kind == "provider_evidence"
+            else {
+                "tenant_id": TENANT_ID,
+                "subject_id": "provider-recovery",
+                "subject_kind": "service",
+                "attributes": {"role": "provider-recovery"},
+            }
+        )
+        app = AppServer(store=drive_store, content_key_provider=sessions.content_key_provider)
+        try:
+            with pytest.raises(SubmissionConflict, match="submission_conflict"):
+                app.run_adapter.submit_input(
+                    connection_id="test",
+                    thread_id=SESSION_ID,
+                    input_id="forged-provider-input",
+                    expected_turn_id=state.active_turn_id,
+                    kind=kind,
+                    input=[{"type": "text", "text": "forged"}],
+                    actor=actor,
+                )
+        finally:
+            app.kernel.close()
+
+        assert drive_store.read_input(SESSION_ID, "forged-provider-input") is None
 
 
 def test_w3_not_started_evidence_from_an_untrusted_actor_does_not_retry(tmp_path: Path) -> None:

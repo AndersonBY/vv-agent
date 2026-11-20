@@ -261,11 +261,20 @@ def renewal_case(path, monkeypatch, *, seed, mode):
             assert len(calls) == 2 and final["successful_ready"] and not final["lost"]
             assert final["error"] is None and final["lease_until"] > observations[0]["lease_until"]
         elif mode == "expire":
-            assert terminal_error is not None and terminal_error.__cause__ is failure
+            assert terminal_error is not None
+            if fault == "after_sql_commit":
+                # The committed receipt was lost; retrying with the older local
+                # receipt must fail the exact SQL fencing CAS.
+                assert str(terminal_error) == "lease expired or fenced" and terminal_error.__cause__ is None
+            else:
+                assert terminal_error.__cause__ is failure
             assert final["lost"] and final["reason"] == "lease_lost"
-            assert world.clock.monotonic() >= scope.safety_deadline
+            if fault == "before_sql":
+                assert world.clock.monotonic() >= scope.safety_deadline
+                assert len(observations) == len(calls) + 1  # Budget rejects before another SQL attempt.
+            else:
+                assert len(observations) == len(calls)  # Each lost reply follows an actual CAS attempt.
             assert final["sql_lease"][2] > world.clock.now_ms()
-            assert len(observations) == len(calls) + 1  # Budget rejects before another SQL attempt.
         else:
             assert final["original_error"] and not final["lost"] and not final["cancelled"]
         return {"fault": fault, "calls": calls, "steps": observations, "finished": finished, "final": final}

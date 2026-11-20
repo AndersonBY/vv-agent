@@ -7,11 +7,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from support.s1_fixture_values import append_fixture_records, create_fixture_session, push_fixture_input, wrap_fixture_store
+from support.s1_fixture_values import create_fixture_session, push_fixture_input, wrap_fixture_store
 
 from vv_agent.kernel._content import (
     Classification,
@@ -40,8 +42,11 @@ from vv_agent.session.deletion import (
     DeletionSignerUnavailable,
     SessionDeletionStore,
 )
+from vv_agent.session.memory import save_projection, session_memory
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 
+from .helpers import acquire_fixture_lease
+from .helpers import append_fixture_records as _append_fixture_records
 from .helpers import record as _record
 
 TENANT = "tenant-a"
@@ -179,7 +184,7 @@ def _append_unknown_effect(store: SQLiteStore, provider: LocalKeyProvider, sessi
         _record("op_started", sid=session_id, tid=turn_id, oid=operation_id),
         _record("op_unknown", sid=session_id, tid=turn_id, oid=operation_id),
     )
-    append_fixture_records(_fixture_store(store, provider), session_id, records, commit_id="unknown-effect")
+    _append_fixture_records(_fixture_store(store, provider), session_id, records, commit_id="unknown-effect")
 
 
 def _count(store: SQLiteStore, table: str, session_id: str) -> int:
@@ -206,6 +211,57 @@ def test_deletion_inventory_is_closed_over_backend_schema(backend: str, schema_t
     assert set(PURGE_DELETE_TABLES) == expected_session_tables - {"sk_tombstone"}
 
 
+def test_forget_and_purge_leave_no_session_memory_projection_plaintext(
+    tmp_path: Path,
+    key_provider: LocalKeyProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SESSION_MEMORY_PROJECTION_SECRET"
+    workspace = tmp_path / "workspace"
+    task = SimpleNamespace(
+        metadata={"session_id": "session", "session_memory_storage_dir": ".memory/session"},
+        task_id="task",
+        use_workspace=True,
+        model="scripted",
+    )
+    memory = session_memory(task, workspace)
+    assert memory.storage_path() is None
+
+    receipt = object()
+    projection_driver = SimpleNamespace(
+        state=SimpleNamespace(
+            boundaries={("turn", "session_memory_saved", None): receipt},
+            turns={"turn": SimpleNamespace(start=SimpleNamespace(task=task))},
+            active_turn_id="turn",
+        ),
+        runtime=SimpleNamespace(config=SimpleNamespace(workspace=str(workspace))),
+        hydrated_definition=lambda _start: SimpleNamespace(task=task),
+    )
+    monkeypatch.setattr(
+        "vv_agent.session.memory.hydrate_boundary_data",
+        lambda _driver, _receipt: {"state": {"entries": [{"content": marker}]}},
+    )
+    save_projection(cast(Any, projection_driver))
+
+    def projection_contains_plaintext() -> bool:
+        return any(marker in path.read_text(encoding="utf-8") for path in workspace.rglob("*") if path.is_file())
+
+    assert projection_contains_plaintext() is False
+    with _sqlite(tmp_path / "memory-projection.sqlite", key_provider) as (store, signer):
+        _create_session(store, key_provider, "session")
+        actor = _principal(store, "session")
+        deletion = SessionDeletionStore(store, SQLiteContentStore(store, key_provider), signer=signer)
+        workspace.mkdir(parents=True, exist_ok=True)
+        host_file = workspace / "host-owned.txt"
+        host_file.write_text("caller-owned workspace content", encoding="utf-8")
+
+        deletion.forget_session(TENANT, "session", actor=actor)
+        assert projection_contains_plaintext() is False
+        deletion.purge_session(TENANT, "session", actor=actor)
+        assert projection_contains_plaintext() is False
+        assert host_file.read_text(encoding="utf-8") == "caller-owned workspace content"
+
+
 def test_forget_fences_active_and_parked_sessions_and_retries_destroy(
     tmp_path,
     monkeypatch,
@@ -223,7 +279,12 @@ def test_forget_fences_active_and_parked_sessions_and_retries_destroy(
                 "UPDATE sk_session SET phase=%s WHERE tenant_id=%s AND session_id=%s",
                 (phase, TENANT, session_id),
             )
-            lease = store.for_tenant(TENANT).acquire(session_id, owner=f"worker-{phase}", ttl_ms=60_000)
+            lease = acquire_fixture_lease(
+                store.for_tenant(TENANT),
+                session_id,
+                owner=f"worker-{phase}",
+                ttl_ms=60_000,
+            )
             assert lease is not None
 
             original_destroy = key_provider.destroy

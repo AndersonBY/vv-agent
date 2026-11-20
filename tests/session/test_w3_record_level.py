@@ -19,6 +19,8 @@ from vv_agent.kernel._boundary_hydration import (
     hydrate_session_records,
 )
 from vv_agent.kernel._content_publication import (
+    declare_input_content,
+    link_declared_input_content,
     link_declared_record_content,
     make_retained_record_before_publication,
     publish_record_content,
@@ -199,16 +201,13 @@ def _publish_provider_lookup(tmp_path: Path, result: dict[str, Any]) -> Path:
         raw_store.configure_reader(level=3)
         with closing(SessionDriver(store=raw_store, tenant_id=_TENANT, content_key_provider=provider, worker_level=3)) as driver:
             driver.create(_SESSION, "/workspace")
-            driver.push(
-                _SESSION,
-                replace(_lookup_item(result), actor=None),
-                actor={
-                    "tenant_id": _TENANT,
-                    "subject_id": result["binding"]["provider_id"],
-                    "subject_kind": "service",
-                    "attributes": {},
-                },
-            )
+            with driver.store.atomic() as tx:
+                writer = SessionContentWriter.bind(tx, tenant_id=_TENANT, session_id=_SESSION)
+                actor, actor_ref = writer.service_principal("provider-recovery")
+                publication = declare_input_content(writer, replace(_lookup_item(result), actor=actor))
+                tx.push(_SESSION, publication.item)
+                link_declared_input_content(writer, publication.item)
+                writer.link_input_actor(publication.item.input_id, actor_ref)
     return database
 
 

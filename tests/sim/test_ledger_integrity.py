@@ -5,11 +5,13 @@ from hashlib import sha256
 
 import pytest
 
+from scripts.s1_fixture_values import content_ref, create_fixture_session
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._sql import _extend_chain_digest
+from vv_agent.kernel._records import make_record
+from vv_agent.kernel._sql import LedgerIntegrityError, _extend_chain_digest
 
 from .scenarios import run_scenario
-from .world import InvariantViolation, SimLedgerSigner, SimWorld
+from .world import InvariantViolation, SimLedgerSigner, SimWorld, sqlite_root
 
 
 def test_ledger_signer_caches_exact_proofs_and_rejections(monkeypatch):
@@ -91,6 +93,89 @@ def test_i9_recomputes_real_sqlite_chain_and_checkpoints(tmp_path):
         with pytest.raises(InvariantViolation, match=r"I9.*seed=17.*seq 2") as error:
             world.check()
         assert "checkpoint signature is invalid at seq 2" in str(error.value)
+
+
+def _warm_verified_cache(world, session_id="s"):
+    observer = sqlite_root(world.connection("observer"))
+    head = observer._head(session_id)[0]
+    observer._verified_records(session_id, head)
+    return observer, sqlite_root(world.connection("fault")), head
+
+
+def test_i9_cache_rechecks_commit_digest(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "tools")
+        observer, fault, head = _warm_verified_cache(world)
+        fault._rows(
+            "UPDATE sk_record SET commit_digest=%s WHERE tenant_id=%s AND session_id=%s AND seq=1",
+            ("0" * 64, observer.tenant_id, "s"),
+        )
+        with pytest.raises(LedgerIntegrityError, match="commit record metadata"):
+            observer._verified_records("s", head)
+
+
+def test_i9_cache_rechecks_creation_consumers(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        create_fixture_session(world.connection("host"), "consumer", consumers=("events",))
+        observer, fault, head = _warm_verified_cache(world, "consumer")
+        fault._rows(
+            "DELETE FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
+            (observer.tenant_id, "consumer", "events"),
+        )
+        with pytest.raises(LedgerIntegrityError, match="commit creation consumer is missing"):
+            observer._verified_records("consumer", head)
+
+
+def test_i9_cache_rechecks_records_beyond_head(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "tools")
+        observer, fault, head = _warm_verified_cache(world)
+        record = make_record(
+            "usage_observed",
+            session_id="s",
+            payload={
+                "meter_id": "beyond-head",
+                "observation": 1,
+                "mode": "cumulative",
+                "usage": content_ref("beyond-head/usage"),
+                "source": content_ref("beyond-head/source"),
+            },
+        )
+        body = record.encode()
+        fault._rows(
+            "INSERT INTO sk_record(tenant_id,session_id,seq,record_id,schema_version,kind,turn_id,operation_id,"
+            "attempt,body,digest,chain_digest,commit_id,commit_digest,commit_position,writer_epoch,created_ms) "
+            "VALUES (%s,%s,%s,%s,'S1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                observer.tenant_id,
+                "s",
+                head + 1,
+                record.record_id,
+                record.kind,
+                record.turn_id,
+                record.operation_id,
+                record.attempt,
+                body,
+                sha256(body).hexdigest(),
+                "0" * 64,
+                "beyond-head",
+                "0" * 64,
+                0,
+                1,
+                1,
+            ),
+        )
+        with pytest.raises(LedgerIntegrityError, match="ledger record outlives"):
+            observer._verified_records("s", head)
+
+
+def test_i9_cache_rechecks_integrity_mode(sim_database):
+    with SimWorld(sim_database, seed=17) as world:
+        run_scenario(world, "tools")
+        observer, _fault, head = _warm_verified_cache(world)
+        observer.configure_input_admission(allow_unsigned=True)
+        with pytest.raises(LedgerIntegrityError, match="ledger verifier is required"):
+            observer._verified_records("s", head)
 
 
 def test_i9_explicit_hash_only_negative_rejects_rehashed_record_without_updating_chain(tmp_path):

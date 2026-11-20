@@ -14,7 +14,7 @@ import sqlite3
 import time
 from collections import Counter
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ from vv_agent.kernel._boundary_hydration import SessionHydration
 from vv_agent.kernel._content_runtime import durable_content_reader
 from vv_agent.kernel._execution_values import LLMResponse
 from vv_agent.kernel._postgres import PostgresStore
-from vv_agent.kernel._records import InboxItem, SessionSpec, make_record
+from vv_agent.kernel._records import InboxItem, Record, SessionSpec, make_record
 from vv_agent.kernel._sql import LedgerIntegrityError, _initial_chain_digest
 from vv_agent.kernel._sqlite import DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS, SQLiteStore
 from vv_agent.kernel._store import LeaseLost
@@ -103,19 +103,26 @@ class SimSQLiteStore(SQLiteStore):
         if kwargs:
             return super()._verified_records(session_id, through, **kwargs)
         params = (self.tenant_id, session_id, through)
+        session_rows = tuple(
+            self._rows(
+                "SELECT tenant_id,session_id,head_seq,inbox_seq,lease_epoch,deletion_state FROM sk_session "
+                "WHERE tenant_id=%s AND session_id=%s",
+                (self.tenant_id, session_id),
+            )
+        )
         record_rows = tuple(
             self._rows(
                 "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
-                "schema_version,kind,turn_id,operation_id,attempt,commit_position FROM sk_record "
-                "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
-                params,
+                "schema_version,kind,turn_id,operation_id,attempt,commit_position,commit_digest FROM sk_record "
+                "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                params[:2],
             )
         )
         checkpoint_rows = tuple(
             self._rows(
                 "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
-                "WHERE tenant_id=%s AND session_id=%s AND seq<=%s ORDER BY seq",
-                params,
+                "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
+                params[:2],
             )
         )
         commit_rows = tuple(
@@ -125,7 +132,26 @@ class SimSQLiteStore(SQLiteStore):
                 (self.tenant_id, session_id),
             )
         )
-        signature = (through, record_rows, checkpoint_rows, commit_rows)
+        consumer_rows = tuple(
+            self._rows(
+                "SELECT tenant_id,session_id,consumer,last_seq,project_retry_at_ms FROM sk_consumer "
+                "WHERE tenant_id=%s AND session_id=%s ORDER BY consumer",
+                params[:2],
+            )
+        )
+        configured, allow_unsigned, signer = self._input_admission_policy()
+        policy = (configured, allow_unsigned, id(signer), getattr(signer, "key_id", None))
+        signature = (
+            self.tenant_id,
+            session_id,
+            through,
+            policy,
+            session_rows,
+            record_rows,
+            checkpoint_rows,
+            commit_rows,
+            consumer_rows,
+        )
         cached = self._sim_verified_ledger_cache
         if cached is not None and cached[0] == signature:
             return cached[1], cached[2]
@@ -427,10 +453,6 @@ class SimWorld:
         """Run the production ledger verifier and compare its complete SQL prefix."""
 
         store = self.connection("observer")
-        version = sqlite_state_version(store, sid)
-        cached = self._ledger_checks.get(sid)
-        if version is not None and cached is not None and cached[0] == version:
-            return cached[1]
         head, inbox_seq = store._head(sid)[:2]
         try:
             verified, chains = store._verified_records(sid, head)
@@ -465,8 +487,6 @@ class SimWorld:
         previous = chains[-1] if chains else _initial_chain_digest(store.tenant_id, sid)
         if head:
             self.covered.add("I9")
-        if version is not None:
-            self._ledger_checks[sid] = (version, previous)
         return previous
 
     def cached_state_signature(self, store, sid, records=None):
@@ -542,7 +562,7 @@ class SimWorld:
         def write(tx, record, **kwargs):
             row = tx.store._lock(record.session_id)
             now = tx.store._now()
-            self.admissions.append((record.session_id, record.record_id, kwargs["epoch"], row[2], row[4], now))
+            self.admissions.append((record.session_id, record.record_id, record.kind, kwargs["epoch"], row[2], row[4], now))
             return actual(tx, record, **kwargs)
 
         self.stack.enter_context(patch.object(SQLSessionTx, "_write", write))
@@ -753,8 +773,10 @@ class SimWorld:
         self.queue.clear()
         scanner = self.connection("scanner")
         progressed = False
+        saw_work = False
         for _ in range(rounds):
             work = [item for item in scanner.list_runnable() if item.kind == "drive"]
+            saw_work |= bool(work)
             self.events.append({"scan_candidates": [item.session_id for item in work]})
             if not work:
                 break
@@ -770,6 +792,7 @@ class SimWorld:
         observer = self.connection("observer")
         ready = [sid for sid in observer.list_sessions() if observer.is_runnable(sid)]
         require(not ready, "I4", f"fair SQL scan left ready work stranded: {ready}")
+        require(not saw_work or progressed, "I4", "fair SQL scan selected work but made no durable progress")
         if progressed:
             self.covered.add("I4")
         return progressed
@@ -782,10 +805,26 @@ class SimWorld:
             checked_inputs = self._check_inputs(sid, rows)
             _inputs, applications = checked_inputs
             records = [r.record for r in rows]
-            identities = {(sid, r.record.record_id) for r in rows}
-            for session, rid, epoch, actual, until, now in self.admissions:
-                if (session, rid) in identities and epoch:
-                    require(epoch == actual and until is not None and until > now, "I2", f"unfenced write {rid}")
+            records_by_id = {(sid, r.record.record_id): r for r in rows}
+            for session, rid, kind, epoch, actual, until, now in self.admissions:
+                stored = records_by_id.get((session, rid))
+                if stored is not None:
+                    if kind == "session_created":
+                        require(
+                            type(epoch) is int and epoch == actual == stored.writer_epoch == 0 and until is None,
+                            "I2",
+                            f"unfenced write {rid}",
+                        )
+                    else:
+                        require(
+                            type(epoch) is int
+                            and epoch > 0
+                            and epoch == actual == stored.writer_epoch
+                            and until is not None
+                            and until > now,
+                            "I2",
+                            f"unfenced write {rid}",
+                        )
             current = self.folds.setdefault(sid, fold_factory())
             old = self.prefixes.get(sid, 0)
             for end in range(old + 1, len(records) + 1):
@@ -813,17 +852,23 @@ class SimWorld:
                 self.verified_prefixes[sid] = raw_prefix
                 require(current.state == verified.state, "I8", "append-only fold branches diverged")
             if every_prefix:
-                replay = fold_factory()
+                incremental = fold_factory()
                 for end, r in enumerate(records, 1):
                     consumed = [InboxItem(**r._payload["input"])] if r.kind == "input_applied" else []
-                    replay.extend([r], consumed_inputs=consumed)
-                    self.compare_prefix(records[:end], replay.state)
+                    incremental.extend([r], consumed_inputs=consumed)
+                    cold = tuple(Record.parse(candidate.encode()) for candidate in records[:end])
+                    self.compare_prefix(cold, incremental.state)
+                require(incremental.state == current.state, "I8", "append-only fold branches diverged")
+                self.covered.add("I8")
             for oid, op in state.operations.items():
                 first_key = op.attempts[1].plan._payload["idempotency_key"]
                 for number, attempt in op.attempts.items():
                     key = (sid, oid, number)
                     external = [c for c in self.calls if c[:3] == key]
                     require(len(external) <= 1, "I1", f"duplicate dispatch {key}")
+                    execution_started = attempt.result is not None and attempt.result._payload.get("execution_started", True)
+                    if execution_started and attempt.child_handle is None:
+                        require(len(external) == 1, "I1", f"started attempt missing external dispatch {key}")
                     require(attempt.plan._payload["idempotency_key"] == first_key, "I1", f"retry changed key {key}")
                     if (
                         attempt.unknown
@@ -864,7 +909,7 @@ class SimWorld:
             if quiescent and state.active_turn_id and store.peek_inbox(sid):
                 require(bool(state.waits) or store.is_runnable(sid), "I4", f"stranded active input {sid}")
             if state.operations:
-                self.covered.update({"I1", "I8"})
+                self.covered.add("I1")
             if any(a.unknown for op in state.operations.values() for a in op.attempts.values()):
                 self.covered.add("I10")
             if applications:
@@ -873,9 +918,16 @@ class SimWorld:
     def _check_inputs(self, sid, rows):
         signature = self.snapshots[sid].signature
         inputs = tuple((row[0], row[10]) for row in signature[1])
+        bodies = {row[0]: row[3] for row in signature[1]}
         applications = Counter(r.record._payload["input"]["input_id"] for r in rows if r.record.kind == "input_applied")
         for row in rows:
             if row.record.kind == "input_applied":
+                applied = InboxItem(**row.record._payload["input"])
+                require(
+                    replace(applied, admission_proof=None).encode() == bodies.get(applied.input_id),
+                    "I3",
+                    f"input {sid}/{applied.input_id} application differs from durable inbox body",
+                )
                 require(
                     row.created_ms >= row.record._payload["input"]["available_ms"],
                     "I3",

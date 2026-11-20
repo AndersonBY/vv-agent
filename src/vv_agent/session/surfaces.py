@@ -113,6 +113,7 @@ _STORE_CLOSERS: WeakKeyDictionary[SessionStore, list[Any]] = WeakKeyDictionary()
 _DEFAULT_SQLITE_PATH = object()
 _ALL_RECORDS_LIMIT = (1 << 31) - 1
 _EVENT_PAGE_SIZE = 256
+_PROVIDER_RECOVERY_SUBJECT_ID = "provider-recovery"
 _TRANSIENT_STREAM_EVENTS = (AssistantDeltaEvent, ReasoningDeltaEvent, ModelToolCallStartedEvent, ModelToolCallProgressEvent)
 PrincipalInput = Principal | Mapping[str, Any]
 RuntimeFactory = Callable[[SessionStore, Agent, RunConfig, AgentTask | None, str], Runtime]
@@ -569,6 +570,33 @@ def _persisted_principal(value: PrincipalInput) -> Principal | None:
     if isinstance(value, _PersistedPrincipalPayload):
         return Principal.from_dict(dict(value))
     return None
+
+
+def _is_provider_recovery_actor(value: PrincipalInput | None) -> bool:
+    if isinstance(value, Principal):
+        return value.subject_id == _PROVIDER_RECOVERY_SUBJECT_ID
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("subject_id") == _PROVIDER_RECOVERY_SUBJECT_ID:
+        return True
+    attributes = value.get("attributes")
+    return isinstance(attributes, Mapping) and attributes.get("role") == _PROVIDER_RECOVERY_SUBJECT_ID
+
+
+def _reject_public_provider_ingress(
+    item: InboxItem,
+    *,
+    actor: PrincipalInput | None,
+    actor_subject_id: str,
+) -> None:
+    if item.kind == "provider_evidence":
+        raise Conflict("provider evidence requires trusted recovery ingress")
+    if (
+        actor_subject_id == _PROVIDER_RECOVERY_SUBJECT_ID
+        or _is_provider_recovery_actor(actor)
+        or _is_provider_recovery_actor(item.actor)
+    ):
+        raise Conflict("provider-recovery actor is reserved for trusted recovery ingress")
 
 
 class SessionDriver:
@@ -2720,6 +2748,7 @@ class SessionDriver:
         registration: _RuntimeRegistration | None = None,
         ceiling: int | None = None,
     ):
+        _reject_public_provider_ingress(item, actor=actor, actor_subject_id=actor_subject_id)
         writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
         item = self._route_inbox_item(sid, item, registration=registration, ceiling=ceiling)
         item = self._prepare_item(sid, item, writer)
@@ -2730,6 +2759,8 @@ class SessionDriver:
             persisted = True
         elif actor is item.actor:
             persisted = True
+        if _is_provider_recovery_actor(actor):
+            raise Conflict("provider-recovery actor is reserved for trusted recovery ingress")
         bound_actor, actor_attributes = self._bound_actor(
             actor,
             subject_id=actor_subject_id,

@@ -2,27 +2,32 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import pytest
+from session.helpers import acquire_fixture_lease
 
 from vv_agent.kernel._boundary_hydration import hydrate_input, hydrate_stored_payload
 from vv_agent.kernel._canonical_json import canonical_json_bytes
-from vv_agent.kernel._content import ContentBindingMismatch, ContentLabels, ContentRef, ContentUnavailable
+from vv_agent.kernel._content import ContentBindingMismatch, ContentLabels, ContentRef, ContentUnavailable, SourceKind
 from vv_agent.kernel._content_publication import (
     _BOUNDARY_CONTENT_SLOTS,
     _CONTENT_SLOTS,
     _INPUT_SLOTS,
+    declare_input_content,
     declared_content_ref,
     declared_record_content,
+    link_declared_input_content,
     link_declared_record_content,
     producer_content_ref,
     publish_record_content,
     publish_turn_started,
     resolve_record_content_links,
 )
+from vv_agent.kernel._content_runtime import INTERNAL_LABELS
 from vv_agent.kernel._driver import CoreDriver
-from vv_agent.kernel._execution_values import AgentTask
+from vv_agent.kernel._execution_values import AgentTask, execution_id_for_values
 from vv_agent.kernel._record_schema import BOUNDARY_DATA, INPUT_PAYLOADS, PAYLOADS
 from vv_agent.kernel._records import InboxItem, Record, digest, record_identity
 from vv_agent.kernel._store import StoredRecord
@@ -54,9 +59,21 @@ class _OwnerMapReader:
 def _sessions(tmp_path, *, attributes: dict[str, Any] | None = None) -> Iterator[tuple[SQLiteStore, SessionDriver]]:
     with SQLiteStore.standalone(str(tmp_path / "inventory.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         sessions.create("s", "/workspace", attributes or {})
         yield store, sessions
+
+
+def _push_trusted_input(store: SQLiteStore, item: InboxItem):
+    with store.atomic() as tx:
+        writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+        actor, actor_attributes = writer.service_principal("fixture/provider-evidence")
+        publication = declare_input_content(writer, replace(item, actor=actor))
+        receipt = tx.push("s", publication.item)
+        link_declared_input_content(writer, publication.item)
+        writer.link_input_actor(item.input_id, actor_attributes)
+        return receipt
 
 
 def _boundary_driver(store: SQLiteStore, session_id: str = "s") -> CoreDriver:
@@ -105,7 +122,6 @@ def _definition(message: dict[str, Any], *, input_message: dict[str, Any] | None
         "model_binding": {
             "backend": "scripted",
             "model": "scripted",
-            "endpoints": ["scripted"],
             "context_length": None,
             "max_output_tokens": None,
         },
@@ -145,20 +161,29 @@ def _provider_items() -> tuple[InboxItem, InboxItem, dict[str, Any], dict[str, A
             "operation_id": "operation/evidence",
             "attempt": 1,
             "request_digest": request_digest,
-            "handle": {
-                "kind": "provider",
-                "provider": "test",
-                "job_id": {"job": "job-secret"},
-                "operation_id": "operation/evidence",
-                "attempt": 1,
-                "request_digest": request_digest,
-                "evidence": {"opaque": "handle-evidence-secret"},
-                "query_ref": {"query": "query-secret"},
-                "cancel_ref": {"cancel": "cancel-secret"},
+            "provider_lookup": {
+                "schema_version": "vv-agent.provider-lookup.v1",
+                "status": "unknown",
+                "binding": {
+                    "tenant_id": "default",
+                    "session_id": "s",
+                    "operation_id": "operation/evidence",
+                    "attempt": 1,
+                    "request_digest": request_digest,
+                    "idempotency_key": "s/operation/evidence",
+                    "execution_id": execution_id_for_values("default", "env", "s/operation/evidence"),
+                    "command_digest": digest({"command": "provider"}),
+                    "environment_id": "env",
+                    "generation": 0,
+                    "provider_id": "test",
+                },
+                "outcome": {"kind": "Unknown", "reason": "provider lookup unavailable"},
+                "evidence": ["lookup-secret"],
             },
         },
         target_turn_id="s/turn/provider",
         generation=0,
+        feature_level=3,
     )
     return provider_result, provider_evidence, result, usage
 
@@ -181,6 +206,7 @@ def test_content_inventory_covers_all_records_inputs_and_boundaries() -> None:
         "provider.handle.evidence",
         "provider.handle.query_ref",
         "provider.handle.cancel_ref",
+        "provider_lookup",
     }
     session_slots = {slot.slot: slot for slot in _CONTENT_SLOTS["session_created"]}
     assert session_slots["session.attributes"].nested[0].path == ("seed", "messages", "*")
@@ -193,15 +219,17 @@ def test_content_inventory_covers_all_records_inputs_and_boundaries() -> None:
 def test_provider_inbox_round_trip_idempotence_and_opaque_content(tmp_path) -> None:
     provider_result, provider_evidence, expected_result, expected_usage = _provider_items()
     with _sessions(tmp_path) as (store, sessions):
+        store._rows("UPDATE sk_settings SET write_level=3 WHERE singleton=1")
+        store.configure_reader(level=3)
         baseline_content = _content_count(store)
         assert not sessions.push("s", provider_result).replayed
-        assert not sessions.push("s", provider_evidence).replayed
+        assert not _push_trusted_input(store, provider_evidence).replayed
         first_content = _content_count(store)
         first_links = _link_count(store)
         assert first_content > baseline_content
 
         assert sessions.push("s", provider_result).replayed
-        assert sessions.push("s", provider_evidence).replayed
+        assert _push_trusted_input(store, provider_evidence).replayed
         assert _content_count(store) == first_content
         assert _link_count(store) == first_links
 
@@ -213,27 +241,47 @@ def test_provider_inbox_round_trip_idempotence_and_opaque_content(tmp_path) -> N
         assert hydrated_result.payload["result"] == expected_result
         assert hydrated_result.payload["usage"] == expected_usage
         assert hydrated_result.payload["evidence"] == {"content_id": "opaque-evidence", "note": "host-defined"}
-        assert hydrated_evidence.payload["handle"]["job_id"] == {"job": "job-secret"}
-        assert hydrated_evidence.payload["handle"]["evidence"] == {"opaque": "handle-evidence-secret"}
-        assert hydrated_evidence.payload["handle"]["query_ref"] == {"query": "query-secret"}
-        assert hydrated_evidence.payload["handle"]["cancel_ref"] == {"cancel": "cancel-secret"}
+        assert hydrated_evidence.payload["provider_lookup"] == provider_evidence.payload["provider_lookup"]
 
         result_links = {link.slot for link in _links(store, input_id="provider-result")}
         evidence_links = {link.slot for link in _links(store, input_id="provider-evidence")}
         assert result_links == {"input.actor.attributes", "provider.result", "provider.usage", "provider.evidence"}
         assert evidence_links == {
             "input.actor.attributes",
-            "provider.handle.job_id",
-            "provider.handle.evidence",
-            "provider.handle.query_ref",
-            "provider.handle.cancel_ref",
+            "provider_lookup",
         }
         bodies = "\n".join(
             row[0].decode() if isinstance(row[0], bytes) else row[0]
             for row in store._rows("SELECT body FROM sk_inbox WHERE tenant_id=%s AND session_id=%s", ("default", "s"))
         )
         assert "provider-result-secret" not in bodies
-        assert "job-secret" not in bodies
+        assert "lookup-secret" not in bodies
+
+
+def test_default_content_labels_do_not_assert_trusted_provenance(tmp_path) -> None:
+    with SQLiteStore.standalone(str(tmp_path / "labels.sqlite")) as store:
+        store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
+        sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
+        sessions.create("s", "/workspace", {"opaque": "host-attributes"})
+
+        creation = store.read("s", limit=1).records[0].record.payload
+        assert ContentRef.from_dict(creation["workspace"]).labels.source == ()
+        assert ContentRef.from_dict(creation["attributes"]).labels.source == ()
+        assert ContentRef.from_dict(creation["principal"]["attributes"]).labels.source == (SourceKind.INTERNAL,)
+
+        provider_result, _, _, _ = _provider_items()
+        sessions.push("s", provider_result)
+        links = {link.slot: link.ref.labels.source for link in _links(store, input_id=provider_result.input_id)}
+        assert links["provider.result"] == ()
+        assert links["provider.usage"] == ()
+        assert links["provider.evidence"] == ()
+        assert links["input.actor.attributes"] == (SourceKind.INTERNAL,)
+
+        with store.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
+            assert writer.put_json({"kind": "model-response"}).labels == ContentLabels()
+            assert writer.put_json({"trusted": "internal-metadata"}, labels=INTERNAL_LABELS).labels == INTERNAL_LABELS
 
 
 @pytest.mark.parametrize(
@@ -377,7 +425,7 @@ def test_nested_creation_definition_and_request_round_trip_and_replay(tmp_path) 
             "max_host_cost": None,
             "unavailable_metric_policy": "continue_and_mark",
         }
-        lease = store.acquire("s", owner="inventory", ttl_ms=15_000)
+        lease = acquire_fixture_lease(store, "s", owner="inventory", ttl_ms=15_000)
         assert lease is not None
         with store.atomic() as tx:
             writer = SessionContentWriter.bind(tx, tenant_id="default", session_id="s")
