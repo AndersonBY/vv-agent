@@ -11,7 +11,12 @@ from vv_agent.kernel._boundary_hydration import hydrate_session_records
 from vv_agent.kernel._content import ContentRef
 
 from .report import DEFAULT_WORKERS, MAX_WORKERS, run_campaign, seed_results, versions
-from .scenarios import SCENARIOS, run_scenario
+from .scenarios import (
+    POSTGRES_FUTURE_DELAYS_MS,
+    POSTGRES_FUTURE_WAIT_LIMIT_SECONDS,
+    SCENARIOS,
+    run_scenario,
+)
 from .world import SimWorld
 
 
@@ -35,6 +40,43 @@ def test_real_driver_recovery(sim_database, scenario):
             assert ContentRef.from_dict(raw_retry._payload["budget_admission"]).content_id
             assert operation.attempts[2].plan.payload["request"]["id"] == "job"
             assert raw_retry._payload["idempotency_key"] == operation.attempts[1].plan.payload["idempotency_key"]
+
+
+def test_future_input_postgres_wait_uses_bounded_budget(sim_database):
+    if not isinstance(sim_database, str):
+        pytest.skip("PostgreSQL keeps the production wall clock")
+    with SimWorld(sim_database, seed=17) as world:
+        summary = run_scenario(world, "future_input")
+    wait = next(event["future_input_wait"] for event in summary["events"] if "future_input_wait" in event)
+    assert wait["delay_ms"] in POSTGRES_FUTURE_DELAYS_MS
+    assert 0 <= wait["elapsed_ms"] <= wait["budget_ms"] == round(POSTGRES_FUTURE_WAIT_LIMIT_SECONDS * 1000)
+
+
+def test_worker_compatibility_releases_one_shot_probe_connections(sim_database):
+    retained = {
+        "compatible/heartbeat",
+        "host",
+        "observer",
+        "worker/cache-mutator",
+        "worker/cache-tamper",
+        "worker/creator",
+        "worker/exact",
+        "worker/root",
+    }
+    with SimWorld(sim_database, seed=17) as world:
+        original_connection = world.connection
+        peak = len(world.connections)
+
+        def observe_connection(participant):
+            nonlocal peak
+            store = original_connection(participant)
+            peak = max(peak, len(world.connections))
+            return store
+
+        world.connection = observe_connection
+        run_scenario(world, "worker_compatibility")
+        assert peak <= len(retained)
+        assert set(world.connections) == retained
 
 
 @pytest.mark.parametrize("scenario", ["accepted", "unknown_idempotent", "late_result"])

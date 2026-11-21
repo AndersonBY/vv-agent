@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scripts.s1_fixture_values import create_fixture_session, push_fixture_input
@@ -50,6 +51,10 @@ SCENARIOS = (
     "context_compacted",
     "worker_compatibility",
 )
+
+POSTGRES_FUTURE_DELAYS_MS = (1500, 2000)
+POSTGRES_FUTURE_POLL_SECONDS = 0.025
+POSTGRES_FUTURE_WAIT_LIMIT_SECONDS = 4.0
 
 
 def require(condition, invariant, detail):
@@ -404,7 +409,11 @@ def future_input(w, provider):
     w.drive(provider=provider)
     w.check()
     observer = w.connection("observer")
-    delay = w.choices.choose("input/delay-ms", [2000, 3000])
+    from .world import SimClock
+
+    simulated_clock = isinstance(w.clock, SimClock)
+    delay_options = (2000, 3000) if simulated_clock else POSTGRES_FUTURE_DELAYS_MS
+    delay = w.choices.choose("input/delay-ms", delay_options)
     due = observer._now() + delay
     item = InboxItem("future", "user", {"content": "run when available"}, available_ms=due)
     w.push("s", item)
@@ -419,15 +428,26 @@ def future_input(w, provider):
     require(tuple(w.calls) == before, "I1", "future input dispatched work early")
     w.events.append({"future_input_held": "future", "available_ms": due, "observed_ms": now})
     # SQLite advances injected time; PostgreSQL sleeps against unchanged SQL time.
-    deadline = w.clock.monotonic() + 10
-    from .world import SimClock
-
-    if isinstance(w.clock, SimClock):
+    if simulated_clock:
         w.clock.sleep(max(0, due - observer._now()) / 1000)
     else:
+        wait_started = w.clock.monotonic()
+        deadline = wait_started + POSTGRES_FUTURE_WAIT_LIMIT_SECONDS
         while (remaining := due - observer._now()) > 0:
-            require(w.clock.monotonic() < deadline, "scheduler", "database due-time wait exceeded ten seconds")
-            w.clock.sleep(min(remaining / 1000, 0.1))
+            require(w.clock.monotonic() < deadline, "scheduler", "database due-time wait exceeded its bounded budget")
+            w.clock.sleep(min(remaining / 1000, POSTGRES_FUTURE_POLL_SECONDS))
+        elapsed_ms = round((w.clock.monotonic() - wait_started) * 1000)
+        budget_ms = round(POSTGRES_FUTURE_WAIT_LIMIT_SECONDS * 1000)
+        require(elapsed_ms <= budget_ms, "scheduler", "database due-time wait exceeded its bounded budget")
+        w.events.append(
+            {
+                "future_input_wait": {
+                    "delay_ms": delay,
+                    "elapsed_ms": elapsed_ms,
+                    "budget_ms": budget_ms,
+                }
+            }
+        )
     require(observer.is_runnable("s"), "I4", "due input did not make SQL work runnable")
     require(w.scan(provider=provider, participant="worker-1"), "I4", "SQL scanner did not recover the due input")
     state, rows, _ = w.read_state("s")
@@ -640,6 +660,21 @@ def _observe_worker_claim(world, store, owner, session_id, *, expected):
     return matches[0] if matches else None
 
 
+def _close_probe_connection(world, participant):
+    """Release a one-shot probe connection after its SQL transaction is complete."""
+
+    store = world.connections[participant]
+    if isinstance(world.database, Path):
+        idle = not store.connection.in_transaction
+    else:
+        from psycopg.pq import TransactionStatus
+
+        idle = store.connection.info.transaction_status == TransactionStatus.IDLE
+    require(idle, "I11", f"probe connection {participant} still owns a transaction")
+    store.connection.close()
+    world.connections.pop(participant)
+
+
 def worker_compatibility(w):
     """Exercise worker support filtering through real SQL claims and core execution."""
 
@@ -718,11 +753,9 @@ def worker_compatibility(w):
             "model identity",
         ),
     )
-    workers = {}
     for name, level, handlers, capabilities, detail in mismatched:
         store = w.connection(f"worker/{name}")
         store.configure_worker(level=level, handler_versions=handlers, capabilities=capabilities)
-        workers[name] = store
         require(
             not store.worker_supports.accepts(
                 level=requirements.level,
@@ -733,6 +766,7 @@ def worker_compatibility(w):
             f"{detail} worker unexpectedly declared the exact support set",
         )
         _observe_worker_claim(w, store, name, session_id, expected=False)
+        _close_probe_connection(w, f"worker/{name}")
 
     extra_schema = copy_json(schema)
     extra_schema["function"]["name"] = "extra"
@@ -758,6 +792,7 @@ def worker_compatibility(w):
     extra_claim = _observe_worker_claim(w, extra, "extra-capability", session_id, expected=True)
     assert extra_claim is not None and extra_claim.lease is not None
     require(extra.release(extra_claim.lease), "I11", "extra-capability worker could not release its claim")
+    _close_probe_connection(w, "worker/extra-capability")
 
     exact = w.connection("worker/exact")
     exact.configure_reader(level=2)
@@ -802,8 +837,20 @@ def worker_compatibility(w):
         capabilities=(*requirements.capabilities, "deployment:worker-unmatched"),
     )
     _create_level_two_work(w, creator, unmatched_id, unmatched_requirements)
-    for name, store in (*workers.items(), ("extra-capability", extra), ("compatible", exact)):
+    for name, level, handlers, capabilities, _detail in mismatched:
+        store = w.connection(f"worker/{name}")
+        store.configure_worker(level=level, handler_versions=handlers, capabilities=capabilities)
         _observe_worker_claim(w, store, f"unmatched/{name}", unmatched_id, expected=False)
+        _close_probe_connection(w, f"worker/{name}")
+    extra = w.connection("worker/extra-capability")
+    extra.configure_worker(
+        level=requirements.level,
+        handler_versions=(runtime.handler_version,),
+        capabilities=extra_capabilities,
+    )
+    _observe_worker_claim(w, extra, "unmatched/extra-capability", unmatched_id, expected=False)
+    _close_probe_connection(w, "worker/extra-capability")
+    _observe_worker_claim(w, exact, "unmatched/compatible", unmatched_id, expected=False)
 
     pending = creator.read_input(unmatched_id, "start")
     require(pending is not None and pending.consumed_seq is None, "I11", "unmatched input was consumed")
