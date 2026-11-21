@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from session import conftest as session_fixtures
 from session.app_server_s1_helpers import bind_development_content
 from support.interactions import displayed_target
 
@@ -14,7 +15,14 @@ from vv_agent.session.app_server import SubmissionConflict
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 
-pytest_plugins = ["session.conftest"]
+database = session_fixtures.database
+postgres_admin_dsn = session_fixtures.postgres_admin_dsn
+store = session_fixtures.store
+
+
+@pytest.fixture(params=("postgres", "sqlite"))
+def store_backend(request: pytest.FixtureRequest) -> str:
+    return request.param
 
 
 @pytest.mark.parametrize(

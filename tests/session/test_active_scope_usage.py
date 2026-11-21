@@ -22,10 +22,11 @@ from vv_agent.session.kernel import _Driver, drive, read_state
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.providers import Accepted, Definitive
 from vv_agent.session.records import InboxItem
-from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, NoToolPolicy, ToolCall, ToolExecutionResult
+
+from .conftest import open_store
 
 MASTER_KEY = b"k" * 32
 ANSWER = "active-scope-finished-result"
@@ -195,7 +196,7 @@ def test_real_s1_no_tool_finish_publishes_and_hydrates_four_active_observations(
         calls.append(ANSWER)
         return LLMResponse(ANSWER)
 
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         start(sessions)
         rt = runtime(sessions, ScriptedModelProvider.from_callback("scripted", "scripted", complete))
@@ -220,7 +221,7 @@ def test_real_s1_no_tool_finish_publishes_and_hydrates_four_active_observations(
         assert ANSWER.encode() not in b"".join(row.record.encode() for row in raw)
         assert b"kernel-active-scope" not in b"".join(row.record.encode() for row in raw)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         sessions = SessionDriver(store=reopened, content_key_provider=key_provider)
         raw = rows(sessions)
         usages = usage_rows(sessions)
@@ -250,7 +251,7 @@ def test_real_s1_no_tool_finish_publishes_and_hydrates_four_active_observations(
 def test_wait_user_excludes_parked_downtime_and_starts_a_new_epoch_interval(tmp_path: Path) -> None:
     clock = ManualClock()
     meter = Meter()
-    with SQLiteStore.standalone(str(tmp_path / "wait.sqlite")) as store:
+    with open_store(tmp_path / "wait.sqlite") as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         start(sessions)
         question = "Resume with the approved answer?"
@@ -320,7 +321,7 @@ def test_provider_query_completion_from_parked_state_records_the_claimed_worker_
             return LLMResponse("", [ToolCall("remote-call", "remote_work", {})])
         return LLMResponse("provider scenario complete")
 
-    with SQLiteStore.standalone(str(tmp_path / "provider-query.sqlite"), clock=clock) as store:
+    with open_store(tmp_path / "provider-query.sqlite", clock=clock) as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         start(sessions)
         rt = runtime(
@@ -397,7 +398,7 @@ def test_cold_reopen_budget_reconstruction_rejects_new_model_without_repeating_c
         clock.advance_ms(7)
         return LLMResponse("Budgeted question")
 
-    with SQLiteStore.standalone(str(path), clock=clock) as store:
+    with open_store(path, clock=clock) as store:
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         start(sessions)
         rt = runtime(
@@ -417,7 +418,7 @@ def test_cold_reopen_budget_reconstruction_rejects_new_model_without_repeating_c
     if meter is not None:
         meter.amount = 11
 
-    with SQLiteStore.standalone(str(path), clock=clock) as reopened:
+    with open_store(path, clock=clock) as reopened:
         sessions = SessionDriver(store=reopened, content_key_provider=key_provider)
         sessions.push(
             "s",
@@ -501,7 +502,7 @@ def test_finalize_failure_rolls_back_content_records_and_usage_before_retry(
 
     monkeypatch.setattr(driver_module, "link_declared_record_content", fail_finalize)
 
-    with SQLiteStore.standalone(str(tmp_path / "rollback.sqlite")) as store:
+    with open_store(tmp_path / "rollback.sqlite") as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         start(sessions)
         rt = runtime(sessions, ScriptedModelProvider.from_callback("scripted", "scripted", complete))
@@ -532,7 +533,7 @@ def test_committed_plan_replay_adds_no_usage_and_resume_binds_the_same_operation
             captured.append(record)
             raise Cut()
 
-    with SQLiteStore.standalone(str(tmp_path / "replay.sqlite")) as store:
+    with open_store(tmp_path / "replay.sqlite") as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         start(sessions)
         rt = runtime(sessions, ScriptedModelProvider.from_callback("scripted", "scripted", complete))
@@ -566,7 +567,7 @@ def test_committed_plan_replay_adds_no_usage_and_resume_binds_the_same_operation
 
 
 def test_retained_budget_requires_reader_and_rejects_malformed_ref(tmp_path: Path) -> None:
-    with SQLiteStore.standalone(str(tmp_path / "retained-reader.sqlite")) as store:
+    with open_store(tmp_path / "retained-reader.sqlite") as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         interrupt_before_model(sessions)
         state, _, _ = read_state(store, "s")
@@ -586,7 +587,7 @@ def test_retained_budget_requires_reader_and_rejects_malformed_ref(tmp_path: Pat
 
 @pytest.mark.parametrize("corruption", ["missing", "wrong-slot", "cross-owner"])
 def test_retained_budget_rejects_broken_owner_links(tmp_path: Path, corruption: str) -> None:
-    with SQLiteStore.standalone(str(tmp_path / f"retained-{corruption}.sqlite")) as store:
+    with open_store(tmp_path / f"retained-{corruption}.sqlite") as store:
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         interrupt_before_model(sessions)
         turn = next(row for row in rows(sessions) if row.record.kind == "turn_started")
