@@ -7,6 +7,7 @@ from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 
@@ -62,6 +63,51 @@ def test_real_pg16_and_pg18_catalog_evidence_has_one_semantic_difference():
     assert {(row[0], row[3].removeprefix("NOT NULL ")) for row in added} == attnotnull_columns
 
 
+def test_postgres_store_keeps_runtime_binding_checks(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    worker_connection = object()
+    tenant_connection = object()
+
+    def schema_status(connection):
+        calls.append(("schema", connection))
+        return "missing"
+
+    def verified_role_binding(connection, binding):
+        calls.append(("role", binding))
+        return binding
+
+    def verify_bound_policy(_connection, binding):
+        calls.append(("policy", binding))
+
+    def verify_tenant_connection(_cls, connection, tenant_id):
+        calls.append(("tenant", (connection, tenant_id)))
+
+    monkeypatch.setattr(_postgres, "_schema_status", schema_status)
+    monkeypatch.setattr(_postgres, "_verified_role_binding", verified_role_binding)
+    monkeypatch.setattr(_postgres.PostgresStore, "_verify_bound_policy", staticmethod(verify_bound_policy))
+    monkeypatch.setattr(
+        _postgres.PostgresStore,
+        "verify_tenant_connection",
+        classmethod(verify_tenant_connection),
+    )
+
+    worker_binding = _postgres.RuntimeBinding("worker")
+    worker = _postgres.PostgresStore(worker_connection, fold_factory=_fold_factory, runtime_binding=worker_binding)
+    tenant_binding = _postgres.RuntimeBinding("tenant", "tenant-a")
+    tenant = _postgres.PostgresStore(tenant_connection, fold_factory=_fold_factory, runtime_binding=tenant_binding)
+
+    assert calls == [
+        ("role", worker_binding),
+        ("policy", worker_binding),
+        ("schema", worker_connection),
+        ("tenant", (tenant_connection, "tenant-a")),
+        ("schema", tenant_connection),
+    ]
+    assert worker.runtime_binding == worker_binding
+    assert tenant.runtime_binding == tenant_binding
+    assert tenant.credential_tenant_id == "tenant-a"
+
+
 @pytest.mark.postgres
 def test_postgres_fingerprint_accepts_both_captures_and_current_schema(monkeypatch, database):
     import psycopg
@@ -81,6 +127,71 @@ def test_postgres_fingerprint_accepts_both_captures_and_current_schema(monkeypat
         monkeypatch.undo()
         _postgres.PostgresStore(connection, fold_factory=_fold_factory).install_schema()
         assert _postgres._schema_fingerprint(connection) == _postgres.SCHEMA_FINGERPRINT
+
+
+@pytest.mark.postgres
+def test_postgres_store_reuses_relation_catalog_scan(monkeypatch, database):
+    import psycopg
+
+    with psycopg.connect(database, autocommit=True, connect_timeout=3) as connection:
+        _postgres.PostgresStore(connection, fold_factory=_fold_factory).install_schema()
+
+    with psycopg.connect(database, autocommit=True, connect_timeout=3) as connection:
+        relation_scans: list[str] = []
+        original_probe_rows = _postgres._probe_rows
+
+        def counting_probe_rows(probe_connection, query, params=(), *, binary=False):
+            if "SELECT c.relname,c.relkind,c.relpersistence" in query:
+                relation_scans.append(query)
+            return original_probe_rows(probe_connection, query, params, binary=binary)
+
+        monkeypatch.setattr(_postgres, "_probe_rows", counting_probe_rows)
+        store = _postgres.PostgresStore(connection, fold_factory=_fold_factory)
+
+        assert store.runtime_mode == "unbound-internal"
+        assert len(relation_scans) == 1
+
+
+@pytest.mark.postgres
+def test_postgres_schema_validation_is_scoped_to_each_database_and_connection(database, postgres_admin_dsn):
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    database_name = f"vv_schema_scope_{uuid4().hex}"
+    with psycopg.connect(postgres_admin_dsn, autocommit=True, connect_timeout=3) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    other_dsn = make_conninfo(postgres_admin_dsn, dbname=database_name)
+
+    try:
+        with (
+            psycopg.connect(database, autocommit=True, connect_timeout=3) as first_database,
+            psycopg.connect(other_dsn, autocommit=True, connect_timeout=3) as second_database,
+        ):
+            _postgres.PostgresStore(first_database, fold_factory=_fold_factory).install_schema()
+            _postgres.PostgresStore(second_database, fold_factory=_fold_factory).install_schema()
+
+        with (
+            psycopg.connect(database, autocommit=True, connect_timeout=3) as first_connection,
+            psycopg.connect(other_dsn, autocommit=True, connect_timeout=3) as second_connection,
+        ):
+            _postgres.PostgresStore(first_connection, fold_factory=_fold_factory)
+            _postgres.PostgresStore(second_connection, fold_factory=_fold_factory)
+
+        with psycopg.connect(other_dsn, autocommit=True, connect_timeout=3) as drifted:
+            drifted.execute("CREATE INDEX sk_extra_record_created ON sk_record(created_ms)")
+
+        with (
+            psycopg.connect(other_dsn, autocommit=True, connect_timeout=3) as drifted,
+            pytest.raises(ValueError, match="unsupported PostgreSQL session schema version"),
+        ):
+            _postgres.PostgresStore(drifted, fold_factory=_fold_factory)
+
+        with psycopg.connect(database, autocommit=True, connect_timeout=3) as still_current:
+            _postgres.PostgresStore(still_current, fold_factory=_fold_factory)
+    finally:
+        with psycopg.connect(postgres_admin_dsn, autocommit=True, connect_timeout=3) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database_name)))
 
 
 @pytest.mark.postgres

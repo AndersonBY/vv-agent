@@ -308,18 +308,19 @@ def _bind_tenant_context(connection: Connection[Any], tenant_id: str | None) -> 
         connection.execute("SELECT set_config('vv.tenant_id',%s,true)", (tenant_id,))
 
 
-def _schema_tables(connection: Connection[Any]) -> set[str]:
+def _schema_relations(connection: Connection[Any]) -> list[tuple[Any, ...]]:
     with _read_only_probe(connection):
-        return {
-            row[0]
-            for row in _probe_rows(
-                connection,
-                "SELECT c.relname FROM pg_catalog.pg_class c "
-                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f') "
-                "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\'",
-            )
-        }
+        return _probe_rows(
+            connection,
+            "SELECT c.relname,c.relkind,c.relpersistence FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f') "
+            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' ORDER BY c.relname",
+        )
+
+
+def _schema_tables(connection: Connection[Any]) -> set[str]:
+    return {row[0] for row in _schema_relations(connection)}
 
 
 def _rls_is_enabled(connection: Connection[Any]) -> bool:
@@ -337,17 +338,15 @@ def _rls_is_enabled(connection: Connection[Any]) -> bool:
         return bool(rows[0][0])
 
 
-def _catalog_manifest(connection: Connection[Any]) -> dict[str, list[tuple[Any, ...]]]:
+def _catalog_manifest(
+    connection: Connection[Any], relations: list[tuple[Any, ...]] | None = None
+) -> dict[str, list[tuple[Any, ...]]]:
     """Return normalized catalog rows without OIDs, database names or scan order."""
 
     with _read_only_probe(connection):
-        tables = _probe_rows(
-            connection,
-            "SELECT c.relname,c.relkind,c.relpersistence FROM pg_class c "
-            "JOIN pg_namespace n ON n.oid=c.relnamespace "
-            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') "
-            "AND c.relname LIKE 'sk\\_%%' ESCAPE '\\' ORDER BY c.relname",
-        )
+        if relations is None:
+            relations = _schema_relations(connection)
+        tables = [row for row in relations if row[1] in {"r", "p"}]
         columns = _probe_rows(
             connection,
             "SELECT c.relname,a.attnum,a.attname,format_type(a.atttypid,a.atttypmod),"
@@ -397,15 +396,18 @@ def _catalog_manifest(connection: Connection[Any]) -> dict[str, list[tuple[Any, 
         }
 
 
+def _catalog_fingerprint(catalog: dict[str, list[tuple[Any, ...]]]) -> str:
+    # PostgreSQL 18 exposes column NOT NULL as validated pg_constraint rows;
+    # columns.attnotnull already carries that semantic on every supported version.
+    catalog["constraints"] = [row for row in catalog["constraints"] if row[2] != "n" or not row[6]]
+    material = {"version": SCHEMA_FINGERPRINT_VERSION, "catalog": catalog}
+    encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
 def _schema_fingerprint(connection: Connection[Any]) -> str:
     with _read_only_probe(connection):
-        catalog = _catalog_manifest(connection)
-        # PostgreSQL 18 exposes column NOT NULL as validated pg_constraint rows;
-        # columns.attnotnull already carries that semantic on every supported version.
-        catalog["constraints"] = [row for row in catalog["constraints"] if row[2] != "n" or not row[6]]
-        material = {"version": SCHEMA_FINGERPRINT_VERSION, "catalog": catalog}
-        encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        return sha256(encoded).hexdigest()
+        return _catalog_fingerprint(_catalog_manifest(connection))
 
 
 def _role_binding(marker: str | None) -> RuntimeBinding | None:
@@ -588,21 +590,31 @@ def _rls_state_is_current(connection: Connection[Any]) -> bool:
         )
 
 
-def _schema_is_current(connection: Connection[Any]) -> bool:
+def _schema_status(connection: Connection[Any]) -> Literal["missing", "current", "invalid"]:
     with _read_only_probe(connection):
-        if _schema_tables(connection) != SCHEMA_TABLES:
-            return False
-        if _schema_fingerprint(connection) != SCHEMA_FINGERPRINT:
-            return False
+        relations = _schema_relations(connection)
+        tables = {row[0] for row in relations}
+        if not tables:
+            return "missing"
+        if tables != SCHEMA_TABLES:
+            return "invalid"
+        if _catalog_fingerprint(_catalog_manifest(connection, relations)) != SCHEMA_FINGERPRINT:
+            return "invalid"
         rows = _probe_rows(connection, "SELECT singleton,storage_major,write_level FROM sk_settings")
-        return (
+        if not (
             len(rows) == 1
             and rows[0][0] == 1
             and rows[0][1] == STORAGE_MAJOR
             and type(rows[0][2]) is int
             and rows[0][2] >= 1
             and _rls_state_is_current(connection)
-        )
+        ):
+            return "invalid"
+        return "current"
+
+
+def _schema_is_current(connection: Connection[Any]) -> bool:
+    return _schema_status(connection) == "current"
 
 
 class PostgresStore(SQLStore):
@@ -640,8 +652,7 @@ class PostgresStore(SQLStore):
             _verified_role_binding(connection, binding)
             self._verify_bound_policy(connection, binding)
         self._runtime_binding = binding
-        existing = _schema_tables(connection)
-        if existing and not _schema_is_current(connection):
+        if _schema_status(connection) == "invalid":
             raise ValueError("unsupported PostgreSQL session schema version")
 
     @property

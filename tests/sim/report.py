@@ -18,6 +18,7 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, suppress
 from functools import cache, lru_cache
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Self
@@ -30,11 +31,14 @@ MAX_WORKERS = 20
 POSTGRES_CONNECTIONS_PER_WORKER = 16
 POSTGRES_ADMIN_CONNECTION_RESERVE = 4
 POSTGRES_CLEANUP_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2)
+POSTGRES_SEEDS_PER_BATCH = 16
+POSTGRES_TEST_RESET_TABLE = "sim_effect"
 AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
 DEFAULT_WORKERS = min(MAX_WORKERS, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
 
 
 class _PostgresDatabase(str):
+    database_name: str
     cleanup_evidence: dict[str, Any] | None
     cleanup_error: dict[str, str] | None
 
@@ -101,7 +105,12 @@ def postgres_worker_plan(workers):
 
 def simulation_worker_plan(backend, workers):
     if backend == "postgres":
-        return postgres_worker_plan(workers)
+        return postgres_worker_plan(workers) | {
+            "lifecycle": "bounded_seed_batch",
+            "seeds_per_batch": POSTGRES_SEEDS_PER_BATCH,
+            "reset_strategy": "transactional_truncate_s1_drop_test_tables",
+            "cleanup_strategy": "terminate_current_role_then_drop",
+        }
     return {"requested_workers": workers, "effective_workers": workers}
 
 
@@ -215,6 +224,70 @@ def _cleanup_postgres_database(admin, name):
     raise AssertionError("PostgreSQL cleanup retry loop exhausted without an outcome")
 
 
+def _reset_postgres_schema(database_handle, *, seed, batch_id, purpose="seed"):
+    """Clear S1 and test-owned relations in one transaction after each world closes."""
+    import psycopg
+    from psycopg import sql
+
+    from vv_agent.kernel._postgres import SESSION_TABLES
+
+    tables = sorted(SESSION_TABLES)
+    test_table = POSTGRES_TEST_RESET_TABLE
+    test_table_exists = (
+        "SELECT current_schema(),"
+        "to_regclass(quote_ident(current_schema()) || '.' || quote_ident(%s)) IS NOT NULL,"
+        "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
+    )
+    test_table_absent = (
+        "SELECT to_regclass(quote_ident(current_schema()) || '.' || quote_ident(%s)) IS NULL,"
+        "(SELECT count(*) FROM pg_constraint con "
+        "JOIN pg_class rel ON rel.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+        "WHERE n.nspname = current_schema() "
+        "AND rel.relname = ANY(%s) AND con.contype = 'f')"
+    )
+    drop_test_table = sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(test_table))
+    truncate = sql.SQL("TRUNCATE TABLE {}").format(sql.SQL(", ").join(map(sql.Identifier, tables)))
+    with (
+        psycopg.connect(str(database_handle), connect_timeout=3) as connection,
+        connection.transaction(),
+        connection.cursor() as cursor,
+    ):
+        cursor.execute(test_table_exists, (test_table,))
+        before = cursor.fetchone()
+        if before is None:
+            raise RuntimeError("PostgreSQL reset could not inspect the test table")
+        schema, existed_before, reset_at_ms = before
+        cursor.execute(drop_test_table)
+        cursor.execute(truncate)
+        cursor.execute(test_table_absent, (test_table, tables))
+        after = cursor.fetchone()
+    if after is None:
+        raise RuntimeError("PostgreSQL reset evidence returned no row")
+    absent_after, foreign_key_constraints = after
+    exists_after = absent_after is False
+    return {
+        "batch_id": batch_id,
+        "worker_pid": os.getpid(),
+        "seed": seed,
+        "purpose": purpose,
+        "strategy": "single_transaction_truncate_s1_drop_test_tables",
+        "schema": schema,
+        "tables": tables,
+        "foreign_key_constraints": foreign_key_constraints,
+        "test_tables": {
+            "strategy": "drop_if_exists",
+            "names": [POSTGRES_TEST_RESET_TABLE],
+            "existed_before": existed_before,
+            "dropped": [test_table] if existed_before else [],
+            "exists_after": exists_after,
+            "cleanup_completed": exists_after is False,
+        },
+        "reset_at_ms": reset_at_ms,
+        "reset_completed": True,
+    }
+
+
 @contextmanager
 def database(backend):
     if backend == "sqlite":
@@ -232,6 +305,7 @@ def database(backend):
         with admin.cursor() as cursor:
             cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
         database_handle = _PostgresDatabase(make_conninfo(dsn, dbname=name))
+        database_handle.database_name = name
         original_error = None
         try:
             yield database_handle
@@ -441,8 +515,8 @@ def _seed_record_parse_cache():
         parse_inbox.cache_clear()
 
 
-def _run_seed(job):
-    # Each worker opens and closes its own database; jobs never carry SQL handles.
+def _run_seed_on_database(job, db, *, reset_before_retry=None):
+    """Run one seed against a caller-owned local database handle."""
     import tempfile
 
     from .scenarios import run_scenario
@@ -453,13 +527,12 @@ def _run_seed(job):
         tempfile.tempdir = None
 
     backend, seed, scenario, replay, budget = job
-    db = None
     world = None
     failure = None
     invariant = None
     storage = {}
     try:
-        with _seed_record_parse_cache(), database(backend) as db, SimWorld(db, seed=seed, replay=replay) as world:
+        with _seed_record_parse_cache(), SimWorld(db, seed=seed, replay=replay) as world:
             storage = (
                 {"sqlite_temporary_storage": temporary_storage(db.parent.parent)} if isinstance(db, Path) and db.is_file() else {}
             )
@@ -476,8 +549,6 @@ def _run_seed(job):
             result["postgres_cleanup"] = db.cleanup_evidence
         return result
     except Exception as exc:
-        if db is None:
-            raise
         if failure is None:
             summary = world.summary() if world is not None else {"seed": seed, "scenario": scenario}
             failure = summary | storage | {"error": f"{type(exc).__name__}: {exc}"}
@@ -488,11 +559,26 @@ def _run_seed(job):
                 failure["postgres_cleanup"] = db.cleanup_evidence
     failure["minimized_decisions"], failure["minimization_trials"] = failure["decisions"], 0
     if invariant and budget:
+        reset_errors = []
 
         def reproduces(candidate):
+            if reset_before_retry is not None:
+                try:
+                    reset_before_retry()
+                except _PostgresResetError as exc:
+                    reset_errors.append(exc)
+                    return False
             try:
-                with database(backend) as trial_db, SimWorld(trial_db, seed=seed, replay=candidate) as trial:
-                    run_scenario(trial, failure["scenario"])
+                if reset_before_retry is None:
+                    with (
+                        _seed_record_parse_cache(),
+                        database(backend) as trial_db,
+                        SimWorld(trial_db, seed=seed, replay=candidate) as trial,
+                    ):
+                        run_scenario(trial, failure["scenario"])
+                else:
+                    with _seed_record_parse_cache(), SimWorld(db, seed=seed, replay=candidate) as trial:
+                        run_scenario(trial, failure["scenario"])
             except InvariantViolation as error:
                 return error.invariant == invariant
             except Exception:
@@ -500,7 +586,188 @@ def _run_seed(job):
             return False
 
         failure["minimized_decisions"], failure["minimization_trials"] = minimize(failure["decisions"], reproduces, budget=budget)
+        if reset_errors:
+            error = reset_errors[0]
+            failure["postgres_minimization_reset"] = error.evidence
+            failure["cleanup_error"] = {
+                "stage": "minimization_reset",
+                "seed": seed,
+                "type": type(error.__cause__ or error).__name__,
+                "message": str(error.__cause__ or error),
+            }
     return failure
+
+
+def _run_seed(job):
+    """Run one direct SQLite/PostgreSQL world; jobs never carry SQL handles."""
+    import tempfile
+
+    if multiprocessing.parent_process() is not None:
+        # Fork inherits the parent's tempfile cache; workers must honor their current TMPDIR.
+        tempfile.tempdir = None
+    with database(job[0]) as db:
+        result = _run_seed_on_database(job, db)
+    if isinstance(db, _PostgresDatabase):
+        result["postgres_cleanup"] = db.cleanup_evidence
+    return result
+
+
+class _PostgresResetError(RuntimeError):
+    def __init__(self, error: Exception, evidence: dict[str, Any]) -> None:
+        super().__init__(str(error))
+        self.evidence = evidence
+
+
+def _reset_postgres_batch_database(database_handle, *, seed, batch_id, purpose="seed"):
+    try:
+        return _reset_postgres_schema(database_handle, seed=seed, batch_id=batch_id, purpose=purpose)
+    except Exception as exc:
+        evidence = {
+            "batch_id": batch_id,
+            "worker_pid": os.getpid(),
+            "seed": seed,
+            "purpose": purpose,
+            "strategy": "single_transaction_truncate_s1_drop_test_tables",
+            "test_tables": {
+                "strategy": "drop_if_exists",
+                "names": [POSTGRES_TEST_RESET_TABLE],
+                "cleanup_completed": False,
+            },
+            "reset_completed": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+        raise _PostgresResetError(exc, evidence) from exc
+
+
+def _add_postgres_cleanup_error(result, *, stage, error, seed, batch_id):
+    entry = {
+        "stage": stage,
+        "seed": seed,
+        "batch_id": batch_id,
+        "type": type(error).__name__,
+        "message": str(error),
+    }
+    if "cleanup_error" not in result:
+        result["cleanup_error"] = entry
+    else:
+        result.setdefault("additional_cleanup_errors", []).append(entry)
+    if "error" not in result:
+        result["error"] = f"PostgreSQL {stage.replace('_', ' ')} failed: {type(error).__name__}: {error}"
+
+
+def _run_postgres_batch(jobs):
+    """Run a bounded seed batch against one process-local temporary database."""
+    batch_id = uuid4().hex
+    jobs = tuple(jobs)
+    if not jobs or any(job[0] != "postgres" for job in jobs):
+        raise ValueError("PostgreSQL batches require one or more postgres jobs")
+
+    results: list[dict[str, Any]] = []
+    resets: list[dict[str, Any]] = []
+    database_handle = None
+    lifecycle_error = None
+    try:
+        with database("postgres") as database_handle:
+            for job in jobs:
+                seed = job[1]
+
+                def reset_trial(batch_seed=seed):
+                    _reset_postgres_batch_database(
+                        database_handle,
+                        seed=batch_seed,
+                        batch_id=batch_id,
+                        purpose="minimization",
+                    )
+
+                try:
+                    result = _run_seed_on_database(job, database_handle, reset_before_retry=reset_trial)
+                except _PostgresResetError as exc:
+                    result = {
+                        "seed": seed,
+                        "scenario": job[2],
+                        "decisions": [],
+                        "covered": [],
+                        "postgres_reset": exc.evidence,
+                        "error": f"PostgreSQL reset failed: {exc}",
+                    }
+                    resets.append(exc.evidence)
+                    _add_postgres_cleanup_error(
+                        result,
+                        stage="reset",
+                        error=exc.__cause__ or exc,
+                        seed=seed,
+                        batch_id=batch_id,
+                    )
+                    results.append(result)
+                    break
+                except Exception as exc:
+                    result = {
+                        "seed": seed,
+                        "scenario": job[2],
+                        "decisions": [],
+                        "covered": [],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+
+                try:
+                    reset = _reset_postgres_batch_database(database_handle, seed=seed, batch_id=batch_id)
+                except _PostgresResetError as exc:
+                    result["postgres_reset"] = exc.evidence
+                    resets.append(exc.evidence)
+                    _add_postgres_cleanup_error(
+                        result,
+                        stage="reset",
+                        error=exc.__cause__ or exc,
+                        seed=seed,
+                        batch_id=batch_id,
+                    )
+                else:
+                    result["postgres_reset"] = reset
+                    resets.append(reset)
+                results.append(result)
+                if "error" in result:
+                    break
+    except Exception as exc:
+        lifecycle_error = exc
+
+    if lifecycle_error is not None and not results:
+        first = jobs[0]
+        results.append(
+            {
+                "seed": first[1],
+                "scenario": first[2],
+                "decisions": [],
+                "covered": [],
+            }
+        )
+    completed_resets = sum(reset["reset_completed"] for reset in resets)
+    cleanup_evidence = database_handle.cleanup_evidence if database_handle is not None else None
+    cleanup = {
+        "batch_id": batch_id,
+        "worker_pid": os.getpid(),
+        "batch_seeds": len(results),
+        "database_creates": int(database_handle is not None),
+        "database_drops": int(cleanup_evidence is not None and cleanup_evidence["drop_completed"]),
+        "seeds_reset": completed_resets,
+        "reset_completed": len(resets) == len(results),
+    }
+    if cleanup_evidence is not None:
+        cleanup = cleanup_evidence | cleanup
+    if lifecycle_error is not None:
+        cleanup["drop_completed"] = False
+        cleanup.setdefault("database", getattr(database_handle, "database_name", None))
+        cleanup["error"] = {"type": type(lifecycle_error).__name__, "message": str(lifecycle_error)}
+        _add_postgres_cleanup_error(
+            results[-1],
+            stage="database_create" if database_handle is None else "final_drop",
+            error=lifecycle_error,
+            seed=results[-1]["seed"],
+            batch_id=batch_id,
+        )
+
+    for result in results:
+        result["postgres_cleanup"] = copy.deepcopy(cleanup)
+    return results
 
 
 def _validate_worker_options(workers, minimize_budget):
@@ -526,9 +793,21 @@ def _seed_results(
     if replay is not None and seeds != 1:
         raise ValueError("a replay runs exactly one seed")
     jobs = ((backend, number, scenario, replay, minimize_budget) for number in range(seed, seed + seeds))
+
+    def batches():
+        while True:
+            batch = tuple(islice(jobs, POSTGRES_SEEDS_PER_BATCH))
+            if not batch:
+                return
+            yield batch
+
     if workers == 1:
         if start_method not in (None, "serial"):
             raise ValueError("serial worker count requires the serial start method")
+        if backend == "postgres":
+            for batch in batches():
+                yield from _run_postgres_batch(batch)
+            return
         for job in jobs:
             yield _run_seed(job)
         return
@@ -539,19 +818,26 @@ def _seed_results(
     selected_method = mp_context.get_start_method()
     if start_method is not None and start_method != selected_method:
         raise ValueError("declared and actual worker start methods differ")
+    work = batches() if backend == "postgres" else ((job,) for job in jobs)
     with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as pool:
         in_flight = deque()
         for _ in range(workers * 2):
             try:
-                job = next(jobs)
+                item = next(work)
             except StopIteration:
                 break
-            in_flight.append(pool.submit(_run_seed, job))
+            future = pool.submit(_run_postgres_batch, item) if backend == "postgres" else pool.submit(_run_seed, item[0])
+            in_flight.append(future)
         while in_flight:
             result = in_flight.popleft().result()
             with suppress(StopIteration):
-                in_flight.append(pool.submit(_run_seed, next(jobs)))
-            yield result
+                item = next(work)
+                future = pool.submit(_run_postgres_batch, item) if backend == "postgres" else pool.submit(_run_seed, item[0])
+                in_flight.append(future)
+            if backend == "postgres":
+                yield from result
+            else:
+                yield result
 
 
 def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
@@ -625,11 +911,19 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
         identity["environment"]["postgres_cleanup"] = {
             "verified": False,
             "seeds_observed": 0,
-            "seeds_cleaned": 0,
+            "seeds_reset": 0,
+            "batch_size": POSTGRES_SEEDS_PER_BATCH,
+            "reset_strategy": "transactional_truncate_s1_drop_test_tables",
+            "drop_strategy": "terminate_current_role_then_drop",
+            "database_creates": 0,
+            "database_drops": 0,
+            "databases": [],
             "terminated_sessions": 0,
             "max_drop_attempts": 0,
+            "cleanup_errors": [],
         }
     scenarios, decisions, covered = {}, 0, set()
+    database_indexes = {}
     results = _seed_results(
         backend=backend,
         seed=seed,
@@ -651,11 +945,43 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             cleanup = identity["environment"]["postgres_cleanup"]
             if cleanup is not None:
                 cleanup["seeds_observed"] += 1
+                reset = result.get("postgres_reset")
+                if reset is not None and reset.get("reset_completed") is True:
+                    cleanup["seeds_reset"] += 1
                 evidence = result.get("postgres_cleanup")
                 if evidence is not None:
-                    cleanup["seeds_cleaned"] += int(evidence["drop_completed"])
-                    cleanup["terminated_sessions"] += evidence["terminated_sessions"]
-                    cleanup["max_drop_attempts"] = max(cleanup["max_drop_attempts"], evidence["drop_attempts"])
+                    database = evidence.get("database") or evidence.get("batch_id") or f"unknown-{cleanup['seeds_observed']}"
+                    if database not in database_indexes:
+                        database_indexes[database] = len(cleanup["databases"])
+                        cleanup["databases"].append(
+                            {
+                                "database": database,
+                                "batch_id": evidence.get("batch_id"),
+                                "worker_pid": evidence.get("worker_pid"),
+                                "batch_seeds": evidence.get("batch_seeds"),
+                                "seeds_reset": evidence.get("seeds_reset"),
+                                "drop_attempts": evidence.get("drop_attempts", 0),
+                                "drop_completed": evidence.get("drop_completed") is True,
+                            }
+                        )
+                        cleanup["database_creates"] += int(evidence.get("database_creates", 1))
+                        cleanup["database_drops"] += int(evidence.get("drop_completed") is True)
+                        cleanup["terminated_sessions"] += int(evidence.get("terminated_sessions", 0))
+                        cleanup["max_drop_attempts"] = max(cleanup["max_drop_attempts"], int(evidence.get("drop_attempts", 0)))
+                    elif evidence.get("drop_completed") is True:
+                        recorded = cleanup["databases"][database_indexes[database]]
+                        if not recorded["drop_completed"]:
+                            recorded["drop_completed"] = True
+                            cleanup["database_drops"] += 1
+                            cleanup["max_drop_attempts"] = max(
+                                cleanup["max_drop_attempts"], int(evidence.get("drop_attempts", 0))
+                            )
+                    if evidence.get("error") is not None:
+                        cleanup["cleanup_errors"].append({"database": database, "stage": "final_drop", **evidence["error"]})
+                cleanup_error = result.get("cleanup_error")
+                if cleanup_error is not None:
+                    cleanup["cleanup_errors"].append(cleanup_error)
+                cleanup["cleanup_errors"].extend(result.get("additional_cleanup_errors", []))
             if "error" in result:
                 return result | identity | {"replay_provenance": provenance}
             scenarios[result["scenario"]] = scenarios.get(result["scenario"], 0) + 1
@@ -665,7 +991,13 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
         results.close()
     cleanup = identity["environment"]["postgres_cleanup"]
     if cleanup is not None:
-        cleanup["verified"] = cleanup["seeds_observed"] == seeds and cleanup["seeds_cleaned"] == seeds
+        cleanup["verified"] = (
+            cleanup["seeds_observed"] == seeds
+            and cleanup["seeds_reset"] == seeds
+            and cleanup["database_creates"] > 0
+            and cleanup["database_creates"] == cleanup["database_drops"]
+            and not cleanup["cleanup_errors"]
+        )
     elapsed = time.perf_counter() - started
     return identity | {
         "backend": backend,

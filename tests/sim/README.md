@@ -60,8 +60,12 @@ TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=20 timeout 60s uv run --no-sync pytest test
 ```
 
 Independent seeds use standard-library processes with a guarded, warmed `fork` start
-method on Linux and a `spawn` fallback elsewhere; each world stays single-threaded and
-owns its disposable real database file.
+method on Linux and a `spawn` fallback elsewhere. Each world stays single-threaded.
+SQLite worlds own separate disposable real database files. PostgreSQL campaigns run
+bounded batches of 16 seeds per worker, reset the S1 session tables and drop any
+scenario-owned test tables after each seed, then drop the worker's unique temporary
+database once the batch finishes. Reset and final-drop results are part of the campaign
+evidence.
 No live SQL connections are inherited. At most twice the worker count of jobs
 and result traces are retained in the rolling window; aggregate memory does not grow with
 the seed count. The measured campaign includes identity calculation, process
@@ -88,8 +92,8 @@ production DSN. PostgreSQL uses its unchanged `clock_timestamp()` SQL expression
 and a real host clock. Lease expiry is an explicit update setting
 `lease_until_ms=0`; test schedule advancement changes persisted deadlines rather
 than replacing PostgreSQL time. The `future_input` case preserves both the inbox body
-and `available_ms`; it waits for a real two- or three-second PostgreSQL deadline
-with a ten-second bound. SQLite advances its injected clock without a real wait.
+and `available_ms`; it waits for a real 1.5- or 2-second PostgreSQL deadline with a
+four-second bound. SQLite advances its injected clock without a real wait.
 Use TCP/password authentication for acceptance;
 no PostgreSQL acceptance is implied by SQLite results.
 

@@ -76,6 +76,71 @@ class FakeCursor:
         return self.rows
 
 
+class FakeResetTransaction:
+    def __init__(self):
+        self.entered = 0
+        self.exited = 0
+
+    def __enter__(self):
+        self.entered += 1
+
+    def __exit__(self, *args):
+        self.exited += 1
+
+
+class FakeResetConnection:
+    def __init__(self, *, provider_table_exists=True):
+        self.transaction_state = FakeResetTransaction()
+        self.queries = []
+        self.closed = False
+        self.provider_table_exists = provider_table_exists
+        self.drop_test_tables = []
+
+    def __enter__(self):
+        self.closed = False
+        return self
+
+    def __exit__(self, *args):
+        self.closed = True
+
+    def transaction(self):
+        return self.transaction_state
+
+    def cursor(self):
+        return FakeResetCursor(self)
+
+
+class FakeResetCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rows = ()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def execute(self, query, params=None):
+        text = query_text(query)
+        self.connection.queries.append((text, params))
+        if text.startswith("DROP TABLE IF EXISTS"):
+            self.connection.drop_test_tables.append(text)
+            self.connection.provider_table_exists = False
+            self.rows = ()
+        elif text.startswith("TRUNCATE TABLE"):
+            self.rows = ()
+        elif text.startswith("SELECT current_schema()"):
+            self.rows = (("public", self.connection.provider_table_exists, 123456),)
+        elif text.startswith("SELECT to_regclass"):
+            self.rows = ((not self.connection.provider_table_exists, 9),)
+        else:
+            raise AssertionError(f"unexpected query: {text}")
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+
 def test_cleanup_terminates_only_current_roles_sessions_then_plain_drop():
     name = "vvsk_sim_success"
     admin = FakeAdmin(termination_results=((True,), (False,)))
@@ -167,6 +232,56 @@ def test_database_exposes_successful_cleanup_evidence(monkeypatch):
     assert database_handle.cleanup_evidence["drop_completed"] is True
 
 
+def test_reset_truncates_all_s1_tables_in_one_transaction_without_cascade(monkeypatch):
+    connection = FakeResetConnection()
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+
+    evidence = report._reset_postgres_schema(
+        report._PostgresDatabase("dbname=temporary"),
+        seed=17,
+        batch_id="batch-id",
+    )
+
+    truncate = next(text for text, _params in connection.queries if text.startswith("TRUNCATE TABLE"))
+    assert "sk_session" in truncate
+    assert "sk_content_link" in truncate
+    assert "CASCADE" not in truncate
+    assert "DELETE FROM" not in truncate
+    drop = next(text for text, _params in connection.queries if text.startswith("DROP TABLE IF EXISTS"))
+    assert "sim_effect" in drop
+    assert "IF EXISTS" in drop
+    assert connection.transaction_state.entered == connection.transaction_state.exited == 1
+    assert connection.closed is True
+    assert evidence["seed"] == 17
+    assert evidence["schema"] == "public"
+    assert evidence["foreign_key_constraints"] == 9
+    assert evidence["test_tables"] == {
+        "strategy": "drop_if_exists",
+        "names": ["sim_effect"],
+        "existed_before": True,
+        "dropped": ["sim_effect"],
+        "exists_after": False,
+        "cleanup_completed": True,
+    }
+    assert evidence["reset_completed"] is True
+
+
+def test_reset_allows_provider_table_to_be_recreated_for_the_next_seed(monkeypatch):
+    connection = FakeResetConnection(provider_table_exists=True)
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+    database_handle = report._PostgresDatabase("dbname=temporary")
+
+    first = report._reset_postgres_schema(database_handle, seed=0, batch_id="batch-id")
+    connection.provider_table_exists = True
+    second = report._reset_postgres_schema(database_handle, seed=1, batch_id="batch-id")
+
+    assert first["test_tables"]["existed_before"] is True
+    assert second["test_tables"]["existed_before"] is True
+    assert first["test_tables"]["dropped"] == second["test_tables"]["dropped"] == ["sim_effect"]
+    assert first["test_tables"]["exists_after"] is second["test_tables"]["exists_after"] is False
+    assert len(connection.drop_test_tables) == 2
+
+
 def test_seed_success_result_contains_cleanup_evidence(monkeypatch):
     from . import scenarios, world
 
@@ -212,6 +327,164 @@ def test_seed_success_result_contains_cleanup_evidence(monkeypatch):
     assert result["postgres_cleanup"]["drop_completed"] is True
 
 
+def test_postgres_seed_batch_creates_once_resets_each_seed_and_drops_once(monkeypatch):
+    lifecycle = {"creates": 0, "drops": 0}
+
+    @contextmanager
+    def fake_database(_backend):
+        handle = report._PostgresDatabase("dbname=temporary")
+        handle.database_name = "vvsk_sim_batch"
+        lifecycle["creates"] += 1
+        yield handle
+        lifecycle["drops"] += 1
+        handle.cleanup_evidence = {
+            "database": handle.database_name,
+            "role": "vvsk_temporary_role",
+            "same_role_sessions": 0,
+            "terminated_sessions": 0,
+            "drop_attempts": 1,
+            "drop_completed": True,
+        }
+
+    reset_seeds = []
+
+    def fake_reset(_database, *, seed, batch_id, purpose="seed"):
+        reset_seeds.append((seed, purpose, batch_id))
+        return {
+            "batch_id": batch_id,
+            "seed": seed,
+            "purpose": purpose,
+            "reset_completed": True,
+        }
+
+    def fake_run(job, _database, *, reset_before_retry=None):
+        assert reset_before_retry is not None
+        return {"seed": job[1], "scenario": "cleanup", "decisions": [], "covered": []}
+
+    monkeypatch.setattr(report, "POSTGRES_SEEDS_PER_BATCH", 3)
+    monkeypatch.setattr(report, "database", fake_database)
+    monkeypatch.setattr(report, "_reset_postgres_schema", fake_reset)
+    monkeypatch.setattr(report, "_run_seed_on_database", fake_run)
+
+    results = list(report._seed_results(backend="postgres", seed=10, seeds=3, workers=1, start_method="serial"))
+
+    assert lifecycle == {"creates": 1, "drops": 1}
+    assert [(seed, purpose) for seed, purpose, _batch_id in reset_seeds] == [
+        (10, "seed"),
+        (11, "seed"),
+        (12, "seed"),
+    ]
+    assert len({result["postgres_reset"]["batch_id"] for result in results}) == 1
+    assert all(result["postgres_cleanup"]["database_creates"] == 1 for result in results)
+    assert all(result["postgres_cleanup"]["database_drops"] == 1 for result in results)
+
+
+def test_postgres_seed_batch_reset_failure_is_retained_and_database_is_dropped(monkeypatch):
+    lifecycle = {"creates": 0, "drops": 0}
+
+    @contextmanager
+    def fake_database(_backend):
+        handle = report._PostgresDatabase("dbname=temporary")
+        handle.database_name = "vvsk_sim_reset_failure"
+        lifecycle["creates"] += 1
+        yield handle
+        lifecycle["drops"] += 1
+        handle.cleanup_evidence = {
+            "database": handle.database_name,
+            "role": "vvsk_temporary_role",
+            "same_role_sessions": 0,
+            "terminated_sessions": 0,
+            "drop_attempts": 1,
+            "drop_completed": True,
+        }
+
+    reset_seeds = []
+
+    def fake_reset(_database, *, seed, batch_id, purpose="seed"):
+        reset_seeds.append(seed)
+        if purpose == "seed" and seed == 1:
+            raise RuntimeError("reset failed")
+        return {
+            "batch_id": batch_id,
+            "seed": seed,
+            "purpose": purpose,
+            "reset_completed": True,
+        }
+
+    monkeypatch.setattr(report, "POSTGRES_SEEDS_PER_BATCH", 3)
+    monkeypatch.setattr(report, "database", fake_database)
+    monkeypatch.setattr(report, "_reset_postgres_schema", fake_reset)
+    monkeypatch.setattr(
+        report,
+        "_run_seed_on_database",
+        lambda job, _database, *, reset_before_retry: {
+            "seed": job[1],
+            "scenario": "cleanup",
+            "decisions": [],
+            "covered": [],
+        },
+    )
+
+    results = list(report._seed_results(backend="postgres", seed=0, seeds=3, workers=1, start_method="serial"))
+
+    assert reset_seeds == [0, 1]
+    assert lifecycle == {"creates": 1, "drops": 1}
+    assert [result["seed"] for result in results] == [0, 1]
+    assert results[1]["postgres_reset"]["reset_completed"] is False
+    assert results[1]["cleanup_error"]["stage"] == "reset"
+    assert results[1]["error"] == "PostgreSQL reset failed: RuntimeError: reset failed"
+    assert all(result["postgres_cleanup"]["drop_completed"] is True for result in results)
+
+
+def test_postgres_seed_batch_final_drop_failure_has_explicit_evidence(monkeypatch):
+    lifecycle = {"creates": 0}
+
+    @contextmanager
+    def fake_database(_backend):
+        handle = report._PostgresDatabase("dbname=temporary")
+        handle.database_name = "vvsk_sim_drop_failure"
+        lifecycle["creates"] += 1
+        yield handle
+        handle.cleanup_error = {
+            "type": "InsufficientPrivilege",
+            "message": "permission denied to drop database",
+        }
+        raise psycopg.errors.InsufficientPrivilege("permission denied to drop database")
+
+    monkeypatch.setattr(report, "POSTGRES_SEEDS_PER_BATCH", 2)
+    monkeypatch.setattr(report, "database", fake_database)
+    monkeypatch.setattr(
+        report,
+        "_reset_postgres_schema",
+        lambda _database, *, seed, batch_id, purpose="seed": {
+            "batch_id": batch_id,
+            "seed": seed,
+            "purpose": purpose,
+            "reset_completed": True,
+        },
+    )
+    monkeypatch.setattr(
+        report,
+        "_run_seed_on_database",
+        lambda job, _database, *, reset_before_retry: {
+            "seed": job[1],
+            "scenario": "cleanup",
+            "decisions": [],
+            "covered": [],
+        },
+    )
+
+    result = next(report._seed_results(backend="postgres", seed=0, seeds=1, workers=1, start_method="serial"))
+
+    assert lifecycle == {"creates": 1}
+    assert result["cleanup_error"]["stage"] == "final_drop"
+    assert result["postgres_cleanup"]["database"] == "vvsk_sim_drop_failure"
+    assert result["postgres_cleanup"]["database_creates"] == 1
+    assert result["postgres_cleanup"]["database_drops"] == 0
+    assert result["postgres_cleanup"]["drop_completed"] is False
+    assert result["postgres_cleanup"]["error"]["type"] == "InsufficientPrivilege"
+
+
 def test_campaign_success_records_cleanup_evidence(monkeypatch):
     def fake_seed_results(**_kwargs):
         for seed in range(2):
@@ -220,8 +493,19 @@ def test_campaign_success_records_cleanup_evidence(monkeypatch):
                 "scenario": "cleanup",
                 "decisions": [],
                 "covered": [],
+                "postgres_reset": {
+                    "seed": seed,
+                    "purpose": "seed",
+                    "reset_completed": True,
+                },
                 "postgres_cleanup": {
                     "database": f"vvsk_sim_{seed}",
+                    "batch_id": f"batch-{seed}",
+                    "worker_pid": 100 + seed,
+                    "batch_seeds": 1,
+                    "seeds_reset": 1,
+                    "database_creates": 1,
+                    "database_drops": 1,
                     "role": "vvsk_temporary_role",
                     "same_role_sessions": seed,
                     "terminated_sessions": seed,
@@ -239,10 +523,70 @@ def test_campaign_success_records_cleanup_evidence(monkeypatch):
     assert result["environment"]["postgres_cleanup"] == {
         "verified": True,
         "seeds_observed": 2,
-        "seeds_cleaned": 2,
+        "seeds_reset": 2,
+        "batch_size": report.POSTGRES_SEEDS_PER_BATCH,
+        "reset_strategy": "transactional_truncate_s1_drop_test_tables",
+        "drop_strategy": "terminate_current_role_then_drop",
+        "database_creates": 2,
+        "database_drops": 2,
+        "databases": [
+            {
+                "database": "vvsk_sim_0",
+                "batch_id": "batch-0",
+                "worker_pid": 100,
+                "batch_seeds": 1,
+                "seeds_reset": 1,
+                "drop_attempts": 1,
+                "drop_completed": True,
+            },
+            {
+                "database": "vvsk_sim_1",
+                "batch_id": "batch-1",
+                "worker_pid": 101,
+                "batch_seeds": 1,
+                "seeds_reset": 1,
+                "drop_attempts": 2,
+                "drop_completed": True,
+            },
+        ],
         "terminated_sessions": 1,
         "max_drop_attempts": 2,
+        "cleanup_errors": [],
     }
+
+
+@pytest.mark.postgres
+def test_real_postgres_tools_batch_recreates_provider_table_for_each_seed():
+    dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("set a local VV_AGENT_TEST_POSTGRES_DSN for a real PostgreSQL batch")
+    host = conninfo_to_dict(dsn).get("host")
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        pytest.skip("real PostgreSQL batch coverage only permits a loopback TCP DSN")
+
+    results = list(
+        report._seed_results(
+            backend="postgres",
+            seed=0,
+            seeds=2,
+            scenario="tools",
+            workers=1,
+            start_method="serial",
+        )
+    )
+
+    assert [result["seed"] for result in results] == [0, 1]
+    assert all("error" not in result for result in results), results
+    for result in results:
+        assert result["postgres_reset"]["test_tables"] == {
+            "strategy": "drop_if_exists",
+            "names": ["sim_effect"],
+            "existed_before": True,
+            "dropped": ["sim_effect"],
+            "exists_after": False,
+            "cleanup_completed": True,
+        }
+        assert result["postgres_cleanup"]["drop_completed"] is True
 
 
 @pytest.mark.postgres
